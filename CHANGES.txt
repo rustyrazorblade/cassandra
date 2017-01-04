@@ -1,3 +1,6 @@
+3.11
+ * CompactionTasks now correctly drops sstables out of compaction when not enough disk space is available (CASSANDRA-12979)
+
 3.10
  * Fixed query monitoring for range queries (CASSANDRA-13050)
  * Remove outboundBindAny configuration property (CASSANDRA-12673)
