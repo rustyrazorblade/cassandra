@@ -1838,6 +1838,21 @@ public class CompactionManager implements CompactionManagerMBean
         void finishCompaction(CompactionInfo.Holder ci);
     }
 
+    public void incAborted()
+    {
+        metrics.compactionsAborted.inc();
+    }
+
+    public void incCompactionsReduced()
+    {
+        metrics.compactionsReduced.inc();
+    }
+    public void incsstablesDropppedFromCompactions(long num)
+    {
+        metrics.sstablesDropppedFromCompactions.inc(num);
+    }
+
+
     public List<Map<String, String>> getCompactions()
     {
         List<Holder> compactionHolders = CompactionMetrics.getCompactions();

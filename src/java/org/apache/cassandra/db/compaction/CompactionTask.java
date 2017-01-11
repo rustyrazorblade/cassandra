@@ -333,23 +333,33 @@ public class CompactionTask extends AbstractCompactionTask
         }
 
         CompactionStrategyManager strategy = cfs.getCompactionStrategyManager();
-
+        int sstablesRemoved = 0;
         while(true)
         {
             long expectedWriteSize = cfs.getExpectedCompactedFileSize(transaction.originals(), compactionType);
             long estimatedSSTables = Math.max(1, expectedWriteSize / strategy.getMaxSSTableBytes());
 
-            if(cfs.getDirectories().hasAvailableDiskSpace(estimatedSSTables, expectedWriteSize))
+            if(cfs.getDirectories().hasAvailableDiskSpace(estimatedSSTables, expectedWriteSize)) {
+                // we're ok now on space so now we track the failures
+                if(sstablesRemoved > 0) {
+                    CompactionManager.instance.incCompactionsReduced();
+                    CompactionManager.instance.incsstablesDropppedFromCompactions(sstablesRemoved);
+                }
+
                 break;
+            }
 
             if (!reduceScopeForLimitedSpace(expectedWriteSize))
             {
                 // we end up here if we can't take any more sstables out of the compaction.
                 // usually means we've run out of disk space
                 String msg = String.format("Not enough space for compaction, estimated sstables = %d, expected write size = %d", estimatedSSTables, expectedWriteSize);
+
                 logger.warn(msg);
+                CompactionManager.instance.incAborted();
                 throw new RuntimeException(msg);
             }
+            sstablesRemoved++;
             logger.warn("Not enough space for compaction, {}MB estimated.  Reducing scope.",
                             (float) expectedWriteSize / 1024 / 1024);
         }
