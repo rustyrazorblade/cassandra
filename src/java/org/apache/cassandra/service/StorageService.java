@@ -51,6 +51,7 @@ import ch.qos.logback.classic.jmx.JMXConfiguratorMBean;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.Appender;
 import ch.qos.logback.core.hook.DelayingShutdownHook;
+import com.codahale.metrics.Meter;
 import org.apache.cassandra.auth.AuthKeyspace;
 import org.apache.cassandra.auth.AuthSchemaChangeListener;
 import org.apache.cassandra.batchlog.BatchRemoveVerbHandler;
@@ -76,6 +77,7 @@ import org.apache.cassandra.hints.HintsService;
 import org.apache.cassandra.io.sstable.SSTableLoader;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.*;
+import org.apache.cassandra.metrics.CompactionMetrics;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.net.*;
 import org.apache.cassandra.repair.*;
@@ -1345,6 +1347,16 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     {
         DatabaseDescriptor.setCompactionThroughputMbPerSec(value);
         CompactionManager.instance.setRate(value);
+    }
+    public Map<String, Integer> getCompactionThroughputRate()
+    {
+        HashMap<String, Integer> result = new HashMap<>();
+        Meter rate = CompactionManager.instance.getCompactionRate();
+        long mb = 1024 * 1024;
+        result.put("1minute", (int) (rate.getOneMinuteRate() / mb));
+        result.put("5minute", (int) (rate.getFiveMinuteRate() / mb));
+        result.put("15minute", (int) (rate.getFifteenMinuteRate() / mb));
+        return result;
     }
 
     public int getBatchlogReplayThrottleInKB()

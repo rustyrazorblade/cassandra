@@ -207,7 +207,10 @@ public class CompactionTask extends AbstractCompactionTask
                         long bytesScanned = scanners.getTotalBytesScanned();
 
                         //Rate limit the scanners, and account for compression
+                        long lengthRead = CompactionManager.getLengthRead(bytesScanned, lastBytesScanned, compressionRatio);
                         CompactionManager.compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+
+                        CompactionManager.instance.getMetrics().bytesCompactedRate.mark(lengthRead);
 
                         lastBytesScanned = bytesScanned;
 

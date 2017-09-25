@@ -55,6 +55,7 @@ public class CompactionMetrics implements CompactionManager.CompactionExecutorSt
     /** Total number of bytes compacted since server [re]start */
     public final Counter bytesCompacted;
 
+    public final Meter bytesCompactedRate;
 
     /** Total number of compactions that have had sstables drop out of them */
     public final Counter compactionsReduced;
@@ -146,7 +147,10 @@ public class CompactionMetrics implements CompactionManager.CompactionExecutorSt
             }
         });
         totalCompactionsCompleted = Metrics.meter(factory.createMetricName("TotalCompactionsCompleted"));
+
+        // we can remove bytesCompacted after bytesCompactedRate is in a release
         bytesCompacted = Metrics.counter(factory.createMetricName("BytesCompacted"));
+        bytesCompactedRate = Metrics.meter(factory.createMetricName("BytesCompactedRate"));
 
         // compaction failure metrics
         compactionsReduced = Metrics.counter(factory.createMetricName("CompactionsReduced"));

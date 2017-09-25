@@ -35,6 +35,7 @@ import com.google.common.util.concurrent.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.codahale.metrics.Meter;
 import io.netty.util.concurrent.FastThreadLocal;
 import org.apache.cassandra.cache.AutoSavingCache;
 import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
@@ -160,6 +161,11 @@ public class CompactionManager implements CompactionManagerMBean
             throughput = Double.MAX_VALUE;
         if (compactionRateLimiter.getRate() != throughput)
             compactionRateLimiter.setRate(throughput);
+    }
+
+    public Meter getCompactionRate()
+    {
+        return metrics.bytesCompactedRate;
     }
 
     /**
@@ -1146,7 +1152,7 @@ public class CompactionManager implements CompactionManagerMBean
 
     static void compactionRateLimiterAcquire(RateLimiter limiter, long bytesScanned, long lastBytesScanned, double compressionRatio)
     {
-        long lengthRead = (long) ((bytesScanned - lastBytesScanned) * compressionRatio) + 1;
+        long lengthRead = getLengthRead(bytesScanned, lastBytesScanned, compressionRatio);
         while (lengthRead >= Integer.MAX_VALUE)
         {
             limiter.acquire(Integer.MAX_VALUE);
@@ -1156,6 +1162,11 @@ public class CompactionManager implements CompactionManagerMBean
         {
             limiter.acquire((int) lengthRead);
         }
+    }
+
+    public static long getLengthRead(long bytesScanned, long lastBytesScanned, double compressionRatio)
+    {
+        return (long) ((bytesScanned - lastBytesScanned) * compressionRatio) + 1;
     }
 
     private static abstract class CleanupStrategy

@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.tools.nodetool;
 
+import java.util.Map;
+
 import io.airlift.airline.Command;
 
 import org.apache.cassandra.tools.NodeProbe;
@@ -28,6 +30,10 @@ public class GetCompactionThroughput extends NodeToolCmd
     @Override
     public void execute(NodeProbe probe)
     {
-        System.out.println("Current compaction throughput: " + probe.getCompactionThroughput() + " MB/s");
+        System.out.println("Current compaction read throughput limit: " + probe.getCompactionThroughput() + " MB/s");
+        Map<String, Integer> compactionThroughputRate = probe.getCompactionThroughputRate();
+        System.out.println("Current compaction read rate (1 minute): " + compactionThroughputRate.get("1minute"));
+        System.out.println("Current compaction read rate (5 minute): " + compactionThroughputRate.get("5minute"));
+        System.out.println("Current compaction read rate (15 minute): " + compactionThroughputRate.get("15minute"));
     }
 }
