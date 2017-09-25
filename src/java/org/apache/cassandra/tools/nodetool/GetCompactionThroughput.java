@@ -32,8 +32,8 @@ public class GetCompactionThroughput extends NodeToolCmd
     {
         System.out.println("Current compaction read throughput limit: " + probe.getCompactionThroughput() + " MB/s");
         Map<String, Integer> compactionThroughputRate = probe.getCompactionThroughputRate();
-        System.out.println("Current compaction read rate (1 minute): " + compactionThroughputRate.get("1minute"));
-        System.out.println("Current compaction read rate (5 minute): " + compactionThroughputRate.get("5minute"));
-        System.out.println("Current compaction read rate (15 minute): " + compactionThroughputRate.get("15minute"));
+        System.out.println("Current compaction read rate (1 minute): " + compactionThroughputRate.get("1minute") + " MB/s");
+        System.out.println("Current compaction read rate (5 minute): " + compactionThroughputRate.get("5minute") + " MB/s");
+        System.out.println("Current compaction read rate (15 minute): " + compactionThroughputRate.get("15minute") + " MB/s");
     }
 }
