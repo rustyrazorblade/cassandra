@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.schema;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -31,6 +32,7 @@ import org.apache.cassandra.service.StorageService;
 public final class ReplicationParams
 {
     public static final String CLASS = "class";
+    public static final String ALL_DCS = "default_datacenter_replication";
 
     public final Class<? extends AbstractReplicationStrategy> klass;
     public final ImmutableMap<String, String> options;
@@ -77,10 +79,28 @@ public final class ReplicationParams
         AbstractReplicationStrategy.validateReplicationStrategy(name, klass, tmd, eps, options);
     }
 
-    public static ReplicationParams fromMap(Map<String, String> map)
+    public static ReplicationParams fromMap(Map<String, String> map) {
+        return fromMapWithDefaults(map, new HashMap<>());
+    }
+
+    public static ReplicationParams fromMapWithDefaults(Map<String, String> map, Map<String, String> defaults)
     {
         Map<String, String> options = new HashMap<>(map);
         String className = options.remove(CLASS);
+        if (options.containsKey(ALL_DCS)) {
+            Integer defaultReplicas = Integer.valueOf(options.get(ALL_DCS));
+            // When DC autoexpansion occurs in e.g. an ALTER statement, we never want to
+            // alter existing datacenters.
+            defaults.forEach(options::putIfAbsent);
+
+            TokenMetadata.Topology topology = StorageService.instance.getTokenMetadata().cloneOnlyTokenMap().getTopology();
+            topology.getDatacenterRacks().keySet().forEach(dc -> {
+                options.putIfAbsent(dc, defaultReplicas.toString());
+            });
+            options.remove(ALL_DCS);
+        }
+        options.values().removeAll(Collections.singleton("0"));
+
         Class<? extends AbstractReplicationStrategy> klass = AbstractReplicationStrategy.getClass(className);
         return new ReplicationParams(klass, options);
     }
