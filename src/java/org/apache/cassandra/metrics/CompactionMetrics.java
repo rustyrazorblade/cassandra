@@ -24,7 +24,7 @@ import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Meter;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionInfo;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -75,7 +75,7 @@ public class CompactionMetrics implements CompactionManager.CompactionExecutorSt
                 // add estimate number of compactions need to be done
                 for (String keyspaceName : Schema.instance.getKeyspaces())
                 {
-                    for (ColumnFamilyStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
+                    for (TableStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
                         n += cfs.getCompactionStrategyManager().getEstimatedRemainingTasks();
                 }
                 // add number of currently running compactions
@@ -93,7 +93,7 @@ public class CompactionMetrics implements CompactionManager.CompactionExecutorSt
                 // estimation of compactions need to be done
                 for (String keyspaceName : Schema.instance.getKeyspaces())
                 {
-                    for (ColumnFamilyStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
+                    for (TableStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
                     {
                         int taskNumber = cfs.getCompactionStrategyManager().getEstimatedRemainingTasks();
                         if (taskNumber > 0)

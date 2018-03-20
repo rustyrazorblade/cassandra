@@ -38,7 +38,6 @@ import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.partitions.*;
-import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -53,7 +52,7 @@ import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.WrappedRunnable;
 import static junit.framework.Assert.assertNotNull;
 @RunWith(OrderedJUnit4ClassRunner.class)
-public class ColumnFamilyStoreTest
+public class TableStoreTest
 {
     public static final String KEYSPACE1 = "ColumnFamilyStoreTest1";
     public static final String KEYSPACE2 = "ColumnFamilyStoreTest2";
@@ -95,7 +94,7 @@ public class ColumnFamilyStoreTest
     public void testTimeSortedQuery()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
 
         new RowUpdateBuilder(cfs.metadata(), 0, "key1")
                 .clustering("Column1")
@@ -120,7 +119,7 @@ public class ColumnFamilyStoreTest
     public void testGetColumnWithWrongBF()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
 
         List<Mutation> rms = new LinkedList<>();
         rms.add(new RowUpdateBuilder(cfs.metadata(), 0, "key1")
@@ -140,7 +139,7 @@ public class ColumnFamilyStoreTest
     public void testEmptyRow() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD2);
+        final TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD2);
 
         RowUpdateBuilder.deleteRow(cfs.metadata(), FBUtilities.timestampMicros(), "key1", "Column1").applyUnsafe();
 
@@ -164,7 +163,7 @@ public class ColumnFamilyStoreTest
         String keyspaceName = KEYSPACE1;
         String cfName = CF_STANDARD1;
         Keyspace keyspace = Keyspace.open(keyspaceName);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         ByteBuffer col = ByteBufferUtil.bytes("val");
         ByteBuffer val = ByteBufferUtil.bytes("val1");
@@ -223,7 +222,7 @@ public class ColumnFamilyStoreTest
         // don't do snapshot-based repair on Windows, we just skip this test.
         Assume.assumeTrue(!FBUtilities.isWindows);
 
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_INDEX1);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_INDEX1);
 
         //cleanup any previous test gargbage
         cfs.clearSnapshot("");
@@ -245,7 +244,7 @@ public class ColumnFamilyStoreTest
         assertTrue(snapshotDetails.containsKey("ephemeralSnapshot"));
         assertTrue(snapshotDetails.containsKey("nonEphemeralSnapshot"));
 
-        ColumnFamilyStore.clearEphemeralSnapshots(cfs.getDirectories());
+        TableStore.clearEphemeralSnapshots(cfs.getDirectories());
 
         snapshotDetails = cfs.getSnapshotDetails();
         assertEquals(1, snapshotDetails.size());
@@ -258,7 +257,7 @@ public class ColumnFamilyStoreTest
     @Test
     public void testBackupAfterFlush() throws Throwable
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE2).getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = Keyspace.open(KEYSPACE2).getColumnFamilyStore(CF_STANDARD1);
         new RowUpdateBuilder(cfs.metadata(), 0, ByteBufferUtil.bytes("key1")).clustering("Column1").add("val", "asdf").build().applyUnsafe();
         cfs.forceBlockingFlush();
         new RowUpdateBuilder(cfs.metadata(), 0, ByteBufferUtil.bytes("key2")).clustering("Column1").add("val", "asdf").build().applyUnsafe();
@@ -283,7 +282,7 @@ public class ColumnFamilyStoreTest
 //        String cfName = CF_SUPER6;
 //        ByteBuffer superColName = LexicalUUIDType.instance.fromString("a4ed3562-0e8e-4b41-bdfd-c45a2774682d");
 //        Keyspace keyspace = Keyspace.open(keyspaceName);
-//        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+//        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 //        DecoratedKey key = Util.dk("slice-get-uuid-type");
 //
 //        // Insert a row with one supercolumn and multiple subcolumns
@@ -318,7 +317,7 @@ public class ColumnFamilyStoreTest
 //    {
 //        String ks = KEYSPACE1;
 //        String cf = CF_STANDARD1;
-//        ColumnFamilyStore cfs = Keyspace.open(ks).getColumnFamilyStore(cf);
+//        TableStore cfs = Keyspace.open(ks).getColumnFamilyStore(cf);
 //        SSTableDeletingTask.waitForDeletions();
 //
 //        final CFMetaData cfmeta = Schema.instance.getTableMetadataRef(ks, cf);
@@ -398,19 +397,19 @@ public class ColumnFamilyStoreTest
 //        assertTrue(generations.contains(4));
 //    }
 
-    public void reTest(ColumnFamilyStore cfs, Runnable verify) throws Exception
+    public void reTest(TableStore cfs, Runnable verify) throws Exception
     {
         verify.run();
         cfs.forceBlockingFlush();
         verify.run();
     }
 
-    private void assertRangeCount(ColumnFamilyStore cfs, ByteBuffer col, ByteBuffer val, int count)
+    private void assertRangeCount(TableStore cfs, ByteBuffer col, ByteBuffer val, int count)
     {
         assertRangeCount(cfs, cfs.metadata().getColumn(col), val, count);
     }
 
-    private void assertRangeCount(ColumnFamilyStore cfs, ColumnMetadata col, ByteBuffer val, int count)
+    private void assertRangeCount(TableStore cfs, ColumnMetadata col, ByteBuffer val, int count)
     {
 
         int found = 0;
@@ -431,9 +430,9 @@ public class ColumnFamilyStoreTest
     @Test
     public void testScrubDataDirectories() throws Throwable
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
 
-        ColumnFamilyStore.scrubDataDirectories(cfs.metadata());
+        TableStore.scrubDataDirectories(cfs.metadata());
 
         new RowUpdateBuilder(cfs.metadata(), 2, "key").clustering("name").add("val", "2").build().applyUnsafe();
         cfs.forceBlockingFlush();
@@ -449,7 +448,7 @@ public class ColumnFamilyStoreTest
 
         ssTable.selfRef().release();
 
-        ColumnFamilyStore.scrubDataDirectories(cfs.metadata());
+        TableStore.scrubDataDirectories(cfs.metadata());
 
         List<File> ssTableFiles = new Directories(cfs.metadata()).sstableLister(Directories.OnTxnErr.THROW).listFiles();
         assertNotNull(ssTableFiles);

@@ -35,7 +35,7 @@ import org.apache.cassandra.utils.FBUtilities;
 
 public abstract class AbstractReadCommandBuilder
 {
-    protected final ColumnFamilyStore cfs;
+    protected final TableStore cfs;
     protected int nowInSeconds;
 
     private int cqlLimit = -1;
@@ -51,7 +51,7 @@ public abstract class AbstractReadCommandBuilder
     private NavigableSet<Clustering> clusterings;
 
     // Use Util.cmd() instead of this ctor directly
-    AbstractReadCommandBuilder(ColumnFamilyStore cfs)
+    AbstractReadCommandBuilder(TableStore cfs)
     {
         this.cfs = cfs;
         this.nowInSeconds = FBUtilities.nowInSeconds();
@@ -224,7 +224,7 @@ public abstract class AbstractReadCommandBuilder
     {
         private final DecoratedKey partitionKey;
 
-        public SinglePartitionBuilder(ColumnFamilyStore cfs, DecoratedKey key)
+        public SinglePartitionBuilder(TableStore cfs, DecoratedKey key)
         {
             super(cfs);
             this.partitionKey = key;
@@ -242,7 +242,7 @@ public abstract class AbstractReadCommandBuilder
         private final DecoratedKey partitionKey;
         private Slices.Builder sliceBuilder;
 
-        public SinglePartitionSliceBuilder(ColumnFamilyStore cfs, DecoratedKey key)
+        public SinglePartitionSliceBuilder(TableStore cfs, DecoratedKey key)
         {
             super(cfs);
             this.partitionKey = key;
@@ -275,7 +275,7 @@ public abstract class AbstractReadCommandBuilder
         private DecoratedKey endKey;
         private boolean endInclusive;
 
-        public PartitionRangeBuilder(ColumnFamilyStore cfs)
+        public PartitionRangeBuilder(TableStore cfs)
         {
             super(cfs);
         }

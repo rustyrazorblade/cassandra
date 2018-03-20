@@ -24,8 +24,8 @@ import java.io.File;
 import java.io.IOException;
 import java.util.*;
 
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.compaction.CompactionInfo;
@@ -46,7 +46,7 @@ import org.apache.cassandra.utils.UUIDGen;
 
 class SASIIndexBuilder extends SecondaryIndexBuilder
 {
-    private final ColumnFamilyStore cfs;
+    private final TableStore cfs;
     private final UUID compactionId = UUIDGen.getTimeUUID();
 
     private final SortedMap<SSTableReader, Map<ColumnMetadata, ColumnIndex>> sstables;
@@ -54,7 +54,7 @@ class SASIIndexBuilder extends SecondaryIndexBuilder
     private long bytesProcessed = 0;
     private final long totalSizeInBytes;
 
-    public SASIIndexBuilder(ColumnFamilyStore cfs, SortedMap<SSTableReader, Map<ColumnMetadata, ColumnIndex>> sstables)
+    public SASIIndexBuilder(TableStore cfs, SortedMap<SSTableReader, Map<ColumnMetadata, ColumnIndex>> sstables)
     {
         long totalIndexBytes = 0;
         for (SSTableReader sstable : sstables.keySet())

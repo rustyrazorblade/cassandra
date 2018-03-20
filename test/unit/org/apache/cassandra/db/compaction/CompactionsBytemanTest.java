@@ -24,7 +24,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.utils.FBUtilities;
 import org.jboss.byteman.contrib.bmunit.BMRule;
 import org.jboss.byteman.contrib.bmunit.BMRules;
@@ -49,7 +49,7 @@ public class CompactionsBytemanTest extends CQLTester
     public void testSSTableNotEnoughDiskSpaceForCompactionGetsDropped() throws Throwable
     {
         createLowGCGraceTable();
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
         for (int i = 0; i < 5; i++)
         {
             createPossiblyExpiredSSTable(cfs, false);
@@ -73,7 +73,7 @@ public class CompactionsBytemanTest extends CQLTester
     public void testExpiredSSTablesStillGetDroppedWithNoDiskSpace() throws Throwable
     {
         createLowGCGraceTable();
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
         createPossiblyExpiredSSTable(cfs, true);
         createPossiblyExpiredSSTable(cfs, true);
         createPossiblyExpiredSSTable(cfs, false);
@@ -96,7 +96,7 @@ public class CompactionsBytemanTest extends CQLTester
     public void testRuntimeExceptionWhenNoDiskSpaceForCompaction() throws Throwable
     {
         createLowGCGraceTable();
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
         createPossiblyExpiredSSTable(cfs, false);
         createPossiblyExpiredSSTable(cfs, false);
         cfs.forceMajorCompaction(false);
@@ -113,7 +113,7 @@ public class CompactionsBytemanTest extends CQLTester
     public void testCompactingCFCounting() throws Throwable
     {
         createTable("CREATE TABLE %s (k INT, c INT, v INT, PRIMARY KEY (k, c))");
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         cfs.enableAutoCompaction();
 
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 0, 1, 1);
@@ -124,7 +124,7 @@ public class CompactionsBytemanTest extends CQLTester
         assertEquals(0, CompactionManager.instance.compactingCF.count(cfs));
     }
 
-    private void createPossiblyExpiredSSTable(final ColumnFamilyStore cfs, final boolean expired) throws Throwable
+    private void createPossiblyExpiredSSTable(final TableStore cfs, final boolean expired) throws Throwable
     {
         if (expired)
         {

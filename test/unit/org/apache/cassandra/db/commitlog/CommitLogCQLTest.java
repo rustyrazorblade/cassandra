@@ -6,7 +6,7 @@ import java.util.Collection;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 
 public class CommitLogCQLTest extends CQLTester
 {
@@ -22,7 +22,7 @@ public class CommitLogCQLTest extends CQLTester
         // We write something in different table to advance the commit log position. Current table remains clean.
         executeFormattedQuery(String.format("INSERT INTO %s.%s (idx, data) VALUES (?, ?)", keyspace(), otherTable), 16, Integer.toString(16));
 
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         assert cfs.getTracker().getView().getCurrentMemtable().isClean();
         // Calling switchMemtable directly applies Flush even though memtable is empty. This can happen with some races
         // (flush with recycling by segment manager). It should still tell commitlog that the memtable's region is clean.

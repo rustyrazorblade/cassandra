@@ -889,12 +889,12 @@ public class NodeProbe implements AutoCloseable
         }
         catch (MalformedObjectNameException mone)
         {
-            System.err.println("ColumnFamilyStore for " + ks + "/" + cf + " not found.");
+            System.err.println("TableStore for " + ks + "/" + cf + " not found.");
             System.exit(1);
         }
         catch (IOException e)
         {
-            System.err.println("ColumnFamilyStore for " + ks + "/" + cf + " not found: " + e);
+            System.err.println("TableStore for " + ks + "/" + cf + " not found: " + e);
             System.exit(1);
         }
 

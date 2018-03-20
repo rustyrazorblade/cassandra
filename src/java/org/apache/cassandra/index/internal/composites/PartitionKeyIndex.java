@@ -48,7 +48,7 @@ import org.apache.cassandra.schema.IndexMetadata;
 public class PartitionKeyIndex extends CassandraIndex
 {
     private final boolean enforceStrictLiveness;
-    public PartitionKeyIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public PartitionKeyIndex(TableStore baseCfs, IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);
         this.enforceStrictLiveness = baseCfs.metadata.get().enforceStrictLiveness();

@@ -30,7 +30,7 @@ import com.datastax.driver.core.BatchStatement;
 import com.datastax.driver.core.BoundStatement;
 import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.Statement;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.io.sstable.StressCQLSSTableWriter;
 import org.apache.cassandra.stress.WorkManager;
@@ -147,7 +147,7 @@ public class SchemaInsert extends SchemaStatement
         return true;
     }
 
-    public StressCQLSSTableWriter createWriter(ColumnFamilyStore cfs, int bufferSize, boolean makeRangeAware)
+    public StressCQLSSTableWriter createWriter(TableStore cfs, int bufferSize, boolean makeRangeAware)
     {
         return StressCQLSSTableWriter.builder()
                                .withCfs(cfs)

@@ -26,7 +26,6 @@ import java.util.*;
 import java.util.concurrent.*;
 
 import com.google.common.collect.Sets;
-import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -51,7 +50,6 @@ import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.MmappedRegions;
 import org.apache.cassandra.schema.CachingParams;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FilterFactory;
@@ -98,7 +96,7 @@ public class SSTableReaderTest
     public void testGetPositionsForRanges()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
+        TableStore store = keyspace.getColumnFamilyStore("Standard2");
         partitioner = store.getPartitioner();
 
         // insert data and compact to a single sstable
@@ -144,7 +142,7 @@ public class SSTableReaderTest
         try
         {
             Keyspace keyspace = Keyspace.open(KEYSPACE1);
-            ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+            TableStore store = keyspace.getColumnFamilyStore("Standard1");
             partitioner = store.getPartitioner();
 
             // insert a bunch of data and compact to a single sstable
@@ -188,7 +186,7 @@ public class SSTableReaderTest
     {
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+        TableStore store = keyspace.getColumnFamilyStore("Standard1");
         partitioner = store.getPartitioner();
 
         for (int j = 0; j < 100; j += 2)
@@ -205,7 +203,7 @@ public class SSTableReaderTest
         assert store.metric.maxPartitionSize.getValue() != 0;
     }
 
-    private void clearAndLoad(ColumnFamilyStore cfs)
+    private void clearAndLoad(TableStore cfs)
     {
         cfs.clearUnsafe();
         cfs.loadNewSSTables();
@@ -216,7 +214,7 @@ public class SSTableReaderTest
     {
         // try to make sure CASSANDRA-8239 never happens again
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+        TableStore store = keyspace.getColumnFamilyStore("Standard1");
         partitioner = store.getPartitioner();
 
         for (int j = 0; j < 10; j++)
@@ -245,7 +243,7 @@ public class SSTableReaderTest
     public void testGetPositionsForRangesWithKeyCache()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
+        TableStore store = keyspace.getColumnFamilyStore("Standard2");
         partitioner = store.getPartitioner();
         CacheService.instance.keyCache.setCapacity(100);
 
@@ -284,7 +282,7 @@ public class SSTableReaderTest
     {
         // Create secondary index and flush to disk
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_INDEXED);
+        TableStore store = keyspace.getColumnFamilyStore(CF_INDEXED);
         partitioner = store.getPartitioner();
 
         new RowUpdateBuilder(store.metadata(), System.currentTimeMillis(), "k1")
@@ -301,7 +299,7 @@ public class SSTableReaderTest
     public void testGetPositionsKeyCacheStats()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
+        TableStore store = keyspace.getColumnFamilyStore("Standard2");
         partitioner = store.getPartitioner();
         CacheService.instance.keyCache.setCapacity(1000);
 
@@ -340,7 +338,7 @@ public class SSTableReaderTest
 
         // clear and create just one sstable for this test
         Keyspace keyspace = Keyspace.open(ks);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(cf);
+        TableStore store = keyspace.getColumnFamilyStore(cf);
         store.clearUnsafe();
         store.disableAutoCompaction();
 
@@ -457,7 +455,7 @@ public class SSTableReaderTest
     public void testLoadingSummaryUsesCorrectPartitioner() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Indexed1");
+        TableStore store = keyspace.getColumnFamilyStore("Indexed1");
 
         new RowUpdateBuilder(store.metadata(), System.currentTimeMillis(), "k1")
         .clustering("0")
@@ -467,7 +465,7 @@ public class SSTableReaderTest
 
         store.forceBlockingFlush();
 
-        for(ColumnFamilyStore indexCfs : store.indexManager.getAllIndexColumnFamilyStores())
+        for(TableStore indexCfs : store.indexManager.getAllIndexColumnFamilyStores())
         {
             assert indexCfs.isIndex();
             SSTableReader sstable = indexCfs.getLiveSSTables().iterator().next();
@@ -485,7 +483,7 @@ public class SSTableReaderTest
     public void testGetScannerForNoIntersectingRanges() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+        TableStore store = keyspace.getColumnFamilyStore("Standard1");
         partitioner = store.getPartitioner();
 
         new RowUpdateBuilder(store.metadata(), 0, "k1")
@@ -511,7 +509,7 @@ public class SSTableReaderTest
     public void testGetPositionsForRangesFromTableOpenedForBulkLoading() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
+        TableStore store = keyspace.getColumnFamilyStore("Standard2");
         partitioner = store.getPartitioner();
 
         // insert data and compact to a single sstable. The
@@ -554,7 +552,7 @@ public class SSTableReaderTest
     public void testIndexSummaryReplacement() throws IOException, ExecutionException, InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final ColumnFamilyStore store = keyspace.getColumnFamilyStore("StandardLowIndexInterval"); // index interval of 8, no key caching
+        final TableStore store = keyspace.getColumnFamilyStore("StandardLowIndexInterval"); // index interval of 8, no key caching
         CompactionManager.instance.disableAutoCompaction();
 
         final int NUM_PARTITIONS = 512;
@@ -633,7 +631,7 @@ public class SSTableReaderTest
     private void testIndexSummaryUpsampleAndReload0() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final ColumnFamilyStore store = keyspace.getColumnFamilyStore("StandardLowIndexInterval"); // index interval of 8, no key caching
+        final TableStore store = keyspace.getColumnFamilyStore("StandardLowIndexInterval"); // index interval of 8, no key caching
         CompactionManager.instance.disableAutoCompaction();
 
         final int NUM_PARTITIONS = 512;
@@ -663,12 +661,12 @@ public class SSTableReaderTest
         assert reopen.getIndexSummarySamplingLevel() == sstable.getIndexSummarySamplingLevel() + 1;
     }
 
-    private void assertIndexQueryWorks(ColumnFamilyStore indexedCFS)
+    private void assertIndexQueryWorks(TableStore indexedCFS)
     {
         assert "Indexed1".equals(indexedCFS.name);
 
         // make sure all sstables including 2ary indexes load from disk
-        for (ColumnFamilyStore cfs : indexedCFS.concatWithIndexes())
+        for (TableStore cfs : indexedCFS.concatWithIndexes())
             clearAndLoad(cfs);
 
 

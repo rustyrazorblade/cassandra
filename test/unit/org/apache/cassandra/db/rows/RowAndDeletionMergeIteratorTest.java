@@ -54,7 +54,7 @@ public class RowAndDeletionMergeIteratorTest
 
     private int nowInSeconds;
     private DecoratedKey dk;
-    private ColumnFamilyStore cfs;
+    private TableStore cfs;
     private TableMetadata cfm;
     private ColumnMetadata defA;
 

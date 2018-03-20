@@ -49,7 +49,7 @@ public class ClusteringColumnIndex extends CassandraIndex
 {
     private final boolean enforceStrictLiveness;
 
-    public ClusteringColumnIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public ClusteringColumnIndex(TableStore baseCfs, IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);
         this.enforceStrictLiveness = baseCfs.metadata.get().enforceStrictLiveness();

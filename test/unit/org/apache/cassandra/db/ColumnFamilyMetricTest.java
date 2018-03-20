@@ -45,7 +45,7 @@ public class ColumnFamilyMetricTest
     public void testSizeMetric()
     {
         Keyspace keyspace = Keyspace.open("Keyspace1");
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard2");
+        TableStore cfs = keyspace.getColumnFamilyStore("Standard2");
         cfs.disableAutoCompaction();
 
         cfs.truncateBlocking();
@@ -86,7 +86,7 @@ public class ColumnFamilyMetricTest
     public void testColUpdateTimeDeltaFiltering()
     {
         Keyspace keyspace = Keyspace.open("Keyspace1");
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
+        TableStore store = keyspace.getColumnFamilyStore("Standard2");
 
         // This confirms another test/set up did not overflow the histogram
         store.metric.colUpdateTimeDeltaHistogram.cf.getSnapshot().get999thPercentile();

@@ -32,7 +32,7 @@ import junit.framework.Assert;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
@@ -52,7 +52,7 @@ import static org.junit.Assert.assertTrue;
 
 /**
  * Tests to simulate real transactions such as compactions and flushing
- * using SSTableRewriter, ColumnFamilyStore, LifecycleTransaction, TransactionLogs, etc
+ * using SSTableRewriter, TableStore, LifecycleTransaction, TransactionLogs, etc
  */
 public class RealTransactionsTest extends SchemaLoader
 {
@@ -76,7 +76,7 @@ public class RealTransactionsTest extends SchemaLoader
     public void testRewriteFinished() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(REWRITE_FINISHED_CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(REWRITE_FINISHED_CF);
 
         SSTableReader oldSSTable = getSSTable(cfs, 1);
         LifecycleTransaction txn = cfs.getTracker().tryModify(oldSSTable, OperationType.COMPACTION);
@@ -92,7 +92,7 @@ public class RealTransactionsTest extends SchemaLoader
     public void testRewriteAborted() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(REWRITE_ABORTED_CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(REWRITE_ABORTED_CF);
 
         SSTableReader oldSSTable = getSSTable(cfs, 1);
         LifecycleTransaction txn = cfs.getTracker().tryModify(oldSSTable, OperationType.COMPACTION);
@@ -107,7 +107,7 @@ public class RealTransactionsTest extends SchemaLoader
     public void testFlush() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(FLUSH_CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(FLUSH_CF);
 
         SSTableReader ssTableReader = getSSTable(cfs, 100);
 
@@ -115,7 +115,7 @@ public class RealTransactionsTest extends SchemaLoader
         assertFiles(dataFolder, new HashSet<>(ssTableReader.getAllFilePaths()));
     }
 
-    private SSTableReader getSSTable(ColumnFamilyStore cfs, int numPartitions) throws IOException
+    private SSTableReader getSSTable(TableStore cfs, int numPartitions) throws IOException
     {
         createSSTable(cfs, numPartitions);
 
@@ -124,7 +124,7 @@ public class RealTransactionsTest extends SchemaLoader
         return sstables.iterator().next();
     }
 
-    private void createSSTable(ColumnFamilyStore cfs, int numPartitions) throws IOException
+    private void createSSTable(TableStore cfs, int numPartitions) throws IOException
     {
         cfs.truncateBlocking();
 
@@ -144,7 +144,7 @@ public class RealTransactionsTest extends SchemaLoader
         cfs.loadNewSSTables();
     }
 
-    private SSTableReader replaceSSTable(ColumnFamilyStore cfs, LifecycleTransaction txn, boolean fail)
+    private SSTableReader replaceSSTable(TableStore cfs, LifecycleTransaction txn, boolean fail)
     {
         List<SSTableReader> newsstables = null;
         int nowInSec = FBUtilities.nowInSeconds();

@@ -18,7 +18,6 @@
 package org.apache.cassandra.repair;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
@@ -29,8 +28,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -39,7 +36,6 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.*;
 import org.apache.commons.lang3.time.DurationFormatUtils;
-import org.junit.internal.runners.statements.Fail;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,6 +43,7 @@ import com.codahale.metrics.Timer;
 import org.apache.cassandra.concurrent.JMXConfigurableThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.repair.consistent.SyncStatSummary;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -55,7 +52,6 @@ import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.statements.SelectStatement;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -73,7 +69,6 @@ import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.cassandra.utils.WrappedRunnable;
 import org.apache.cassandra.utils.progress.ProgressEvent;
@@ -192,7 +187,7 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
         final int totalProgress = 4 + options.getRanges().size(); // get valid column families, calculate neighbors, validation, prepare for repair + number of ranges to repair
 
         String[] columnFamilies = options.getColumnFamilies().toArray(new String[options.getColumnFamilies().size()]);
-        Iterable<ColumnFamilyStore> validColumnFamilies;
+        Iterable<TableStore> validColumnFamilies;
         try
         {
             validColumnFamilies = storageService.getValidColumnFamilies(false, false, keyspace, columnFamilies);
@@ -212,7 +207,7 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
         if (options.isTraced())
         {
             StringBuilder cfsb = new StringBuilder();
-            for (ColumnFamilyStore cfs : validColumnFamilies)
+            for (TableStore cfs : validColumnFamilies)
                 cfsb.append(", ").append(cfs.keyspace.getName()).append(".").append(cfs.name);
 
             UUID sessionId = Tracing.instance.newSession(Tracing.TraceType.REPAIR);
@@ -263,10 +258,10 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
         }
 
         // Validate columnfamilies
-        List<ColumnFamilyStore> columnFamilyStores = new ArrayList<>();
+        List<TableStore> tableStores = new ArrayList<>();
         try
         {
-            Iterables.addAll(columnFamilyStores, validColumnFamilies);
+            Iterables.addAll(tableStores, validColumnFamilies);
             progress.incrementAndGet();
         }
         catch (IllegalArgumentException e)
@@ -275,10 +270,10 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
             return;
         }
 
-        String[] cfnames = new String[columnFamilyStores.size()];
-        for (int i = 0; i < columnFamilyStores.size(); i++)
+        String[] cfnames = new String[tableStores.size()];
+        for (int i = 0; i < tableStores.size(); i++)
         {
-            cfnames[i] = columnFamilyStores.get(i).name;
+            cfnames[i] = tableStores.get(i).name;
         }
 
         if (!options.isPreview())
@@ -297,7 +292,7 @@ public class RepairRunnable extends WrappedRunnable implements ProgressEventNoti
 
         try (Timer.Context ctx = Keyspace.open(keyspace).metric.repairPrepareTime.time())
         {
-            ActiveRepairService.instance.prepareForRepair(parentSession, FBUtilities.getBroadcastAddressAndPort(), allNeighbors, options, force, columnFamilyStores);
+            ActiveRepairService.instance.prepareForRepair(parentSession, FBUtilities.getBroadcastAddressAndPort(), allNeighbors, options, force, tableStores);
             progress.incrementAndGet();
         }
         catch (Throwable t)

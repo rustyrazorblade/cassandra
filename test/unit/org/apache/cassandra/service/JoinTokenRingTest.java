@@ -25,7 +25,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.index.SecondaryIndexManager;
 import org.apache.cassandra.index.StubIndex;
@@ -47,7 +47,7 @@ public class JoinTokenRingTest
         StorageService ss = StorageService.instance;
         ss.joinRing();
 
-        SecondaryIndexManager indexManager = ColumnFamilyStore.getIfExists("JoinTokenRingTestKeyspace7", "Indexed1").indexManager;
+        SecondaryIndexManager indexManager = TableStore.getIfExists("JoinTokenRingTestKeyspace7", "Indexed1").indexManager;
         StubIndex stub = (StubIndex) indexManager.getIndexByName("Indexed1_value_index");
         Assert.assertTrue(stub.preJoinInvocation);
     }

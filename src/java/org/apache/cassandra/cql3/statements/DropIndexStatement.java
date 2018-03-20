@@ -83,7 +83,7 @@ public class DropIndexStatement extends SchemaAlteringStatement
 
         MigrationManager.announceTableUpdate(updated, isLocalOnly);
         // Dropping an index is akin to updating the CF
-        // Note that we shouldn't call columnFamily() at this point because the index has been dropped and the call to lookupIndexedTable()
+        // Note that we shouldn't call table() at this point because the index has been dropped and the call to lookupIndexedTable()
         // in that method would now throw.
         return new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TABLE, current.keyspace, current.name);
     }

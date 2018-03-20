@@ -26,7 +26,7 @@ import org.apache.cassandra.schema.IndexMetadata;
 
 /**
  * The collection of all Index instances for a base table.
- * The SecondaryIndexManager for a ColumnFamilyStore contains an IndexRegistry
+ * The SecondaryIndexManager for a TableStore contains an IndexRegistry
  * (actually it implements this interface at present) and Index implementations
  * register in order to:
  * i) subscribe to the stream of updates being applied to partitions in the base table

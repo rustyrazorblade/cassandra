@@ -27,7 +27,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.repair.messages.SyncRequest;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Schema;
@@ -42,7 +42,7 @@ public class StreamingRepairTaskTest extends AbstractRepairTest
     protected String ks;
     protected final String tbl = "tbl";
     protected TableMetadata cfm;
-    protected ColumnFamilyStore cfs;
+    protected TableStore cfs;
 
     @BeforeClass
     public static void setupClass()

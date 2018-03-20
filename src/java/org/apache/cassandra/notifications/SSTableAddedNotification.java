@@ -22,10 +22,11 @@ import java.util.Optional;
 import javax.annotation.Nullable;
 
 import org.apache.cassandra.db.Memtable;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 
 /**
- * Notification sent after SSTables are added to their {@link org.apache.cassandra.db.ColumnFamilyStore}.
+ * Notification sent after SSTables are added to their {@link TableStore}.
  */
 public class SSTableAddedNotification implements INotification
 {

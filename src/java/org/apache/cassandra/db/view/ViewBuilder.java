@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionInterruptedException;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -62,7 +62,7 @@ class ViewBuilder
 
     private static final int NUM_TASKS = Runtime.getRuntime().availableProcessors() * 4;
 
-    private final ColumnFamilyStore baseCfs;
+    private final TableStore baseCfs;
     private final View view;
     private final String ksName;
     private final UUID localHostId = SystemKeyspace.getLocalHostId();
@@ -73,7 +73,7 @@ class ViewBuilder
     private volatile boolean isStopped = false;
     private volatile Future<?> future = Futures.immediateFuture(null);
 
-    ViewBuilder(ColumnFamilyStore baseCfs, View view)
+    ViewBuilder(TableStore baseCfs, View view)
     {
         this.baseCfs = baseCfs;
         this.view = view;

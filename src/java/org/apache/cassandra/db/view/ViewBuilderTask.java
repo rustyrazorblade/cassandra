@@ -33,7 +33,7 @@ import com.google.common.util.concurrent.Futures;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.Mutation;
@@ -64,7 +64,7 @@ public class ViewBuilderTask extends CompactionInfo.Holder implements Callable<L
 
     private static final int ROWS_BETWEEN_CHECKPOINTS = 1000;
 
-    private final ColumnFamilyStore baseCfs;
+    private final TableStore baseCfs;
     private final View view;
     private final Range<Token> range;
     private final UUID compactionId;
@@ -73,7 +73,7 @@ public class ViewBuilderTask extends CompactionInfo.Holder implements Callable<L
     private volatile boolean isStopped = false;
     private volatile boolean isCompactionInterrupted = false;
 
-    ViewBuilderTask(ColumnFamilyStore baseCfs, View view, Range<Token> range, Token lastToken, long keysBuilt)
+    ViewBuilderTask(TableStore baseCfs, View view, Range<Token> range, Token lastToken, long keysBuilt)
     {
         this.baseCfs = baseCfs;
         this.view = view;
@@ -124,7 +124,7 @@ public class ViewBuilderTask extends CompactionInfo.Holder implements Callable<L
         Function<org.apache.cassandra.db.lifecycle.View, Iterable<SSTableReader>> function;
         function = org.apache.cassandra.db.lifecycle.View.select(SSTableSet.CANONICAL, s -> range.intersects(s.getBounds()));
 
-        try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(function);
+        try (TableStore.RefViewFragment viewFragment = baseCfs.selectAndReference(function);
              Refs<SSTableReader> sstables = viewFragment.refs;
              ReducingKeyIterator keyIter = new ReducingKeyIterator(sstables))
         {

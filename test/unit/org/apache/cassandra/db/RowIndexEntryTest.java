@@ -403,7 +403,7 @@ public class RowIndexEntryTest extends CQLTester
     public void testSerializedSize() throws Throwable
     {
         String tableName = createTable("CREATE TABLE %s (a int, b text, c int, PRIMARY KEY(a, b))");
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+        TableStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
 
         Pre_C_11206_RowIndexEntry simple = new Pre_C_11206_RowIndexEntry(123);
 

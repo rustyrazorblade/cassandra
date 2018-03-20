@@ -45,7 +45,7 @@ import org.json.simple.parser.JSONParser;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-public class ColumnFamilyStoreCQLHelperTest extends CQLTester
+public class TableStoreCQLHelperTest extends CQLTester
 {
     @Before
     public void defineSchema() throws ConfigurationException
@@ -97,7 +97,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
 
         SchemaLoader.createKeyspace(keyspace, KeyspaceParams.simple(1), Tables.of(cfm), Types.of(typeA, typeB, typeC));
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
 
         assertEquals(ImmutableList.of("CREATE TYPE cql_test_keyspace_user_types.a (a1 varint, a2 varint, a3 varint);",
                                       "CREATE TYPE cql_test_keyspace_user_types.b (b1 a, b2 a, b3 a);",
@@ -133,7 +133,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
 
         SchemaLoader.createKeyspace(keyspace, KeyspaceParams.simple(1), builder);
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
 
         assertEquals(ImmutableList.of("ALTER TABLE cql_test_keyspace_dropped_columns.test_table_dropped_columns DROP reg1 USING TIMESTAMP 10000;",
                                       "ALTER TABLE cql_test_keyspace_dropped_columns.test_table_dropped_columns DROP reg3 USING TIMESTAMP 30000;",
@@ -178,7 +178,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
 
         SchemaLoader.createKeyspace(keyspace, KeyspaceParams.simple(1), builder);
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
 
         // when re-adding, column is present in CREATE, then in DROP and then in ADD again, to record DROP with a proper timestamp
         assertTrue(ColumnFamilyStoreCQLHelper.getTableMetadataAsCQL(cfs.metadata(), true).startsWith(
@@ -216,7 +216,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
 
         SchemaLoader.createKeyspace(keyspace, KeyspaceParams.simple(1), metadata);
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
 
         assertTrue(ColumnFamilyStoreCQLHelper.getTableMetadataAsCQL(cfs.metadata(), true).startsWith(
         "CREATE TABLE IF NOT EXISTS cql_test_keyspace_create_table.test_table_create_table (\n" +
@@ -262,7 +262,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
 
         SchemaLoader.createKeyspace(keyspace, KeyspaceParams.simple(1), builder);
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
 
         assertTrue(ColumnFamilyStoreCQLHelper.getTableMetadataAsCQL(cfs.metadata(), true).endsWith(
         "AND bloom_filter_fp_chance = 1.0\n" +
@@ -323,7 +323,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
 
         SchemaLoader.createKeyspace(keyspace, KeyspaceParams.simple(1), builder);
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
 
         assertEquals(ImmutableList.of("CREATE INDEX \"indexName\" ON cql_test_keyspace_3.test_table_3 (values(reg1));",
                                       "CREATE INDEX \"indexName2\" ON cql_test_keyspace_3.test_table_3 (keys(reg1));",
@@ -358,7 +358,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
         for (int i = 0; i < 10; i++)
             execute("INSERT INTO %s (pk1, pk2, ck1, ck2, reg1, reg2) VALUES (?, ?, ?, ?, ?, ?)", i, i + 1, i + 2, i + 3, null, i + 5);
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(tableName);
+        TableStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(tableName);
         cfs.snapshot(SNAPSHOT);
 
         String schema = Files.toString(cfs.getDirectories().getSnapshotSchemaFile(SNAPSHOT), Charset.defaultCharset());
@@ -393,7 +393,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
     @Test
     public void testSystemKsSnapshot() throws Throwable
     {
-        ColumnFamilyStore cfs = Keyspace.open("system").getColumnFamilyStore("peers");
+        TableStore cfs = Keyspace.open("system").getColumnFamilyStore("peers");
         cfs.snapshot(SNAPSHOT);
 
         Assert.assertTrue(cfs.getDirectories().getSnapshotManifestFile(SNAPSHOT).exists());
@@ -418,7 +418,7 @@ public class ColumnFamilyStoreCQLHelperTest extends CQLTester
         Runnable validate = () -> {
             try
             {
-                ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(tableName);
+                TableStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(tableName);
                 cfs.snapshot(SNAPSHOT);
                 String schema = Files.toString(cfs.getDirectories().getSnapshotSchemaFile(SNAPSHOT), Charset.defaultCharset());
 

@@ -33,7 +33,7 @@ import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.KeyspaceParams;
@@ -47,7 +47,7 @@ import org.apache.cassandra.utils.concurrent.Transactional;
 public class CompactionTaskTest
 {
     private static TableMetadata cfm;
-    private static ColumnFamilyStore cfs;
+    private static TableStore cfs;
 
     @BeforeClass
     public static void setUpClass() throws Exception

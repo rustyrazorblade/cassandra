@@ -19,7 +19,7 @@ package org.apache.cassandra.db.compaction.writers;
 
 import java.util.Set;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.SerializationHeader;
@@ -38,7 +38,7 @@ public class MaxSSTableSizeWriter extends CompactionAwareWriter
     private final Set<SSTableReader> allSSTables;
     private Directories.DataDirectory sstableDirectory;
 
-    public MaxSSTableSizeWriter(ColumnFamilyStore cfs,
+    public MaxSSTableSizeWriter(TableStore cfs,
                                 Directories directories,
                                 LifecycleTransaction txn,
                                 Set<SSTableReader> nonExpiredSSTables,
@@ -49,7 +49,7 @@ public class MaxSSTableSizeWriter extends CompactionAwareWriter
     }
 
     @Deprecated
-    public MaxSSTableSizeWriter(ColumnFamilyStore cfs,
+    public MaxSSTableSizeWriter(TableStore cfs,
                                 Directories directories,
                                 LifecycleTransaction txn,
                                 Set<SSTableReader> nonExpiredSSTables,
@@ -61,7 +61,7 @@ public class MaxSSTableSizeWriter extends CompactionAwareWriter
         this(cfs, directories, txn, nonExpiredSSTables, maxSSTableSize, level, keepOriginals);
     }
 
-    public MaxSSTableSizeWriter(ColumnFamilyStore cfs,
+    public MaxSSTableSizeWriter(TableStore cfs,
                                 Directories directories,
                                 LifecycleTransaction txn,
                                 Set<SSTableReader> nonExpiredSSTables,
@@ -81,7 +81,7 @@ public class MaxSSTableSizeWriter extends CompactionAwareWriter
     /**
      * Gets the estimated total amount of data to write during compaction
      */
-    private static long getTotalWriteSize(Iterable<SSTableReader> nonExpiredSSTables, long estimatedTotalKeys, ColumnFamilyStore cfs, OperationType compactionType)
+    private static long getTotalWriteSize(Iterable<SSTableReader> nonExpiredSSTables, long estimatedTotalKeys, TableStore cfs, OperationType compactionType)
     {
         long estimatedKeysBeforeCompaction = 0;
         for (SSTableReader sstable : nonExpiredSSTables)

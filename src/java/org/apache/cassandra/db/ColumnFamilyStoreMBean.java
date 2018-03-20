@@ -29,7 +29,7 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 
 /**
- * The MBean interface for ColumnFamilyStore
+ * The MBean interface for TableStore
  */
 public interface ColumnFamilyStoreMBean
 {

@@ -72,7 +72,7 @@ public class SizeEstimatesRecorder extends SchemaChangeListener implements Runna
         {
             Collection<Range<Token>> localRanges = StorageService.instance.getPrimaryRangesForEndpoint(keyspace.getName(),
                     FBUtilities.getBroadcastAddressAndPort());
-            for (ColumnFamilyStore table : keyspace.getColumnFamilyStores())
+            for (TableStore table : keyspace.getColumnFamilyStores())
             {
                 long start = System.nanoTime();
                 recordSizeEstimates(table, localRanges);
@@ -86,7 +86,7 @@ public class SizeEstimatesRecorder extends SchemaChangeListener implements Runna
     }
 
     @SuppressWarnings("resource")
-    private void recordSizeEstimates(ColumnFamilyStore table, Collection<Range<Token>> localRanges)
+    private void recordSizeEstimates(TableStore table, Collection<Range<Token>> localRanges)
     {
         // for each local primary range, estimate (crudely) mean partition size and partitions count.
         Map<Range<Token>, Pair<Long, Long>> estimates = new HashMap<>(localRanges.size());

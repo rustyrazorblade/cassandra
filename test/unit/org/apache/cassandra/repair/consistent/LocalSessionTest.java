@@ -46,7 +46,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.repair.messages.FailSession;
@@ -192,7 +192,7 @@ public class LocalSessionTest extends AbstractRepairTest
     }
 
     private static TableMetadata cfm;
-    private static ColumnFamilyStore cfs;
+    private static TableStore cfs;
 
     @BeforeClass
     public static void setupClass()
@@ -207,7 +207,7 @@ public class LocalSessionTest extends AbstractRepairTest
     public void setup()
     {
         // clear out any data from previous test runs
-        ColumnFamilyStore repairCfs = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.REPAIRS);
+        TableStore repairCfs = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.REPAIRS);
         repairCfs.truncateBlocking();
     }
 

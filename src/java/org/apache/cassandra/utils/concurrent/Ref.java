@@ -38,7 +38,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -710,7 +710,7 @@ public final class Ref<T> implements RefCounted<T>
             final Ref.IdentityCollection expected = new Ref.IdentityCollection(candidates);
             for (Keyspace ks : Keyspace.all())
             {
-                for (ColumnFamilyStore cfs : ks.getColumnFamilyStores())
+                for (TableStore cfs : ks.getColumnFamilyStores())
                 {
                     View view = cfs.getTracker().getView();
                     for (SSTableReader reader : view.allKnownSSTables())

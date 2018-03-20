@@ -37,7 +37,7 @@ import static org.junit.Assert.fail;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -152,7 +152,7 @@ public class TimeWindowCompactionStrategyTest extends SchemaLoader
     public void testPrepBucket()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
 
@@ -240,7 +240,7 @@ public class TimeWindowCompactionStrategyTest extends SchemaLoader
     public void testDropExpiredSSTables() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
 
@@ -288,7 +288,7 @@ public class TimeWindowCompactionStrategyTest extends SchemaLoader
     public void testDropOverlappingExpiredSSTables() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
 

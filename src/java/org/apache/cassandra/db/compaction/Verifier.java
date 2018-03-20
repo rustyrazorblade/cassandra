@@ -57,11 +57,10 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.function.LongPredicate;
-import java.util.function.Predicate;
 
 public class Verifier implements Closeable
 {
-    private final ColumnFamilyStore cfs;
+    private final TableStore cfs;
     private final SSTableReader sstable;
 
     private final CompactionController controller;
@@ -79,12 +78,12 @@ public class Verifier implements Closeable
     private final OutputHandler outputHandler;
     private FileDigestValidator validator;
 
-    public Verifier(ColumnFamilyStore cfs, SSTableReader sstable, boolean isOffline, Options options)
+    public Verifier(TableStore cfs, SSTableReader sstable, boolean isOffline, Options options)
     {
         this(cfs, sstable, new OutputHandler.LogOutput(), isOffline, options);
     }
 
-    public Verifier(ColumnFamilyStore cfs, SSTableReader sstable, OutputHandler outputHandler, boolean isOffline, Options options)
+    public Verifier(TableStore cfs, SSTableReader sstable, OutputHandler outputHandler, boolean isOffline, Options options)
     {
         this.cfs = cfs;
         this.sstable = sstable;
@@ -421,7 +420,7 @@ public class Verifier implements Closeable
 
     private static class VerifyController extends CompactionController
     {
-        public VerifyController(ColumnFamilyStore cfs)
+        public VerifyController(TableStore cfs)
         {
             super(cfs, Integer.MAX_VALUE);
         }

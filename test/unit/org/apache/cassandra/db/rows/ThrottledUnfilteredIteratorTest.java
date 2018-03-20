@@ -42,7 +42,7 @@ import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.AbstractReadCommandBuilder;
 import org.apache.cassandra.db.BufferDecoratedKey;
 import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.Keyspace;
@@ -110,7 +110,7 @@ public class ThrottledUnfilteredIteratorTest extends CQLTester
         execute("DELETE FROM %s USING TIMESTAMP 160 WHERE pk=1");
 
         // flush and generate 1 sstable
-        ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
+        TableStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
         cfs.forceBlockingFlush();
         cfs.disableAutoCompaction();
         cfs.forceMajorCompaction();
@@ -145,7 +145,7 @@ public class ThrottledUnfilteredIteratorTest extends CQLTester
         execute("UPDATE %s SET v2 = 160 WHERE pk = 1");
 
         // flush and generate 1 sstable
-        ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
+        TableStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
         cfs.forceBlockingFlush();
         cfs.disableAutoCompaction();
         cfs.forceMajorCompaction();
@@ -203,7 +203,7 @@ public class ThrottledUnfilteredIteratorTest extends CQLTester
         execute("DELETE FROM %s USING TIMESTAMP 160 WHERE pk=1");
 
         // flush and generate 1 sstable
-        ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
+        TableStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
         cfs.forceBlockingFlush();
         cfs.disableAutoCompaction();
         cfs.forceMajorCompaction();
@@ -609,7 +609,7 @@ public class ThrottledUnfilteredIteratorTest extends CQLTester
     public void testThrottledIteratorWithRangeDeletions() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CFNAME);
+        TableStore cfs = keyspace.getColumnFamilyStore(CFNAME);
 
         // Inserting data
         String key = "k1";

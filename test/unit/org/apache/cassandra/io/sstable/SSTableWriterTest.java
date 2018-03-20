@@ -44,7 +44,7 @@ public class SSTableWriterTest extends SSTableWriterTestBase
     public void testAbortTxnWithOpenEarlyShouldRemoveSSTable() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         File dir = cfs.getDirectories().getDirectoryForNewSSTables();
@@ -99,7 +99,7 @@ public class SSTableWriterTest extends SSTableWriterTestBase
     public void testAbortTxnWithClosedWriterShouldRemoveSSTable() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         File dir = cfs.getDirectories().getDirectoryForNewSSTables();
@@ -147,7 +147,7 @@ public class SSTableWriterTest extends SSTableWriterTestBase
     public void testAbortTxnWithClosedAndOpenWriterShouldRemoveAllSSTables() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         File dir = cfs.getDirectories().getDirectoryForNewSSTables();
@@ -205,7 +205,7 @@ public class SSTableWriterTest extends SSTableWriterTestBase
     public void testValueTooBigCorruption() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_SMALL_MAX_VALUE);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_SMALL_MAX_VALUE);
         truncate(cfs);
 
         File dir = cfs.getDirectories().getDirectoryForNewSSTables();

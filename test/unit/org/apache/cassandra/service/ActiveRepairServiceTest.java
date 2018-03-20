@@ -20,8 +20,6 @@ package org.apache.cassandra.service;
 
 import java.util.*;
 
-import javax.xml.crypto.Data;
-
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
 import org.junit.Assert;
@@ -31,12 +29,11 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
-import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -68,7 +65,7 @@ public class ActiveRepairServiceTest
     public static final String CF_COUNTER = "Counter1";
 
     public String cfname;
-    public ColumnFamilyStore store;
+    public TableStore store;
     public InetAddressAndPort LOCAL, REMOTE;
 
     private boolean initialized;
@@ -261,7 +258,7 @@ public class ActiveRepairServiceTest
     @Test
     public void testSnapshotAddSSTables() throws Exception
     {
-        ColumnFamilyStore store = prepareColumnFamilyStore();
+        TableStore store = prepareColumnFamilyStore();
         UUID prsId = UUID.randomUUID();
         Set<SSTableReader> original = Sets.newHashSet(store.select(View.select(SSTableSet.CANONICAL, (s) -> !s.isRepaired())).sstables);
         ActiveRepairService.instance.registerParentRepairSession(prsId, FBUtilities.getBroadcastAddressAndPort(), Collections.singletonList(store),
@@ -285,17 +282,17 @@ public class ActiveRepairServiceTest
         }
     }
 
-    private ColumnFamilyStore prepareColumnFamilyStore()
+    private TableStore prepareColumnFamilyStore()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE5);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore store = keyspace.getColumnFamilyStore(CF_STANDARD1);
         store.truncateBlocking();
         store.disableAutoCompaction();
         createSSTables(store, 10);
         return store;
     }
 
-    private void createSSTables(ColumnFamilyStore cfs, int count)
+    private void createSSTables(TableStore cfs, int count)
     {
         long timestamp = System.currentTimeMillis();
         for (int i = 0; i < count; i++)

@@ -29,9 +29,9 @@ import com.google.common.collect.Maps;
 
 import com.codahale.metrics.*;
 import com.codahale.metrics.Timer;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
@@ -46,7 +46,7 @@ import org.apache.cassandra.utils.TopKSampler;
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
 /**
- * Metrics for {@link ColumnFamilyStore}.
+ * Metrics for {@link TableStore}.
  */
 public class TableMetrics
 {
@@ -218,7 +218,7 @@ public class TableMetrics
             if (k.getReplicationStrategy().getReplicationFactor() < 2)
                 continue;
 
-            for (ColumnFamilyStore cf : k.getColumnFamilyStores())
+            for (TableStore cf : k.getColumnFamilyStores())
             {
                 if (!SecondaryIndexManager.isIndexColumnFamily(cf.name))
                 {
@@ -330,11 +330,11 @@ public class TableMetrics
     }
 
     /**
-     * Creates metrics for given {@link ColumnFamilyStore}.
+     * Creates metrics for given {@link TableStore}.
      *
-     * @param cfs ColumnFamilyStore to measure metrics
+     * @param cfs TableStore to measure metrics
      */
-    public TableMetrics(final ColumnFamilyStore cfs)
+    public TableMetrics(final TableStore cfs)
     {
         factory = new TableMetricNameFactory(cfs, "Table");
         aliasFactory = new TableMetricNameFactory(cfs, "ColumnFamily");
@@ -378,7 +378,7 @@ public class TableMetrics
             public Long getValue()
             {
                 long size = 0;
-                for (ColumnFamilyStore cfs2 : cfs.concatWithIndexes())
+                for (TableStore cfs2 : cfs.concatWithIndexes())
                     size += cfs2.getTracker().getView().getCurrentMemtable().getAllocator().onHeap().owns();
                 return size;
             }
@@ -388,7 +388,7 @@ public class TableMetrics
             public Long getValue()
             {
                 long size = 0;
-                for (ColumnFamilyStore cfs2 : cfs.concatWithIndexes())
+                for (TableStore cfs2 : cfs.concatWithIndexes())
                     size += cfs2.getTracker().getView().getCurrentMemtable().getAllocator().offHeap().owns();
                 return size;
             }
@@ -398,7 +398,7 @@ public class TableMetrics
             public Long getValue()
             {
                 long size = 0;
-                for (ColumnFamilyStore cfs2 : cfs.concatWithIndexes())
+                for (TableStore cfs2 : cfs.concatWithIndexes())
                     size += cfs2.getTracker().getView().getCurrentMemtable().getLiveDataSize();
                 return size;
             }
@@ -1097,7 +1097,7 @@ public class TableMetrics
         private final boolean isIndex;
         private final String type;
 
-        TableMetricNameFactory(ColumnFamilyStore cfs, String type)
+        TableMetricNameFactory(TableStore cfs, String type)
         {
             this.keyspaceName = cfs.keyspace.getName();
             this.tableName = cfs.name;

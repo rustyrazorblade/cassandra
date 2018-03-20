@@ -32,7 +32,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.WriteType;
@@ -48,7 +48,7 @@ import static org.junit.Assert.assertTrue;
 public class WriteResponseHandlerTest
 {
     static Keyspace ks;
-    static ColumnFamilyStore cfs;
+    static TableStore cfs;
     static List<InetAddressAndPort> targets;
 
     @BeforeClass

@@ -40,7 +40,7 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.Verifier;
 import org.apache.cassandra.db.streaming.CassandraOutgoingFile;
@@ -56,7 +56,6 @@ import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.streaming.OutgoingStream;
 import org.apache.cassandra.streaming.StreamPlan;
-import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -164,7 +163,7 @@ public class LegacySSTableTest
             loadLegacyTables(legacyVersion);
             CacheService.instance.invalidateKeyCache();
 
-            for (ColumnFamilyStore cfs : Keyspace.open("legacy_tables").getColumnFamilyStores())
+            for (TableStore cfs : Keyspace.open("legacy_tables").getColumnFamilyStores())
             {
                 for (SSTableReader sstable : cfs.getLiveSSTables())
                 {
@@ -205,7 +204,7 @@ public class LegacySSTableTest
     {
         for (String legacyVersion : legacyVersions)
         {
-            ColumnFamilyStore cfs = Keyspace.open("legacy_tables").getColumnFamilyStore(String.format("legacy_%s_simple", legacyVersion));
+            TableStore cfs = Keyspace.open("legacy_tables").getColumnFamilyStore(String.format("legacy_%s_simple", legacyVersion));
             loadLegacyTable("legacy_%s_simple", legacyVersion);
 
             for (SSTableReader sstable : cfs.getLiveSSTables())
@@ -406,7 +405,7 @@ public class LegacySSTableTest
 
         logger.info("Loading legacy table {}", table);
 
-        ColumnFamilyStore cfs = Keyspace.open("legacy_tables").getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open("legacy_tables").getColumnFamilyStore(table);
 
         for (File cfDir : cfs.getDirectories().getCFDirectories())
         {

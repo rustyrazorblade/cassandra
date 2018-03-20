@@ -23,7 +23,7 @@ import java.util.Collection;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
@@ -64,7 +64,7 @@ public class NeverPurgeTest extends CQLTester
     public void minorNeverPurgeTombstonesTest() throws Throwable
     {
         createTable("CREATE TABLE %s (a int, b int, c text, PRIMARY KEY (a, b)) WITH gc_grace_seconds = 0");
-        ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
+        TableStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
         cfs.disableAutoCompaction();
         for (int i = 0; i < 4; i++)
         {
@@ -88,7 +88,7 @@ public class NeverPurgeTest extends CQLTester
     private void testHelper(String deletionStatement) throws Throwable
     {
         createTable("CREATE TABLE %s (a int, b int, c text, PRIMARY KEY (a, b)) WITH gc_grace_seconds = 0");
-        ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
+        TableStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore(currentTable());
         execute("INSERT INTO %s (a, b, c) VALUES (1, 2, '3')");
         execute(deletionStatement);
         Thread.sleep(1000);

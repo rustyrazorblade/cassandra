@@ -34,8 +34,8 @@ import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.SetMultimap;
 
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
@@ -93,12 +93,12 @@ public class SSTableOfflineRelevel
         Schema.instance.loadFromDisk(false);
 
         if (Schema.instance.getTableMetadataRef(keyspace, columnfamily) == null)
-            throw new IllegalArgumentException(String.format("Unknown keyspace/columnFamily %s.%s",
+            throw new IllegalArgumentException(String.format("Unknown keyspace/table %s.%s",
                     keyspace,
                     columnfamily));
 
         Keyspace ks = Keyspace.openWithoutSSTables(keyspace);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(columnfamily);
+        TableStore cfs = ks.getColumnFamilyStore(columnfamily);
         Directories.SSTableLister lister = cfs.getDirectories().sstableLister(Directories.OnTxnErr.THROW).skipTemporary(true);
         SetMultimap<File, SSTableReader> sstableMultimap = HashMultimap.create();
         for (Map.Entry<Descriptor, Set<Component>> sstable : lister.list().entrySet())

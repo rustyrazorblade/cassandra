@@ -43,7 +43,7 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -73,7 +73,7 @@ public class CassandraStreamManagerTest
     private static final StreamConnectionFactory connectionFactory = new DefaultConnectionFactory();
 
     private TableMetadata tbm;
-    private ColumnFamilyStore cfs;
+    private TableStore cfs;
 
     @BeforeClass
     public static void setupClass() throws Exception

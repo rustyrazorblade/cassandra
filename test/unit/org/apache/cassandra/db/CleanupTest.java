@@ -114,7 +114,7 @@ public class CleanupTest
         StorageService.instance.getTokenMetadata().clearUnsafe();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
 
         UnfilteredPartitionIterator iter;
 
@@ -143,7 +143,7 @@ public class CleanupTest
     public void testCleanupWithIndexes() throws IOException, ExecutionException, InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_INDEXED1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_INDEXED1);
 
 
         // insert data and verify we get it back w/ range query
@@ -187,7 +187,7 @@ public class CleanupTest
         StorageService.instance.getTokenMetadata().clearUnsafe();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
 
         // insert data and verify we get it back w/ range query
         fillCF(cfs, "val", LOOPS);
@@ -229,7 +229,7 @@ public class CleanupTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE2);
         keyspace.setMetadata(KeyspaceMetadata.create(KEYSPACE2, KeyspaceParams.nts("DC1", 1)));
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD2);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD2);
 
         // insert data and verify we get it back w/ range query
         fillCF(cfs, "val", LOOPS);
@@ -259,7 +259,7 @@ public class CleanupTest
         StorageService.instance.getTokenMetadata().clearUnsafe();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
 
         // insert data and verify we get it back w/ range query
         fillCF(cfs, "val", LOOPS);
@@ -285,7 +285,7 @@ public class CleanupTest
         // setup
         StorageService.instance.getTokenMetadata().clearUnsafe();
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         fillCF(cfs, "val", LOOPS);
 
         // prepare SSTable and some useful tokens
@@ -352,7 +352,7 @@ public class CleanupTest
         return new Range<>(from, to);
     }
 
-    protected void fillCF(ColumnFamilyStore cfs, String colName, int rowsPerSSTable)
+    protected void fillCF(TableStore cfs, String colName, int rowsPerSSTable)
     {
         CompactionManager.instance.disableAutoCompaction();
 
@@ -370,7 +370,7 @@ public class CleanupTest
         cfs.forceBlockingFlush();
     }
 
-    protected List<Long> getMaxTimestampList(ColumnFamilyStore cfs)
+    protected List<Long> getMaxTimestampList(TableStore cfs)
     {
         List<Long> list = new LinkedList<Long>();
         for (SSTableReader sstable : cfs.getLiveSSTables())

@@ -36,7 +36,7 @@ public class TruncateVerbHandler implements IVerbHandler<Truncation>
         Tracing.trace("Applying truncation of {}.{}", t.keyspace, t.columnFamily);
         try
         {
-            ColumnFamilyStore cfs = Keyspace.open(t.keyspace).getColumnFamilyStore(t.columnFamily);
+            TableStore cfs = Keyspace.open(t.keyspace).getColumnFamilyStore(t.columnFamily);
             cfs.truncateBlocking();
         }
         catch (Exception e)

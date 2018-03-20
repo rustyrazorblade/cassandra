@@ -90,7 +90,7 @@ public class RecoveryManagerTruncateTest
     public void testTruncate() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        TableStore cfs = keyspace.getColumnFamilyStore("Standard1");
 
         // add a single cell
         new RowUpdateBuilder(cfs.metadata(), 0, "key1")

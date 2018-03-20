@@ -33,7 +33,7 @@ import org.junit.BeforeClass;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -97,12 +97,12 @@ public class SSTableWriterTestBase extends SchemaLoader
     public void truncateCF()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        TableStore store = keyspace.getColumnFamilyStore(CF);
         store.truncateBlocking();
         LifecycleTransaction.waitForDeletions();
     }
 
-    public static void truncate(ColumnFamilyStore cfs)
+    public static void truncate(TableStore cfs)
     {
         cfs.truncateBlocking();
         LifecycleTransaction.waitForDeletions();
@@ -131,7 +131,7 @@ public class SSTableWriterTestBase extends SchemaLoader
      *
      * @param cfs - the column family store to validate
      */
-    public static void validateCFS(ColumnFamilyStore cfs)
+    public static void validateCFS(TableStore cfs)
     {
         Set<Integer> liveDescriptors = new HashSet<>();
         long spaceUsed = 0;
@@ -161,7 +161,7 @@ public class SSTableWriterTestBase extends SchemaLoader
             assertFalse(CompactionManager.instance.submitMaximal(cfs, cfs.gcBefore((int) (System.currentTimeMillis() / 1000)), false).isEmpty());
     }
 
-    public static SSTableWriter getWriter(ColumnFamilyStore cfs, File directory, LifecycleTransaction txn)
+    public static SSTableWriter getWriter(TableStore cfs, File directory, LifecycleTransaction txn)
     {
         Descriptor desc = cfs.newSSTableDescriptor(directory);
         return SSTableWriter.create(desc, 0, 0, null, new SerializationHeader(true, cfs.metadata(), cfs.metadata().regularAndStaticColumns(), EncodingStats.NO_STATS), cfs.indexManager.listIndexes(), txn);

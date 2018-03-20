@@ -116,7 +116,7 @@ public class CachedBTreePartition extends ImmutableBTreePartition implements Cac
     /**
      * The number of rows that were live at the time the partition was cached.
      *
-     * See {@link ColumnFamilyStore#isFilterFullyCoveredBy} to see why we need this.
+     * See {@link TableStore#isFilterFullyCoveredBy} to see why we need this.
      *
      * @return the number of rows in this partition that were live at the time the
      * partition was cached (this can be different from the number of live rows now

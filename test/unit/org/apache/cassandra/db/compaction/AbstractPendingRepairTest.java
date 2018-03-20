@@ -30,11 +30,11 @@ import org.junit.Ignore;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.net.IMessageSink;
 import org.apache.cassandra.net.MessageIn;
@@ -51,7 +51,7 @@ public class AbstractPendingRepairTest extends AbstractRepairTest
     protected String ks;
     protected final String tbl = "tbl";
     protected TableMetadata cfm;
-    protected ColumnFamilyStore cfs;
+    protected TableStore cfs;
     protected CompactionStrategyManager csm;
     protected static ActiveRepairService ARS;
 

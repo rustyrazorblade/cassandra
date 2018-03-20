@@ -56,7 +56,7 @@ public class GcCompactionTest extends CQLTester
     }
 
     @Override
-    public ColumnFamilyStore getCurrentColumnFamilyStore()
+    public TableStore getCurrentColumnFamilyStore()
     {
         return super.getCurrentColumnFamilyStore(KEYSPACE_PER_TEST);
     }
@@ -118,7 +118,7 @@ public class GcCompactionTest extends CQLTester
                 execute("INSERT INTO %s (key, column, data, extra) VALUES (?, ?, ?, ?)", i, j, i+j, "" + i + ":" + j);
 
         Set<SSTableReader> readers = new HashSet<>();
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
 
         flush();
         assertEquals(1, cfs.getLiveSSTables().size());
@@ -165,7 +165,7 @@ public class GcCompactionTest extends CQLTester
                 execute("INSERT INTO %s (key, column, data, extra) VALUES (?, ?, ?, ?)", i, j, i+j, "" + i + ":" + j);
 
         Set<SSTableReader> readers = new HashSet<>();
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
 
         flush();
         assertEquals(1, cfs.getLiveSSTables().size());
@@ -205,7 +205,7 @@ public class GcCompactionTest extends CQLTester
                 execute("INSERT INTO %s (key, column, data, extra) VALUES (?, ?, ?, ?)", i, j, i+j, "" + i + ":" + j);
 
         Set<SSTableReader> readers = new HashSet<>();
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
 
         flush();
         assertEquals(1, cfs.getLiveSSTables().size());
@@ -246,7 +246,7 @@ public class GcCompactionTest extends CQLTester
                 execute("UPDATE %s SET data[?] = ? WHERE key = ?", j, i+j, i);
 
         Set<SSTableReader> readers = new HashSet<>();
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
 
         flush();
         assertEquals(1, cfs.getLiveSSTables().size());

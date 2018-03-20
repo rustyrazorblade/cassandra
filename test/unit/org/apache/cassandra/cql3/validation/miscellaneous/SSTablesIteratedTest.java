@@ -26,7 +26,7 @@ import static org.junit.Assert.assertEquals;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.metrics.ClearableHistogram;
 
 /**
@@ -36,7 +36,7 @@ public class SSTablesIteratedTest extends CQLTester
 {
     private void executeAndCheck(String query, int numSSTables, Object[]... rows) throws Throwable
     {
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore(KEYSPACE_PER_TEST);
+        TableStore cfs = getCurrentColumnFamilyStore(KEYSPACE_PER_TEST);
 
         ((ClearableHistogram) cfs.metric.sstablesPerReadHistogram.cf).clear(); // resets counts
 

@@ -20,9 +20,9 @@ package org.apache.cassandra.index.internal;
 
 import java.util.List;
 
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.CompositeType;
@@ -38,7 +38,7 @@ public interface CassandraIndexFunctions
      * @param indexMetadata
      * @return
      */
-    public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata);
+    public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata);
 
     /**
      * Returns the type of the the values in the index. For most columns this is simply its type, but for collections
@@ -83,7 +83,7 @@ public interface CassandraIndexFunctions
 
     static final CassandraIndexFunctions KEYS_INDEX_FUNCTIONS = new CassandraIndexFunctions()
     {
-        public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+        public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata)
         {
             return new KeysIndex(baseCfs, indexMetadata);
         }
@@ -91,7 +91,7 @@ public interface CassandraIndexFunctions
 
     static final CassandraIndexFunctions REGULAR_COLUMN_INDEX_FUNCTIONS = new CassandraIndexFunctions()
     {
-        public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+        public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata)
         {
             return new RegularColumnIndex(baseCfs, indexMetadata);
         }
@@ -99,7 +99,7 @@ public interface CassandraIndexFunctions
 
     static final CassandraIndexFunctions CLUSTERING_COLUMN_INDEX_FUNCTIONS = new CassandraIndexFunctions()
     {
-        public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+        public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata)
         {
             return new ClusteringColumnIndex(baseCfs, indexMetadata);
         }
@@ -126,7 +126,7 @@ public interface CassandraIndexFunctions
 
     static final CassandraIndexFunctions PARTITION_KEY_INDEX_FUNCTIONS = new CassandraIndexFunctions()
     {
-        public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+        public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata)
         {
             return new PartitionKeyIndex(baseCfs, indexMetadata);
         }
@@ -134,7 +134,7 @@ public interface CassandraIndexFunctions
 
     static final CassandraIndexFunctions COLLECTION_KEY_INDEX_FUNCTIONS = new CassandraIndexFunctions()
     {
-        public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+        public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata)
         {
             return new CollectionKeyIndex(baseCfs, indexMetadata);
         }
@@ -148,7 +148,7 @@ public interface CassandraIndexFunctions
     static final CassandraIndexFunctions COLLECTION_VALUE_INDEX_FUNCTIONS = new CassandraIndexFunctions()
     {
 
-        public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+        public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata)
         {
             return new CollectionValueIndex(baseCfs, indexMetadata);
         }
@@ -173,7 +173,7 @@ public interface CassandraIndexFunctions
 
     static final CassandraIndexFunctions COLLECTION_ENTRY_INDEX_FUNCTIONS = new CassandraIndexFunctions()
     {
-        public CassandraIndex newIndexInstance(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+        public CassandraIndex newIndexInstance(TableStore baseCfs, IndexMetadata indexMetadata)
         {
             return new CollectionEntryIndex(baseCfs, indexMetadata);
         }

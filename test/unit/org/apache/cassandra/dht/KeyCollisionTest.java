@@ -27,8 +27,8 @@ import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.partitions.*;
@@ -72,7 +72,7 @@ public class KeyCollisionTest
     public void testGetSliceWithCollision() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF);
         cfs.clearUnsafe();
 
         insert("k1", "k2", "kq");       // token = 2, kq ordered after row below lexicographically

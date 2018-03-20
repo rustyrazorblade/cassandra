@@ -73,17 +73,17 @@ public class Memtable implements Comparable<Memtable>
         switch (DatabaseDescriptor.getMemtableAllocationType())
         {
             case unslabbed_heap_buffers:
-                return new HeapPool(heapLimit, DatabaseDescriptor.getMemtableCleanupThreshold(), new ColumnFamilyStore.FlushLargestColumnFamily());
+                return new HeapPool(heapLimit, DatabaseDescriptor.getMemtableCleanupThreshold(), new TableStore.FlushLargestColumnFamily());
             case heap_buffers:
-                return new SlabPool(heapLimit, 0, DatabaseDescriptor.getMemtableCleanupThreshold(), new ColumnFamilyStore.FlushLargestColumnFamily());
+                return new SlabPool(heapLimit, 0, DatabaseDescriptor.getMemtableCleanupThreshold(), new TableStore.FlushLargestColumnFamily());
             case offheap_buffers:
                 if (!FileUtils.isCleanerAvailable)
                 {
                     throw new IllegalStateException("Could not free direct byte buffer: offheap_buffers is not a safe memtable_allocation_type without this ability, please adjust your config. This feature is only guaranteed to work on an Oracle JVM. Refusing to start.");
                 }
-                return new SlabPool(heapLimit, offHeapLimit, DatabaseDescriptor.getMemtableCleanupThreshold(), new ColumnFamilyStore.FlushLargestColumnFamily());
+                return new SlabPool(heapLimit, offHeapLimit, DatabaseDescriptor.getMemtableCleanupThreshold(), new TableStore.FlushLargestColumnFamily());
             case offheap_objects:
-                return new NativePool(heapLimit, offHeapLimit, DatabaseDescriptor.getMemtableCleanupThreshold(), new ColumnFamilyStore.FlushLargestColumnFamily());
+                return new NativePool(heapLimit, offHeapLimit, DatabaseDescriptor.getMemtableCleanupThreshold(), new TableStore.FlushLargestColumnFamily());
             default:
                 throw new AssertionError();
         }
@@ -103,7 +103,7 @@ public class Memtable implements Comparable<Memtable>
     private AtomicReference<CommitLogPosition> commitLogLowerBound;
 
     // The approximate lower bound by this memtable; must be <= commitLogLowerBound once our predecessor
-    // has been finalised, and this is enforced in the ColumnFamilyStore.setCommitLogUpperBound
+    // has been finalised, and this is enforced in the TableStore.setCommitLogUpperBound
     private final CommitLogPosition approximateCommitLogLowerBound = CommitLog.instance.getCurrentPosition();
 
     public int compareTo(Memtable that)
@@ -123,7 +123,7 @@ public class Memtable implements Comparable<Memtable>
     // to select key range using Token.KeyBound. However put() ensures that we
     // actually only store DecoratedKey.
     private final ConcurrentNavigableMap<PartitionPosition, AtomicBTreePartition> partitions = new ConcurrentSkipListMap<>();
-    public final ColumnFamilyStore cfs;
+    public final TableStore cfs;
     private final long creationNano = System.nanoTime();
 
     // The smallest timestamp for all partitions stored in this memtable
@@ -138,7 +138,7 @@ public class Memtable implements Comparable<Memtable>
     private final StatsCollector statsCollector = new StatsCollector();
 
     // only to be used by init(), to setup the very first memtable for the cfs
-    public Memtable(AtomicReference<CommitLogPosition> commitLogLowerBound, ColumnFamilyStore cfs)
+    public Memtable(AtomicReference<CommitLogPosition> commitLogLowerBound, TableStore cfs)
     {
         this.cfs = cfs;
         this.commitLogLowerBound = commitLogLowerBound;
@@ -252,7 +252,7 @@ public class Memtable implements Comparable<Memtable>
     }
 
     /**
-     * Should only be called by ColumnFamilyStore.apply via Keyspace.apply, which supplies the appropriate
+     * Should only be called by TableStore.apply via Keyspace.apply, which supplies the appropriate
      * OpOrdering.
      *
      * commitLogSegmentPosition should only be null if this is a secondary index, in which case it is *expected* to be null
@@ -540,13 +540,13 @@ public class Memtable implements Comparable<Memtable>
 
     public static class MemtableUnfilteredPartitionIterator extends AbstractUnfilteredPartitionIterator
     {
-        private final ColumnFamilyStore cfs;
+        private final TableStore cfs;
         private final Iterator<Map.Entry<PartitionPosition, AtomicBTreePartition>> iter;
         private final int minLocalDeletionTime;
         private final ColumnFilter columnFilter;
         private final DataRange dataRange;
 
-        public MemtableUnfilteredPartitionIterator(ColumnFamilyStore cfs, Iterator<Map.Entry<PartitionPosition, AtomicBTreePartition>> iter, int minLocalDeletionTime, ColumnFilter columnFilter, DataRange dataRange)
+        public MemtableUnfilteredPartitionIterator(TableStore cfs, Iterator<Map.Entry<PartitionPosition, AtomicBTreePartition>> iter, int minLocalDeletionTime, ColumnFilter columnFilter, DataRange dataRange)
         {
             this.cfs = cfs;
             this.iter = iter;

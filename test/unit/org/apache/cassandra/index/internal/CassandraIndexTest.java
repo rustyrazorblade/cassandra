@@ -419,12 +419,12 @@ public class CassandraIndexTest extends CQLTester
         createTable("CREATE TABLE %s (k int, c int, v int, PRIMARY KEY(k,c))");
         createIndex("CREATE INDEX ON %s(c)");
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, 0) USING TTL ?", basePk, indexedVal, initialTtl);
-        ColumnFamilyStore baseCfs = getCurrentColumnFamilyStore();
-        ColumnFamilyStore indexCfs = baseCfs.indexManager.listIndexes()
-                                                         .iterator()
-                                                         .next()
-                                                         .getBackingTable()
-                                                         .orElseThrow(throwAssert("No index found"));
+        TableStore baseCfs = getCurrentColumnFamilyStore();
+        TableStore indexCfs = baseCfs.indexManager.listIndexes()
+                                                  .iterator()
+                                                  .next()
+                                                  .getBackingTable()
+                                                  .orElseThrow(throwAssert("No index found"));
         assertIndexRowTtl(indexCfs, indexedVal, initialTtl);
 
         int updatedTtl = 9999;
@@ -514,7 +514,7 @@ public class CassandraIndexTest extends CQLTester
     // CFS inherits from the base CFS. This has the 'wrong' partitioner (the index table
     // uses LocalPartition, the base table a real one, so we cannot read from the index
     // table with executeInternal
-    private void assertIndexRowTtl(ColumnFamilyStore indexCfs, int indexedValue, int ttl) throws Throwable
+    private void assertIndexRowTtl(TableStore indexCfs, int indexedValue, int ttl) throws Throwable
     {
         DecoratedKey indexKey = indexCfs.decorateKey(ByteBufferUtil.bytes(indexedValue));
         ClusteringIndexFilter filter = new ClusteringIndexSliceFilter(Slices.with(indexCfs.metadata().comparator,
@@ -803,7 +803,7 @@ public class CassandraIndexTest extends CQLTester
         // Spin waiting for named index to be built
         private void waitForIndexBuild() throws Throwable
         {
-            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            TableStore cfs = getCurrentColumnFamilyStore();
             long maxWaitMillis = 10000;
             long startTime = System.currentTimeMillis();
             while (! cfs.indexManager.getBuiltIndexNames().contains(indexName))

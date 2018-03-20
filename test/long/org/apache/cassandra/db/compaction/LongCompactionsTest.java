@@ -62,7 +62,7 @@ public class LongCompactionsTest
     public void cleanupFiles()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        TableStore cfs = keyspace.getColumnFamilyStore("Standard1");
         cfs.truncateBlocking();
     }
 
@@ -98,7 +98,7 @@ public class LongCompactionsTest
         CompactionManager.instance.disableAutoCompaction();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+        TableStore store = keyspace.getColumnFamilyStore("Standard1");
 
         ArrayList<SSTableReader> sstables = new ArrayList<>();
         for (int k = 0; k < sstableCount; k++)
@@ -142,7 +142,7 @@ public class LongCompactionsTest
     {
         // this test does enough rows to force multiple block indexes to be used
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        TableStore cfs = keyspace.getColumnFamilyStore("Standard1");
         cfs.clearUnsafe();
 
         final int ROWS_PER_SSTABLE = 10;
@@ -179,7 +179,7 @@ public class LongCompactionsTest
         cfs.truncateBlocking();
     }
 
-    private void forceCompactions(ColumnFamilyStore cfs)
+    private void forceCompactions(TableStore cfs)
     {
         // re-enable compaction with thresholds low enough to force a few rounds
         cfs.setCompactionThresholds(2, 4);

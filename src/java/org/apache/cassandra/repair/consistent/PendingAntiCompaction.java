@@ -36,7 +36,7 @@ import com.google.common.util.concurrent.MoreExecutors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
@@ -57,11 +57,11 @@ public class PendingAntiCompaction
 
     static class AcquireResult
     {
-        final ColumnFamilyStore cfs;
+        final TableStore cfs;
         final Refs<SSTableReader> refs;
         final LifecycleTransaction txn;
 
-        AcquireResult(ColumnFamilyStore cfs, Refs<SSTableReader> refs, LifecycleTransaction txn)
+        AcquireResult(TableStore cfs, Refs<SSTableReader> refs, LifecycleTransaction txn)
         {
             this.cfs = cfs;
             this.refs = refs;
@@ -81,11 +81,11 @@ public class PendingAntiCompaction
 
     static class AcquisitionCallable implements Callable<AcquireResult>
     {
-        private final ColumnFamilyStore cfs;
+        private final TableStore cfs;
         private final Collection<Range<Token>> ranges;
         private final UUID sessionID;
 
-        public AcquisitionCallable(ColumnFamilyStore cfs, Collection<Range<Token>> ranges, UUID sessionID)
+        public AcquisitionCallable(TableStore cfs, Collection<Range<Token>> ranges, UUID sessionID)
         {
             this.cfs = cfs;
             this.ranges = ranges;
@@ -186,9 +186,9 @@ public class PendingAntiCompaction
     public ListenableFuture run()
     {
         ActiveRepairService.ParentRepairSession prs = ActiveRepairService.instance.getParentRepairSession(prsId);
-        Collection<ColumnFamilyStore> cfss = prs.getColumnFamilyStores();
+        Collection<TableStore> cfss = prs.getColumnFamilyStores();
         List<ListenableFutureTask<AcquireResult>> tasks = new ArrayList<>(cfss.size());
-        for (ColumnFamilyStore cfs : cfss)
+        for (TableStore cfs : cfss)
         {
             cfs.forceBlockingFlush();
             ListenableFutureTask<AcquireResult> task = ListenableFutureTask.create(new AcquisitionCallable(cfs, ranges, prsId));

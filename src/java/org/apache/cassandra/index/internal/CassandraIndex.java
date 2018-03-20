@@ -74,13 +74,13 @@ public abstract class CassandraIndex implements Index
 {
     private static final Logger logger = LoggerFactory.getLogger(CassandraIndex.class);
 
-    public final ColumnFamilyStore baseCfs;
+    public final TableStore baseCfs;
     protected IndexMetadata metadata;
-    protected ColumnFamilyStore indexCfs;
+    protected TableStore indexCfs;
     protected ColumnMetadata indexedColumn;
     protected CassandraIndexFunctions functions;
 
-    protected CassandraIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    protected CassandraIndex(TableStore baseCfs, IndexMetadata indexDef)
     {
         this.baseCfs = baseCfs;
         setMetadata(indexDef);
@@ -156,7 +156,7 @@ public abstract class CassandraIndex implements Index
         return indexCfs.metadata().comparator;
     }
 
-    public ColumnFamilyStore getIndexCfs()
+    public TableStore getIndexCfs()
     {
         return indexCfs;
     }
@@ -178,7 +178,7 @@ public abstract class CassandraIndex implements Index
         return metadata;
     }
 
-    public Optional<ColumnFamilyStore> getBackingTable()
+    public Optional<TableStore> getBackingTable()
     {
         return indexCfs == null ? Optional.empty() : Optional.of(indexCfs);
     }
@@ -226,10 +226,10 @@ public abstract class CassandraIndex implements Index
         Pair<ColumnMetadata, IndexTarget.Type> target = TargetParser.parse(baseCfs.metadata(), indexDef);
         functions = getFunctions(indexDef, target);
         TableMetadataRef tableRef = TableMetadataRef.forOfflineTools(indexCfsMetadata(baseCfs.metadata(), indexDef));
-        indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.keyspace,
-                                                             tableRef.name,
-                                                             tableRef,
-                                                             baseCfs.getTracker().loadsstables);
+        indexCfs = TableStore.createColumnFamilyStore(baseCfs.keyspace,
+                                                      tableRef.name,
+                                                      tableRef,
+                                                      baseCfs.getTracker().loadsstables);
         indexedColumn = target.left;
     }
 
@@ -659,7 +659,7 @@ public abstract class CassandraIndex implements Index
     private void invalidate()
     {
         // interrupt in-progress compactions
-        Collection<ColumnFamilyStore> cfss = Collections.singleton(indexCfs);
+        Collection<TableStore> cfss = Collections.singleton(indexCfs);
         CompactionManager.instance.interruptCompactionForCFs(cfss, true);
         CompactionManager.instance.waitForCessation(cfss);
         Keyspace.writeOrder.awaitNewBarrier();
@@ -690,7 +690,7 @@ public abstract class CassandraIndex implements Index
     {
         baseCfs.forceBlockingFlush();
 
-        try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
+        try (TableStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
              Refs<SSTableReader> sstables = viewFragment.refs)
         {
             if (sstables.isEmpty())
@@ -770,7 +770,7 @@ public abstract class CassandraIndex implements Index
      * @param indexMetadata
      * @return
      */
-    public static CassandraIndex newIndex(ColumnFamilyStore baseCfs, IndexMetadata indexMetadata)
+    public static CassandraIndex newIndex(TableStore baseCfs, IndexMetadata indexMetadata)
     {
         return getFunctions(indexMetadata, TargetParser.parse(baseCfs.metadata(), indexMetadata)).newIndexInstance(baseCfs, indexMetadata);
     }

@@ -33,7 +33,7 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
@@ -63,7 +63,7 @@ public class SchemaKeyspaceTest
     {
         for (String keyspaceName : Schema.instance.getNonSystemKeyspaces())
         {
-            for (ColumnFamilyStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
+            for (TableStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
             {
                 checkInverses(cfs.metadata());
 

@@ -26,7 +26,7 @@ import org.junit.BeforeClass;
 import junit.framework.Assert;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.UpdateBuilder;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.marshal.*;
@@ -39,7 +39,7 @@ public class BigTableWriterTest extends AbstractTransactionalTest
     public static final String KEYSPACE1 = "BigTableWriterTest";
     public static final String CF_STANDARD = "Standard1";
 
-    private static ColumnFamilyStore cfs;
+    private static TableStore cfs;
 
     @BeforeClass
     public static void defineSchema() throws Exception

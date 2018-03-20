@@ -27,7 +27,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.DiskBoundaries;
@@ -50,7 +50,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
 {
     protected static final Logger logger = LoggerFactory.getLogger(CompactionAwareWriter.class);
 
-    protected final ColumnFamilyStore cfs;
+    protected final TableStore cfs;
     protected final Directories directories;
     protected final Set<SSTableReader> nonExpiredSSTables;
     protected final long estimatedTotalKeys;
@@ -65,7 +65,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     private int locationIndex;
 
     @Deprecated
-    public CompactionAwareWriter(ColumnFamilyStore cfs,
+    public CompactionAwareWriter(TableStore cfs,
                                  Directories directories,
                                  LifecycleTransaction txn,
                                  Set<SSTableReader> nonExpiredSSTables,
@@ -75,7 +75,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
         this(cfs, directories, txn, nonExpiredSSTables, keepOriginals);
     }
 
-    public CompactionAwareWriter(ColumnFamilyStore cfs,
+    public CompactionAwareWriter(TableStore cfs,
                                  Directories directories,
                                  LifecycleTransaction txn,
                                  Set<SSTableReader> nonExpiredSSTables,

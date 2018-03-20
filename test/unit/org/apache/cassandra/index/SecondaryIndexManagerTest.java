@@ -31,7 +31,7 @@ import org.junit.After;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionInfo;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
@@ -107,7 +107,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         waitForIndex(KEYSPACE, tableName, indexName);
         assertMarkedAsBuilt(indexName);
 
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         cfs.indexManager.markAllIndexesRemoved();
         assertNotMarkedAsBuilt(indexName);
 
@@ -210,7 +210,7 @@ public class SecondaryIndexManagerTest extends CQLTester
             @Override
             public void run()
             {
-                ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+                TableStore cfs = getCurrentColumnFamilyStore();
                 try (Refs<SSTableReader> sstables = Refs.ref(cfs.getSSTables(SSTableSet.CANONICAL)))
                 {
                     cfs.indexManager.handleNotification(new SSTableAddedNotification(sstables, null), cfs.getTracker());
@@ -281,7 +281,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         TestingIndex.shouldBlockBuild = false;
 
         // try adding sstables and verify they are built but the index is not marked as built because of the pending build:
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         try (Refs<SSTableReader> sstables = Refs.ref(cfs.getSSTables(SSTableSet.CANONICAL)))
         {
             cfs.indexManager.handleNotification(new SSTableAddedNotification(sstables, null), cfs.getTracker());
@@ -336,7 +336,7 @@ public class SecondaryIndexManagerTest extends CQLTester
 
         // try adding sstables but make the build fail:
         TestingIndex.shouldFailBuild = true;
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         try (Refs<SSTableReader> sstables = Refs.ref(cfs.getSSTables(SSTableSet.CANONICAL)))
         {
             cfs.indexManager.handleNotification(new SSTableAddedNotification(sstables, null), cfs.getTracker());
@@ -370,7 +370,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         TestingIndex.shouldFailBuild = true;
         try
         {
-            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            TableStore cfs = getCurrentColumnFamilyStore();
             cfs.indexManager.rebuildIndexesBlocking(Collections.singleton(indexName));
             fail("Should have failed!");
         }
@@ -389,7 +389,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         String indexName = createIndex(String.format("CREATE CUSTOM INDEX ON %%s(c) USING '%s'", TestingIndex.class.getName()));
 
         // the index shouldn't be queryable while the initialization hasn't finished
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         Index index = cfs.indexManager.getIndexByName(indexName);
         assertFalse(cfs.indexManager.isIndexQueryable(index));
 
@@ -407,7 +407,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         String indexName = createIndex(String.format("CREATE CUSTOM INDEX ON %%s(c) USING '%s'", TestingIndex.class.getName()));
 
         // the index shouldn't be queryable while the initialization hasn't finished
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         Index index = cfs.indexManager.getIndexByName(indexName);
         assertFalse(cfs.indexManager.isIndexQueryable(index));
 
@@ -447,7 +447,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         TestingIndex.shouldFailCreate = false;
 
         // a successfull full rebuild should set the index as queryable
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         Index index = cfs.indexManager.getIndexByName(indexName);
         cfs.indexManager.rebuildIndexesBlocking(Collections.singleton(indexName));
         assertTrue(cfs.indexManager.isIndexQueryable(index));
@@ -463,7 +463,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         TestingIndex.shouldFailCreate = false;
 
         // the index shouldn't be queryable after the failed initialization
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         Index index = cfs.indexManager.getIndexByName(indexName);
         assertFalse(cfs.indexManager.isIndexQueryable(index));
 
@@ -564,7 +564,7 @@ public class SecondaryIndexManagerTest extends CQLTester
 
     private boolean tryRebuild(String indexName, boolean wait) throws Throwable
     {
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         boolean done = false;
         do
         {
@@ -597,7 +597,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         public static volatile Throwable failedCreateThrowable;
         public static volatile Throwable failedBuildTrowable;
 
-        public TestingIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public TestingIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -674,7 +674,7 @@ public class SecondaryIndexManagerTest extends CQLTester
         {
             return new CollatedViewIndexBuildingSupport()
             {
-                public SecondaryIndexBuilder getIndexBuildTask(ColumnFamilyStore cfs, Set<Index> indexes, Collection<SSTableReader> sstables)
+                public SecondaryIndexBuilder getIndexBuildTask(TableStore cfs, Set<Index> indexes, Collection<SSTableReader> sstables)
                 {
                     try
                     {

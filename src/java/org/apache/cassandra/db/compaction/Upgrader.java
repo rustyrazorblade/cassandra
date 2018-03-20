@@ -20,12 +20,11 @@ package org.apache.cassandra.db.compaction;
 import java.io.File;
 import java.util.*;
 import java.util.function.LongPredicate;
-import java.util.function.Predicate;
 
 import com.google.common.base.Throwables;
 import com.google.common.collect.Sets;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.SerializationHeader;
@@ -40,7 +39,7 @@ import org.apache.cassandra.utils.UUIDGen;
 
 public class Upgrader
 {
-    private final ColumnFamilyStore cfs;
+    private final TableStore cfs;
     private final SSTableReader sstable;
     private final LifecycleTransaction transaction;
     private final File directory;
@@ -51,7 +50,7 @@ public class Upgrader
 
     private final OutputHandler outputHandler;
 
-    public Upgrader(ColumnFamilyStore cfs, LifecycleTransaction txn, OutputHandler outputHandler)
+    public Upgrader(TableStore cfs, LifecycleTransaction txn, OutputHandler outputHandler)
     {
         this.cfs = cfs;
         this.transaction = txn;
@@ -111,7 +110,7 @@ public class Upgrader
 
     private static class UpgradeController extends CompactionController
     {
-        public UpgradeController(ColumnFamilyStore cfs)
+        public UpgradeController(TableStore cfs)
         {
             super(cfs, Integer.MAX_VALUE);
         }

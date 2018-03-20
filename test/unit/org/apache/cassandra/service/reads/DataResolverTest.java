@@ -22,16 +22,12 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.collect.Iterators;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import org.junit.*;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.service.reads.DataResolver;
-import org.apache.cassandra.service.reads.repair.BlockingReadRepair;
-import org.apache.cassandra.service.reads.repair.NoopReadRepair;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -47,8 +43,6 @@ import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.net.*;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.service.reads.repair.ReadRepair;
-import org.apache.cassandra.service.reads.repair.RepairListener;
 import org.apache.cassandra.service.reads.repair.TestableReadRepair;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -73,8 +67,8 @@ public class DataResolverTest
 
     private DecoratedKey dk;
     private Keyspace ks;
-    private ColumnFamilyStore cfs;
-    private ColumnFamilyStore cfs2;
+    private TableStore cfs;
+    private TableStore cfs2;
     private TableMetadata cfm;
     private TableMetadata cfm2;
     private ColumnMetadata m;

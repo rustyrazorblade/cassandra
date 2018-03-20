@@ -29,7 +29,7 @@ import com.google.common.collect.Sets;
 import org.junit.Ignore;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -76,7 +76,7 @@ public abstract class AbstractConsistentSessionTest
     protected static final Range<Token> RANGE3 = new Range<>(t(4), t(5));
 
 
-    protected static UUID registerSession(ColumnFamilyStore cfs)
+    protected static UUID registerSession(TableStore cfs)
     {
         UUID sessionId = UUIDGen.getTimeUUID();
 

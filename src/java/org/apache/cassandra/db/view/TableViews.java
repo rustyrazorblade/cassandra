@@ -23,7 +23,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.PeekingIterator;
@@ -82,7 +81,7 @@ public class TableViews extends AbstractCollection<View>
         return views.add(view);
     }
 
-    public Iterable<ColumnFamilyStore> allViewsCfs()
+    public Iterable<TableStore> allViewsCfs()
     {
         Keyspace keyspace = Keyspace.open(baseTableMetadata.keyspace);
         return Iterables.transform(views, view -> keyspace.getColumnFamilyStore(view.getDefinition().name));
@@ -90,19 +89,19 @@ public class TableViews extends AbstractCollection<View>
 
     public void forceBlockingFlush()
     {
-        for (ColumnFamilyStore viewCfs : allViewsCfs())
+        for (TableStore viewCfs : allViewsCfs())
             viewCfs.forceBlockingFlush();
     }
 
     public void dumpMemtables()
     {
-        for (ColumnFamilyStore viewCfs : allViewsCfs())
+        for (TableStore viewCfs : allViewsCfs())
             viewCfs.dumpMemtable();
     }
 
     public void truncateBlocking(CommitLogPosition replayAfter, long truncatedAt)
     {
-        for (ColumnFamilyStore viewCfs : allViewsCfs())
+        for (TableStore viewCfs : allViewsCfs())
         {
             viewCfs.discardSSTables(truncatedAt);
             SystemKeyspace.saveTruncationRecord(viewCfs, truncatedAt, replayAfter);
@@ -137,7 +136,7 @@ public class TableViews extends AbstractCollection<View>
         if (command == null)
             return;
 
-        ColumnFamilyStore cfs = Keyspace.openAndGetStore(update.metadata());
+        TableStore cfs = Keyspace.openAndGetStore(update.metadata());
         long start = System.nanoTime();
         Collection<Mutation> mutations;
         try (ReadExecutionController orderGroup = command.executionController();

@@ -52,7 +52,7 @@ public class ReadExecutionController implements AutoCloseable
         return writeOp;
     }
 
-    public boolean validForReadOn(ColumnFamilyStore cfs)
+    public boolean validForReadOn(TableStore cfs)
     {
         return baseOp != null && cfs.metadata.id.equals(baseMetadata.id);
     }
@@ -74,8 +74,8 @@ public class ReadExecutionController implements AutoCloseable
     @SuppressWarnings("resource") // ops closed during controller close
     static ReadExecutionController forCommand(ReadCommand command)
     {
-        ColumnFamilyStore baseCfs = Keyspace.openAndGetStore(command.metadata());
-        ColumnFamilyStore indexCfs = maybeGetIndexCfs(baseCfs, command);
+        TableStore baseCfs = Keyspace.openAndGetStore(command.metadata());
+        TableStore indexCfs = maybeGetIndexCfs(baseCfs, command);
 
         if (indexCfs == null)
         {
@@ -114,7 +114,7 @@ public class ReadExecutionController implements AutoCloseable
         }
     }
 
-    private static ColumnFamilyStore maybeGetIndexCfs(ColumnFamilyStore baseCfs, ReadCommand command)
+    private static TableStore maybeGetIndexCfs(TableStore baseCfs, ReadCommand command)
     {
         Index index = command.getIndex(baseCfs);
         return index == null ? null : index.getBackingTable().orElse(null);

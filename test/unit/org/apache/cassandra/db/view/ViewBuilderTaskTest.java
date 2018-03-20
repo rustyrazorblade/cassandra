@@ -25,7 +25,7 @@ import java.util.stream.IntStream;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.dht.IPartitioner;
@@ -58,7 +58,7 @@ public class ViewBuilderTaskTest extends CQLTester
                                                   "WHERE v IS NOT NULL AND k IS NOT NULL AND c IS NOT NULL " +
                                                   "PRIMARY KEY (v, k, c)", viewName));
 
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         View view = cfs.keyspace.viewManager.forTable(cfs.metadata().id).iterator().next();
 
         // Insert the dataset

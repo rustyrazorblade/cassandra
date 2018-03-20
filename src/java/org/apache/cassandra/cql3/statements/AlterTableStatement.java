@@ -24,7 +24,7 @@ import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CollectionType;
@@ -206,7 +206,7 @@ public class AlterTableStatement extends SchemaAlteringStatement
                     Indexes allIndexes = current.indexes;
                     if (!allIndexes.isEmpty())
                     {
-                        ColumnFamilyStore store = Keyspace.openAndGetStore(current);
+                        TableStore store = Keyspace.openAndGetStore(current);
                         Set<IndexMetadata> dependentIndexes = store.indexManager.getDependentIndexes(def);
                         if (!dependentIndexes.isEmpty())
                         {
@@ -266,7 +266,7 @@ public class AlterTableStatement extends SchemaAlteringStatement
 
                     if (!current.indexes.isEmpty())
                     {
-                        ColumnFamilyStore store = Keyspace.openAndGetStore(current);
+                        TableStore store = Keyspace.openAndGetStore(current);
                         Set<IndexMetadata> dependentIndexes = store.indexManager.getDependentIndexes(def);
                         if (!dependentIndexes.isEmpty())
                             throw new InvalidRequestException(String.format("Cannot rename column %s because it has " +

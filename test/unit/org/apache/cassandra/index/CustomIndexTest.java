@@ -542,7 +542,7 @@ public class CustomIndexTest extends CQLTester
         createTable("CREATE TABLE %s (k int, v1 int, PRIMARY KEY(k))");
         createIndex(String.format("CREATE CUSTOM INDEX reload_counter ON %%s() USING '%s'",
                                   CountMetadataReloadsIndex.class.getName()));
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         CountMetadataReloadsIndex index = (CountMetadataReloadsIndex)cfs.indexManager.getIndexByName("reload_counter");
         assertEquals(0, index.reloads.get());
 
@@ -556,7 +556,7 @@ public class CustomIndexTest extends CQLTester
     {
         createTable("CREATE TABLE %s (k int, c int, v int, PRIMARY KEY (k,c))");
         createIndex(String.format("CREATE CUSTOM INDEX cleanup_index ON %%s() USING '%s'", StubIndex.class.getName()));
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         StubIndex index  = (StubIndex)cfs.indexManager.getIndexByName("cleanup_index");
 
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 0, 0, 0);
@@ -585,7 +585,7 @@ public class CustomIndexTest extends CQLTester
     {
         createTable("CREATE TABLE %s (k int, c int, PRIMARY KEY (k,c))");
         createIndex(String.format("CREATE CUSTOM INDEX row_ttl_test_index ON %%s() USING '%s'", StubIndex.class.getName()));
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         StubIndex index  = (StubIndex)cfs.indexManager.getIndexByName("row_ttl_test_index");
 
         execute("INSERT INTO %s (k, c) VALUES (?, ?) USING TTL 1", 0, 0);
@@ -655,7 +655,7 @@ public class CustomIndexTest extends CQLTester
     public void indexBuildingPagesLargePartitions() throws Throwable
     {
         createTable("CREATE TABLE %s(k int, c int, v int, PRIMARY KEY(k,c))");
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         SecondaryIndexManager indexManager = cfs.indexManager;
         int totalRows = SimulateConcurrentFlushingIndex.ROWS_IN_PARTITION;
         // Insert a single wide partition to be indexed
@@ -691,7 +691,7 @@ public class CustomIndexTest extends CQLTester
     public void partitionIndexTest() throws Throwable
     {
         createTable("CREATE TABLE %s(k int, c int, v int, s int static, PRIMARY KEY(k,c))");
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
 
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 1, 1, 1);
         execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 1, 2, 2);
@@ -768,7 +768,7 @@ public class CustomIndexTest extends CQLTester
     public void partitionIsNotOverIndexed() throws Throwable
     {
         createTable("CREATE TABLE %s(k int, c int, v int, PRIMARY KEY(k,c))");
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         SecondaryIndexManager indexManager = cfs.indexManager;
 
         int totalRows = 1;
@@ -796,7 +796,7 @@ public class CustomIndexTest extends CQLTester
     // Used for index creation above
     public static class BrokenCustom2I extends StubIndex
     {
-        public BrokenCustom2I(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public BrokenCustom2I(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -852,7 +852,7 @@ public class CustomIndexTest extends CQLTester
     {
         private final AtomicInteger reloads = new AtomicInteger(0);
 
-        public CountMetadataReloadsIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public CountMetadataReloadsIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -871,7 +871,7 @@ public class CustomIndexTest extends CQLTester
 
     public static final class IndexIncludedInBuild extends StubIndex
     {
-        public IndexIncludedInBuild(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public IndexIncludedInBuild(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -884,7 +884,7 @@ public class CustomIndexTest extends CQLTester
 
     public static final class UTF8ExpressionIndex extends StubIndex
     {
-        public UTF8ExpressionIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public UTF8ExpressionIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -897,7 +897,7 @@ public class CustomIndexTest extends CQLTester
 
     public static final class Int32ExpressionIndex extends StubIndex
     {
-        public Int32ExpressionIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public Int32ExpressionIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -913,7 +913,7 @@ public class CustomIndexTest extends CQLTester
         private int searchersProvided = 0;
         private long estimatedResultRows = 0;
 
-        public SettableSelectivityIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public SettableSelectivityIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -937,7 +937,7 @@ public class CustomIndexTest extends CQLTester
 
     public static final class IndexExcludedFromBuild extends StubIndex
     {
-        public IndexExcludedFromBuild(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public IndexExcludedFromBuild(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -950,7 +950,7 @@ public class CustomIndexTest extends CQLTester
 
     public static final class NoCustomExpressionsIndex extends StubIndex
     {
-        public NoCustomExpressionsIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public NoCustomExpressionsIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -963,7 +963,7 @@ public class CustomIndexTest extends CQLTester
 
     public static final class AlwaysRejectIndex extends StubIndex
     {
-        public AlwaysRejectIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public AlwaysRejectIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -983,7 +983,7 @@ public class CustomIndexTest extends CQLTester
     {
         public static Map<String, String> options;
 
-        public IndexWithValidateOptions(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public IndexWithValidateOptions(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -1000,7 +1000,7 @@ public class CustomIndexTest extends CQLTester
         public static TableMetadata table;
         public static Map<String, String> options;
 
-        public IndexWithOverloadedValidateOptions(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public IndexWithOverloadedValidateOptions(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
@@ -1015,7 +1015,7 @@ public class CustomIndexTest extends CQLTester
 
     public static final class SimulateConcurrentFlushingIndex extends StubIndex
     {
-        ColumnFamilyStore baseCfs;
+        TableStore baseCfs;
         AtomicInteger indexedRowCount = new AtomicInteger(0);
 
         OpOrder.Group readOrderingAtStart = null;
@@ -1025,7 +1025,7 @@ public class CustomIndexTest extends CQLTester
 
         static final int ROWS_IN_PARTITION = 1000;
 
-        public SimulateConcurrentFlushingIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public SimulateConcurrentFlushingIndex(TableStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
             this.baseCfs = baseCfs;

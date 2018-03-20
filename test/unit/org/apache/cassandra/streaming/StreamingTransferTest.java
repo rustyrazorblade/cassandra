@@ -166,7 +166,7 @@ public class StreamingTransferTest
      * Create and transfer a single sstable, and return the keys that should have been transferred.
      * The Mutator must create the given column, but it may also create any other columns it pleases.
      */
-    private List<String> createAndTransfer(ColumnFamilyStore cfs, Mutator mutator, boolean transferSSTables) throws Exception
+    private List<String> createAndTransfer(TableStore cfs, Mutator mutator, boolean transferSSTables) throws Exception
     {
         // write a temporary SSTable, and unregister it
         logger.debug("Mutating {}", cfs.name);
@@ -232,7 +232,7 @@ public class StreamingTransferTest
         transfer(sstable, ranges);
     }
 
-    private void transferRanges(ColumnFamilyStore cfs) throws Exception
+    private void transferRanges(TableStore cfs) throws Exception
     {
         IPartitioner p = cfs.getPartitioner();
         List<Range<Token>> ranges = new ArrayList<>();
@@ -291,7 +291,7 @@ public class StreamingTransferTest
     private void doTransferTable(boolean transferSSTables) throws Exception
     {
         final Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_INDEX);
+        final TableStore cfs = keyspace.getColumnFamilyStore(CF_INDEX);
 
         List<String> keys = createAndTransfer(cfs, new Mutator()
         {
@@ -328,7 +328,7 @@ public class StreamingTransferTest
         String ks = KEYSPACE1;
         String cfname = "StandardInteger1";
         Keyspace keyspace = Keyspace.open(ks);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         ClusteringComparator comparator = cfs.getComparator();
 
         String key = "key1";
@@ -391,7 +391,7 @@ public class StreamingTransferTest
     public void testTransferTableCounter() throws Exception
     {
         final Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Counter1");
+        final TableStore cfs = keyspace.getColumnFamilyStore("Counter1");
         final CounterContext cc = new CounterContext();
 
         final Map<String, ColumnFamily> cleanedEntries = new HashMap<>();
@@ -468,7 +468,7 @@ public class StreamingTransferTest
         new StreamPlan("StreamingTransferTest").transferStreams(LOCAL, makeOutgoingStreams(ranges, refs)).execute().get();
 
         // confirm that the sstables were transferred and registered and that 2 keys arrived
-        ColumnFamilyStore cfstore = Keyspace.open(keyspaceName).getColumnFamilyStore(cfname);
+        TableStore cfstore = Keyspace.open(keyspaceName).getColumnFamilyStore(cfname);
         List<Row> rows = Util.getRangeSlice(cfstore);
         assertEquals(2, rows.size());
         assert rows.get(0).key.getKey().equals(ByteBufferUtil.bytes("test"));
@@ -525,7 +525,7 @@ public class StreamingTransferTest
         // check that only two keys were transferred
         for (Map.Entry<DecoratedKey,String> entry : Arrays.asList(first, last))
         {
-            ColumnFamilyStore store = Keyspace.open(keyspace).getColumnFamilyStore(entry.getValue());
+            TableStore store = Keyspace.open(keyspace).getColumnFamilyStore(entry.getValue());
             List<Row> rows = Util.getRangeSlice(store);
             assertEquals(rows.toString(), 1, rows.size());
             assertEquals(entry.getKey(), rows.get(0).key);
@@ -536,7 +536,7 @@ public class StreamingTransferTest
     public void testRandomSSTableTransfer() throws Exception
     {
         final Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        final TableStore cfs = keyspace.getColumnFamilyStore("Standard1");
         Mutator mutator = new Mutator()
         {
             public void mutate(String key, String colName, long timestamp) throws Exception

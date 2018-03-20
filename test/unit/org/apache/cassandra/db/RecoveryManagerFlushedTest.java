@@ -111,7 +111,7 @@ public class RecoveryManagerFlushedTest
         }
 
         Keyspace keyspace1 = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace1.getColumnFamilyStore("Standard1");
+        TableStore cfs = keyspace1.getColumnFamilyStore("Standard1");
         logger.debug("forcing flush");
         cfs.forceBlockingFlush();
 
@@ -125,7 +125,7 @@ public class RecoveryManagerFlushedTest
     private void insertRow(String cfname, String key)
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         new RowUpdateBuilder(cfs.metadata(), 0, key)
             .clustering("c")
             .add("val", "val1")

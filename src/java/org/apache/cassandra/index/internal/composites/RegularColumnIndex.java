@@ -46,7 +46,7 @@ import org.apache.cassandra.schema.IndexMetadata;
  */
 public class RegularColumnIndex extends CassandraIndex
 {
-    public RegularColumnIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public RegularColumnIndex(TableStore baseCfs, IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);
     }

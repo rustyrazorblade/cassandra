@@ -32,7 +32,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.DebuggableScheduledThreadPoolExecutor;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
@@ -184,7 +184,7 @@ public class IndexSummaryManager implements IndexSummaryManagerMBean
         List<SSTableReader> result = new ArrayList<>();
         for (Keyspace ks : Keyspace.all())
         {
-            for (ColumnFamilyStore cfStore: ks.getColumnFamilyStores())
+            for (TableStore cfStore: ks.getColumnFamilyStores())
                 result.addAll(cfStore.getLiveSSTables());
         }
 
@@ -202,7 +202,7 @@ public class IndexSummaryManager implements IndexSummaryManagerMBean
         Map<TableId, LifecycleTransaction> allNonCompacting = new HashMap<>();
         for (Keyspace ks : Keyspace.all())
         {
-            for (ColumnFamilyStore cfStore: ks.getColumnFamilyStores())
+            for (TableStore cfStore: ks.getColumnFamilyStores())
             {
                 Set<SSTableReader> nonCompacting, allSSTables;
                 LifecycleTransaction txn = null;

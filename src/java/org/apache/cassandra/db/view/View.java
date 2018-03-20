@@ -51,7 +51,7 @@ public class View
     public final String name;
     private volatile ViewMetadata definition;
 
-    private final ColumnFamilyStore baseCfs;
+    private final TableStore baseCfs;
 
     public volatile List<ColumnMetadata> baseNonPKColumnsInViewPK;
     private ViewBuilder builder;
@@ -64,7 +64,7 @@ public class View
     private ReadQuery query;
 
     public View(ViewMetadata definition,
-                ColumnFamilyStore baseCfs)
+                TableStore baseCfs)
     {
         this.baseCfs = baseCfs;
         this.name = definition.name;

@@ -33,7 +33,7 @@ import org.slf4j.LoggerFactory;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelId;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -301,7 +301,7 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     synchronized void addTransferRanges(String keyspace, Collection<Range<Token>> ranges, Collection<String> columnFamilies, boolean flushTables)
     {
         failIfFinished();
-        Collection<ColumnFamilyStore> stores = getColumnFamilyStores(keyspace, columnFamilies);
+        Collection<TableStore> stores = getColumnFamilyStores(keyspace, columnFamilies);
         if (flushTables)
             flushSSTables(stores);
 
@@ -323,9 +323,9 @@ public class StreamSession implements IEndpointStateChangeSubscriber
             throw new RuntimeException(String.format("Stream %s is finished with state %s", planId(), state().name()));
     }
 
-    private Collection<ColumnFamilyStore> getColumnFamilyStores(String keyspace, Collection<String> columnFamilies)
+    private Collection<TableStore> getColumnFamilyStores(String keyspace, Collection<String> columnFamilies)
     {
-        Collection<ColumnFamilyStore> stores = new HashSet<>();
+        Collection<TableStore> stores = new HashSet<>();
         // if columnfamilies are not specified, we add all cf under the keyspace
         if (columnFamilies.isEmpty())
         {
@@ -340,12 +340,12 @@ public class StreamSession implements IEndpointStateChangeSubscriber
     }
 
     @VisibleForTesting
-    public List<OutgoingStream> getOutgoingStreamsForRanges(Collection<Range<Token>> ranges, Collection<ColumnFamilyStore> stores, UUID pendingRepair, PreviewKind previewKind)
+    public List<OutgoingStream> getOutgoingStreamsForRanges(Collection<Range<Token>> ranges, Collection<TableStore> stores, UUID pendingRepair, PreviewKind previewKind)
     {
         List<OutgoingStream> streams = new ArrayList<>();
         try
         {
-            for (ColumnFamilyStore cfs: stores)
+            for (TableStore cfs: stores)
             {
                 streams.addAll(cfs.getStreamManager().createOutgoingStreams(this, ranges, pendingRepair, previewKind));
             }
@@ -755,10 +755,10 @@ public class StreamSession implements IEndpointStateChangeSubscriber
      * Flushes matching column families from the given keyspace, or all columnFamilies
      * if the cf list is empty.
      */
-    private void flushSSTables(Iterable<ColumnFamilyStore> stores)
+    private void flushSSTables(Iterable<TableStore> stores)
     {
         List<Future<?>> flushes = new ArrayList<>();
-        for (ColumnFamilyStore cfs : stores)
+        for (TableStore cfs : stores)
             flushes.add(cfs.forceFlush());
         FBUtilities.waitOnFutures(flushes);
     }

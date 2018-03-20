@@ -73,7 +73,7 @@ public class RangeTombstoneTest
     public void simpleQueryWithRangeTombstoneTest() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CFNAME);
+        TableStore cfs = keyspace.getColumnFamilyStore(CFNAME);
         boolean enforceStrictLiveness = cfs.metadata().enforceStrictLiveness();
 
         // Inserting data
@@ -133,7 +133,7 @@ public class RangeTombstoneTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CFNAME);
+        TableStore cfs = keyspace.getColumnFamilyStore(CFNAME);
 
         // Inserting data
         String key = "k111";
@@ -229,7 +229,7 @@ public class RangeTombstoneTest
     public void testTrackTimesPartitionTombstone() throws ExecutionException, InterruptedException
     {
         Keyspace ks = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(CFNAME);
+        TableStore cfs = ks.getColumnFamilyStore(CFNAME);
         cfs.truncateBlocking();
         String key = "rt_times";
 
@@ -248,7 +248,7 @@ public class RangeTombstoneTest
     public void testTrackTimesPartitionTombstoneWithData() throws ExecutionException, InterruptedException
     {
         Keyspace ks = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(CFNAME);
+        TableStore cfs = ks.getColumnFamilyStore(CFNAME);
         cfs.truncateBlocking();
         String key = "rt_times";
 
@@ -270,7 +270,7 @@ public class RangeTombstoneTest
     public void testTrackTimesRangeTombstone() throws ExecutionException, InterruptedException
     {
         Keyspace ks = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(CFNAME);
+        TableStore cfs = ks.getColumnFamilyStore(CFNAME);
         cfs.truncateBlocking();
         String key = "rt_times";
 
@@ -289,7 +289,7 @@ public class RangeTombstoneTest
     public void testTrackTimesRangeTombstoneWithData() throws ExecutionException, InterruptedException
     {
         Keyspace ks = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(CFNAME);
+        TableStore cfs = ks.getColumnFamilyStore(CFNAME);
         cfs.truncateBlocking();
         String key = "rt_times";
 
@@ -319,7 +319,7 @@ public class RangeTombstoneTest
     public void test7810() throws ExecutionException, InterruptedException
     {
         Keyspace ks = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(CFNAME);
+        TableStore cfs = ks.getColumnFamilyStore(CFNAME);
         MigrationManager.announceTableUpdate(cfs.metadata().unbuild().gcGraceSeconds(2).build(), true);
 
         String key = "7810";
@@ -342,7 +342,7 @@ public class RangeTombstoneTest
     public void test7808_1() throws ExecutionException, InterruptedException
     {
         Keyspace ks = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(CFNAME);
+        TableStore cfs = ks.getColumnFamilyStore(CFNAME);
         MigrationManager.announceTableUpdate(cfs.metadata().unbuild().gcGraceSeconds(2).build(), true);
 
         String key = "7808_1";
@@ -362,7 +362,7 @@ public class RangeTombstoneTest
     public void test7808_2() throws ExecutionException, InterruptedException
     {
         Keyspace ks = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(CFNAME);
+        TableStore cfs = ks.getColumnFamilyStore(CFNAME);
         MigrationManager.announceTableUpdate(cfs.metadata().unbuild().gcGraceSeconds(2).build(), true);
 
         String key = "7808_2";
@@ -387,7 +387,7 @@ public class RangeTombstoneTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CFNAME);
+        TableStore cfs = keyspace.getColumnFamilyStore(CFNAME);
         boolean enforceStrictLiveness = cfs.metadata().enforceStrictLiveness();
         // Inserting data
         String key = "k2";
@@ -441,7 +441,7 @@ public class RangeTombstoneTest
     public void reverseQueryTest() throws Exception
     {
         Keyspace table = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(CFNAME);
+        TableStore cfs = table.getColumnFamilyStore(CFNAME);
 
         // Inserting data
         String key = "k3";
@@ -465,7 +465,7 @@ public class RangeTombstoneTest
     public void testRowWithRangeTombstonesUpdatesSecondaryIndex() throws Exception
     {
         Keyspace table = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(CFNAME);
+        TableStore cfs = table.getColumnFamilyStore(CFNAME);
         ByteBuffer key = ByteBufferUtil.bytes("k5");
         ByteBuffer indexedColumnName = ByteBufferUtil.bytes("val");
 
@@ -527,7 +527,7 @@ public class RangeTombstoneTest
     public void testRangeTombstoneCompaction() throws Exception
     {
         Keyspace table = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(CFNAME);
+        TableStore cfs = table.getColumnFamilyStore(CFNAME);
         ByteBuffer key = ByteBufferUtil.bytes("k4");
 
         // remove any existing sstables before starting
@@ -571,7 +571,7 @@ public class RangeTombstoneTest
     public void testOverwritesToDeletedColumns() throws Exception
     {
         Keyspace table = Keyspace.open(KSNAME);
-        ColumnFamilyStore cfs = table.getColumnFamilyStore(CFNAME);
+        TableStore cfs = table.getColumnFamilyStore(CFNAME);
         ByteBuffer key = ByteBufferUtil.bytes("k6");
         ByteBuffer indexedColumnName = ByteBufferUtil.bytes("val");
 

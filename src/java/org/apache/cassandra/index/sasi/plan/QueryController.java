@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.Sets;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionRangeReadCommand;
@@ -54,12 +54,12 @@ public class QueryController
     private final long executionQuota;
     private final long executionStart;
 
-    private final ColumnFamilyStore cfs;
+    private final TableStore cfs;
     private final PartitionRangeReadCommand command;
     private final DataRange range;
     private final Map<Collection<Expression>, List<RangeIterator<Long, Token>>> resources = new HashMap<>();
 
-    public QueryController(ColumnFamilyStore cfs, PartitionRangeReadCommand command, long timeQuotaMs)
+    public QueryController(TableStore cfs, PartitionRangeReadCommand command, long timeQuotaMs)
     {
         this.cfs = cfs;
         this.command = command;

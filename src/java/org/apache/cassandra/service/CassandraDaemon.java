@@ -264,7 +264,7 @@ public class CassandraDaemon
             {
                 try
                 {
-                    ColumnFamilyStore.scrubDataDirectories(cfm);
+                    TableStore.scrubDataDirectories(cfm);
                 }
                 catch (StartupException e)
                 {
@@ -281,9 +281,9 @@ public class CassandraDaemon
             if (logger.isDebugEnabled())
                 logger.debug("opening keyspace {}", keyspaceName);
             // disable auto compaction until gossip settles since disk boundaries may be affected by ring layout
-            for (ColumnFamilyStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
+            for (TableStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
             {
-                for (ColumnFamilyStore store : cfs.concatWithIndexes())
+                for (TableStore store : cfs.concatWithIndexes())
                 {
                     store.disableAutoCompaction();
                 }
@@ -390,9 +390,9 @@ public class CassandraDaemon
         // re-enable auto-compaction after gossip is settled, so correct disk boundaries are used
         for (Keyspace keyspace : Keyspace.all())
         {
-            for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+            for (TableStore cfs : keyspace.getColumnFamilyStores())
             {
-                for (final ColumnFamilyStore store : cfs.concatWithIndexes())
+                for (final TableStore store : cfs.concatWithIndexes())
                 {
                     store.reload(); //reload CFs in case there was a change of disk boundaries
                     if (store.getCompactionStrategyManager().shouldBeEnabled())
@@ -405,7 +405,7 @@ public class CassandraDaemon
 
         // schedule periodic background compaction task submission. this is simply a backstop against compactions stalling
         // due to scheduling errors or race conditions
-        ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(ColumnFamilyStore.getBackgroundCompactionTaskSubmitter(), 5, 1, TimeUnit.MINUTES);
+        ScheduledExecutors.optionalTasks.scheduleWithFixedDelay(TableStore.getBackgroundCompactionTaskSubmitter(), 5, 1, TimeUnit.MINUTES);
 
         // schedule periodic dumps of table size estimates into SystemKeyspace.SIZE_ESTIMATES_CF
         // set cassandra.size_recorder_interval to 0 to disable

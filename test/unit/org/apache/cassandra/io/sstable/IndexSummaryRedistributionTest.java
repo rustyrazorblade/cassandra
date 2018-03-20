@@ -29,7 +29,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -65,7 +65,7 @@ public class IndexSummaryRedistributionTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARD;
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         int numSSTables = 1;
         int numRows = 1024 * 10;
         long load = StorageMetrics.load.getCount();
@@ -108,7 +108,7 @@ public class IndexSummaryRedistributionTest
     private void createSSTables(String ksname, String cfname, int numSSTables, int numRows)
     {
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
 

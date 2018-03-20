@@ -37,7 +37,7 @@ import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.compaction.CompactionInfo;
@@ -102,7 +102,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         originalMinIndexInterval = cfs.metadata().params.minIndexInterval;
         originalMaxIndexInterval = cfs.metadata().params.maxIndexInterval;
         originalCapacity = IndexSummaryManager.instance.getMemoryPoolCapacityInMB();
@@ -119,7 +119,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
 
         MigrationManager.announceTableUpdate(cfs.metadata().unbuild().minIndexInterval(originalMinIndexInterval).build(), true);
         MigrationManager.announceTableUpdate(cfs.metadata().unbuild().maxIndexInterval(originalMaxIndexInterval).build(), true);
@@ -135,7 +135,7 @@ public class IndexSummaryManagerTest
         return total;
     }
 
-    private static List<SSTableReader> resetSummaries(ColumnFamilyStore cfs, List<SSTableReader> sstables, long originalOffHeapSize) throws IOException
+    private static List<SSTableReader> resetSummaries(TableStore cfs, List<SSTableReader> sstables, long originalOffHeapSize) throws IOException
     {
         for (SSTableReader sstable : sstables)
             sstable.overrideReadMeter(new RestorableMeter(100.0, 100.0));
@@ -150,7 +150,7 @@ public class IndexSummaryManagerTest
         return sstables;
     }
 
-    private void validateData(ColumnFamilyStore cfs, int numPartition)
+    private void validateData(TableStore cfs, int numPartition)
     {
         for (int i = 0; i < numPartition; i++)
         {
@@ -173,7 +173,7 @@ public class IndexSummaryManagerTest
     private void createSSTables(String ksname, String cfname, int numSSTables, int numPartition)
     {
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
 
@@ -214,7 +214,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         int numSSTables = 1;
         int numRows = 256;
         createSSTables(ksname, cfname, numSSTables, numRows);
@@ -299,7 +299,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         int numSSTables = 1;
         int numRows = 256;
         createSSTables(ksname, cfname, numSSTables, numRows);
@@ -348,7 +348,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         int numSSTables = 4;
         int numRows = 256;
         createSSTables(ksname, cfname, numSSTables, numRows);
@@ -499,7 +499,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL;
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
 
@@ -562,7 +562,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         cfs.truncateBlocking();
         cfs.disableAutoCompaction();
 
@@ -607,7 +607,7 @@ public class IndexSummaryManagerTest
         String ksname = KEYSPACE1;
         String cfname = CF_STANDARDLOWiINTERVAL; // index interval of 8, no key caching
         Keyspace keyspace = Keyspace.open(ksname);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        final TableStore cfs = keyspace.getColumnFamilyStore(cfname);
         final int numSSTables = 4;
         int numRows = 256;
         createSSTables(ksname, cfname, numSSTables, numRows);

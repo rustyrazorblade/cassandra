@@ -21,7 +21,7 @@ import java.nio.ByteBuffer;
 
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.CompositeType;
@@ -38,7 +38,7 @@ import org.apache.cassandra.schema.IndexMetadata;
  */
 public class CollectionEntryIndex extends CollectionKeyIndexBase
 {
-    public CollectionEntryIndex(ColumnFamilyStore baseCfs,
+    public CollectionEntryIndex(TableStore baseCfs,
                                 IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);

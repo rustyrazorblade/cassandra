@@ -23,7 +23,7 @@ import java.util.Objects;
 
 import com.google.common.base.Preconditions;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.schema.TableId;
@@ -38,14 +38,14 @@ import org.apache.cassandra.streaming.messages.StreamMessageHeader;
  */
 public class CassandraIncomingFile implements IncomingStream
 {
-    private final ColumnFamilyStore cfs;
+    private final TableStore cfs;
     private final StreamSession session;
     private final StreamMessageHeader header;
 
     private volatile SSTableMultiWriter sstable;
     private volatile long size = -1;
 
-    public CassandraIncomingFile(ColumnFamilyStore cfs, StreamSession session, StreamMessageHeader header)
+    public CassandraIncomingFile(TableStore cfs, StreamSession session, StreamMessageHeader header)
     {
         this.cfs = cfs;
         this.session = session;

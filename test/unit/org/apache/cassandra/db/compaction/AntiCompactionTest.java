@@ -74,7 +74,7 @@ public class AntiCompactionTest
     private static final String KEYSPACE1 = "AntiCompactionTest";
     private static final String CF = "AntiCompactionTest";
     private static TableMetadata metadata;
-    private static ColumnFamilyStore cfs;
+    private static TableStore cfs;
 
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
@@ -89,7 +89,7 @@ public class AntiCompactionTest
     public void truncateCF()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        TableStore store = keyspace.getColumnFamilyStore(CF);
         store.truncateBlocking();
     }
 
@@ -106,7 +106,7 @@ public class AntiCompactionTest
     {
         assert repairedAt != UNREPAIRED_SSTABLE || pendingRepair != null;
 
-        ColumnFamilyStore store = prepareColumnFamilyStore();
+        TableStore store = prepareColumnFamilyStore();
         Collection<SSTableReader> sstables = getUnrepairedSSTables(store);
         assertEquals(store.getLiveSSTables().size(), sstables.size());
         Range<Token> range = new Range<Token>(new BytesToken("0".getBytes()), new BytesToken("4".getBytes()));
@@ -175,7 +175,7 @@ public class AntiCompactionTest
     public void antiCompactionSizeTest() throws InterruptedException, IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF);
         cfs.disableAutoCompaction();
         SSTableReader s = writeFile(cfs, 1000);
         cfs.addSSTable(s);
@@ -198,7 +198,7 @@ public class AntiCompactionTest
         assertEquals(rows, 1000 * (1000 * 5));//See writeFile for how this number is derived
     }
 
-    private SSTableReader writeFile(ColumnFamilyStore cfs, int count)
+    private SSTableReader writeFile(TableStore cfs, int count)
     {
         File dir = cfs.getDirectories().getDirectoryForNewSSTables();
         Descriptor desc = cfs.newSSTableDescriptor(dir);
@@ -220,7 +220,7 @@ public class AntiCompactionTest
         }
     }
 
-    public void generateSStable(ColumnFamilyStore store, String Suffix)
+    public void generateSStable(TableStore store, String Suffix)
     {
         for (int i = 0; i < 10; i++)
         {
@@ -249,7 +249,7 @@ public class AntiCompactionTest
     public void antiCompactTen(String compactionStrategy) throws InterruptedException, IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        TableStore store = keyspace.getColumnFamilyStore(CF);
         store.disableAutoCompaction();
 
         for (int table = 0; table < 10; table++)
@@ -307,7 +307,7 @@ public class AntiCompactionTest
 
     private void shouldMutate(long repairedAt, UUID pendingRepair) throws InterruptedException, IOException
     {
-        ColumnFamilyStore store = prepareColumnFamilyStore();
+        TableStore store = prepareColumnFamilyStore();
         Collection<SSTableReader> sstables = getUnrepairedSSTables(store);
         assertEquals(store.getLiveSSTables().size(), sstables.size());
         Range<Token> range = new Range<Token>(new BytesToken("0".getBytes()), new BytesToken("9999".getBytes()));
@@ -344,7 +344,7 @@ public class AntiCompactionTest
     public void shouldSkipAntiCompactionForNonIntersectingRange() throws InterruptedException, IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        TableStore store = keyspace.getColumnFamilyStore(CF);
         store.disableAutoCompaction();
 
         for (int table = 0; table < 10; table++)
@@ -369,10 +369,10 @@ public class AntiCompactionTest
         assertThat(Iterables.get(store.getLiveSSTables(), 0).isRepaired(), is(false));
     }
 
-    private ColumnFamilyStore prepareColumnFamilyStore()
+    private TableStore prepareColumnFamilyStore()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        TableStore store = keyspace.getColumnFamilyStore(CF);
         store.disableAutoCompaction();
         for (int i = 0; i < 10; i++)
         {
@@ -390,11 +390,11 @@ public class AntiCompactionTest
     public void truncateCfs()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        TableStore store = keyspace.getColumnFamilyStore(CF);
         store.truncateBlocking();
     }
 
-    private static Set<SSTableReader> getUnrepairedSSTables(ColumnFamilyStore cfs)
+    private static Set<SSTableReader> getUnrepairedSSTables(TableStore cfs)
     {
         return ImmutableSet.copyOf(cfs.getTracker().getView().sstables(SSTableSet.LIVE, (s) -> !s.isRepaired()));
     }
@@ -406,7 +406,7 @@ public class AntiCompactionTest
     public void missingParentRepairSession() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        TableStore store = keyspace.getColumnFamilyStore(CF);
         store.disableAutoCompaction();
 
         for (int table = 0; table < 10; table++)

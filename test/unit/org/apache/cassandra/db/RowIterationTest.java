@@ -33,7 +33,7 @@ public class RowIterationTest extends CQLTester
     public void testRowIteration() throws Throwable
     {
         String tableName = createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b, c))");
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+        TableStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
         for (int i = 0; i < 10; i++)
             execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TIMESTAMP ?", i, 0, i, i, (long)i);
         cfs.forceBlockingFlush();
@@ -44,7 +44,7 @@ public class RowIterationTest extends CQLTester
     public void testRowIterationDeletionTime() throws Throwable
     {
         String tableName = createTable("CREATE TABLE %s (a int PRIMARY KEY, b int)");
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+        TableStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
 
         execute("INSERT INTO %s (a, b) VALUES (?, ?) USING TIMESTAMP ?", 0, 0, 0L);
         execute("DELETE FROM %s USING TIMESTAMP ? WHERE a = ?", 0L, 0);
@@ -68,7 +68,7 @@ public class RowIterationTest extends CQLTester
     public void testRowIterationDeletion() throws Throwable
     {
         String tableName = createTable("CREATE TABLE %s (a int PRIMARY KEY, b int)");
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+        TableStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
 
         // Delete a row in first sstable
         execute("DELETE FROM %s USING TIMESTAMP ? WHERE a = ?", 0L, 0);

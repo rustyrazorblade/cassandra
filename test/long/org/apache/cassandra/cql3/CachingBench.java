@@ -38,7 +38,7 @@ import org.apache.cassandra.config.Config.CommitLogSync;
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.cache.ChunkCache;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
@@ -198,7 +198,7 @@ public class CachingBench extends CQLTester
         DatabaseDescriptor.setDiskAccessMode(mode);
         alterTable("ALTER TABLE %s WITH compaction = { 'class' :  '" + compactionClass + "'  };");
         alterTable("ALTER TABLE %s WITH compression = { 'sstable_compression' : '" + compressorClass + "'  };");
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        TableStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
         long onStartTime = System.currentTimeMillis();
@@ -328,24 +328,24 @@ public class CachingBench extends CQLTester
         testSetup(STRATEGY, "", DiskAccessMode.mmap, false /* doesn't matter */);
     }
 
-    int countTombstoneMarkers(ColumnFamilyStore cfs)
+    int countTombstoneMarkers(TableStore cfs)
     {
         return count(cfs, x -> x.isRangeTombstoneMarker());
     }
 
-    int countRowDeletions(ColumnFamilyStore cfs)
+    int countRowDeletions(TableStore cfs)
     {
         return count(cfs, x -> x.isRow() && !((Row) x).deletion().isLive());
     }
 
-    int countRows(ColumnFamilyStore cfs)
+    int countRows(TableStore cfs)
     {
         boolean enforceStrictLiveness = cfs.metadata().enforceStrictLiveness();
         int nowInSec = FBUtilities.nowInSeconds();
         return count(cfs, x -> x.isRow() && ((Row) x).hasLiveData(nowInSec, enforceStrictLiveness));
     }
 
-    private int count(ColumnFamilyStore cfs, Predicate<Unfiltered> predicate)
+    private int count(TableStore cfs, Predicate<Unfiltered> predicate)
     {
         int count = 0;
         for (SSTableReader reader : cfs.getLiveSSTables())

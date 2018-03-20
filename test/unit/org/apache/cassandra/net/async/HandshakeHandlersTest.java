@@ -19,7 +19,6 @@
 package org.apache.cassandra.net.async;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.Optional;
 
@@ -31,7 +30,7 @@ import org.junit.Test;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.auth.AllowAllInternodeAuthenticator;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -130,7 +129,7 @@ public class HandshakeHandlersTest
             buf.put(bytes);
 
         // write a bunch of messages to the channel
-        ColumnFamilyStore cfs1 = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        TableStore cfs1 = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
         int count = 1024;
         for (int i = 0; i < count; i++)
         {

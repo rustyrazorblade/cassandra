@@ -32,7 +32,7 @@ import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.repair.AbstractRepairTest;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.repair.messages.FailSession;
 import org.apache.cassandra.repair.messages.FinalizePromise;
 import org.apache.cassandra.repair.messages.PrepareConsistentResponse;
@@ -43,7 +43,7 @@ import org.apache.cassandra.utils.UUIDGen;
 public class CoordinatorSessionsTest extends AbstractRepairTest
 {
     private static TableMetadata cfm;
-    private static ColumnFamilyStore cfs;
+    private static TableStore cfs;
 
     // to check CoordinatorSessions is passing the messages to the coordinator session correctly
     private static class InstrumentedCoordinatorSession extends CoordinatorSession

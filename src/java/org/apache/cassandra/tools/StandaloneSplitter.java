@@ -22,11 +22,11 @@ import java.io.File;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.commons.cli.*;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
@@ -110,7 +110,7 @@ public class StandaloneSplitter
 
             // Do not load sstables since they might be broken
             Keyspace keyspace = Keyspace.openWithoutSSTables(ksName);
-            ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+            TableStore cfs = keyspace.getColumnFamilyStore(cfName);
             String snapshotName = "pre-split-" + System.currentTimeMillis();
 
             List<SSTableReader> sstables = new ArrayList<>();

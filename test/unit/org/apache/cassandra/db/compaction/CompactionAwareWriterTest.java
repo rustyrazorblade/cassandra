@@ -59,7 +59,7 @@ public class CompactionAwareWriterTest extends CQLTester
         QueryProcessor.executeInternal("DROP KEYSPACE IF EXISTS " + KEYSPACE);
     }
 
-    private ColumnFamilyStore getColumnFamilyStore()
+    private TableStore getColumnFamilyStore()
     {
         return Keyspace.open(KEYSPACE).getColumnFamilyStore(TABLE);
     }
@@ -68,7 +68,7 @@ public class CompactionAwareWriterTest extends CQLTester
     public void testDefaultCompactionWriter() throws Throwable
     {
         Keyspace ks = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(TABLE);
+        TableStore cfs = ks.getColumnFamilyStore(TABLE);
 
         int rowCount = 1000;
         cfs.disableAutoCompaction();
@@ -87,7 +87,7 @@ public class CompactionAwareWriterTest extends CQLTester
     @Test
     public void testMaxSSTableSizeWriter() throws Throwable
     {
-        ColumnFamilyStore cfs = getColumnFamilyStore();
+        TableStore cfs = getColumnFamilyStore();
         cfs.disableAutoCompaction();
         int rowCount = 1000;
         populate(rowCount);
@@ -105,7 +105,7 @@ public class CompactionAwareWriterTest extends CQLTester
     @Test
     public void testSplittingSizeTieredCompactionWriter() throws Throwable
     {
-        ColumnFamilyStore cfs = getColumnFamilyStore();
+        TableStore cfs = getColumnFamilyStore();
         cfs.disableAutoCompaction();
         int rowCount = 10000;
         populate(rowCount);
@@ -139,7 +139,7 @@ public class CompactionAwareWriterTest extends CQLTester
     @Test
     public void testMajorLeveledCompactionWriter() throws Throwable
     {
-        ColumnFamilyStore cfs = getColumnFamilyStore();
+        TableStore cfs = getColumnFamilyStore();
         cfs.disableAutoCompaction();
         int rowCount = 20000;
         int targetSSTableCount = 50;
@@ -165,7 +165,7 @@ public class CompactionAwareWriterTest extends CQLTester
         cfs.truncateBlocking();
     }
 
-    private int compact(ColumnFamilyStore cfs, LifecycleTransaction txn, CompactionAwareWriter writer)
+    private int compact(TableStore cfs, LifecycleTransaction txn, CompactionAwareWriter writer)
     {
         assert txn.originals().size() == 1;
         int rowsWritten = 0;
@@ -194,7 +194,7 @@ public class CompactionAwareWriterTest extends CQLTester
             for (int j = 0; j < ROW_PER_PARTITION; j++)
                 execute(String.format("INSERT INTO %s.%s(k, t, v) VALUES (?, ?, ?)", KEYSPACE, TABLE), i, j, b);
 
-        ColumnFamilyStore cfs = getColumnFamilyStore();
+        TableStore cfs = getColumnFamilyStore();
         cfs.forceBlockingFlush();
         if (cfs.getLiveSSTables().size() > 1)
         {
@@ -211,7 +211,7 @@ public class CompactionAwareWriterTest extends CQLTester
         assert cfs.getLiveSSTables().size() == 1 : cfs.getLiveSSTables();
     }
 
-    private void validateData(ColumnFamilyStore cfs, int rowCount) throws Throwable
+    private void validateData(TableStore cfs, int rowCount) throws Throwable
     {
         for (int i = 0; i < rowCount; i++)
         {

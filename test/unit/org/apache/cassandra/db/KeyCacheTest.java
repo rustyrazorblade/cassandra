@@ -94,7 +94,7 @@ public class KeyCacheTest
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE1).getColumnFamilyStore(cf);
+        TableStore store = Keyspace.open(KEYSPACE1).getColumnFamilyStore(cf);
 
         // empty the cache
         CacheService.instance.invalidateKeyCache();
@@ -170,10 +170,10 @@ public class KeyCacheTest
 
     private static SSTableReader readerForKey(KeyCacheKey k)
     {
-        return ColumnFamilyStore.getIfExists(k.desc.ksname, k.desc.cfname).getLiveSSTables()
-                                .stream()
-                                .filter(sstreader -> sstreader.descriptor.generation == k.desc.generation)
-                                .findFirst().get();
+        return TableStore.getIfExists(k.desc.ksname, k.desc.cfname).getLiveSSTables()
+                         .stream()
+                         .filter(sstreader -> sstreader.descriptor.generation == k.desc.generation)
+                         .findFirst().get();
     }
 
     @Test
@@ -194,7 +194,7 @@ public class KeyCacheTest
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE1).getColumnFamilyStore(cf);
+        TableStore store = Keyspace.open(KEYSPACE1).getColumnFamilyStore(cf);
 
         // empty the cache
         CacheService.instance.invalidateKeyCache();
@@ -258,7 +258,7 @@ public class KeyCacheTest
         CompactionManager.instance.disableAutoCompaction();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cf);
+        TableStore cfs = keyspace.getColumnFamilyStore(cf);
 
         // just to make sure that everything is clean
         CacheService.instance.invalidateKeyCache();
@@ -310,7 +310,7 @@ public class KeyCacheTest
 
     private static void readData(String keyspace, String columnFamily, int startRow, int numberOfRows)
     {
-        ColumnFamilyStore store = Keyspace.open(keyspace).getColumnFamilyStore(columnFamily);
+        TableStore store = Keyspace.open(keyspace).getColumnFamilyStore(columnFamily);
         for (int i = 0; i < numberOfRows; i++)
             Util.getAll(Util.cmd(store, "key" + (i + startRow)).includeRow("col" + (i + startRow)).build());
     }

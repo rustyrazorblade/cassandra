@@ -24,13 +24,13 @@ import javax.management.*;
 
 import org.apache.cassandra.cache.*;
 
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.metrics.ThreadPoolMetrics;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.net.MessagingService;
@@ -119,7 +119,7 @@ public class StatusLogger
 
         // per-CF stats
         logger.info(String.format("%-25s%20s", "Table", "Memtable ops,data"));
-        for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
+        for (TableStore cfs : TableStore.all())
         {
             logger.info(String.format("%-25s%20s",
                                       cfs.keyspace.getName() + "." + cfs.name,

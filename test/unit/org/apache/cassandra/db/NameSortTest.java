@@ -73,7 +73,7 @@ public class NameSortTest
     private void testNameSort(int N) throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        TableStore cfs = keyspace.getColumnFamilyStore(CF);
         for (int i = 0; i < N; i++)
         {
             ByteBuffer key = ByteBufferUtil.bytes(Integer.toString(i));
@@ -88,7 +88,7 @@ public class NameSortTest
         validateNameSort(cfs);
     }
 
-    private void validateNameSort(ColumnFamilyStore cfs) throws IOException
+    private void validateNameSort(TableStore cfs) throws IOException
     {
         for (FilteredPartition partition : Util.getAll(Util.cmd(cfs).build()))
         {

@@ -114,9 +114,9 @@ public class StressCQLSSTableWriter implements Closeable
     private final UpdateStatement insert;
     private final List<ColumnSpecification> boundNames;
     private final List<TypeCodec> typeCodecs;
-    private final ColumnFamilyStore cfs;
+    private final TableStore cfs;
 
-    private StressCQLSSTableWriter(ColumnFamilyStore cfs, AbstractSSTableSimpleWriter writer, UpdateStatement insert, List<ColumnSpecification> boundNames)
+    private StressCQLSSTableWriter(TableStore cfs, AbstractSSTableSimpleWriter writer, UpdateStatement insert, List<ColumnSpecification> boundNames)
     {
         this.cfs = cfs;
         this.writer = writer;
@@ -353,7 +353,7 @@ public class StressCQLSSTableWriter implements Closeable
     public static class Builder
     {
         private final List<File> directoryList;
-        private ColumnFamilyStore cfs;
+        private TableStore cfs;
 
         protected SSTableFormat.Type formatType = null;
 
@@ -410,7 +410,7 @@ public class StressCQLSSTableWriter implements Closeable
         }
 
         /**
-         * A pre-instanciated ColumnFamilyStore
+         * A pre-instanciated TableStore
          * <p>
          * This is can be used in place of inDirectory and forTable
          *
@@ -421,7 +421,7 @@ public class StressCQLSSTableWriter implements Closeable
          *
          * @throws IllegalArgumentException if a directory doesn't exist or is not writable.
          */
-        public Builder withCfs(ColumnFamilyStore cfs)
+        public Builder withCfs(TableStore cfs)
         {
             this.cfs = cfs;
             return this;
@@ -592,7 +592,7 @@ public class StressCQLSSTableWriter implements Closeable
             Schema.instance.load(ksm);
         }
 
-        public static ColumnFamilyStore createOfflineTable(String schema, List<File> directoryList)
+        public static TableStore createOfflineTable(String schema, List<File> directoryList)
         {
             return createOfflineTable(parseStatement(schema, CreateTableStatement.RawStatement.class, "CREATE TABLE"), Collections.EMPTY_LIST, directoryList);
         }
@@ -601,7 +601,7 @@ public class StressCQLSSTableWriter implements Closeable
          * Creates the table according to schema statement
          * with specified data directories
          */
-        public static ColumnFamilyStore createOfflineTable(CreateTableStatement.RawStatement schemaStatement, List<CreateTypeStatement> typeStatements, List<File> directoryList)
+        public static TableStore createOfflineTable(CreateTableStatement.RawStatement schemaStatement, List<CreateTypeStatement> typeStatements, List<File> directoryList)
         {
             String keyspace = schemaStatement.keyspace();
 
@@ -628,7 +628,7 @@ public class StressCQLSSTableWriter implements Closeable
             Directories directories = new Directories(tableMetadata, directoryList.stream().map(Directories.DataDirectory::new).collect(Collectors.toList()));
 
             Keyspace ks = Keyspace.openWithoutSSTables(keyspace);
-            ColumnFamilyStore cfs =  ColumnFamilyStore.createColumnFamilyStore(ks, tableMetadata.name, TableMetadataRef.forOfflineTools(tableMetadata), directories, false, false, true);
+            TableStore cfs =  TableStore.createColumnFamilyStore(ks, tableMetadata.name, TableMetadataRef.forOfflineTools(tableMetadata), directories, false, false, true);
 
             ks.initCfCustom(cfs);
             Schema.instance.load(ksm.withSwapped(ksm.tables.with(cfs.metadata())));

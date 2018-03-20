@@ -59,7 +59,7 @@ public class PaxosStateTest
     @Test
     public void testCommittingAfterTruncation() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open("PaxosStateTestKeyspace1").getColumnFamilyStore("Standard1");
+        TableStore cfs = Keyspace.open("PaxosStateTestKeyspace1").getColumnFamilyStore("Standard1");
         String key = "key" + System.nanoTime();
         ByteBuffer value = ByteBufferUtil.bytes(0);
         RowUpdateBuilder builder = new RowUpdateBuilder(cfs.metadata(), FBUtilities.timestampMicros(), key);
@@ -92,14 +92,14 @@ public class PaxosStateTest
         return Commit.newProposal(UUIDGen.getTimeUUID(ballotMillis), update);
     }
 
-    private void assertDataPresent(ColumnFamilyStore cfs, DecoratedKey key, String name, ByteBuffer value)
+    private void assertDataPresent(TableStore cfs, DecoratedKey key, String name, ByteBuffer value)
     {
         Row row = Util.getOnlyRowUnfiltered(Util.cmd(cfs, key).build());
         assertEquals(0, ByteBufferUtil.compareUnsigned(value,
                 row.getCell(cfs.metadata().getColumn(ByteBufferUtil.bytes(name))).value()));
     }
 
-    private void assertNoDataPresent(ColumnFamilyStore cfs, DecoratedKey key)
+    private void assertNoDataPresent(TableStore cfs, DecoratedKey key)
     {
         Util.assertEmpty(Util.cmd(cfs, key).build());
     }
@@ -107,7 +107,7 @@ public class PaxosStateTest
     @Test
     public void testPrepareProposePaxos() throws Throwable
     {
-        ColumnFamilyStore cfs = Keyspace.open("PaxosStateTestKeyspace1").getColumnFamilyStore("Standard1");
+        TableStore cfs = Keyspace.open("PaxosStateTestKeyspace1").getColumnFamilyStore("Standard1");
         String key = "key" + System.nanoTime();
         ByteBuffer value = ByteBufferUtil.bytes(0);
         RowUpdateBuilder builder = new RowUpdateBuilder(cfs.metadata(), FBUtilities.timestampMicros(), key);

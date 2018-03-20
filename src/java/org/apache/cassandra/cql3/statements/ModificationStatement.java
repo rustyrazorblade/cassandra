@@ -188,7 +188,7 @@ public abstract class ModificationStatement implements CQLStatement
         return metadata.keyspace;
     }
 
-    public String columnFamily()
+    public String table()
     {
         return metadata.name;
     }
@@ -228,7 +228,7 @@ public abstract class ModificationStatement implements CQLStatement
 
         // MV updates need to get the current state from the table, and might update the views
         // Require Permission.SELECT on the base table, and Permission.MODIFY on the views
-        Iterator<ViewMetadata> views = View.findAll(keyspace(), columnFamily()).iterator();
+        Iterator<ViewMetadata> views = View.findAll(keyspace(), table()).iterator();
         if (views.hasNext())
         {
             state.hasColumnFamilyAccess(metadata, Permission.SELECT);
@@ -459,7 +459,7 @@ public abstract class ModificationStatement implements CQLStatement
         CQL3CasRequest request = makeCasRequest(queryState, options);
 
         try (RowIterator result = StorageProxy.cas(keyspace(),
-                                                   columnFamily(),
+                                                   table(),
                                                    request.key,
                                                    request,
                                                    options.getSerialConsistency(),
@@ -515,7 +515,7 @@ public abstract class ModificationStatement implements CQLStatement
 
     private ResultSet buildCasResultSet(RowIterator partition, QueryOptions options) throws InvalidRequestException
     {
-        return buildCasResultSet(keyspace(), columnFamily(), partition, getColumnsWithConditions(), false, options);
+        return buildCasResultSet(keyspace(), table(), partition, getColumnsWithConditions(), false, options);
     }
 
     public static ResultSet buildCasResultSet(String ksName, String tableName, RowIterator partition, Iterable<ColumnMetadata> columnsWithConditions, boolean isBatch, QueryOptions options)

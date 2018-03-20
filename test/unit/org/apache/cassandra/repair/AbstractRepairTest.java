@@ -29,7 +29,7 @@ import com.google.common.collect.Sets;
 import org.junit.Ignore;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -77,7 +77,7 @@ public abstract class AbstractRepairTest
 
     protected static final Set<Range<Token>> ALL_RANGES = ImmutableSet.of(RANGE1, RANGE2, RANGE3);
 
-    protected static UUID registerSession(ColumnFamilyStore cfs, boolean isIncremental, boolean isGlobal)
+    protected static UUID registerSession(TableStore cfs, boolean isIncremental, boolean isGlobal)
     {
         UUID sessionId = UUIDGen.getTimeUUID();
 

@@ -29,7 +29,7 @@ import org.junit.Test;
 
 import junit.framework.Assert;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -76,7 +76,7 @@ public class LifecycleTransactionTest extends AbstractTransactionalTest
     @Test
     public void testUpdates() // (including obsoletion)
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        TableStore cfs = MockSchema.newCFS();
         Tracker tracker = new Tracker(null, false);
         SSTableReader[] readers = readersArray(0, 3, cfs);
         SSTableReader[] readers2 = readersArray(0, 4, cfs);
@@ -140,7 +140,7 @@ public class LifecycleTransactionTest extends AbstractTransactionalTest
     @Test
     public void testCancellation()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        TableStore cfs = MockSchema.newCFS();
         Tracker tracker = new Tracker(null, false);
         List<SSTableReader> readers = readers(0, 3, cfs);
         tracker.addInitialSSTables(readers);
@@ -184,7 +184,7 @@ public class LifecycleTransactionTest extends AbstractTransactionalTest
     @Test
     public void testSplit()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        TableStore cfs = MockSchema.newCFS();
         Tracker tracker = new Tracker(null, false);
         List<SSTableReader> readers = readers(0, 4, cfs);
         tracker.addInitialSSTables(readers);
@@ -269,7 +269,7 @@ public class LifecycleTransactionTest extends AbstractTransactionalTest
         final Tracker tracker;
         final LifecycleTransaction txn;
 
-        private static Tracker tracker(ColumnFamilyStore cfs, List<SSTableReader> readers)
+        private static Tracker tracker(TableStore cfs, List<SSTableReader> readers)
         {
             Tracker tracker = new Tracker(new Memtable(new AtomicReference<>(CommitLogPosition.NONE), cfs), false);
             tracker.addInitialSSTables(readers);
@@ -281,12 +281,12 @@ public class LifecycleTransactionTest extends AbstractTransactionalTest
             this(MockSchema.newCFS());
         }
 
-        private TxnTest(ColumnFamilyStore cfs)
+        private TxnTest(TableStore cfs)
         {
             this(cfs, readers(0, 8, cfs));
         }
 
-        private TxnTest(ColumnFamilyStore cfs, List<SSTableReader> readers)
+        private TxnTest(TableStore cfs, List<SSTableReader> readers)
         {
             this(tracker(cfs, readers), readers);
         }
@@ -410,12 +410,12 @@ public class LifecycleTransactionTest extends AbstractTransactionalTest
         }
     }
 
-    private static SSTableReader[] readersArray(int lb, int ub, ColumnFamilyStore cfs)
+    private static SSTableReader[] readersArray(int lb, int ub, TableStore cfs)
     {
         return readers(lb, ub, cfs).toArray(new SSTableReader[0]);
     }
 
-    private static List<SSTableReader> readers(int lb, int ub, ColumnFamilyStore cfs)
+    private static List<SSTableReader> readers(int lb, int ub, TableStore cfs)
     {
         List<SSTableReader> readers = new ArrayList<>();
         for (int i = lb ; i < ub ; i++)

@@ -81,7 +81,7 @@ public class SecondaryIndexTest
     @Test
     public void testIndexScan()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
 
         new RowUpdateBuilder(cfs.metadata(), 0, "k1").clustering("c").add("birthdate", 1L).add("notbirthdate", 1L).build().applyUnsafe();
         new RowUpdateBuilder(cfs.metadata(), 0, "k2").clustering("c").add("birthdate", 2L).add("notbirthdate", 2L).build().applyUnsafe();
@@ -153,7 +153,7 @@ public class SecondaryIndexTest
     @Test
     public void testLargeScan()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
         ByteBuffer bBB = ByteBufferUtil.bytes("birthdate");
         ByteBuffer nbBB = ByteBufferUtil.bytes("notbirthdate");
 
@@ -189,7 +189,7 @@ public class SecondaryIndexTest
     @Test
     public void testCompositeIndexDeletions() throws IOException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
         ByteBuffer bBB = ByteBufferUtil.bytes("birthdate");
         ColumnMetadata bDef = cfs.metadata().getColumn(bBB);
         ByteBuffer col = ByteBufferUtil.bytes("birthdate");
@@ -235,7 +235,7 @@ public class SecondaryIndexTest
     public void testCompositeIndexUpdate() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(WITH_COMPOSITE_INDEX);
+        TableStore cfs = keyspace.getColumnFamilyStore(WITH_COMPOSITE_INDEX);
         ByteBuffer col = ByteBufferUtil.bytes("birthdate");
 
         // create a row and update the birthdate value, test that the index query fetches the new version
@@ -257,7 +257,7 @@ public class SecondaryIndexTest
     public void testIndexUpdateOverwritingExpiringColumns() throws Exception
     {
         // see CASSANDRA-7268
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
         ByteBuffer col = ByteBufferUtil.bytes("birthdate");
 
         // create a row and update the birthdate value with an expiring column
@@ -289,7 +289,7 @@ public class SecondaryIndexTest
     public void testDeleteOfInconsistentValuesInKeysIndex() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(WITH_KEYS_INDEX);
+        TableStore cfs = keyspace.getColumnFamilyStore(WITH_KEYS_INDEX);
 
         ByteBuffer col = ByteBufferUtil.bytes("birthdate");
 
@@ -317,7 +317,7 @@ public class SecondaryIndexTest
                        true,
                        false);
         assertIndexedNone(cfs, col, 1L);
-        ColumnFamilyStore indexCfs = cfs.indexManager.getAllIndexColumnFamilyStores().iterator().next();
+        TableStore indexCfs = cfs.indexManager.getAllIndexColumnFamilyStores().iterator().next();
         assertIndexCfsIsEmpty(indexCfs);
     }
 
@@ -338,7 +338,7 @@ public class SecondaryIndexTest
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         String cfName = WITH_COMPOSITE_INDEX;
 
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         String colName = isStatic ? "static" : "birthdate";
         ByteBuffer col = ByteBufferUtil.bytes(colName);
@@ -380,7 +380,7 @@ public class SecondaryIndexTest
         keyspace.apply(builder.build(), true, false);
         assertIndexedNone(cfs, col, 20l);
 
-        ColumnFamilyStore indexCfs = cfs.indexManager.getAllIndexColumnFamilyStores().iterator().next();
+        TableStore indexCfs = cfs.indexManager.getAllIndexColumnFamilyStores().iterator().next();
         assertIndexCfsIsEmpty(indexCfs);
     }
 
@@ -388,7 +388,7 @@ public class SecondaryIndexTest
     @Test
     public void testDeleteCompositeIndex() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
 
         ByteBuffer colName = ByteBufferUtil.bytes("birthdate");
 
@@ -411,7 +411,7 @@ public class SecondaryIndexTest
     @Test
     public void testDeleteKeysIndex() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_KEYS_INDEX);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_KEYS_INDEX);
 
         ByteBuffer colName = ByteBufferUtil.bytes("birthdate");
 
@@ -435,7 +435,7 @@ public class SecondaryIndexTest
     @Test
     public void testIndexScanWithLimitOne()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(WITH_COMPOSITE_INDEX);
         Mutation rm;
 
         new RowUpdateBuilder(cfs.metadata(), 0, "kk1").clustering("c").add("birthdate", 1L).build().applyUnsafe();
@@ -459,7 +459,7 @@ public class SecondaryIndexTest
     public void testIndexCreate() throws IOException, InterruptedException, ExecutionException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COMPOSITE_INDEX_TO_BE_ADDED);
+        TableStore cfs = keyspace.getColumnFamilyStore(COMPOSITE_INDEX_TO_BE_ADDED);
 
         // create a row and update the birthdate value, test that the index query fetches the new version
         new RowUpdateBuilder(cfs.metadata(), 0, "k1").clustering("c").add("birthdate", 1L).build().applyUnsafe();
@@ -491,9 +491,9 @@ public class SecondaryIndexTest
 
         // we had a bug (CASSANDRA-2244) where index would get created but not flushed -- check for that
         // the way we find the index cfs is a bit convoluted at the moment
-        ColumnFamilyStore indexCfs = cfs.indexManager.getIndex(indexDef)
-                                                     .getBackingTable()
-                                                     .orElseThrow(throwAssert("Index not found"));
+        TableStore indexCfs = cfs.indexManager.getIndex(indexDef)
+                                              .getBackingTable()
+                                              .orElseThrow(throwAssert("Index not found"));
         assertFalse(indexCfs.getLiveSSTables().isEmpty());
         assertIndexedOne(cfs, ByteBufferUtil.bytes("birthdate"), 1L);
 
@@ -513,7 +513,7 @@ public class SecondaryIndexTest
     {
         //  Create secondary index and flush to disk
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(WITH_KEYS_INDEX);
+        TableStore cfs = keyspace.getColumnFamilyStore(WITH_KEYS_INDEX);
 
         for (int i = 0; i < 10; i++)
             new RowUpdateBuilder(cfs.metadata(), 0, "k" + i).noRowMarker().add("birthdate", 1l).build().applyUnsafe();
@@ -523,15 +523,15 @@ public class SecondaryIndexTest
         assertIndexedCount(cfs, ByteBufferUtil.bytes("birthdate"), 1l, 10);
     }
 
-    private void assertIndexedNone(ColumnFamilyStore cfs, ByteBuffer col, Object val)
+    private void assertIndexedNone(TableStore cfs, ByteBuffer col, Object val)
     {
         assertIndexedCount(cfs, col, val, 0);
     }
-    private void assertIndexedOne(ColumnFamilyStore cfs, ByteBuffer col, Object val)
+    private void assertIndexedOne(TableStore cfs, ByteBuffer col, Object val)
     {
         assertIndexedCount(cfs, col, val, 1);
     }
-    private void assertIndexedCount(ColumnFamilyStore cfs, ByteBuffer col, Object val, int count)
+    private void assertIndexedCount(TableStore cfs, ByteBuffer col, Object val, int count)
     {
         ColumnMetadata cdef = cfs.metadata().getColumn(col);
 
@@ -548,7 +548,7 @@ public class SecondaryIndexTest
         }
     }
 
-    private void assertIndexCfsIsEmpty(ColumnFamilyStore indexCfs)
+    private void assertIndexCfsIsEmpty(TableStore indexCfs)
     {
         PartitionRangeReadCommand command = (PartitionRangeReadCommand)Util.cmd(indexCfs).build();
         try (ReadExecutionController controller = command.executionController();

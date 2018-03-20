@@ -26,7 +26,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -59,7 +59,7 @@ public class OneCompactionTest
         CompactionManager.instance.disableAutoCompaction();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(columnFamilyName);
+        TableStore store = keyspace.getColumnFamilyStore(columnFamilyName);
 
         Set<String> inserted = new HashSet<>();
         for (int j = 0; j < insertsPerTable; j++) {

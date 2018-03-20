@@ -625,7 +625,7 @@ public class QueryProcessor implements QueryHandler
             {
                 ModificationStatement modificationStatement = ((ModificationStatement) statement);
                 statementKsName = modificationStatement.keyspace();
-                statementCfName = modificationStatement.columnFamily();
+                statementCfName = modificationStatement.table();
             }
             else if (statement instanceof SelectStatement)
             {

@@ -89,7 +89,7 @@ public class CompactionsPurgeTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         String cfName = "Standard1";
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         String key = "key1";
 
@@ -134,7 +134,7 @@ public class CompactionsPurgeTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         String cfName = "Standard1";
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         String key = "key1";
 
@@ -179,7 +179,7 @@ public class CompactionsPurgeTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         String cfName = "Standard1";
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         String key = "key1";
 
@@ -223,7 +223,7 @@ public class CompactionsPurgeTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         String cfName = "Standard1";
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         String key = "key1";
 
@@ -265,7 +265,7 @@ public class CompactionsPurgeTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE2);
         String cfName = "Standard1";
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         for (int k = 1; k <= 2; ++k) {
             String key = "key" + k;
@@ -327,7 +327,7 @@ public class CompactionsPurgeTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE2);
         String cfName = "Standard1";
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
         final boolean enforceStrictLiveness = cfs.metadata().enforceStrictLiveness();
         String key3 = "key3";
 
@@ -373,7 +373,7 @@ public class CompactionsPurgeTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         String cfName = "Standard2";
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         String key = "key1";
 
@@ -410,7 +410,7 @@ public class CompactionsPurgeTest
         String keyspaceName = KEYSPACE_CACHED;
         String cfName = CF_CACHED;
         Keyspace keyspace = Keyspace.open(keyspaceName);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
 
         String key = "key3";
 
@@ -451,7 +451,7 @@ public class CompactionsPurgeTest
         String keyspaceName = KEYSPACE1;
         String cfName = "Standard1";
         Keyspace keyspace = Keyspace.open(keyspaceName);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        TableStore cfs = keyspace.getColumnFamilyStore(cfName);
         String key = "key3";
 
         // inserts
@@ -496,7 +496,7 @@ public class CompactionsPurgeTest
     {
         String keyspace = "cql_keyspace";
         String table = "table1";
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
         cfs.disableAutoCompaction();
 
         // write a row out to one sstable

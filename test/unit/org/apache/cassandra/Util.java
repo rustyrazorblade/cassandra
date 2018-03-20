@@ -167,9 +167,9 @@ public class Util
      * Writes out a bunch of mutations for a single column family.
      *
      * @param mutations A group of Mutations for the same keyspace and column family.
-     * @return The ColumnFamilyStore that was used.
+     * @return The TableStore that was used.
      */
-    public static ColumnFamilyStore writeColumnFamily(List<Mutation> mutations)
+    public static TableStore writeColumnFamily(List<Mutation> mutations)
     {
         IMutation first = mutations.get(0);
         String keyspaceName = first.getKeyspaceName();
@@ -178,7 +178,7 @@ public class Util
         for (Mutation rm : mutations)
             rm.applyUnsafe();
 
-        ColumnFamilyStore store = Keyspace.open(keyspaceName).getColumnFamilyStore(tableId);
+        TableStore store = Keyspace.open(keyspaceName).getColumnFamilyStore(tableId);
         store.forceBlockingFlush();
         return store;
     }
@@ -227,7 +227,7 @@ public class Util
             assertTrue(ss.getTokenMetadata().isMember(hosts.get(i)));
     }
 
-    public static Future<?> compactAll(ColumnFamilyStore cfs, int gcBefore)
+    public static Future<?> compactAll(TableStore cfs, int gcBefore)
     {
         List<Descriptor> descriptors = new ArrayList<>();
         for (SSTableReader sstable : cfs.getLiveSSTables())
@@ -235,7 +235,7 @@ public class Util
         return CompactionManager.instance.submitUserDefined(cfs, descriptors, gcBefore);
     }
 
-    public static void compact(ColumnFamilyStore cfs, Collection<SSTableReader> sstables)
+    public static void compact(TableStore cfs, Collection<SSTableReader> sstables)
     {
         int gcBefore = cfs.gcBefore(FBUtilities.nowInSeconds());
         List<AbstractCompactionTask> tasks = cfs.getCompactionStrategyManager().getUserDefinedTasks(sstables, gcBefore);
@@ -265,12 +265,12 @@ public class Util
         assert thrown : exception.getName() + " not received";
     }
 
-    public static AbstractReadCommandBuilder.SinglePartitionBuilder cmd(ColumnFamilyStore cfs, Object... partitionKey)
+    public static AbstractReadCommandBuilder.SinglePartitionBuilder cmd(TableStore cfs, Object... partitionKey)
     {
         return new AbstractReadCommandBuilder.SinglePartitionBuilder(cfs, makeKey(cfs.metadata(), partitionKey));
     }
 
-    public static AbstractReadCommandBuilder.PartitionRangeBuilder cmd(ColumnFamilyStore cfs)
+    public static AbstractReadCommandBuilder.PartitionRangeBuilder cmd(TableStore cfs)
     {
         return new AbstractReadCommandBuilder.PartitionRangeBuilder(cfs);
     }
@@ -418,7 +418,7 @@ public class Util
         return mutation.getPartitionUpdates().iterator().next().unfilteredIterator();
     }
 
-    public static Cell cell(ColumnFamilyStore cfs, Row row, String columnName)
+    public static Cell cell(TableStore cfs, Row row, String columnName)
     {
         ColumnMetadata def = cfs.metadata().getColumn(ByteBufferUtil.bytes(columnName));
         assert def != null;
@@ -430,7 +430,7 @@ public class Util
         return partition.getRow(partition.metadata().comparator.make(clustering));
     }
 
-    public static void assertCellValue(Object value, ColumnFamilyStore cfs, Row row, String columnName)
+    public static void assertCellValue(Object value, TableStore cfs, Row row, String columnName)
     {
         Cell cell = cell(cfs, row, columnName);
         assert cell != null : "Row " + row.toString(cfs.metadata()) + " has no cell for " + columnName;
@@ -657,13 +657,13 @@ public class Util
     }
 
     public static UnfilteredPartitionIterator executeLocally(PartitionRangeReadCommand command,
-                                                             ColumnFamilyStore cfs,
+                                                             TableStore cfs,
                                                              ReadExecutionController controller)
     {
         return command.queryStorage(cfs, controller);
     }
 
-    public static Closeable markDirectoriesUnwriteable(ColumnFamilyStore cfs)
+    public static Closeable markDirectoriesUnwriteable(TableStore cfs)
     {
         try
         {

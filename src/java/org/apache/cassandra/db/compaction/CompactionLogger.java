@@ -37,7 +37,7 @@ import com.google.common.collect.MapMaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.codehaus.jackson.JsonNode;
@@ -104,13 +104,13 @@ public class CompactionLogger
     private static final JsonNodeFactory json = JsonNodeFactory.instance;
     private static final Logger logger = LoggerFactory.getLogger(CompactionLogger.class);
     private static final Writer serializer = new CompactionLogSerializer();
-    private final WeakReference<ColumnFamilyStore> cfsRef;
+    private final WeakReference<TableStore> cfsRef;
     private final WeakReference<CompactionStrategyManager> csmRef;
     private final AtomicInteger identifier = new AtomicInteger(0);
     private final Map<AbstractCompactionStrategy, String> compactionStrategyMapping = new MapMaker().weakKeys().makeMap();
     private final AtomicBoolean enabled = new AtomicBoolean(false);
 
-    public CompactionLogger(ColumnFamilyStore cfs, CompactionStrategyManager csm)
+    public CompactionLogger(TableStore cfs, CompactionStrategyManager csm)
     {
         csmRef = new WeakReference<>(csm);
         cfsRef = new WeakReference<>(cfs);
@@ -151,7 +151,7 @@ public class CompactionLogger
     {
         ArrayNode node = json.arrayNode();
         CompactionStrategyManager csm = csmRef.get();
-        ColumnFamilyStore cfs = cfsRef.get();
+        TableStore cfs = cfsRef.get();
         if (csm == null || cfs == null)
             return node;
         for (SSTableReader sstable : cfs.getLiveSSTables())
@@ -215,7 +215,7 @@ public class CompactionLogger
 
     private void describeStrategy(ObjectNode node)
     {
-        ColumnFamilyStore cfs = cfsRef.get();
+        TableStore cfs = cfsRef.get();
         if (cfs == null)
             return;
         node.put("keyspace", cfs.keyspace.getName());

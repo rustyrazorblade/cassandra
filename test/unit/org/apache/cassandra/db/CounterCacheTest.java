@@ -71,7 +71,7 @@ public class CounterCacheTest
     @Test
     public void testReadWrite()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         cfs.truncateBlocking();
         CacheService.instance.invalidateCounterCache();
 
@@ -99,7 +99,7 @@ public class CounterCacheTest
     @Test
     public void testCounterCacheInvalidate()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         cfs.truncateBlocking();
         CacheService.instance.invalidateCounterCache();
 
@@ -144,7 +144,7 @@ public class CounterCacheTest
     @Test
     public void testSaveLoad() throws ExecutionException, InterruptedException, WriteTimeoutException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         cfs.truncateBlocking();
         CacheService.instance.invalidateCounterCache();
 
@@ -177,7 +177,7 @@ public class CounterCacheTest
     @Test
     public void testDroppedSaveLoad() throws ExecutionException, InterruptedException, WriteTimeoutException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         cfs.truncateBlocking();
         CacheService.instance.invalidateCounterCache();
 
@@ -208,7 +208,7 @@ public class CounterCacheTest
     @Test
     public void testDisabledSaveLoad() throws ExecutionException, InterruptedException, WriteTimeoutException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        TableStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         cfs.truncateBlocking();
         CacheService.instance.invalidateCounterCache();
 

@@ -132,7 +132,7 @@ public class SASIIndexTest
             put("key4", Pair.create("Jason", 27));
         }};
 
-        ColumnFamilyStore store = loadData(data, forceFlush);
+        TableStore store = loadData(data, forceFlush);
 
         final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
         final ByteBuffer age = UTF8Type.instance.decompose("age");
@@ -182,7 +182,7 @@ public class SASIIndexTest
                 put("key1", Pair.create("  ", 14));
         }};
 
-        ColumnFamilyStore store = loadData(data, forceFlush);
+        TableStore store = loadData(data, forceFlush);
 
         Set<String> rows= getIndexed(store, 10, buildExpression(UTF8Type.instance.decompose("first_name"), Operator.LIKE_MATCHES, UTF8Type.instance.decompose("doesntmatter")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[]{}, rows.toArray(new String[rows.size()])));
@@ -206,7 +206,7 @@ public class SASIIndexTest
                 put("key4", Pair.create("Jason", 27));
         }};
 
-        ColumnFamilyStore store = loadData(data, forceFlush);
+        TableStore store = loadData(data, forceFlush);
 
         final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
         final ByteBuffer age = UTF8Type.instance.decompose("age");
@@ -311,7 +311,7 @@ public class SASIIndexTest
                 put("key14", Pair.create("Demario", 28));
             }};
 
-        ColumnFamilyStore store = loadData(part3, forceFlush);
+        TableStore store = loadData(part3, forceFlush);
 
         final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
         final ByteBuffer age = UTF8Type.instance.decompose("age");
@@ -405,7 +405,7 @@ public class SASIIndexTest
                         "help someone.", 27));
             }};
 
-        ColumnFamilyStore store = loadData(part1, forceFlush);
+        TableStore store = loadData(part1, forceFlush);
 
         final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
         final ByteBuffer age = UTF8Type.instance.decompose("age");
@@ -433,7 +433,7 @@ public class SASIIndexTest
 
     private void testPrefixSearchWithContainsMode(boolean forceFlush) throws Exception
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(FTS_CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(FTS_CF_NAME);
 
         executeCQL(FTS_CF_NAME, "INSERT INTO %s.%s (song_id, title, artist) VALUES(?, ?, ?)", UUID.fromString("1a4abbcd-b5de-4c69-a578-31231e01ff09"), "Poker Face", "Lady Gaga");
         executeCQL(FTS_CF_NAME, "INSERT INTO %s.%s (song_id, title, artist) VALUES(?, ?, ?)", UUID.fromString("9472a394-359b-4a06-b1d5-b6afce590598"), "Forgetting the Way Home", "Our Lady of Bells");
@@ -493,7 +493,7 @@ public class SASIIndexTest
                 put("key2", Pair.create("Josephine", -1));
         }};
 
-        ColumnFamilyStore store = loadData(part3, forceFlush);
+        TableStore store = loadData(part3, forceFlush);
 
         final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
         final ByteBuffer age = UTF8Type.instance.decompose("age");
@@ -628,7 +628,7 @@ public class SASIIndexTest
                 put("key26", Pair.create("Dennis", 32));
         }};
 
-        ColumnFamilyStore store = loadData(part1, forceFlush);
+        TableStore store = loadData(part1, forceFlush);
 
         loadData(part2, forceFlush);
         loadData(part3, forceFlush);
@@ -765,7 +765,7 @@ public class SASIIndexTest
 
     private void testColumnNamesWithSlashes(boolean forceFlush) throws Exception
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         Mutation.PartitionUpdateCollector rm1 = new Mutation.PartitionUpdateCollector(KS_NAME, decoratedKey(AsciiType.instance.decompose("key1")));
         rm1.add(PartitionUpdate.singleRowUpdate(store.metadata(),
@@ -854,7 +854,7 @@ public class SASIIndexTest
                 put("key4", Pair.create("Amiya", 36));
         }};
 
-        ColumnFamilyStore store = loadData(part1, forceFlush);
+        TableStore store = loadData(part1, forceFlush);
 
         final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
         final ByteBuffer age = UTF8Type.instance.decompose("age");
@@ -934,7 +934,7 @@ public class SASIIndexTest
                 put("key26", Pair.create("Dennis", 32));
         }};
 
-        ColumnFamilyStore store = loadData(part1, 1000, true);
+        TableStore store = loadData(part1, 1000, true);
 
         loadData(part2, 2000, true);
         loadData(part3, 3000, true);
@@ -982,7 +982,7 @@ public class SASIIndexTest
     @Test
     public void testConcurrentMemtableReadsAndWrites() throws Exception
     {
-        final ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        final TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         ExecutorService scheduler = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
@@ -1048,7 +1048,7 @@ public class SASIIndexTest
                 put("key4", Pair.create("Jason", 27));
         }};
 
-        ColumnFamilyStore store = loadData(data1, true);
+        TableStore store = loadData(data1, true);
 
         Map<String, Pair<String, Integer>> data2 = new HashMap<String, Pair<String, Integer>>()
         {{
@@ -1090,7 +1090,7 @@ public class SASIIndexTest
     @Test
     public void testInsertingIncorrectValuesIntoAgeIndex()
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
         final ByteBuffer age = UTF8Type.instance.decompose("age");
@@ -1123,7 +1123,7 @@ public class SASIIndexTest
 
     private void testUnicodeSupport(boolean forceFlush)
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         final ByteBuffer comment = UTF8Type.instance.decompose("comment");
 
@@ -1199,7 +1199,7 @@ public class SASIIndexTest
 
     private void testUnicodeSuffixModeNoSplits(boolean forceFlush)
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         final ByteBuffer comment = UTF8Type.instance.decompose("comment_suffix_split");
 
@@ -1261,7 +1261,7 @@ public class SASIIndexTest
     @Test
     public void testThatTooBigValueIsRejected()
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         final ByteBuffer comment = UTF8Type.instance.decompose("comment_suffix_split");
 
@@ -1301,7 +1301,7 @@ public class SASIIndexTest
                 put("key4", Pair.create("Jason", 27));
         }};
 
-        ColumnFamilyStore store = loadData(data1, true);
+        TableStore store = loadData(data1, true);
 
         RowFilter filter = RowFilter.create();
         filter.add(store.metadata().getColumn(firstName), Operator.LIKE_CONTAINS, AsciiType.instance.fromString("a"));
@@ -1348,7 +1348,7 @@ public class SASIIndexTest
     @Test
     public void testChinesePrefixSearch()
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         final ByteBuffer fullName = UTF8Type.instance.decompose("/output/full-name/");
 
@@ -1404,7 +1404,7 @@ public class SASIIndexTest
 
     public void testLowerCaseAnalyzer(boolean forceFlush)
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         final ByteBuffer comment = UTF8Type.instance.decompose("address");
 
@@ -1479,7 +1479,7 @@ public class SASIIndexTest
     {
         // This test coverts particular case which interval lookup can return invalid results
         // when queried on the prefix e.g. "j".
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         final ByteBuffer name = UTF8Type.instance.decompose("first_name_prefix");
 
@@ -1678,7 +1678,7 @@ public class SASIIndexTest
 
     public void testClusteringIndexes(boolean forceFlush) throws Exception
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
 
         executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Pavel", "xedin", "US", 27, 183, 1.0);
         executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Pavel", "xedin", "BY", 28, 182, 2.0);
@@ -1790,7 +1790,7 @@ public class SASIIndexTest
 
     public void testStaticIndex(boolean shouldFlush) throws Exception
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(STATIC_CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(STATIC_CF_NAME);
 
         executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,sensor_type) VALUES(?, ?)", 1, "TEMPERATURE");
         executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,date,value,variance) VALUES(?, ?, ?, ?)", 1, 20160401L, 24.46, 2);
@@ -1881,7 +1881,7 @@ public class SASIIndexTest
     @Test
     public void testTableRebuild() throws Exception
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
 
         executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Pavel", "xedin", "US", 27, 183, 1.0);
         executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, location, age, height, score) VALUES (?, ?, ?, ?, ?)", "Pavel", "BY", 28, 182, 2.0);
@@ -1920,7 +1920,7 @@ public class SASIIndexTest
     @Test
     public void testIndexRebuild() throws Exception
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
 
         executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname) VALUES (?, ?)", "Alex", "ifesdjeen");
 
@@ -1936,7 +1936,7 @@ public class SASIIndexTest
     @Test
     public void testInvalidIndexOptions()
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         try
         {
@@ -2261,7 +2261,7 @@ public class SASIIndexTest
     public void testIndexMemtableSwitching()
     {
         // write some data but don't flush
-        ColumnFamilyStore store = loadData(new HashMap<String, Pair<String, Integer>>()
+        TableStore store = loadData(new HashMap<String, Pair<String, Integer>>()
         {{
             put("key1", Pair.create("Pavel", 14));
         }}, false);
@@ -2332,17 +2332,17 @@ public class SASIIndexTest
         Assert.assertEquals(index.searchMemtable(expression).getCount(), 0);
     }
 
-    private static ColumnFamilyStore loadData(Map<String, Pair<String, Integer>> data, boolean forceFlush)
+    private static TableStore loadData(Map<String, Pair<String, Integer>> data, boolean forceFlush)
     {
         return loadData(data, System.currentTimeMillis(), forceFlush);
     }
 
-    private static ColumnFamilyStore loadData(Map<String, Pair<String, Integer>> data, long timestamp, boolean forceFlush)
+    private static TableStore loadData(Map<String, Pair<String, Integer>> data, long timestamp, boolean forceFlush)
     {
         for (Map.Entry<String, Pair<String, Integer>> e : data.entrySet())
             newMutation(e.getKey(), e.getValue().left, null, e.getValue().right, timestamp).apply();
 
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+        TableStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
 
         if (forceFlush)
             store.forceBlockingFlush();
@@ -2357,17 +2357,17 @@ public class SASIIndexTest
         ks.getColumnFamilyStore(CLUSTERING_CF_NAME_1).truncateBlocking();
     }
 
-    private static Set<String> getIndexed(ColumnFamilyStore store, int maxResults, Expression... expressions)
+    private static Set<String> getIndexed(TableStore store, int maxResults, Expression... expressions)
     {
         return getIndexed(store, ColumnFilter.all(store.metadata()), maxResults, expressions);
     }
 
-    private static Set<String> getIndexed(ColumnFamilyStore store, ColumnFilter columnFilter, int maxResults, Expression... expressions)
+    private static Set<String> getIndexed(TableStore store, ColumnFilter columnFilter, int maxResults, Expression... expressions)
     {
         return getKeys(getIndexed(store, columnFilter, null, maxResults, expressions));
     }
 
-    private static Set<DecoratedKey> getPaged(ColumnFamilyStore store, int pageSize, Expression... expressions)
+    private static Set<DecoratedKey> getPaged(TableStore store, int pageSize, Expression... expressions)
     {
         UnfilteredPartitionIterator currentPage;
         Set<DecoratedKey> uniqueKeys = new TreeSet<>();
@@ -2399,7 +2399,7 @@ public class SASIIndexTest
         return uniqueKeys;
     }
 
-    private static UnfilteredPartitionIterator getIndexed(ColumnFamilyStore store, ColumnFilter columnFilter, DecoratedKey startKey, int maxResults, Expression... expressions)
+    private static UnfilteredPartitionIterator getIndexed(TableStore store, ColumnFilter columnFilter, DecoratedKey startKey, int maxResults, Expression... expressions)
     {
         DataRange range = (startKey == null)
                             ? DataRange.allData(PARTITIONER)

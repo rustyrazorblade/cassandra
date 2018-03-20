@@ -75,7 +75,7 @@ public abstract class CassandraIndexSearcher implements Index.Searcher
     private UnfilteredRowIterator queryIndex(DecoratedKey indexKey, ReadCommand command, ReadExecutionController executionController)
     {
         ClusteringIndexFilter filter = makeIndexFilter(command);
-        ColumnFamilyStore indexCfs = index.getBackingTable().get();
+        TableStore indexCfs = index.getBackingTable().get();
         TableMetadata indexMetadata = indexCfs.metadata();
         return SinglePartitionReadCommand.create(indexMetadata, command.nowInSec(), indexKey, ColumnFilter.all(indexMetadata), filter)
                                          .queryMemtableAndDisk(indexCfs, executionController.indexReadController());

@@ -57,7 +57,7 @@ public class KeyspaceTest extends CQLTester
     }
 
     @Override
-    public ColumnFamilyStore getCurrentColumnFamilyStore()
+    public TableStore getCurrentColumnFamilyStore()
     {
         return super.getCurrentColumnFamilyStore(KEYSPACE_PER_TEST);
     }
@@ -69,7 +69,7 @@ public class KeyspaceTest extends CQLTester
 
         execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "0", 0, 0);
 
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         for (int round = 0; round < 2; round++)
         {
@@ -95,7 +95,7 @@ public class KeyspaceTest extends CQLTester
         for (int i = 0; i < 2; i++)
             execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "0", i, i);
 
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         for (int round = 0; round < 2; round++)
         {
@@ -129,7 +129,7 @@ public class KeyspaceTest extends CQLTester
 
         execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "1", 1, 1);
 
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         // check empty reads on the partitions before and after the existing one
         for (String key : new String[]{"0", "2"})
@@ -148,7 +148,7 @@ public class KeyspaceTest extends CQLTester
             Util.assertEmpty(Util.cmd(cfs, key).build());
     }
 
-    private static void assertRowsInSlice(ColumnFamilyStore cfs, String key, int sliceStart, int sliceEnd, int limit, boolean reversed, String columnValuePrefix)
+    private static void assertRowsInSlice(TableStore cfs, String key, int sliceStart, int sliceEnd, int limit, boolean reversed, String columnValuePrefix)
     {
         Clustering startClustering = Clustering.make(ByteBufferUtil.bytes(sliceStart));
         Clustering endClustering = Clustering.make(ByteBufferUtil.bytes(sliceEnd));
@@ -193,7 +193,7 @@ public class KeyspaceTest extends CQLTester
         for (int i = 0; i < 300; i++)
             execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "0", i, prefix + i);
 
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         for (int round = 0; round < 2; round++)
         {
@@ -215,7 +215,7 @@ public class KeyspaceTest extends CQLTester
     public void testReversedWithFlushing() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b)) WITH CLUSTERING ORDER BY (b DESC)");
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         for (int i = 0; i < 10; i++)
             execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "0", i, i);
@@ -242,7 +242,7 @@ public class KeyspaceTest extends CQLTester
         }
     }
 
-    private static void assertRowsInResult(ColumnFamilyStore cfs, SinglePartitionReadCommand command, int ... columnValues)
+    private static void assertRowsInResult(TableStore cfs, SinglePartitionReadCommand command, int ... columnValues)
     {
         try (ReadExecutionController executionController = command.executionController();
              PartitionIterator iterator = command.executeInternal(executionController))
@@ -269,7 +269,7 @@ public class KeyspaceTest extends CQLTester
         }
     }
 
-    private static ClusteringIndexSliceFilter slices(ColumnFamilyStore cfs, Integer sliceStart, Integer sliceEnd, boolean reversed)
+    private static ClusteringIndexSliceFilter slices(TableStore cfs, Integer sliceStart, Integer sliceEnd, boolean reversed)
     {
         ClusteringBound startBound = sliceStart == null
                                    ? ClusteringBound.BOTTOM
@@ -281,7 +281,7 @@ public class KeyspaceTest extends CQLTester
         return new ClusteringIndexSliceFilter(slices, reversed);
     }
 
-    private static SinglePartitionReadCommand singlePartitionSlice(ColumnFamilyStore cfs, String key, ClusteringIndexSliceFilter filter, Integer rowLimit)
+    private static SinglePartitionReadCommand singlePartitionSlice(TableStore cfs, String key, ClusteringIndexSliceFilter filter, Integer rowLimit)
     {
         DataLimits limit = rowLimit == null
                          ? DataLimits.NONE
@@ -294,7 +294,7 @@ public class KeyspaceTest extends CQLTester
     public void testGetSliceFromBasic() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b))");
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         for (int i = 1; i < 10; i++)
         {
@@ -342,7 +342,7 @@ public class KeyspaceTest extends CQLTester
     public void testGetSliceWithExpiration() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b))");
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "0", 0, 0);
         execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?) USING TTL 60", "0", 1, 1);
@@ -365,7 +365,7 @@ public class KeyspaceTest extends CQLTester
     public void testGetSliceFromAdvanced() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b))");
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         for (int i = 1; i < 7; i++)
             execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "0", i, i);
@@ -390,7 +390,7 @@ public class KeyspaceTest extends CQLTester
     public void testGetSliceFromLarge() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b))");
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
 
         for (int i = 1000; i < 2000; i++)
             execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", "0", i, i);
@@ -415,7 +415,7 @@ public class KeyspaceTest extends CQLTester
     public void testLimitSSTables() throws Throwable
     {
         createTable("CREATE TABLE %s (a text, b int, c int, PRIMARY KEY (a, b))");
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
         for (int j = 0; j < 10; j++)
@@ -468,7 +468,7 @@ public class KeyspaceTest extends CQLTester
         // ---------------------
         // then we slice out col1 = a5 and col2 > 85 -> which should let us just check 2 sstables and get 2 columns
         createTable("CREATE TABLE %s (a text, b text, c int, d int, PRIMARY KEY (a, b, c))");
-        final ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        final TableStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
         for (int j = 0; j < 10; j++)
@@ -486,7 +486,7 @@ public class KeyspaceTest extends CQLTester
         assertEquals(2, cfs.metric.sstablesPerReadHistogram.cf.getSnapshot().getMax(), 0.1);
     }
 
-    private void validateSliceLarge(ColumnFamilyStore cfs)
+    private void validateSliceLarge(TableStore cfs)
     {
         ClusteringIndexSliceFilter filter = slices(cfs, 1000, null, false);
         SinglePartitionReadCommand command = SinglePartitionReadCommand.create(

@@ -53,7 +53,7 @@ public class RowTest
 
     private int nowInSeconds;
     private DecoratedKey dk;
-    private ColumnFamilyStore cfs;
+    private TableStore cfs;
     private TableMetadata metadata;
 
     @BeforeClass

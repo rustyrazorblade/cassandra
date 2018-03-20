@@ -25,7 +25,7 @@ import java.util.List;
 import java.util.concurrent.*;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.TableStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -45,7 +45,7 @@ public class CompactionBench extends CQLTester
     String table;
     String writeStatement;
     String readStatement;
-    ColumnFamilyStore cfs;
+    TableStore cfs;
     List<File> snapshotFiles;
     List<Descriptor> liveFiles;
 

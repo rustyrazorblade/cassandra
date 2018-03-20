@@ -121,7 +121,7 @@ public class QueryPagerTest
         }
     }
 
-    private static ColumnFamilyStore cfs()
+    private static TableStore cfs()
     {
         return Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD);
     }
@@ -435,7 +435,7 @@ public class QueryPagerTest
         // Testing for the bug of #6748
         String keyspace = "cql_keyspace";
         String table = "table2";
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        TableStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
 
         // Insert rows but with a tombstone as last cell
         for (int i = 0; i < 5; i++)
