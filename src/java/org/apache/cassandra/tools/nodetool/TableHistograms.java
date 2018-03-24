@@ -29,7 +29,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.TableMBean;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.tools.NodeProbe;
 import org.apache.cassandra.tools.NodeTool.NodeToolCmd;
@@ -59,12 +59,12 @@ public class TableHistograms extends NodeToolCmd
         else
         {
             // get a list of table stores
-            Iterator<Map.Entry<String, ColumnFamilyStoreMBean>> tableMBeans = probe.getColumnFamilyStoreMBeanProxies();
+            Iterator<Map.Entry<String, TableMBean>> tableMBeans = probe.getColumnFamilyStoreMBeanProxies();
             while (tableMBeans.hasNext())
             {
-                Map.Entry<String, ColumnFamilyStoreMBean> entry = tableMBeans.next();
+                Map.Entry<String, TableMBean> entry = tableMBeans.next();
                 String keyspaceName = entry.getKey();
-                ColumnFamilyStoreMBean tableProxy = entry.getValue();
+                TableMBean tableProxy = entry.getValue();
                 if (!tablesList.containsKey(keyspaceName))
                 {
                     tablesList.put(keyspaceName, new ArrayList<String>());

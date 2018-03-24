@@ -90,7 +90,7 @@ import org.json.simple.JSONObject;
 
 import static org.apache.cassandra.utils.Throwables.maybeFail;
 
-public class Table implements ColumnFamilyStoreMBean
+public class Table implements TableMBean
 {
     private static final Logger logger = LoggerFactory.getLogger(Table.class);
 

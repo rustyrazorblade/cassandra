@@ -24,7 +24,7 @@ import io.airlift.airline.Command;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.TableMBean;
 import org.apache.cassandra.tools.NodeProbe;
 import org.apache.cassandra.tools.NodeTool.NodeToolCmd;
 
@@ -41,7 +41,7 @@ public class GetCompactionThreshold extends NodeToolCmd
         String ks = args.get(0);
         String cf = args.get(1);
 
-        ColumnFamilyStoreMBean cfsProxy = probe.getCfsProxy(ks, cf);
+        TableMBean cfsProxy = probe.getCfsProxy(ks, cf);
         System.out.println("Current compaction thresholds for " + ks + "/" + cf + ": \n" +
                 " min = " + cfsProxy.getMinimumCompactionThreshold() + ", " +
                 " max = " + cfsProxy.getMaximumCompactionThreshold());

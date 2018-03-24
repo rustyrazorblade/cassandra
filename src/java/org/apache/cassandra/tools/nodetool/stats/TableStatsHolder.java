@@ -122,17 +122,17 @@ public class TableStatsHolder implements StatsHolder
     private void initializeKeyspaces(NodeProbe probe, boolean humanReadable, boolean ignore, List<String> tableNames)
     {
         OptionFilter filter = new OptionFilter(ignore, tableNames);
-        ArrayListMultimap<String, ColumnFamilyStoreMBean> selectedTableMbeans = ArrayListMultimap.create();
+        ArrayListMultimap<String, TableMBean> selectedTableMbeans = ArrayListMultimap.create();
         Map<String, StatsKeyspace> keyspaceStats = new HashMap<>();
 
         // get a list of table stores
-        Iterator<Map.Entry<String, ColumnFamilyStoreMBean>> tableMBeans = probe.getColumnFamilyStoreMBeanProxies();
+        Iterator<Map.Entry<String, TableMBean>> tableMBeans = probe.getColumnFamilyStoreMBeanProxies();
 
         while (tableMBeans.hasNext())
         {
-            Map.Entry<String, ColumnFamilyStoreMBean> entry = tableMBeans.next();
+            Map.Entry<String, TableMBean> entry = tableMBeans.next();
             String keyspaceName = entry.getKey();
-            ColumnFamilyStoreMBean tableProxy = entry.getValue();
+            TableMBean tableProxy = entry.getValue();
 
             if (filter.isKeyspaceIncluded(keyspaceName))
             {
@@ -154,14 +154,14 @@ public class TableStatsHolder implements StatsHolder
         filter.verifyTables();
 
         // get metrics of keyspace
-        for (Map.Entry<String, Collection<ColumnFamilyStoreMBean>> entry : selectedTableMbeans.asMap().entrySet())
+        for (Map.Entry<String, Collection<TableMBean>> entry : selectedTableMbeans.asMap().entrySet())
         {
             String keyspaceName = entry.getKey();
-            Collection<ColumnFamilyStoreMBean> tables = entry.getValue();
+            Collection<TableMBean> tables = entry.getValue();
             StatsKeyspace statsKeyspace = keyspaceStats.get(keyspaceName);
 
             // get metrics of table statistics for this keyspace
-            for (ColumnFamilyStoreMBean table : tables)
+            for (TableMBean table : tables)
             {
                 String tableName = table.getTableName();
                 StatsTable statsTable = new StatsTable();

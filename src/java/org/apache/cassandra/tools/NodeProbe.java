@@ -57,7 +57,7 @@ import javax.rmi.ssl.SslRMIClientSocketFactory;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.batchlog.BatchlogManagerMBean;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.TableMBean;
 import org.apache.cassandra.db.HintedHandOffManagerMBean;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
@@ -416,7 +416,7 @@ public class NodeProbe implements AutoCloseable
 
     public Map<Sampler, CompositeData> getPartitionSample(String ks, String cf, int capacity, int duration, int count, List<Sampler> samplers) throws OpenDataException
     {
-        ColumnFamilyStoreMBean cfsProxy = getCfsProxy(ks, cf);
+        TableMBean cfsProxy = getCfsProxy(ks, cf);
         for(Sampler sampler : samplers)
         {
             cfsProxy.beginLocalSampling(sampler.name(), capacity);
@@ -524,7 +524,7 @@ public class NodeProbe implements AutoCloseable
         return gcProxy.getAndResetStats();
     }
 
-    public Iterator<Map.Entry<String, ColumnFamilyStoreMBean>> getColumnFamilyStoreMBeanProxies()
+    public Iterator<Map.Entry<String, TableMBean>> getColumnFamilyStoreMBeanProxies()
     {
         try
         {
@@ -729,7 +729,7 @@ public class NodeProbe implements AutoCloseable
      */
     public void setCompactionThreshold(String ks, String cf, int minimumCompactionThreshold, int maximumCompactionThreshold)
     {
-        ColumnFamilyStoreMBean cfsProxy = getCfsProxy(ks, cf);
+        TableMBean cfsProxy = getCfsProxy(ks, cf);
         cfsProxy.setCompactionThresholds(minimumCompactionThreshold, maximumCompactionThreshold);
     }
 
@@ -807,7 +807,7 @@ public class NodeProbe implements AutoCloseable
 
     public List<String> getSSTables(String keyspace, String cf, String key, boolean hexFormat)
     {
-        ColumnFamilyStoreMBean cfsProxy = getCfsProxy(keyspace, cf);
+        TableMBean cfsProxy = getCfsProxy(keyspace, cf);
         return cfsProxy.getSSTablesForKey(key, hexFormat);
     }
 
@@ -872,9 +872,9 @@ public class NodeProbe implements AutoCloseable
         }
     }
 
-    public ColumnFamilyStoreMBean getCfsProxy(String ks, String cf)
+    public TableMBean getCfsProxy(String ks, String cf)
     {
-        ColumnFamilyStoreMBean cfsProxy = null;
+        TableMBean cfsProxy = null;
         try
         {
             String type = cf.contains(".") ? "IndexColumnFamilies" : "ColumnFamilies";
@@ -885,7 +885,7 @@ public class NodeProbe implements AutoCloseable
                 throw new MalformedObjectNameException("couldn't find that bean");
             assert beans.size() == 1;
             for (ObjectName bean : beans)
-                cfsProxy = JMX.newMBeanProxy(mbeanServerConn, bean, ColumnFamilyStoreMBean.class);
+                cfsProxy = JMX.newMBeanProxy(mbeanServerConn, bean, TableMBean.class);
         }
         catch (MalformedObjectNameException mone)
         {
@@ -1654,20 +1654,20 @@ public class NodeProbe implements AutoCloseable
     }
 }
 
-class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, ColumnFamilyStoreMBean>>
+class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, TableMBean>>
 {
     private MBeanServerConnection mbeanServerConn;
-    Iterator<Entry<String, ColumnFamilyStoreMBean>> mbeans;
+    Iterator<Entry<String, TableMBean>> mbeans;
 
     public ColumnFamilyStoreMBeanIterator(MBeanServerConnection mbeanServerConn)
         throws MalformedObjectNameException, NullPointerException, IOException
     {
         this.mbeanServerConn = mbeanServerConn;
-        List<Entry<String, ColumnFamilyStoreMBean>> cfMbeans = getCFSMBeans(mbeanServerConn, "ColumnFamilies");
+        List<Entry<String, TableMBean>> cfMbeans = getCFSMBeans(mbeanServerConn, "ColumnFamilies");
         cfMbeans.addAll(getCFSMBeans(mbeanServerConn, "IndexColumnFamilies"));
-        Collections.sort(cfMbeans, new Comparator<Entry<String, ColumnFamilyStoreMBean>>()
+        Collections.sort(cfMbeans, new Comparator<Entry<String, TableMBean>>()
         {
-            public int compare(Entry<String, ColumnFamilyStoreMBean> e1, Entry<String, ColumnFamilyStoreMBean> e2)
+            public int compare(Entry<String, TableMBean> e1, Entry<String, TableMBean> e2)
             {
                 //compare keyspace, then CF name, then normal vs. index
                 int keyspaceNameCmp = e1.getKey().compareTo(e2.getKey());
@@ -1699,17 +1699,17 @@ class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, Colum
         mbeans = cfMbeans.iterator();
     }
 
-    private List<Entry<String, ColumnFamilyStoreMBean>> getCFSMBeans(MBeanServerConnection mbeanServerConn, String type)
+    private List<Entry<String, TableMBean>> getCFSMBeans(MBeanServerConnection mbeanServerConn, String type)
             throws MalformedObjectNameException, IOException
     {
         ObjectName query = new ObjectName("org.apache.cassandra.db:type=" + type +",*");
         Set<ObjectName> cfObjects = mbeanServerConn.queryNames(query, null);
-        List<Entry<String, ColumnFamilyStoreMBean>> mbeans = new ArrayList<Entry<String, ColumnFamilyStoreMBean>>(cfObjects.size());
+        List<Entry<String, TableMBean>> mbeans = new ArrayList<Entry<String, TableMBean>>(cfObjects.size());
         for(ObjectName n : cfObjects)
         {
             String keyspaceName = n.getKeyProperty("keyspace");
-            ColumnFamilyStoreMBean cfsProxy = JMX.newMBeanProxy(mbeanServerConn, n, ColumnFamilyStoreMBean.class);
-            mbeans.add(new AbstractMap.SimpleImmutableEntry<String, ColumnFamilyStoreMBean>(keyspaceName, cfsProxy));
+            TableMBean cfsProxy = JMX.newMBeanProxy(mbeanServerConn, n, TableMBean.class);
+            mbeans.add(new AbstractMap.SimpleImmutableEntry<String, TableMBean>(keyspaceName, cfsProxy));
         }
         return mbeans;
     }
@@ -1719,7 +1719,7 @@ class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, Colum
         return mbeans.hasNext();
     }
 
-    public Entry<String, ColumnFamilyStoreMBean> next()
+    public Entry<String, TableMBean> next()
     {
         return mbeans.next();
     }

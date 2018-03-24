@@ -40,7 +40,7 @@ import org.junit.Test;
 import org.apache.cassandra.auth.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.TableMBean;
 import org.apache.cassandra.utils.JMXServerUtils;
 
 import static org.junit.Assert.assertEquals;
@@ -113,9 +113,9 @@ public class JMXAuthTest extends CQLTester
     @Test
     public void readAttribute() throws Throwable
     {
-        ColumnFamilyStoreMBean proxy = JMX.newMBeanProxy(connection,
-                                                         ObjectName.getInstance(tableMBean.getObjectName()),
-                                                         ColumnFamilyStoreMBean.class);
+        TableMBean proxy = JMX.newMBeanProxy(connection,
+                                             ObjectName.getInstance(tableMBean.getObjectName()),
+                                             TableMBean.class);
 
         // grant SELECT on a single specific Table mbean
         assertPermissionOnResource(Permission.SELECT, tableMBean, proxy::getTableName);
@@ -139,9 +139,9 @@ public class JMXAuthTest extends CQLTester
     @Test
     public void writeAttribute() throws Throwable
     {
-        ColumnFamilyStoreMBean proxy = JMX.newMBeanProxy(connection,
-                                                         ObjectName.getInstance(tableMBean.getObjectName()),
-                                                         ColumnFamilyStoreMBean.class);
+        TableMBean proxy = JMX.newMBeanProxy(connection,
+                                             ObjectName.getInstance(tableMBean.getObjectName()),
+                                             TableMBean.class);
         MBeanAction action = () -> proxy.setMinimumCompactionThreshold(4);
 
         // grant MODIFY on a single specific Table mbean
@@ -166,9 +166,9 @@ public class JMXAuthTest extends CQLTester
     @Test
     public void executeMethod() throws Throwable
     {
-        ColumnFamilyStoreMBean proxy = JMX.newMBeanProxy(connection,
-                                                         ObjectName.getInstance(tableMBean.getObjectName()),
-                                                         ColumnFamilyStoreMBean.class);
+        TableMBean proxy = JMX.newMBeanProxy(connection,
+                                             ObjectName.getInstance(tableMBean.getObjectName()),
+                                             TableMBean.class);
 
         // grant EXECUTE on a single specific Table mbean
         assertPermissionOnResource(Permission.EXECUTE, tableMBean, proxy::estimateKeys);

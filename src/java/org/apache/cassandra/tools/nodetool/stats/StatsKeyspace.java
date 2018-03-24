@@ -21,7 +21,7 @@ package org.apache.cassandra.tools.nodetool.stats;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.TableMBean;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.tools.NodeProbe;
 
@@ -43,7 +43,7 @@ public class StatsKeyspace
         this.name = keyspaceName;
     }
 
-    public void add(ColumnFamilyStoreMBean table)
+    public void add(TableMBean table)
     {
         String tableName = table.getTableName();
         long tableWriteCount = ((CassandraMetricsRegistry.JmxTimerMBean) probe.getColumnFamilyMetric(name, tableName, "WriteLatency")).getCount();

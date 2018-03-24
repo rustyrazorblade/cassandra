@@ -28,7 +28,7 @@ import java.util.Map.Entry;
 
 import javax.management.InstanceNotFoundException;
 
-import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.TableMBean;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.CacheServiceMBean;
 import org.apache.cassandra.tools.NodeProbe;
@@ -167,11 +167,11 @@ public class Info extends NodeToolCmd
     {
         long offHeapMemUsedInBytes = 0;
         // get a list of column family stores
-        Iterator<Map.Entry<String, ColumnFamilyStoreMBean>> cfamilies = probe.getColumnFamilyStoreMBeanProxies();
+        Iterator<Map.Entry<String, TableMBean>> cfamilies = probe.getColumnFamilyStoreMBeanProxies();
 
         while (cfamilies.hasNext())
         {
-            Entry<String, ColumnFamilyStoreMBean> entry = cfamilies.next();
+            Entry<String, TableMBean> entry = cfamilies.next();
             String keyspaceName = entry.getKey();
             String cfName = entry.getValue().getTableName();
 
