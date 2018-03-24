@@ -288,8 +288,8 @@ public abstract class CommitLogTest
     public void testDontDeleteIfDirty() throws Exception
     {
         Keyspace ks = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs1 = ks.getColumnFamilyStore(STANDARD1);
-        ColumnFamilyStore cfs2 = ks.getColumnFamilyStore(STANDARD2);
+        Table cfs1 = ks.getColumnFamilyStore(STANDARD1);
+        Table cfs2 = ks.getColumnFamilyStore(STANDARD2);
 
         // Roughly 32 MB mutation
         Mutation m = new RowUpdateBuilder(cfs1.metadata(), 0, "k")
@@ -324,8 +324,8 @@ public abstract class CommitLogTest
     public void testDeleteIfNotDirty() throws Exception
     {
         Keyspace ks = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs1 = ks.getColumnFamilyStore(STANDARD1);
-        ColumnFamilyStore cfs2 = ks.getColumnFamilyStore(STANDARD2);
+        Table cfs1 = ks.getColumnFamilyStore(STANDARD1);
+        Table cfs2 = ks.getColumnFamilyStore(STANDARD2);
 
         // Roughly 32 MB mutation
          Mutation rm = new RowUpdateBuilder(cfs1.metadata(), 0, "k")
@@ -389,7 +389,7 @@ public abstract class CommitLogTest
 
     private static int getMaxRecordDataSize(String keyspace, ByteBuffer key, String cfName, String colName)
     {
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(cfName);
+        Table cfs = Keyspace.open(keyspace).getColumnFamilyStore(cfName);
         // We don't want to allocate a size of 0 as this is optimized under the hood and our computation would
         // break testEqualRecordLimit
         int allocSize = 1;
@@ -420,7 +420,7 @@ public abstract class CommitLogTest
     @Test
     public void testEqualRecordLimit() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
         Mutation rm = new RowUpdateBuilder(cfs.metadata(), 0, "k")
                       .clustering("bytes")
                       .add("val", ByteBuffer.allocate(getMaxRecordDataSize()))
@@ -432,7 +432,7 @@ public abstract class CommitLogTest
     public void testExceedRecordLimit() throws Exception
     {
         Keyspace ks = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(STANDARD1);
+        Table cfs = ks.getColumnFamilyStore(STANDARD1);
         Mutation rm = new RowUpdateBuilder(cfs.metadata(), 0, "k")
                       .clustering("bytes")
                       .add("val", ByteBuffer.allocate(1 + getMaxRecordDataSize()))
@@ -600,8 +600,8 @@ public abstract class CommitLogTest
             boolean prev = DatabaseDescriptor.isAutoSnapshot();
             DatabaseDescriptor.setAutoSnapshot(false);
             Keyspace ks = Keyspace.open(KEYSPACE1);
-            ColumnFamilyStore cfs1 = ks.getColumnFamilyStore(STANDARD1);
-            ColumnFamilyStore cfs2 = ks.getColumnFamilyStore(STANDARD2);
+            Table cfs1 = ks.getColumnFamilyStore(STANDARD1);
+            Table cfs2 = ks.getColumnFamilyStore(STANDARD2);
 
             new RowUpdateBuilder(cfs1.metadata(), 0, "k").clustering("bytes").add("val", ByteBuffer.allocate(100)).build().applyUnsafe();
             cfs1.truncateBlocking();
@@ -617,7 +617,7 @@ public abstract class CommitLogTest
             assertEquals(2, CommitLog.instance.segmentManager.getActiveSegments().size());
             CommitLogPosition position = CommitLog.instance.getCurrentPosition();
             for (Keyspace keyspace : Keyspace.system())
-                for (ColumnFamilyStore syscfs : keyspace.getColumnFamilyStores())
+                for (Table syscfs : keyspace.getColumnFamilyStores())
                     CommitLog.instance.discardCompletedSegments(syscfs.metadata().id, CommitLogPosition.NONE, position);
             CommitLog.instance.discardCompletedSegments(cfs2.metadata().id, CommitLogPosition.NONE, position);
             assertEquals(1, CommitLog.instance.segmentManager.getActiveSegments().size());
@@ -638,7 +638,7 @@ public abstract class CommitLogTest
             Keyspace notDurableKs = Keyspace.open(KEYSPACE2);
             Assert.assertFalse(notDurableKs.getMetadata().params.durableWrites);
 
-            ColumnFamilyStore cfs = notDurableKs.getColumnFamilyStore("Standard1");
+            Table cfs = notDurableKs.getColumnFamilyStore("Standard1");
             new RowUpdateBuilder(cfs.metadata(), 0, "key1")
             .clustering("bytes").add("val", bytes("abcd"))
             .build()
@@ -661,7 +661,7 @@ public abstract class CommitLogTest
     public void replaySimple() throws IOException
     {
         int cellCount = 0;
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
         final Mutation rm1 = new RowUpdateBuilder(cfs.metadata(), 0, "k1")
                              .clustering("bytes")
                              .add("val", bytes("this is a string"))
@@ -695,7 +695,7 @@ public abstract class CommitLogTest
         int max = 1024;
         int discardPosition = (int)(max * .8); // an arbitrary number of entries that we'll skip on the replay
         CommitLogPosition commitLogPosition = null;
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
 
         for (int i = 0; i < max; i++)
         {
@@ -770,7 +770,7 @@ public abstract class CommitLogTest
     {
         CommitLog.instance.resetUnsafe(true);
 
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
 
         DiskFailurePolicy oldPolicy = DatabaseDescriptor.getDiskFailurePolicy();
         try
@@ -813,12 +813,12 @@ public abstract class CommitLogTest
         Assert.assertEquals(1, CommitLog.instance.resetUnsafe(false));
     }
 
-    public void testOutOfOrderFlushRecovery(BiConsumer<ColumnFamilyStore, Memtable> flushAction, boolean performCompaction)
+    public void testOutOfOrderFlushRecovery(BiConsumer<Table, Memtable> flushAction, boolean performCompaction)
             throws ExecutionException, InterruptedException, IOException
     {
         CommitLog.instance.resetUnsafe(true);
 
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
 
         for (int i = 0 ; i < 5 ; i++)
         {
@@ -847,7 +847,7 @@ public abstract class CommitLogTest
         Assert.assertEquals(1, CommitLog.instance.resetUnsafe(false));
     }
 
-    BiConsumer<ColumnFamilyStore, Memtable> flush = (cfs, current) ->
+    BiConsumer<Table, Memtable> flush = (cfs, current) ->
     {
         try
         {
@@ -863,7 +863,7 @@ public abstract class CommitLogTest
         }
     };
 
-    BiConsumer<ColumnFamilyStore, Memtable> recycleSegments = (cfs, current) ->
+    BiConsumer<Table, Memtable> recycleSegments = (cfs, current) ->
     {
         // Move to new commit log segment and try to flush all data. Also delete segments that no longer contain
         // flushed data.

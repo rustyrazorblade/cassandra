@@ -30,8 +30,8 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
@@ -207,7 +207,7 @@ public class SSTableScannerTest
     public void testSingleDataRange() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(TABLE);
+        Table store = keyspace.getColumnFamilyStore(TABLE);
         store.clearUnsafe();
 
         // disable compaction while flushing
@@ -312,7 +312,7 @@ public class SSTableScannerTest
     public void testMultipleRanges() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(TABLE);
+        Table store = keyspace.getColumnFamilyStore(TABLE);
         store.clearUnsafe();
 
         // disable compaction while flushing
@@ -434,7 +434,7 @@ public class SSTableScannerTest
     public void testSingleKeyMultipleRanges() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(TABLE);
+        Table store = keyspace.getColumnFamilyStore(TABLE);
         store.clearUnsafe();
 
         // disable compaction while flushing

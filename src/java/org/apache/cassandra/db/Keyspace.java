@@ -84,8 +84,8 @@ public class Keyspace
     //Keyspaces in the case of Views (batchlog of view mutations)
     public static final OpOrder writeOrder = new OpOrder();
 
-    /* ColumnFamilyStore per column family */
-    private final ConcurrentMap<TableId, ColumnFamilyStore> columnFamilyStores = new ConcurrentHashMap<>();
+    /* Table per column family */
+    private final ConcurrentMap<TableId, Table> columnFamilyStores = new ConcurrentHashMap<>();
 
     private volatile AbstractReplicationStrategy replicationStrategy;
     public final ViewManager viewManager;
@@ -152,7 +152,7 @@ public class Keyspace
             Keyspace t = schema.removeKeyspaceInstance(keyspaceName);
             if (t != null)
             {
-                for (ColumnFamilyStore cfs : t.getColumnFamilyStores())
+                for (Table cfs : t.getColumnFamilyStores())
                     t.unloadCf(cfs);
                 t.metric.release();
             }
@@ -160,12 +160,12 @@ public class Keyspace
         }
     }
 
-    public static ColumnFamilyStore openAndGetStore(TableMetadataRef tableRef)
+    public static Table openAndGetStore(TableMetadataRef tableRef)
     {
         return open(tableRef.keyspace).getColumnFamilyStore(tableRef.id);
     }
 
-    public static ColumnFamilyStore openAndGetStore(TableMetadata table)
+    public static Table openAndGetStore(TableMetadata table)
     {
         return open(table.keyspace).getColumnFamilyStore(table.id);
     }
@@ -178,9 +178,9 @@ public class Keyspace
     {
         for (Keyspace keyspace : Keyspace.all())
         {
-            for (ColumnFamilyStore baseCfs : keyspace.getColumnFamilyStores())
+            for (Table baseCfs : keyspace.getColumnFamilyStores())
             {
-                for (ColumnFamilyStore cfs : baseCfs.concatWithIndexes())
+                for (Table cfs : baseCfs.concatWithIndexes())
                     cfs.maybeRemoveUnreadableSSTables(directory);
             }
         }
@@ -197,12 +197,12 @@ public class Keyspace
         return metadata;
     }
 
-    public Collection<ColumnFamilyStore> getColumnFamilyStores()
+    public Collection<Table> getColumnFamilyStores()
     {
         return Collections.unmodifiableCollection(columnFamilyStores.values());
     }
 
-    public ColumnFamilyStore getColumnFamilyStore(String cfName)
+    public Table getColumnFamilyStore(String cfName)
     {
         TableMetadata table = Schema.instance.getTableMetadata(getName(), cfName);
         if (table == null)
@@ -210,9 +210,9 @@ public class Keyspace
         return getColumnFamilyStore(table.id);
     }
 
-    public ColumnFamilyStore getColumnFamilyStore(TableId id)
+    public Table getColumnFamilyStore(TableId id)
     {
-        ColumnFamilyStore cfs = columnFamilyStores.get(id);
+        Table cfs = columnFamilyStores.get(id);
         if (cfs == null)
             throw new IllegalArgumentException("Unknown CF " + id);
         return cfs;
@@ -236,7 +236,7 @@ public class Keyspace
     {
         assert snapshotName != null;
         boolean tookSnapShot = false;
-        for (ColumnFamilyStore cfStore : columnFamilyStores.values())
+        for (Table cfStore : columnFamilyStores.values())
         {
             if (columnFamilyName == null || cfStore.name.equals(columnFamilyName))
             {
@@ -290,7 +290,7 @@ public class Keyspace
     public boolean snapshotExists(String snapshotName)
     {
         assert snapshotName != null;
-        for (ColumnFamilyStore cfStore : columnFamilyStores.values())
+        for (Table cfStore : columnFamilyStores.values())
         {
             if (cfStore.snapshotExists(snapshotName))
                 return true;
@@ -316,7 +316,7 @@ public class Keyspace
     public List<SSTableReader> getAllSSTables(SSTableSet sstableSet)
     {
         List<SSTableReader> list = new ArrayList<>(columnFamilyStores.size());
-        for (ColumnFamilyStore cfStore : columnFamilyStores.values())
+        for (Table cfStore : columnFamilyStores.values())
             Iterables.addAll(list, cfStore.getSSTables(sstableSet));
         return list;
     }
@@ -361,7 +361,7 @@ public class Keyspace
         if (!ksm.params.replication.equals(replicationParams))
         {
             logger.debug("New replication settings for keyspace {} - invalidating disk boundary caches", ksm.name);
-            columnFamilyStores.values().forEach(ColumnFamilyStore::invalidateDiskBoundaries);
+            columnFamilyStores.values().forEach(Table::invalidateDiskBoundaries);
         }
         replicationParams = ksm.params.replication;
     }
@@ -370,7 +370,7 @@ public class Keyspace
     public void dropCf(TableId tableId)
     {
         assert columnFamilyStores.containsKey(tableId);
-        ColumnFamilyStore cfs = columnFamilyStores.remove(tableId);
+        Table cfs = columnFamilyStores.remove(tableId);
         if (cfs == null)
             return;
 
@@ -384,7 +384,7 @@ public class Keyspace
     }
 
     // disassociate a cfs from this keyspace instance.
-    private void unloadCf(ColumnFamilyStore cfs)
+    private void unloadCf(Table cfs)
     {
         cfs.forceBlockingFlush();
         cfs.invalidate();
@@ -394,16 +394,16 @@ public class Keyspace
      * Registers a custom cf instance with this keyspace.
      * This is required for offline tools what use non-standard directories.
      */
-    public void initCfCustom(ColumnFamilyStore newCfs)
+    public void initCfCustom(Table newCfs)
     {
-        ColumnFamilyStore cfs = columnFamilyStores.get(newCfs.metadata.id);
+        Table cfs = columnFamilyStores.get(newCfs.metadata.id);
 
         if (cfs == null)
         {
             // CFS being created for the first time, either on server startup or new CF being added.
             // We don't worry about races here; startup is safe, and adding multiple idential CFs
             // simultaneously is a "don't do that" scenario.
-            ColumnFamilyStore oldCfs = columnFamilyStores.putIfAbsent(newCfs.metadata.id, newCfs);
+            Table oldCfs = columnFamilyStores.putIfAbsent(newCfs.metadata.id, newCfs);
             // CFS mbean instantiation will error out before we hit this, but in case that changes...
             if (oldCfs != null)
                 throw new IllegalStateException("added multiple mappings for cf id " + newCfs.metadata.id);
@@ -419,14 +419,14 @@ public class Keyspace
      */
     public void initCf(TableMetadataRef metadata, boolean loadSSTables)
     {
-        ColumnFamilyStore cfs = columnFamilyStores.get(metadata.id);
+        Table cfs = columnFamilyStores.get(metadata.id);
 
         if (cfs == null)
         {
             // CFS being created for the first time, either on server startup or new CF being added.
             // We don't worry about races here; startup is safe, and adding multiple idential CFs
             // simultaneously is a "don't do that" scenario.
-            ColumnFamilyStore oldCfs = columnFamilyStores.putIfAbsent(metadata.id, ColumnFamilyStore.createColumnFamilyStore(this, metadata, loadSSTables));
+            Table oldCfs = columnFamilyStores.putIfAbsent(metadata.id, Table.createColumnFamilyStore(this, metadata, loadSSTables));
             // CFS mbean instantiation will error out before we hit this, but in case that changes...
             if (oldCfs != null)
                 throw new IllegalStateException("added multiple mappings for cf id " + metadata.id);
@@ -606,7 +606,7 @@ public class Keyspace
 
             for (PartitionUpdate upd : mutation.getPartitionUpdates())
             {
-                ColumnFamilyStore cfs = columnFamilyStores.get(upd.metadata().id);
+                Table cfs = columnFamilyStores.get(upd.metadata().id);
                 if (cfs == null)
                 {
                     logger.error("Attempting to mutate non-existant table {} ({}.{})", upd.metadata().id, upd.metadata().keyspace, upd.metadata().name);
@@ -663,21 +663,21 @@ public class Keyspace
     public List<Future<?>> flush()
     {
         List<Future<?>> futures = new ArrayList<>(columnFamilyStores.size());
-        for (ColumnFamilyStore cfs : columnFamilyStores.values())
+        for (Table cfs : columnFamilyStores.values())
             futures.add(cfs.forceFlush());
         return futures;
     }
 
-    public Iterable<ColumnFamilyStore> getValidColumnFamilies(boolean allowIndexes,
-                                                              boolean autoAddIndexes,
-                                                              String... cfNames) throws IOException
+    public Iterable<Table> getValidColumnFamilies(boolean allowIndexes,
+                                                  boolean autoAddIndexes,
+                                                  String... cfNames) throws IOException
     {
-        Set<ColumnFamilyStore> valid = new HashSet<>();
+        Set<Table> valid = new HashSet<>();
 
         if (cfNames.length == 0)
         {
             // all stores are interesting
-            for (ColumnFamilyStore cfStore : getColumnFamilyStores())
+            for (Table cfStore : getColumnFamilyStores())
             {
                 valid.add(cfStore);
                 if (autoAddIndexes)
@@ -699,7 +699,7 @@ public class Keyspace
                 String baseName = SecondaryIndexManager.getParentCfsName(cfName);
                 String indexName = SecondaryIndexManager.getIndexName(cfName);
 
-                ColumnFamilyStore baseCfs = getColumnFamilyStore(baseName);
+                Table baseCfs = getColumnFamilyStore(baseName);
                 Index index = baseCfs.indexManager.getIndexByName(indexName);
                 if (index == null)
                     throw new IllegalArgumentException(String.format("Invalid index specified: %s/%s.",
@@ -711,7 +711,7 @@ public class Keyspace
             }
             else
             {
-                ColumnFamilyStore cfStore = getColumnFamilyStore(cfName);
+                Table cfStore = getColumnFamilyStore(cfName);
                 valid.add(cfStore);
                 if (autoAddIndexes)
                     valid.addAll(getIndexColumnFamilyStores(cfStore));
@@ -721,10 +721,10 @@ public class Keyspace
         return valid;
     }
 
-    private Set<ColumnFamilyStore> getIndexColumnFamilyStores(ColumnFamilyStore baseCfs)
+    private Set<Table> getIndexColumnFamilyStores(Table baseCfs)
     {
-        Set<ColumnFamilyStore> stores = new HashSet<>();
-        for (ColumnFamilyStore indexCfs : baseCfs.indexManager.getAllIndexColumnFamilyStores())
+        Set<Table> stores = new HashSet<>();
+        for (Table indexCfs : baseCfs.indexManager.getAllIndexColumnFamilyStores())
         {
             logger.info("adding secondary index table {} to operation", indexCfs.metadata.name);
             stores.add(indexCfs);

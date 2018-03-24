@@ -55,7 +55,7 @@ public class StubIndex implements Index
     public List<Pair<Row,Row>> rowsUpdated = new ArrayList<>();
     public volatile boolean preJoinInvocation;
     private IndexMetadata indexMetadata;
-    private ColumnFamilyStore baseCfs;
+    private Table baseCfs;
 
     public void reset()
     {
@@ -66,7 +66,7 @@ public class StubIndex implements Index
         rangeTombstones.clear();
     }
 
-    public StubIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+    public StubIndex(Table baseCfs, IndexMetadata metadata)
     {
         this.baseCfs = baseCfs;
         this.indexMetadata = metadata;
@@ -156,7 +156,7 @@ public class StubIndex implements Index
         registry.registerIndex(this);
     }
 
-    public Optional<ColumnFamilyStore> getBackingTable()
+    public Optional<Table> getBackingTable()
     {
         return Optional.empty();
     }

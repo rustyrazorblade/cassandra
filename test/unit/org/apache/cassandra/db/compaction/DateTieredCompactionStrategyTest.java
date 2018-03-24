@@ -29,7 +29,7 @@ import com.google.common.collect.Lists;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -217,7 +217,7 @@ public class DateTieredCompactionStrategyTest extends SchemaLoader
     public void testPrepBucket()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         cfs.disableAutoCompaction();
 
         ByteBuffer value = ByteBuffer.wrap(new byte[100]);
@@ -253,7 +253,7 @@ public class DateTieredCompactionStrategyTest extends SchemaLoader
     public void testFilterOldSSTables()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         cfs.disableAutoCompaction();
 
         ByteBuffer value = ByteBuffer.wrap(new byte[100]);
@@ -293,7 +293,7 @@ public class DateTieredCompactionStrategyTest extends SchemaLoader
     public void testDropExpiredSSTables() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         cfs.disableAutoCompaction();
 
         ByteBuffer value = ByteBuffer.wrap(new byte[100]);
@@ -341,7 +341,7 @@ public class DateTieredCompactionStrategyTest extends SchemaLoader
     public void testSTCSBigWindow()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = keyspace.getColumnFamilyStore(CF_STANDARD1);
         cfs.disableAutoCompaction();
         ByteBuffer bigValue = ByteBuffer.wrap(new byte[10000]);
         ByteBuffer value = ByteBuffer.wrap(new byte[100]);

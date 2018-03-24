@@ -19,7 +19,6 @@
 package org.apache.cassandra.repair.consistent;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.time.Instant;
@@ -51,7 +50,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.db.marshal.UTF8Type;
@@ -59,9 +58,7 @@ import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.SystemKeyspace;
-import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.dht.IPartitioner;
@@ -81,8 +78,6 @@ import org.apache.cassandra.repair.messages.PrepareConsistentResponse;
 import org.apache.cassandra.repair.messages.RepairMessage;
 import org.apache.cassandra.repair.messages.StatusRequest;
 import org.apache.cassandra.repair.messages.StatusResponse;
-import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.service.StorageService;
@@ -409,7 +404,7 @@ public class LocalSessions
     private void syncTable()
     {
         TableId tid = Schema.instance.getTableMetadata(keyspace, table).id;
-        ColumnFamilyStore cfm = Schema.instance.getColumnFamilyStoreInstance(tid);
+        Table cfm = Schema.instance.getColumnFamilyStoreInstance(tid);
         cfm.forceBlockingFlush();
     }
 
@@ -670,7 +665,7 @@ public class LocalSessions
     {
         for (TableId tid: session.tableIds)
         {
-            ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(tid);
+            Table cfs = Schema.instance.getColumnFamilyStoreInstance(tid);
             if (cfs != null)
             {
                 CompactionManager.instance.submitBackground(cfs);
@@ -773,7 +768,7 @@ public class LocalSessions
     protected boolean sessionHasData(LocalSession session)
     {
         Predicate<TableId> predicate = tid -> {
-            ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(tid);
+            Table cfs = Schema.instance.getColumnFamilyStoreInstance(tid);
             return cfs != null && cfs.getCompactionStrategyManager().hasDataForPendingRepair(session.sessionID);
 
         };

@@ -87,7 +87,7 @@ public class RowCacheTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE_CACHED);
         String cf = "CachedIntCF";
-        ColumnFamilyStore cachedStore  = keyspace.getColumnFamilyStore(cf);
+        Table cachedStore  = keyspace.getColumnFamilyStore(cf);
         long startRowCacheHits = cachedStore.metric.rowCacheHit.getCount();
         long startRowCacheOutOfRange = cachedStore.metric.rowCacheHitOutOfRange.getCount();
         // empty the row cache
@@ -133,7 +133,7 @@ public class RowCacheTest
         CompactionManager.instance.disableAutoCompaction();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE_CACHED);
-        ColumnFamilyStore cachedStore  = keyspace.getColumnFamilyStore(CF_CACHED);
+        Table cachedStore  = keyspace.getColumnFamilyStore(CF_CACHED);
 
         // empty the row cache
         CacheService.instance.invalidateRowCache();
@@ -215,7 +215,7 @@ public class RowCacheTest
         CompactionManager.instance.disableAutoCompaction();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE_CACHED);
-        ColumnFamilyStore cachedStore  = keyspace.getColumnFamilyStore(CF_CACHEDNOCLUSTER);
+        Table cachedStore  = keyspace.getColumnFamilyStore(CF_CACHEDNOCLUSTER);
 
         // empty the row cache
         CacheService.instance.invalidateRowCache();
@@ -292,7 +292,7 @@ public class RowCacheTest
         CacheService.instance.setRowCacheCapacityInMB(1);
         rowCacheLoad(100, Integer.MAX_VALUE, 1000);
 
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
+        Table store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
         assertEquals(CacheService.instance.rowCache.size(), 100);
         store.cleanupCache();
         assertEquals(CacheService.instance.rowCache.size(), 100);
@@ -314,7 +314,7 @@ public class RowCacheTest
         CacheService.instance.setRowCacheCapacityInMB(1);
         rowCacheLoad(100, Integer.MAX_VALUE, 1000);
 
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
+        Table store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
         assertEquals(CacheService.instance.rowCache.size(), 100);
 
         //construct 5 bounds of 20 elements each
@@ -332,7 +332,7 @@ public class RowCacheTest
 
     private ArrayList<Bounds<Token>> getBounds(int nElements)
     {
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
+        Table store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
         TreeSet<DecoratedKey> orderedKeys = new TreeSet<>();
 
         for(Iterator<RowCacheKey> it = CacheService.instance.rowCache.keyIterator();it.hasNext();)
@@ -402,7 +402,7 @@ public class RowCacheTest
 
         Keyspace keyspace = Keyspace.open(KEYSPACE_CACHED);
         String cf = "CachedIntCF";
-        ColumnFamilyStore cachedStore  = keyspace.getColumnFamilyStore(cf);
+        Table cachedStore  = keyspace.getColumnFamilyStore(cf);
         long startRowCacheHits = cachedStore.metric.rowCacheHit.getCount();
         long startRowCacheOutOfRange = cachedStore.metric.rowCacheHitOutOfRange.getCount();
         // empty the row cache
@@ -478,7 +478,7 @@ public class RowCacheTest
         CompactionManager.instance.disableAutoCompaction();
 
         Keyspace keyspace = Keyspace.open(KEYSPACE_CACHED);
-        ColumnFamilyStore cachedStore  = keyspace.getColumnFamilyStore(CF_CACHED);
+        Table cachedStore  = keyspace.getColumnFamilyStore(CF_CACHED);
 
         // empty the row cache
         CacheService.instance.invalidateRowCache();
@@ -524,7 +524,7 @@ public class RowCacheTest
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
+        Table store = Keyspace.open(KEYSPACE_CACHED).getColumnFamilyStore(CF_CACHED);
 
         // empty the cache
         CacheService.instance.invalidateRowCache();
@@ -546,7 +546,7 @@ public class RowCacheTest
 
     private static void readData(String keyspace, String columnFamily, int offset, int numberOfRows)
     {
-        ColumnFamilyStore store = Keyspace.open(keyspace).getColumnFamilyStore(columnFamily);
+        Table store = Keyspace.open(keyspace).getColumnFamilyStore(columnFamily);
 
         for (int i = offset; i < offset + numberOfRows; i++)
         {

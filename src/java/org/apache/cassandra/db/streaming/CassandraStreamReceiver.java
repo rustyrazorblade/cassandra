@@ -29,7 +29,7 @@ import com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -57,7 +57,7 @@ public class CassandraStreamReceiver implements StreamReceiver
 
     private static final int MAX_ROWS_PER_BATCH = Integer.getInteger("cassandra.repair.mutation_repair_rows_per_batch", 100);
 
-    private final ColumnFamilyStore cfs;
+    private final Table cfs;
     private final StreamSession session;
 
     // Transaction tracking new files received
@@ -69,7 +69,7 @@ public class CassandraStreamReceiver implements StreamReceiver
     private final boolean requiresWritePath;
 
 
-    public CassandraStreamReceiver(ColumnFamilyStore cfs, StreamSession session, int totalFiles)
+    public CassandraStreamReceiver(Table cfs, StreamSession session, int totalFiles)
     {
         this.cfs = cfs;
         this.session = session;
@@ -130,12 +130,12 @@ public class CassandraStreamReceiver implements StreamReceiver
         txn.abort();
     }
 
-    private boolean hasViews(ColumnFamilyStore cfs)
+    private boolean hasViews(Table cfs)
     {
         return !Iterables.isEmpty(View.findAll(cfs.metadata.keyspace, cfs.getTableName()));
     }
 
-    private boolean hasCDC(ColumnFamilyStore cfs)
+    private boolean hasCDC(Table cfs)
     {
         return cfs.metadata().params.cdc;
     }
@@ -149,11 +149,11 @@ public class CassandraStreamReceiver implements StreamReceiver
      * For CDC-enabled tables, we want to ensure that the mutations are run through the CommitLog so they
      * can be archived by the CDC process on discard.
      */
-    private boolean requiresWritePath(ColumnFamilyStore cfs) {
+    private boolean requiresWritePath(Table cfs) {
         return hasCDC(cfs) || (session.streamOperation().requiresViewBuild() && hasViews(cfs));
     }
 
-    private void sendThroughWritePath(ColumnFamilyStore cfs, Collection<SSTableReader> readers) {
+    private void sendThroughWritePath(Table cfs, Collection<SSTableReader> readers) {
         boolean hasCdc = hasCDC(cfs);
         ColumnFilter filter = ColumnFilter.all(cfs.metadata());
         for (SSTableReader reader : readers)

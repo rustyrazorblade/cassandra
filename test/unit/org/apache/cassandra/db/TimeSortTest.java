@@ -33,7 +33,7 @@ public class TimeSortTest extends CQLTester
     public void testMixedSources() throws Throwable
     {
         String tableName = createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a, b))");
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
 
         execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?) USING TIMESTAMP ?", 0, 100, 0, 100L);
         cfs.forceBlockingFlush();
@@ -46,7 +46,7 @@ public class TimeSortTest extends CQLTester
     public void testTimeSort() throws Throwable
     {
         String tableName = createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a, b))");
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
 
         for (int i = 900; i < 1000; ++i)
             for (int j = 0; j < 8; ++j)

@@ -34,7 +34,7 @@ public class QueryPlan
 {
     private final QueryController controller;
 
-    public QueryPlan(ColumnFamilyStore cfs, ReadCommand command, long executionQuotaMs)
+    public QueryPlan(Table cfs, ReadCommand command, long executionQuotaMs)
     {
         this.controller = new QueryController(cfs, (PartitionRangeReadCommand) command, executionQuotaMs);
     }

@@ -70,7 +70,7 @@ public class PartitionRangeReadTest
     @Test
     public void testInclusiveBounds()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE2).getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE2).getColumnFamilyStore(CF_STANDARD1);
         new RowUpdateBuilder(cfs.metadata(), 0, ByteBufferUtil.bytes("key1"))
                 .clustering("cc1")
                 .add("val", "asdf").build().applyUnsafe();
@@ -86,7 +86,7 @@ public class PartitionRangeReadTest
     {
         String cfname = CF_STANDARDINT;
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        Table cfs = keyspace.getColumnFamilyStore(cfname);
         cfs.truncateBlocking();
 
         ByteBuffer col = ByteBufferUtil.bytes("val");
@@ -120,7 +120,7 @@ public class PartitionRangeReadTest
     @Test
     public void testLimits()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_COMPACT1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_COMPACT1);
         for (int i = 0; i < 10; i++)
         {
             new RowUpdateBuilder(cfs.metadata(), 0, Integer.toString(i))
@@ -147,7 +147,7 @@ public class PartitionRangeReadTest
         String keyspaceName = KEYSPACE1;
         String cfName = CF_STANDARD1;
         Keyspace keyspace = Keyspace.open(keyspaceName);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        Table cfs = keyspace.getColumnFamilyStore(cfName);
         cfs.clearUnsafe();
 
         for (int i = 0; i < 10; ++i)

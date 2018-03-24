@@ -24,7 +24,7 @@ import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 
@@ -53,7 +53,7 @@ public class StreamReceiveTask extends StreamTask
     public StreamReceiveTask(StreamSession session, TableId tableId, int totalStreams, long totalSize)
     {
         super(session, tableId);
-        this.receiver = ColumnFamilyStore.getIfExists(tableId).getStreamManager().createStreamReceiver(session, totalStreams);
+        this.receiver = Table.getIfExists(tableId).getStreamManager().createStreamReceiver(session, totalStreams);
         this.totalStreams = totalStreams;
         this.totalSize = totalSize;
     }
@@ -118,7 +118,7 @@ public class StreamReceiveTask extends StreamTask
         {
             try
             {
-                if (ColumnFamilyStore.getIfExists(task.tableId) == null)
+                if (Table.getIfExists(task.tableId) == null)
                 {
                     // schema was dropped during streaming
                     task.receiver.abort();

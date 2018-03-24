@@ -31,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.schema.ColumnMetadata.ClusteringOrder;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.functions.*;
@@ -340,7 +341,7 @@ public final class SchemaKeyspace
      * @param schemaTableName The name of the table responsible for part of the schema
      * @return CFS responsible to hold low-level serialized schema
      */
-    private static ColumnFamilyStore getSchemaCFS(String schemaTableName)
+    private static Table getSchemaCFS(String schemaTableName)
     {
         return Keyspace.open(SchemaConstants.SCHEMA_KEYSPACE_NAME).getColumnFamilyStore(schemaTableName);
     }
@@ -351,7 +352,7 @@ public final class SchemaKeyspace
      */
     private static ReadCommand getReadCommandForTableSchema(String schemaTableName)
     {
-        ColumnFamilyStore cfs = getSchemaCFS(schemaTableName);
+        Table cfs = getSchemaCFS(schemaTableName);
         return PartitionRangeReadCommand.allDataRead(cfs.metadata(), FBUtilities.nowInSeconds());
     }
 

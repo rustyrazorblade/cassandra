@@ -28,7 +28,6 @@ import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
@@ -68,7 +67,7 @@ public class LongLeveledCompactionStrategyTest
         String ksname = KEYSPACE1;
         String cfname = "StandardLeveled";
         Keyspace keyspace = Keyspace.open(ksname);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(cfname);
+        Table store = keyspace.getColumnFamilyStore(cfname);
         store.disableAutoCompaction();
         CompactionStrategyManager mgr = store.getCompactionStrategyManager();
         LeveledCompactionStrategy lcs = (LeveledCompactionStrategy) mgr.getStrategies().get(1).get(0);
@@ -150,7 +149,7 @@ public class LongLeveledCompactionStrategyTest
     public void testLeveledScanner() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_STANDARDLVL2);
+        Table store = keyspace.getColumnFamilyStore(CF_STANDARDLVL2);
         ByteBuffer value = ByteBuffer.wrap(new byte[100 * 1024]); // 100 KB value, make it easy to have multiple files
 
         // Enough data to have a level 1 and 2

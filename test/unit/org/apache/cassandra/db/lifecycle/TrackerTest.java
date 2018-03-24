@@ -36,7 +36,7 @@ import org.junit.Test;
 
 import junit.framework.Assert;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
@@ -82,7 +82,7 @@ public class TrackerTest
     @Test
     public void testTryModify()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         Tracker tracker = new Tracker(null, false);
         List<SSTableReader> readers = ImmutableList.of(MockSchema.sstable(0, true, cfs), MockSchema.sstable(1, cfs), MockSchema.sstable(2, cfs));
         tracker.addInitialSSTables(copyOf(readers));
@@ -105,7 +105,7 @@ public class TrackerTest
     @Test
     public void testApply()
     {
-        final ColumnFamilyStore cfs = MockSchema.newCFS();
+        final Table cfs = MockSchema.newCFS();
         final Tracker tracker = new Tracker(null, false);
         final View resultView = ViewTest.fakeView(0, 0, cfs);
         final AtomicInteger count = new AtomicInteger();
@@ -146,7 +146,7 @@ public class TrackerTest
     @Test
     public void testAddInitialSSTables()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         Tracker tracker = cfs.getTracker();
         List<SSTableReader> readers = ImmutableList.of(MockSchema.sstable(0, 17, cfs),
                                                        MockSchema.sstable(1, 121, cfs),
@@ -166,7 +166,7 @@ public class TrackerTest
     {
         boolean backups = DatabaseDescriptor.isIncrementalBackupsEnabled();
         DatabaseDescriptor.setIncrementalBackupsEnabled(false);
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         Tracker tracker = cfs.getTracker();
         MockListener listener = new MockListener(false);
         tracker.subscribe(listener);
@@ -198,7 +198,7 @@ public class TrackerTest
 
     private void testDropSSTables(boolean invalidate)
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         Tracker tracker = cfs.getTracker();
         MockListener listener = new MockListener(false);
         tracker.subscribe(listener);
@@ -263,7 +263,7 @@ public class TrackerTest
     {
         boolean backups = DatabaseDescriptor.isIncrementalBackupsEnabled();
         DatabaseDescriptor.setIncrementalBackupsEnabled(false);
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         MockListener listener = new MockListener(false);
         Tracker tracker = cfs.getTracker();
         tracker.subscribe(listener);
@@ -337,7 +337,7 @@ public class TrackerTest
     @Test
     public void testNotifications()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         SSTableReader r1 = MockSchema.sstable(0, cfs), r2 = MockSchema.sstable(1, cfs);
         Tracker tracker = new Tracker(null, false);
         MockListener listener = new MockListener(false);

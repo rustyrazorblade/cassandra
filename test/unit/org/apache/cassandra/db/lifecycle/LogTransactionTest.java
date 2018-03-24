@@ -34,7 +34,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import junit.framework.Assert;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.*;
@@ -79,14 +79,14 @@ public class LogTransactionTest extends AbstractTransactionalTest
     {
         private final static class Transaction extends Transactional.AbstractTransactional implements Transactional
         {
-            final ColumnFamilyStore cfs;
+            final Table cfs;
             final LogTransaction txnLogs;
             final File dataFolder;
             final SSTableReader sstableOld;
             final SSTableReader sstableNew;
             final LogTransaction.SSTableTidier tidier;
 
-            Transaction(ColumnFamilyStore cfs, LogTransaction txnLogs) throws IOException
+            Transaction(Table cfs, LogTransaction txnLogs) throws IOException
             {
                 this.cfs = cfs;
                 this.txnLogs = txnLogs;
@@ -161,12 +161,12 @@ public class LogTransactionTest extends AbstractTransactionalTest
             this(MockSchema.newCFS(KEYSPACE));
         }
 
-        private TxnTest(ColumnFamilyStore cfs) throws IOException
+        private TxnTest(Table cfs) throws IOException
         {
             this(cfs, new LogTransaction(OperationType.COMPACTION));
         }
 
-        private TxnTest(ColumnFamilyStore cfs, LogTransaction txnLogs) throws IOException
+        private TxnTest(Table cfs, LogTransaction txnLogs) throws IOException
         {
             this(new Transaction(cfs, txnLogs));
         }
@@ -201,7 +201,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testUntrack() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstableNew = sstable(dataFolder, cfs, 1, 128);
 
@@ -224,7 +224,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testCommitSameDesc() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstableOld1 = sstable(dataFolder, cfs, 0, 128);
         SSTableReader sstableOld2 = sstable(dataFolder, cfs, 0, 256);
@@ -255,7 +255,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testCommitOnlyNew() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstable = sstable(dataFolder, cfs, 0, 128);
 
@@ -273,7 +273,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testCommitOnlyOld() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstable = sstable(dataFolder, cfs, 0, 128);
 
@@ -293,7 +293,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testCommitMultipleFolders() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
 
         File origiFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         File dataFolder1 = new File(origiFolder, "1");
@@ -330,7 +330,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testAbortOnlyNew() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstable = sstable(dataFolder, cfs, 0, 128);
 
@@ -348,7 +348,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testAbortOnlyOld() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstable = sstable(dataFolder, cfs, 0, 128);
 
@@ -369,7 +369,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testAbortMultipleFolders() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
 
         File origiFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         File dataFolder1 = new File(origiFolder, "1");
@@ -405,7 +405,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testRemoveUnfinishedLeftovers_abort() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstableOld = sstable(dataFolder, cfs, 0, 128);
         SSTableReader sstableNew = sstable(dataFolder, cfs, 1, 128);
@@ -442,7 +442,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testRemoveUnfinishedLeftovers_commit() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstableOld = sstable(dataFolder, cfs, 0, 128);
         SSTableReader sstableNew = sstable(dataFolder, cfs, 1, 128);
@@ -482,7 +482,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testRemoveUnfinishedLeftovers_commit_multipleFolders() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
 
         File origiFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         File dataFolder1 = new File(origiFolder, "1");
@@ -533,7 +533,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testRemoveUnfinishedLeftovers_abort_multipleFolders() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
 
         File origiFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         File dataFolder1 = new File(origiFolder, "1");
@@ -708,7 +708,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
 
     private static void testRemoveUnfinishedLeftovers_multipleFolders_errorConditions(Consumer<LogTransaction> modifier, boolean shouldCommit) throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
 
         File origiFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         File dataFolder1 = new File(origiFolder, "1");
@@ -766,7 +766,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testGetTemporaryFiles() throws IOException
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstable1 = sstable(dataFolder, cfs, 0, 128);
 
@@ -833,7 +833,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testGetTemporaryFilesMultipleFolders() throws IOException
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
 
         File origiFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         File dataFolder1 = new File(origiFolder, "1");
@@ -993,7 +993,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
 
     private static void testCorruptRecord(BiConsumer<LogTransaction, SSTableReader> modifier, boolean isRecoverable) throws IOException
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstableOld = sstable(dataFolder, cfs, 0, 128);
         SSTableReader sstableNew = sstable(dataFolder, cfs, 1, 128);
@@ -1065,7 +1065,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
 
     private static void testObsoletedFilesChanged(Consumer<SSTableReader> modifier) throws IOException
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstableOld = sstable(dataFolder, cfs, 0, 128);
         SSTableReader sstableNew = sstable(dataFolder, cfs, 1, 128);
@@ -1108,7 +1108,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testGetTemporaryFilesSafeAfterObsoletion() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstable = sstable(dataFolder, cfs, 0, 128);
 
@@ -1132,7 +1132,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     @Test
     public void testGetTemporaryFilesThrowsIfCompletingAfterObsoletion() throws Throwable
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS(KEYSPACE);
+        Table cfs = MockSchema.newCFS(KEYSPACE);
         File dataFolder = new Directories(cfs.metadata()).getDirectoryForNewSSTables();
         SSTableReader sstable = sstable(dataFolder, cfs, 0, 128);
 
@@ -1163,7 +1163,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
         logs.finish();
     }
 
-    private static SSTableReader sstable(File dataFolder, ColumnFamilyStore cfs, int generation, int size) throws IOException
+    private static SSTableReader sstable(File dataFolder, Table cfs, int generation, int size) throws IOException
     {
         Descriptor descriptor = new Descriptor(dataFolder, cfs.keyspace.getName(), cfs.getTableName(), generation, SSTableFormat.Type.BIG);
         Set<Component> components = ImmutableSet.of(Component.DATA, Component.PRIMARY_INDEX, Component.FILTER, Component.TOC);

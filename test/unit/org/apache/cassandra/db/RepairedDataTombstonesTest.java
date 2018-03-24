@@ -306,7 +306,7 @@ public class RepairedDataTombstonesTest extends CQLTester
         assertEquals(expectedRows, foundRows);
     }
 
-    public static void repair(ColumnFamilyStore cfs, SSTableReader sstable) throws IOException
+    public static void repair(Table cfs, SSTableReader sstable) throws IOException
     {
         sstable.descriptor.getMetadataSerializer().mutateRepaired(sstable.descriptor, 1, null);
         sstable.reloadSSTableMetadata();

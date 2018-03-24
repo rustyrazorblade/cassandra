@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.cli.*;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -61,7 +61,7 @@ public class StandaloneUpgrader
                                                                  options.cf));
 
             Keyspace keyspace = Keyspace.openWithoutSSTables(options.keyspace);
-            ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(options.cf);
+            Table cfs = keyspace.getColumnFamilyStore(options.cf);
 
             OutputHandler handler = new OutputHandler.SystemOutput(false, options.debug);
             Directories.SSTableLister lister = cfs.getDirectories().sstableLister(Directories.OnTxnErr.THROW);

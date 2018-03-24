@@ -23,7 +23,7 @@ import java.io.IOException;
 import java.util.concurrent.*;
 
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 import org.openjdk.jmh.annotations.*;
 
@@ -41,7 +41,7 @@ public class ReadWriteTest extends CQLTester
     String writeStatement;
     String readStatement;
     long numRows = 0;
-    ColumnFamilyStore cfs;
+    Table cfs;
 
     @Setup(Level.Trial)
     public void setup() throws Throwable

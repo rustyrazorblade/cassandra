@@ -63,6 +63,7 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.Verifier;
@@ -1043,7 +1044,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
     private void executePreJoinTasks(boolean bootstrap)
     {
-        StreamSupport.stream(ColumnFamilyStore.all().spliterator(), false)
+        StreamSupport.stream(Table.all().spliterator(), false)
                 .filter(cfs -> Schema.instance.getUserKeyspaces().contains(cfs.keyspace.getName()))
                 .forEach(cfs -> cfs.indexManager.executePreJoinTasksBlocking(bootstrap));
     }
@@ -1537,9 +1538,9 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     {
         for (Keyspace keyspace : Keyspace.all())
         {
-            for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+            for (Table cfs : keyspace.getColumnFamilyStores())
             {
-                for (final ColumnFamilyStore store : cfs.concatWithIndexes())
+                for (final Table store : cfs.concatWithIndexes())
                 {
                     store.invalidateDiskBoundaries();
                 }
@@ -3113,7 +3114,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             throw new RuntimeException("Cleanup of the system keyspace is neither necessary nor wise");
 
         CompactionManager.AllSSTableOpStatus status = CompactionManager.AllSSTableOpStatus.SUCCESSFUL;
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(false, false, keyspaceName, tables))
+        for (Table cfStore : getValidColumnFamilies(false, false, keyspaceName, tables))
         {
             CompactionManager.AllSSTableOpStatus oneStatus = cfStore.forceCleanup(jobs);
             if (oneStatus != CompactionManager.AllSSTableOpStatus.SUCCESSFUL)
@@ -3140,7 +3141,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, boolean reinsertOverflowedTTL, int jobs, String keyspaceName, String... tables) throws IOException, ExecutionException, InterruptedException
     {
         CompactionManager.AllSSTableOpStatus status = CompactionManager.AllSSTableOpStatus.SUCCESSFUL;
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(true, false, keyspaceName, tables))
+        for (Table cfStore : getValidColumnFamilies(true, false, keyspaceName, tables))
         {
             CompactionManager.AllSSTableOpStatus oneStatus = cfStore.scrub(disableSnapshot, skipCorrupted, reinsertOverflowedTTL, checkData, jobs);
             if (oneStatus != CompactionManager.AllSSTableOpStatus.SUCCESSFUL)
@@ -3165,7 +3166,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                                                      .checkOwnsTokens(checkOwnsTokens)
                                                      .quick(quick).build();
         logger.info("Verifying {}.{} with options = {}", keyspaceName, Arrays.toString(tableNames), options);
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(false, false, keyspaceName, tableNames))
+        for (Table cfStore : getValidColumnFamilies(false, false, keyspaceName, tableNames))
         {
             CompactionManager.AllSSTableOpStatus oneStatus = cfStore.verify(options);
             if (oneStatus != CompactionManager.AllSSTableOpStatus.SUCCESSFUL)
@@ -3182,7 +3183,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     public int upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, int jobs, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
         CompactionManager.AllSSTableOpStatus status = CompactionManager.AllSSTableOpStatus.SUCCESSFUL;
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(true, true, keyspaceName, tableNames))
+        for (Table cfStore : getValidColumnFamilies(true, true, keyspaceName, tableNames))
         {
             CompactionManager.AllSSTableOpStatus oneStatus = cfStore.sstablesRewrite(excludeCurrentVersion, jobs);
             if (oneStatus != CompactionManager.AllSSTableOpStatus.SUCCESSFUL)
@@ -3193,7 +3194,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
     public void forceKeyspaceCompaction(boolean splitOutput, String keyspaceName, String... tableNames) throws IOException, ExecutionException, InterruptedException
     {
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(true, false, keyspaceName, tableNames))
+        for (Table cfStore : getValidColumnFamilies(true, false, keyspaceName, tableNames))
         {
             cfStore.forceMajorCompaction(splitOutput);
         }
@@ -3207,7 +3208,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     public int relocateSSTables(int jobs, String keyspaceName, String ... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
         CompactionManager.AllSSTableOpStatus status = CompactionManager.AllSSTableOpStatus.SUCCESSFUL;
-        for (ColumnFamilyStore cfs : getValidColumnFamilies(false, false, keyspaceName, columnFamilies))
+        for (Table cfs : getValidColumnFamilies(false, false, keyspaceName, columnFamilies))
         {
             CompactionManager.AllSSTableOpStatus oneStatus = cfs.relocateSSTables(jobs);
             if (oneStatus != CompactionManager.AllSSTableOpStatus.SUCCESSFUL)
@@ -3220,7 +3221,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     {
         TombstoneOption tombstoneOption = TombstoneOption.valueOf(tombstoneOptionString);
         CompactionManager.AllSSTableOpStatus status = CompactionManager.AllSSTableOpStatus.SUCCESSFUL;
-        for (ColumnFamilyStore cfs : getValidColumnFamilies(false, false, keyspaceName, columnFamilies))
+        for (Table cfs : getValidColumnFamilies(false, false, keyspaceName, columnFamilies))
         {
             CompactionManager.AllSSTableOpStatus oneStatus = cfs.garbageCollect(tombstoneOption, jobs);
             if (oneStatus != CompactionManager.AllSSTableOpStatus.SUCCESSFUL)
@@ -3275,7 +3276,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     {
         Collection<Range<Token>> tokenRanges = createRepairRangeFrom(startToken, endToken);
 
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(true, false, keyspaceName, tableNames))
+        for (Table cfStore : getValidColumnFamilies(true, false, keyspaceName, tableNames))
         {
             cfStore.forceCompactionForTokenRange(tokenRanges);
         }
@@ -3377,7 +3378,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                     throw new IOException("You must supply a snapshot name.");
 
                 Keyspace keyspace = getValidKeyspace(keyspaceName);
-                ColumnFamilyStore columnFamilyStore = keyspace.getColumnFamilyStore(tableName);
+                Table columnFamilyStore = keyspace.getColumnFamilyStore(tableName);
                 // As there can be multiple column family from same keyspace check if snapshot exist for that specific
                 // columnfamily and not for whole keyspace
 
@@ -3453,7 +3454,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             if (SchemaConstants.isLocalSystemKeyspace(keyspace.getName()))
                 continue;
 
-            for (ColumnFamilyStore cfStore : keyspace.getColumnFamilyStores())
+            for (Table cfStore : keyspace.getColumnFamilyStores())
             {
                 for (Map.Entry<String, Pair<Long,Long>> snapshotDetail : cfStore.getSnapshotDetails().entrySet())
                 {
@@ -3479,7 +3480,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             if (SchemaConstants.isLocalSystemKeyspace(keyspace.getName()))
                 continue;
 
-            for (ColumnFamilyStore cfStore : keyspace.getColumnFamilyStores())
+            for (Table cfStore : keyspace.getColumnFamilyStores())
             {
                 total += cfStore.trueSnapshotsSize();
             }
@@ -3500,7 +3501,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
      * @param cfNames CFs
      * @throws java.lang.IllegalArgumentException when given CF name does not exist
      */
-    public Iterable<ColumnFamilyStore> getValidColumnFamilies(boolean allowIndexes, boolean autoAddIndexes, String keyspaceName, String... cfNames) throws IOException
+    public Iterable<Table> getValidColumnFamilies(boolean allowIndexes, boolean autoAddIndexes, String keyspaceName, String... cfNames) throws IOException
     {
         Keyspace keyspace = getValidKeyspace(keyspaceName);
         return keyspace.getValidColumnFamilies(allowIndexes, autoAddIndexes, cfNames);
@@ -3514,7 +3515,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
      */
     public void forceKeyspaceFlush(String keyspaceName, String... tableNames) throws IOException
     {
-        for (ColumnFamilyStore cfStore : getValidColumnFamilies(true, false, keyspaceName, tableNames))
+        for (Table cfStore : getValidColumnFamilies(true, false, keyspaceName, tableNames))
         {
             logger.debug("Forcing flush on keyspace {}, CF {}", keyspaceName, cfStore.name);
             cfStore.forceBlockingFlush();
@@ -3895,7 +3896,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     public List<Pair<Range<Token>, Long>> getSplits(String keyspaceName, String cfName, Range<Token> range, int keysPerSplit)
     {
         Keyspace t = Keyspace.open(keyspaceName);
-        ColumnFamilyStore cfs = t.getColumnFamilyStore(cfName);
+        Table cfs = t.getColumnFamilyStore(cfName);
         List<DecoratedKey> keys = keySamples(Collections.singleton(cfs), range);
 
         long totalRowCountEstimate = cfs.estimatedKeysForRange(range);
@@ -3909,7 +3910,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         return getSplits(tokens, splitCount, cfs);
     }
 
-    private List<Pair<Range<Token>, Long>> getSplits(List<Token> tokens, int splitCount, ColumnFamilyStore cfs)
+    private List<Pair<Range<Token>, Long>> getSplits(List<Token> tokens, int splitCount, Table cfs)
     {
         double step = (double) (tokens.size() - 1) / splitCount;
         Token prevToken = tokens.get(0);
@@ -3936,10 +3937,10 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         return tokens;
     }
 
-    private List<DecoratedKey> keySamples(Iterable<ColumnFamilyStore> cfses, Range<Token> range)
+    private List<DecoratedKey> keySamples(Iterable<Table> cfses, Range<Token> range)
     {
         List<DecoratedKey> keys = new ArrayList<>();
-        for (ColumnFamilyStore cfs : cfses)
+        for (Table cfs : cfses)
             Iterables.addAll(keys, cfs.keySamples(range));
         FBUtilities.sortSampledKeys(keys, range);
         return keys;
@@ -4617,7 +4618,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
             // disable autocompaction - we don't want to start any new compactions while we are draining
             for (Keyspace keyspace : Keyspace.all())
-                for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+                for (Table cfs : keyspace.getColumnFamilyStores())
                     cfs.disableAutoCompaction();
 
             // count CFs first, since forceFlush could block for the flushWriter to get a queue slot empty
@@ -4629,7 +4630,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             List<Future<?>> flushes = new ArrayList<>();
             for (Keyspace keyspace : Keyspace.nonSystem())
             {
-                for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+                for (Table cfs : keyspace.getColumnFamilyStores())
                     flushes.add(cfs.forceFlush());
             }
             // wait for the flushes.
@@ -4661,7 +4662,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             flushes.clear();
             for (Keyspace keyspace : Keyspace.system())
             {
-                for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+                for (Table cfs : keyspace.getColumnFamilyStores())
                     flushes.add(cfs.forceFlush());
             }
             FBUtilities.waitOnFutures(flushes);
@@ -4682,7 +4683,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             if (!ScheduledExecutors.nonPeriodicTasks.awaitTermination(1, TimeUnit.MINUTES))
                 logger.warn("Failed to wait for non periodic tasks to shutdown");
 
-            ColumnFamilyStore.shutdownPostFlushExecutor();
+            Table.shutdownPostFlushExecutor();
             setMode(Mode.DRAINED, !isFinalShutdown);
         }
         catch (Throwable t)
@@ -5237,7 +5238,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
      */
     public void loadNewSSTables(String ksName, String cfName)
     {
-        ColumnFamilyStore.loadNewSSTables(ksName, cfName);
+        Table.loadNewSSTables(ksName, cfName);
     }
 
     /**
@@ -5265,7 +5266,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                                            .collect(toList())
                                            .toArray(new String[idxNames.length]);
 
-        ColumnFamilyStore.rebuildSecondaryIndex(ksName, cfName, indices);
+        Table.rebuildSecondaryIndex(ksName, cfName, indices);
     }
 
     public void resetLocalSchema() throws IOException
@@ -5290,7 +5291,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
     public void disableAutoCompaction(String ks, String... tables) throws IOException
     {
-        for (ColumnFamilyStore cfs : getValidColumnFamilies(true, true, ks, tables))
+        for (Table cfs : getValidColumnFamilies(true, true, ks, tables))
         {
             cfs.disableAutoCompaction();
         }
@@ -5300,7 +5301,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     {
         checkServiceAllowedToStart("auto compaction");
 
-        for (ColumnFamilyStore cfs : getValidColumnFamilies(true, true, ks, tables))
+        for (Table cfs : getValidColumnFamilies(true, true, ks, tables))
         {
             cfs.enableAutoCompaction();
         }
@@ -5309,7 +5310,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     public Map<String, Boolean> getAutoCompactionStatus(String ks, String... tables) throws IOException
     {
         Map<String, Boolean> status = new HashMap<String, Boolean>();
-        for (ColumnFamilyStore cfs : getValidColumnFamilies(true, true, ks, tables))
+        for (Table cfs : getValidColumnFamilies(true, true, ks, tables))
             status.put(cfs.getTableName(), cfs.isAutoCompactionDisabled());
         return status;
     }

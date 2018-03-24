@@ -22,20 +22,16 @@ import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
-import com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.Test;
 
 import org.apache.cassandra.Util;
 import org.apache.cassandra.UpdateBuilder;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -56,8 +52,6 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.metrics.StorageMetrics;
-import org.apache.cassandra.streaming.PreviewKind;
-import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
@@ -71,7 +65,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void basicTest() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         for (int j = 0; j < 100; j ++)
@@ -110,7 +104,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void basicTest2() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -142,7 +136,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void getPositionsTest() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -198,7 +192,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testNumberOfFilesAndSizes() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -254,7 +248,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testNumberOfFiles_dont_clean_readers() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -302,7 +296,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
             public void run(ISSTableScanner scanner,
                             CompactionController controller,
                             SSTableReader sstable,
-                            ColumnFamilyStore cfs,
+                            Table cfs,
                             SSTableRewriter rewriter,
                             LifecycleTransaction txn)
             {
@@ -333,7 +327,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
             public void run(ISSTableScanner scanner,
                             CompactionController controller,
                             SSTableReader sstable,
-                            ColumnFamilyStore cfs,
+                            Table cfs,
                             SSTableRewriter rewriter,
                             LifecycleTransaction txn)
             {
@@ -369,7 +363,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
             public void run(ISSTableScanner scanner,
                             CompactionController controller,
                             SSTableReader sstable,
-                            ColumnFamilyStore cfs,
+                            Table cfs,
                             SSTableRewriter rewriter,
                             LifecycleTransaction txn)
             {
@@ -397,7 +391,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         public void run(ISSTableScanner scanner,
                         CompactionController controller,
                         SSTableReader sstable,
-                        ColumnFamilyStore cfs,
+                        Table cfs,
                         SSTableRewriter rewriter,
                         LifecycleTransaction txn);
     }
@@ -405,7 +399,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     private void testNumberOfFiles_abort(RewriterTest test) throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -438,7 +432,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testNumberOfFiles_finish_empty_new_writer() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -483,7 +477,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testNumberOfFiles_truncate() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
         cfs.disableAutoCompaction();
 
@@ -523,7 +517,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testSmallFiles() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
         cfs.disableAutoCompaction();
 
@@ -565,7 +559,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testSSTableSplit() throws InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
         cfs.disableAutoCompaction();
         SSTableReader s = writeFile(cfs, 1000);
@@ -612,7 +606,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     private void testAbortHelper(boolean earlyException, boolean offline) throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
         SSTableReader s = writeFile(cfs, 1000);
         if (!offline)
@@ -686,7 +680,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testAllKeysReadable() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
         for (int i = 0; i < 100; i++)
         {
@@ -739,7 +733,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testCanonicalView() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -761,7 +755,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
                 if (!checked && writer.currentWriter().getFilePointer() > 15000000)
                 {
                     checked = true;
-                    ColumnFamilyStore.ViewFragment viewFragment = cfs.select(View.selectFunction(SSTableSet.CANONICAL));
+                    Table.ViewFragment viewFragment = cfs.select(View.selectFunction(SSTableSet.CANONICAL));
                     // canonical view should have only one SSTable which is not opened early.
                     assertEquals(1, viewFragment.sstables.size());
                     SSTableReader sstable = viewFragment.sstables.get(0);
@@ -783,7 +777,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testTwoWriters() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         SSTableReader s = writeFile(cfs, 1000);
@@ -819,7 +813,7 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
     public void testCanonicalSSTables() throws ExecutionException, InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        final ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        final Table cfs = keyspace.getColumnFamilyStore(CF);
         truncate(cfs);
 
         cfs.addSSTable(writeFile(cfs, 100));
@@ -864,12 +858,12 @@ public class SSTableRewriterTest extends SSTableWriterTestBase
         }
     }
 
-    public static SSTableReader writeFile(ColumnFamilyStore cfs, int count)
+    public static SSTableReader writeFile(Table cfs, int count)
     {
         return Iterables.getFirst(writeFiles(cfs, 1, count * 5, count / 100, 1000), null);
     }
 
-    public static Set<SSTableReader> writeFiles(ColumnFamilyStore cfs, int fileCount, int partitionCount, int cellCount, int cellSize)
+    public static Set<SSTableReader> writeFiles(Table cfs, int fileCount, int partitionCount, int cellCount, int cellSize)
     {
         int i = 0;
         Set<SSTableReader> result = new LinkedHashSet<>();

@@ -31,7 +31,7 @@ import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.lifecycle.SSTableIntervalTree;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
@@ -62,9 +62,9 @@ public class CassandraStreamManager implements TableStreamManager
 {
     private static final Logger logger = LoggerFactory.getLogger(CassandraStreamManager.class);
 
-    private final ColumnFamilyStore cfs;
+    private final Table cfs;
 
-    public CassandraStreamManager(ColumnFamilyStore cfs)
+    public CassandraStreamManager(Table cfs)
     {
         this.cfs = cfs;
     }

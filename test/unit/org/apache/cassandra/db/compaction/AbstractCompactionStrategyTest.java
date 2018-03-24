@@ -29,7 +29,7 @@ import org.junit.Test;
 import junit.framework.Assert;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -106,7 +106,7 @@ public class AbstractCompactionStrategyTest
 
     public void testGetNextBackgroundTaskDoesNotBlock(String table)
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(table);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(table);
         AbstractCompactionStrategy strategy = cfs.getCompactionStrategyManager().getStrategies().get(1).get(0);
 
         // Add 4 sstables
@@ -133,7 +133,7 @@ public class AbstractCompactionStrategyTest
     {
         long timestamp = System.currentTimeMillis();
         DecoratedKey dk = Util.dk(String.format("%03d", key));
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(table);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(table);
         new RowUpdateBuilder(cfs.metadata(), timestamp, dk.getKey())
         .clustering(String.valueOf(key))
         .add("val", "val")

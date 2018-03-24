@@ -59,7 +59,7 @@ public class SystemKeyspaceMigrator40
 
     private static void migratePeers()
     {
-        ColumnFamilyStore newPeers = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.PEERS_V2);
+        Table newPeers = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.PEERS_V2);
 
         if (!newPeers.isEmpty())
              return;
@@ -112,7 +112,7 @@ public class SystemKeyspaceMigrator40
 
     private static void migratePeerEvents()
     {
-        ColumnFamilyStore newPeerEvents = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.PEER_EVENTS_V2);
+        Table newPeerEvents = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.PEER_EVENTS_V2);
 
         if (!newPeerEvents.isEmpty())
             return;
@@ -145,7 +145,7 @@ public class SystemKeyspaceMigrator40
 
     static void migrateTransferredRanges()
     {
-        ColumnFamilyStore newTransferredRanges = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.TRANSFERRED_RANGES_V2);
+        Table newTransferredRanges = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.TRANSFERRED_RANGES_V2);
 
         if (!newTransferredRanges.isEmpty())
             return;

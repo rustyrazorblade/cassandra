@@ -91,7 +91,7 @@ public final class CounterCacheKey extends CacheKey
      * @return the value for the counter represented by this key, or {@code null} if there
      * is not such counter.
      */
-    public ByteBuffer readCounterValue(ColumnFamilyStore cfs)
+    public ByteBuffer readCounterValue(Table cfs)
     {
         TableMetadata metadata = cfs.metadata();
         assert metadata.id.equals(tableId) && Objects.equals(metadata.indexName().orElse(null), indexName);

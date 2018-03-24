@@ -20,7 +20,6 @@ package org.apache.cassandra.tools;
 
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.utils.OutputHandler;
@@ -28,7 +27,6 @@ import org.apache.commons.cli.*;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 
 import static org.apache.cassandra.tools.BulkLoader.CmdLineOptions;

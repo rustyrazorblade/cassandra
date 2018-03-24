@@ -28,7 +28,7 @@ public class RemoveCellTest extends CQLTester
     public void testDeleteCell() throws Throwable
     {
         String tableName = createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a, b))");
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
         execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?) USING TIMESTAMP ?", 0, 0, 0, 0L);
         cfs.forceBlockingFlush();
         execute("DELETE c FROM %s USING TIMESTAMP ? WHERE a = ? AND b = ?", 1L, 0, 0);

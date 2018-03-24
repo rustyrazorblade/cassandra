@@ -40,7 +40,7 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.SystemKeyspace;
@@ -106,7 +106,7 @@ public class CommitLogReplayer implements CommitLogReadHandler
         Map<TableId, IntervalSet<CommitLogPosition>> cfPersisted = new HashMap<>();
         ReplayFilter replayFilter = ReplayFilter.create();
 
-        for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
+        for (Table cfs : Table.all())
         {
             // but, if we've truncated the cf in question, then we need to need to start replay after the truncation
             CommitLogPosition truncatedAt = SystemKeyspace.getTruncatedPosition(cfs.metadata.id);
@@ -339,7 +339,7 @@ public class CommitLogReplayer implements CommitLogReadHandler
                 Keyspace ks = Schema.instance.getKeyspaceInstance(pair[0]);
                 if (ks == null)
                     throw new IllegalArgumentException("Unknown keyspace " + pair[0]);
-                ColumnFamilyStore cfs = ks.getColumnFamilyStore(pair[1]);
+                Table cfs = ks.getColumnFamilyStore(pair[1]);
                 if (cfs == null)
                     throw new IllegalArgumentException(String.format("Unknown table %s.%s", pair[0], pair[1]));
 

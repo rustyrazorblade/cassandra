@@ -24,7 +24,6 @@ import java.util.concurrent.locks.Lock;
 
 import com.google.common.base.Function;
 import com.google.common.base.Objects;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.PeekingIterator;
@@ -190,7 +189,7 @@ public class CounterMutation implements IMutation
 
     private PartitionUpdate processModifications(PartitionUpdate changes)
     {
-        ColumnFamilyStore cfs = Keyspace.open(getKeyspaceName()).getColumnFamilyStore(changes.metadata().id);
+        Table cfs = Keyspace.open(getKeyspaceName()).getColumnFamilyStore(changes.metadata().id);
 
         List<PartitionUpdate.CounterMark> marks = changes.collectCounterMarks();
 
@@ -212,7 +211,7 @@ public class CounterMutation implements IMutation
         return changes;
     }
 
-    private void updateWithCurrentValue(PartitionUpdate.CounterMark mark, ClockAndCount currentValue, ColumnFamilyStore cfs)
+    private void updateWithCurrentValue(PartitionUpdate.CounterMark mark, ClockAndCount currentValue, Table cfs)
     {
         long clock = Math.max(FBUtilities.timestampMicros(), currentValue.clock + 1L);
         long count = currentValue.count + CounterContext.instance().total(mark.value());
@@ -224,7 +223,7 @@ public class CounterMutation implements IMutation
     }
 
     // Returns the count of cache misses.
-    private void updateWithCurrentValuesFromCache(List<PartitionUpdate.CounterMark> marks, ColumnFamilyStore cfs)
+    private void updateWithCurrentValuesFromCache(List<PartitionUpdate.CounterMark> marks, Table cfs)
     {
         Iterator<PartitionUpdate.CounterMark> iter = marks.iterator();
         while (iter.hasNext())
@@ -240,7 +239,7 @@ public class CounterMutation implements IMutation
     }
 
     // Reads the missing current values from the CFS.
-    private void updateWithCurrentValuesFromCFS(List<PartitionUpdate.CounterMark> marks, ColumnFamilyStore cfs)
+    private void updateWithCurrentValuesFromCFS(List<PartitionUpdate.CounterMark> marks, Table cfs)
     {
         ColumnFilter.Builder builder = ColumnFilter.selectionBuilder();
         BTreeSet.Builder<Clustering> names = BTreeSet.builder(cfs.metadata().comparator);
@@ -273,7 +272,7 @@ public class CounterMutation implements IMutation
         }
     }
 
-    private int compare(Clustering c1, Clustering c2, ColumnFamilyStore cfs)
+    private int compare(Clustering c1, Clustering c2, Table cfs)
     {
         if (c1 == Clustering.STATIC_CLUSTERING)
             return c2 == Clustering.STATIC_CLUSTERING ? 0 : -1;
@@ -283,7 +282,7 @@ public class CounterMutation implements IMutation
         return cfs.getComparator().compare(c1, c2);
     }
 
-    private void updateForRow(PeekingIterator<PartitionUpdate.CounterMark> markIter, Row row, ColumnFamilyStore cfs)
+    private void updateForRow(PeekingIterator<PartitionUpdate.CounterMark> markIter, Row row, Table cfs)
     {
         int cmp = 0;
         // If the mark is before the row, we have no value for this mark, just consume it

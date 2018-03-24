@@ -51,7 +51,7 @@ public class CounterMutationTest
     @Test
     public void testSingleCell() throws WriteTimeoutException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
         cfs.truncateBlocking();
         ColumnMetadata cDef = cfs.metadata().getColumn(ByteBufferUtil.bytes("val"));
 
@@ -65,7 +65,7 @@ public class CounterMutationTest
         addAndCheck(cfs, -3, 0);
     }
 
-    private void addAndCheck(ColumnFamilyStore cfs, long toAdd, long expected)
+    private void addAndCheck(Table cfs, long toAdd, long expected)
     {
         ColumnMetadata cDef = cfs.metadata().getColumn(ByteBufferUtil.bytes("val"));
         Mutation m = new RowUpdateBuilder(cfs.metadata(), 5, "key1").clustering("cc").add("val", toAdd).build();
@@ -78,7 +78,7 @@ public class CounterMutationTest
     @Test
     public void testTwoCells() throws WriteTimeoutException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
         cfs.truncateBlocking();
 
         // Do the initial update (+1, -1)
@@ -91,7 +91,7 @@ public class CounterMutationTest
         addTwoAndCheck(cfs, -3L, 0L, 3L, 0L);
     }
 
-    private void addTwoAndCheck(ColumnFamilyStore cfs, long addOne, long expectedOne, long addTwo, long expectedTwo)
+    private void addTwoAndCheck(Table cfs, long addOne, long expectedOne, long addTwo, long expectedTwo)
     {
         ColumnMetadata cDefOne = cfs.metadata().getColumn(ByteBufferUtil.bytes("val"));
         ColumnMetadata cDefTwo = cfs.metadata().getColumn(ByteBufferUtil.bytes("val2"));
@@ -111,8 +111,8 @@ public class CounterMutationTest
     @Test
     public void testBatch() throws WriteTimeoutException
     {
-        ColumnFamilyStore cfsOne = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
-        ColumnFamilyStore cfsTwo = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF2);
+        Table cfsOne = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
+        Table cfsTwo = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF2);
 
         cfsOne.truncateBlocking();
         cfsTwo.truncateBlocking();
@@ -160,7 +160,7 @@ public class CounterMutationTest
     @Test
     public void testDeletes() throws WriteTimeoutException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF1);
         cfs.truncateBlocking();
         ColumnMetadata cOne = cfs.metadata().getColumn(ByteBufferUtil.bytes("val"));
         ColumnMetadata cTwo = cfs.metadata().getColumn(ByteBufferUtil.bytes("val2"));

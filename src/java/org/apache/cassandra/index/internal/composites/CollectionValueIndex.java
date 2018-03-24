@@ -42,7 +42,7 @@ import org.apache.cassandra.schema.IndexMetadata;
  */
 public class CollectionValueIndex extends CassandraIndex
 {
-    public CollectionValueIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public CollectionValueIndex(Table baseCfs, IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);
     }

@@ -24,7 +24,6 @@ import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.cache.ChunkCache;
 import org.apache.cassandra.UpdateBuilder;
-import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.Verifier;
 import org.apache.cassandra.db.marshal.UUIDType;
@@ -32,7 +31,6 @@ import org.apache.cassandra.dht.ByteOrderedPartitioner;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.io.FSWriteError;
-import org.apache.cassandra.io.compress.CorruptBlockException;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -49,7 +47,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.io.*;
-import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.util.Collections;
 import java.util.concurrent.ExecutionException;
@@ -112,7 +109,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
 
         fillCF(cfs, 2);
 
@@ -133,7 +130,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COUNTER_CF);
+        Table cfs = keyspace.getColumnFamilyStore(COUNTER_CF);
 
         fillCounterCF(cfs, 2);
 
@@ -153,7 +150,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF2);
+        Table cfs = keyspace.getColumnFamilyStore(CF2);
 
         fillCF(cfs, 2);
 
@@ -173,7 +170,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COUNTER_CF2);
+        Table cfs = keyspace.getColumnFamilyStore(COUNTER_CF2);
 
         fillCounterCF(cfs, 2);
 
@@ -194,7 +191,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF3);
+        Table cfs = keyspace.getColumnFamilyStore(CF3);
 
         fillCF(cfs, 2);
 
@@ -215,7 +212,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COUNTER_CF3);
+        Table cfs = keyspace.getColumnFamilyStore(COUNTER_CF3);
 
         fillCounterCF(cfs, 2);
 
@@ -236,7 +233,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF4);
+        Table cfs = keyspace.getColumnFamilyStore(CF4);
 
         fillCF(cfs, 2);
 
@@ -257,7 +254,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COUNTER_CF4);
+        Table cfs = keyspace.getColumnFamilyStore(COUNTER_CF4);
 
         fillCounterCF(cfs, 2);
 
@@ -279,7 +276,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CORRUPT_CF);
+        Table cfs = keyspace.getColumnFamilyStore(CORRUPT_CF);
 
         fillCF(cfs, 2);
 
@@ -316,7 +313,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
+        Table cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
 
         fillCF(cfs, 2);
 
@@ -373,7 +370,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
+        Table cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
         cfs.truncateBlocking();
         fillCF(cfs, 2);
 
@@ -408,7 +405,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
+        Table cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
         cfs.truncateBlocking();
         fillCF(cfs, 2);
 
@@ -451,7 +448,7 @@ public class VerifyTest
     public void testOutOfRangeTokens() throws IOException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         fillCF(cfs, 100);
         TokenMetadata tmd = StorageService.instance.getTokenMetadata();
         byte[] tk1 = new byte[1], tk2 = new byte[1];
@@ -477,7 +474,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
+        Table cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
 
         fillCF(cfs, 2);
 
@@ -526,7 +523,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
+        Table cfs = keyspace.getColumnFamilyStore(CORRUPT_CF2);
 
         fillCF(cfs, 2);
 
@@ -557,7 +554,7 @@ public class VerifyTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CORRUPT_CF);
+        Table cfs = keyspace.getColumnFamilyStore(CORRUPT_CF);
 
         fillCF(cfs, 2);
 
@@ -594,7 +591,7 @@ public class VerifyTest
     }
 
 
-    protected void fillCF(ColumnFamilyStore cfs, int partitionsPerSSTable)
+    protected void fillCF(Table cfs, int partitionsPerSSTable)
     {
         for (int i = 0; i < partitionsPerSSTable; i++)
         {
@@ -607,7 +604,7 @@ public class VerifyTest
         cfs.forceBlockingFlush();
     }
 
-    protected void fillCounterCF(ColumnFamilyStore cfs, int partitionsPerSSTable) throws WriteTimeoutException
+    protected void fillCounterCF(Table cfs, int partitionsPerSSTable) throws WriteTimeoutException
     {
         for (int i = 0; i < partitionsPerSSTable; i++)
         {

@@ -21,7 +21,6 @@ package org.apache.cassandra.db.compaction;
 import java.nio.ByteBuffer;
 import java.util.Set;
 import java.util.function.LongPredicate;
-import java.util.function.Predicate;
 
 import com.google.common.collect.Sets;
 import org.junit.BeforeClass;
@@ -29,8 +28,8 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
@@ -78,7 +77,7 @@ public class CompactionControllerTest extends SchemaLoader
     public void testMaxPurgeableTimestamp()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF1);
+        Table cfs = keyspace.getColumnFamilyStore(CF1);
         cfs.truncateBlocking();
 
         DecoratedKey key = Util.dk("k1");
@@ -145,7 +144,7 @@ public class CompactionControllerTest extends SchemaLoader
     public void testGetFullyExpiredSSTables()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF2);
+        Table cfs = keyspace.getColumnFamilyStore(CF2);
         cfs.truncateBlocking();
 
         DecoratedKey key = Util.dk("k1");

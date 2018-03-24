@@ -20,7 +20,7 @@ package org.apache.cassandra.streaming.messages;
 import java.io.IOException;
 import java.util.Objects;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.io.util.DataInputPlus;
 
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
@@ -41,7 +41,7 @@ public class IncomingStreamMessage extends StreamMessage
             session = StreamManager.instance.findSession(header.sender, header.planId, header.sessionIndex);
             if (session == null)
                 throw new IllegalStateException(String.format("unknown stream session: %s - %d", header.planId, header.sessionIndex));
-            ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(header.tableId);
+            Table cfs = Table.getIfExists(header.tableId);
             if (cfs == null)
                 throw new StreamReceiveException(session, "CF " + header.tableId + " was dropped during streaming");
 

@@ -35,11 +35,10 @@ import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.DiskBoundaries;
-import org.apache.cassandra.db.DiskBoundaryManager;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -94,7 +93,7 @@ public class CompactionStrategyManagerTest
                                     KeyspaceParams.simple(1),
                                     SchemaLoader.standardCFMD(KS_PREFIX, TABLE_PREFIX)
                                                 .compaction(CompactionParams.scts(Collections.emptyMap())));
-        ColumnFamilyStore cfs = Keyspace.open(KS_PREFIX).getColumnFamilyStore(TABLE_PREFIX);
+        Table cfs = Keyspace.open(KS_PREFIX).getColumnFamilyStore(TABLE_PREFIX);
         cfs.disableAutoCompaction();
         Set<SSTableReader> previousSSTables = cfs.getLiveSSTables();
         for (int i = 0; i < numSSTables; i++)
@@ -188,7 +187,7 @@ public class CompactionStrategyManagerTest
             directories[i] = new Directories.DataDirectory(tempDir);
         }
 
-        ColumnFamilyStore cfs = Keyspace.open(KS_PREFIX).getColumnFamilyStore(TABLE_PREFIX);
+        Table cfs = Keyspace.open(KS_PREFIX).getColumnFamilyStore(TABLE_PREFIX);
         MockCFS mockCFS = new MockCFS(cfs, new Directories(cfs.metadata(), directories));
         mockCFS.disableAutoCompaction();
         mockCFS.addSSTables(cfs.getLiveSSTables());
@@ -255,11 +254,11 @@ public class CompactionStrategyManagerTest
 
     class MockBoundaryManager
     {
-        private final ColumnFamilyStore cfs;
+        private final Table cfs;
         private Integer[] positions;
         private DiskBoundaries boundaries;
 
-        public MockBoundaryManager(ColumnFamilyStore cfs, Integer[] positions)
+        public MockBoundaryManager(Table cfs, Integer[] positions)
         {
             this.cfs = cfs;
             this.positions = positions;
@@ -278,7 +277,7 @@ public class CompactionStrategyManagerTest
             return boundaries;
         }
 
-        private DiskBoundaries createDiskBoundaries(ColumnFamilyStore cfs, Integer[] boundaries)
+        private DiskBoundaries createDiskBoundaries(Table cfs, Integer[] boundaries)
         {
             List<PartitionPosition> positions = Arrays.stream(boundaries).map(b -> Util.token(String.format(String.format("%04d", b))).minKeyBound()).collect(Collectors.toList());
             return new DiskBoundaries(cfs.getDirectories().getWriteableLocations(), positions, 0, 0);
@@ -289,7 +288,7 @@ public class CompactionStrategyManagerTest
     {
         long timestamp = System.currentTimeMillis();
         DecoratedKey dk = Util.dk(String.format("%04d", key));
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
+        Table cfs = Keyspace.open(keyspace).getColumnFamilyStore(table);
         new RowUpdateBuilder(cfs.metadata(), timestamp, dk.getKey())
         .clustering(Integer.toString(key))
         .add("val", "val")
@@ -299,9 +298,9 @@ public class CompactionStrategyManagerTest
     }
 
     // just to be able to override the data directories
-    private static class MockCFS extends ColumnFamilyStore
+    private static class MockCFS extends Table
     {
-        MockCFS(ColumnFamilyStore cfs, Directories dirs)
+        MockCFS(Table cfs, Directories dirs)
         {
             super(cfs.keyspace, cfs.getTableName(), 0, cfs.metadata, dirs, false, false, true);
         }

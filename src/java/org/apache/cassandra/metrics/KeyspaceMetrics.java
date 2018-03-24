@@ -23,7 +23,7 @@ import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Timer;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 
 import com.google.common.collect.Lists;
@@ -32,7 +32,7 @@ import com.google.common.collect.Sets;
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
 /**
- * Metrics for {@link ColumnFamilyStore}.
+ * Metrics for {@link Table}.
  */
 public class KeyspaceMetrics
 {
@@ -128,7 +128,7 @@ public class KeyspaceMetrics
     private Set<String> allMetrics = Sets.newHashSet();
 
     /**
-     * Creates metrics for given {@link ColumnFamilyStore}.
+     * Creates metrics for given {@link Table}.
      *
      * @param ks Keyspace to measure metrics
      */
@@ -355,7 +355,7 @@ public class KeyspaceMetrics
             public Long getValue()
             {
                 long sum = 0;
-                for (ColumnFamilyStore cf : keyspace.getColumnFamilyStores())
+                for (Table cf : keyspace.getColumnFamilyStores())
                 {
                     sum += extractor.getValue(cf.metric);
                 }
@@ -379,7 +379,7 @@ public class KeyspaceMetrics
             public long getCount()
             {
                 long sum = 0;
-                for (ColumnFamilyStore cf : keyspace.getColumnFamilyStores())
+                for (Table cf : keyspace.getColumnFamilyStores())
                 {
                     sum += extractor.getValue(cf.metric);
                 }

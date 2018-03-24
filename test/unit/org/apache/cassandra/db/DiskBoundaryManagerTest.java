@@ -117,9 +117,9 @@ public class DiskBoundaryManagerTest extends CQLTester
     }
 
     // just to be able to override the data directories
-    private static class MockCFS extends ColumnFamilyStore
+    private static class MockCFS extends Table
     {
-        MockCFS(ColumnFamilyStore cfs, Directories dirs)
+        MockCFS(Table cfs, Directories dirs)
         {
             super(cfs.keyspace, cfs.getTableName(), 0, cfs.metadata, dirs, false, false, true);
         }

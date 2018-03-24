@@ -21,7 +21,7 @@ package org.apache.cassandra.service.reads;
 import java.util.function.Function;
 
 import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
@@ -164,7 +164,7 @@ class ShortReadRowsProtection extends Transformation implements MoreRows<Unfilte
          */
         lastQueried = Math.min(command.limits().count(), command.limits().perPartitionCount());
 
-        ColumnFamilyStore.metricsFor(metadata.id).shortReadProtectionRequests.mark();
+        Table.metricsFor(metadata.id).shortReadProtectionRequests.mark();
         Tracing.trace("Requesting {} extra rows from {} for short read protection", lastQueried, source);
 
         SinglePartitionReadCommand cmd = makeFetchAdditionalRowsReadCommand(lastQueried);

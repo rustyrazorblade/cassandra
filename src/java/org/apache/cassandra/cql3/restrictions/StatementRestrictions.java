@@ -131,7 +131,7 @@ public final class StatementRestrictions
     {
         this(type, table, allowFiltering);
 
-        ColumnFamilyStore cfs;
+        Table cfs;
         SecondaryIndexManager secondaryIndexManager = null;
 
         if (type.allowUseOfSecondaryIndices())

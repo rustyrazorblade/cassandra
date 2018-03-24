@@ -34,13 +34,13 @@ public interface StorageHook
 
     public void reportWrite(TableId tableId, PartitionUpdate partitionUpdate);
     public void reportRead(TableId tableId, DecoratedKey key);
-    public UnfilteredRowIteratorWithLowerBound makeRowIteratorWithLowerBound(ColumnFamilyStore cfs,
+    public UnfilteredRowIteratorWithLowerBound makeRowIteratorWithLowerBound(Table cfs,
                                                                       DecoratedKey partitionKey,
                                                                       SSTableReader sstable,
                                                                       ClusteringIndexFilter filter,
                                                                       ColumnFilter selectedColumns,
                                                                       SSTableReadsListener listener);
-    public UnfilteredRowIterator makeRowIterator(ColumnFamilyStore cfs,
+    public UnfilteredRowIterator makeRowIterator(Table cfs,
                                                  SSTableReader sstable,
                                                  DecoratedKey key,
                                                  Slices slices,
@@ -62,7 +62,7 @@ public interface StorageHook
 
             public void reportRead(TableId tableId, DecoratedKey key) {}
 
-            public UnfilteredRowIteratorWithLowerBound makeRowIteratorWithLowerBound(ColumnFamilyStore cfs,
+            public UnfilteredRowIteratorWithLowerBound makeRowIteratorWithLowerBound(Table cfs,
                                                                                      DecoratedKey partitionKey,
                                                                                      SSTableReader sstable,
                                                                                      ClusteringIndexFilter filter,
@@ -76,7 +76,7 @@ public interface StorageHook
                                                                listener);
             }
 
-            public UnfilteredRowIterator makeRowIterator(ColumnFamilyStore cfs,
+            public UnfilteredRowIterator makeRowIterator(Table cfs,
                                                          SSTableReader sstable,
                                                          DecoratedKey key,
                                                          Slices slices,

@@ -48,7 +48,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * SSTableReaders are open()ed by Keyspace.onStart; after that they are created by SSTableWriter.renameAndOpen.
- * Do not re-call open() on existing SSTable files; use the references kept by ColumnFamilyStore post-start instead.
+ * Do not re-call open() on existing SSTable files; use the references kept by Table post-start instead.
  */
 public class BigTableReader extends SSTableReader
 {

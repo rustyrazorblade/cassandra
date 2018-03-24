@@ -71,13 +71,13 @@ public class CustomCassandraIndex implements Index
 {
     private static final Logger logger = LoggerFactory.getLogger(CassandraIndex.class);
 
-    public final ColumnFamilyStore baseCfs;
+    public final Table baseCfs;
     protected IndexMetadata metadata;
-    protected ColumnFamilyStore indexCfs;
+    protected Table indexCfs;
     protected ColumnMetadata indexedColumn;
     protected CassandraIndexFunctions functions;
 
-    public CustomCassandraIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public CustomCassandraIndex(Table baseCfs, IndexMetadata indexDef)
     {
         this.baseCfs = baseCfs;
         setMetadata(indexDef);
@@ -104,7 +104,7 @@ public class CustomCassandraIndex implements Index
         return indexCfs.metadata().comparator;
     }
 
-    public ColumnFamilyStore getIndexCfs()
+    public Table getIndexCfs()
     {
         return indexCfs;
     }
@@ -126,7 +126,7 @@ public class CustomCassandraIndex implements Index
         return metadata;
     }
 
-    public Optional<ColumnFamilyStore> getBackingTable()
+    public Optional<Table> getBackingTable()
     {
         return indexCfs == null ? Optional.empty() : Optional.of(indexCfs);
     }
@@ -162,10 +162,10 @@ public class CustomCassandraIndex implements Index
         Pair<ColumnMetadata, IndexTarget.Type> target = TargetParser.parse(baseCfs.metadata(), indexDef);
         functions = getFunctions(indexDef, target);
         TableMetadata cfm = indexCfsMetadata(baseCfs.metadata(), indexDef);
-        indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.keyspace,
-                                                             cfm.name,
-                                                             TableMetadataRef.forOfflineTools(cfm),
-                                                             baseCfs.getTracker().loadsstables);
+        indexCfs = Table.createColumnFamilyStore(baseCfs.keyspace,
+                                                 cfm.name,
+                                                 TableMetadataRef.forOfflineTools(cfm),
+                                                 baseCfs.getTracker().loadsstables);
         indexedColumn = target.left;
     }
 
@@ -592,7 +592,7 @@ public class CustomCassandraIndex implements Index
     private void invalidate()
     {
         // interrupt in-progress compactions
-        Collection<ColumnFamilyStore> cfss = Collections.singleton(indexCfs);
+        Collection<Table> cfss = Collections.singleton(indexCfs);
         CompactionManager.instance.interruptCompactionForCFs(cfss, true);
         CompactionManager.instance.waitForCessation(cfss);
         indexCfs.keyspace.writeOrder.awaitNewBarrier();
@@ -623,7 +623,7 @@ public class CustomCassandraIndex implements Index
     {
         baseCfs.forceBlockingFlush();
 
-        try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
+        try (Table.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
              Refs<SSTableReader> sstables = viewFragment.refs)
         {
             if (sstables.isEmpty())

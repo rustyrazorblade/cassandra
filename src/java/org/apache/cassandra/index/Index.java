@@ -50,8 +50,8 @@ import org.apache.cassandra.utils.concurrent.OpOrder;
  * Consisting of a top level Index interface and two sub-interfaces which handle read and write operations,
  * Searcher and Indexer respectively, this defines a secondary index implementation.
  * Instantiation is done via reflection and implementations must provide a constructor which takes the base
- * table's ColumnFamilyStore and the IndexMetadata which defines the Index as arguments. e.g:
- *  {@code MyCustomIndex( ColumnFamilyStore baseCfs, IndexMetadata indexDef )}
+ * table's Table and the IndexMetadata which defines the Index as arguments. e.g:
+ *  {@code MyCustomIndex( Table baseCfs, IndexMetadata indexDef )}
  *
  * The main interface defines methods for index management, index selection at both write and query time,
  * as well as validation of values that will ultimately be indexed.
@@ -147,7 +147,7 @@ public interface Index
      */
     interface IndexBuildingSupport
     {
-        SecondaryIndexBuilder getIndexBuildTask(ColumnFamilyStore cfs, Set<Index> indexes, Collection<SSTableReader> sstables);
+        SecondaryIndexBuilder getIndexBuildTask(Table cfs, Set<Index> indexes, Collection<SSTableReader> sstables);
     }
 
     /**
@@ -156,7 +156,7 @@ public interface Index
      */
     public static class CollatedViewIndexBuildingSupport implements IndexBuildingSupport
     {
-        public SecondaryIndexBuilder getIndexBuildTask(ColumnFamilyStore cfs, Set<Index> indexes, Collection<SSTableReader> sstables)
+        public SecondaryIndexBuilder getIndexBuildTask(Table cfs, Set<Index> indexes, Collection<SSTableReader> sstables)
         {
             return new CollatedViewIndexBuilder(cfs, indexes, new ReducingKeyIterator(sstables));
         }
@@ -228,7 +228,7 @@ public interface Index
      * Index implementations.
      * @return an Optional referencing the Index's backing storage table if it has one, or Optional.empty() if not.
      */
-    public Optional<ColumnFamilyStore> getBackingTable();
+    public Optional<Table> getBackingTable();
 
     /**
      * Return a task which performs a blocking flush of the index's data to persistent storage.
@@ -495,7 +495,7 @@ public interface Index
      * Used to validate the various parameters of a supplied {@code}ReadCommand{@code},
      * this is called prior to execution. In theory, any command instance may be checked
      * by any {@code}Index{@code} instance, but in practice the index will be the one
-     * returned by a call to the {@code}getIndex(ColumnFamilyStore cfs){@code} method on
+     * returned by a call to the {@code}getIndex(Table cfs){@code} method on
      * the supplied command.
      *
      * Custom index implementations should perform any validation of query expressions here and throw a meaningful

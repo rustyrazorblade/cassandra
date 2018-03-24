@@ -82,10 +82,10 @@ public class CompactionsTest
                                                 .gcGraceSeconds(0));
     }
 
-    public ColumnFamilyStore testSingleSSTableCompaction(String strategyClassName) throws Exception
+    public Table testSingleSSTableCompaction(String strategyClassName) throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_DENSE1);
+        Table store = keyspace.getColumnFamilyStore(CF_DENSE1);
         store.clearUnsafe();
         MigrationManager.announceTableUpdate(store.metadata().unbuild().gcGraceSeconds(1).build(), true);
 
@@ -150,7 +150,7 @@ public class CompactionsTest
     @Test
     public void testSingleSSTableCompactionWithLeveledCompaction() throws Exception
     {
-        ColumnFamilyStore store = testSingleSSTableCompaction(LeveledCompactionStrategy.class.getCanonicalName());
+        Table store = testSingleSSTableCompaction(LeveledCompactionStrategy.class.getCanonicalName());
         CompactionStrategyManager strategyManager = store.getCompactionStrategyManager();
         // tombstone removal compaction should not promote level
         assert strategyManager.getSSTableCountPerLevel()[0] == 1;
@@ -160,7 +160,7 @@ public class CompactionsTest
     public void testSuperColumnTombstones()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Super1");
+        Table cfs = keyspace.getColumnFamilyStore("Super1");
         CFMetaData table = cfs.metadata;
         cfs.disableAutoCompaction();
 
@@ -195,7 +195,7 @@ public class CompactionsTest
     public void testUncheckedTombstoneSizeTieredCompaction() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_STANDARD1);
+        Table store = keyspace.getColumnFamilyStore(CF_STANDARD1);
         store.clearUnsafe();
         store.metadata.gcGraceSeconds(1);
         store.metadata.compactionStrategyOptions.put("tombstone_compaction_interval", "1");
@@ -266,7 +266,7 @@ public class CompactionsTest
     }
     */
 
-    public static void assertMaxTimestamp(ColumnFamilyStore cfs, long maxTimestampExpected)
+    public static void assertMaxTimestamp(Table cfs, long maxTimestampExpected)
     {
         long maxTimestampObserved = Long.MIN_VALUE;
         for (SSTableReader sstable : cfs.getLiveSSTables())
@@ -281,7 +281,7 @@ public class CompactionsTest
         // This test check that EchoedRow doesn't skipp rows: see CASSANDRA-2653
 
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard2");
+        Table cfs = keyspace.getColumnFamilyStore("Standard2");
 
         // disable compaction while flushing
         cfs.disableAutoCompaction();
@@ -343,7 +343,7 @@ public class CompactionsTest
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         final String cfname = "Standard3"; // use clean(no sstable) CF
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        Table cfs = keyspace.getColumnFamilyStore(cfname);
 
         // disable compaction while flushing
         cfs.disableAutoCompaction();
@@ -382,7 +382,7 @@ public class CompactionsTest
     public void testRangeTombstones()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard2");
+        Table cfs = keyspace.getColumnFamilyStore("Standard2");
         cfs.clearUnsafe();
 
         // disable compaction while flushing
@@ -458,7 +458,7 @@ public class CompactionsTest
         SystemKeyspace.discardCompactionsInProgress();
 
         String cf = "Standard4";
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(cf);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(cf);
         SchemaLoader.insertData(KEYSPACE1, cf, 0, 1);
         cfs.forceBlockingFlush();
 
@@ -485,7 +485,7 @@ public class CompactionsTest
     {
         // This test catches the regression of CASSANDRA-2786
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        Table cfs = keyspace.getColumnFamilyStore(cfname);
 
         // disable compaction while flushing
         cfs.clearUnsafe();
@@ -564,7 +564,7 @@ public class CompactionsTest
     public void testNeedsCleanup()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("CF_STANDARD1");
+        Table store = keyspace.getColumnFamilyStore("CF_STANDARD1");
         store.clearUnsafe();
 
         // disable compaction while flushing

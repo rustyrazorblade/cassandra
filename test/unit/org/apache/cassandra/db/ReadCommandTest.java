@@ -129,7 +129,7 @@ public class ReadCommandTest
     @Test
     public void testPartitionRangeAbort() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF1);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF1);
 
         new RowUpdateBuilder(cfs.metadata(), 0, ByteBufferUtil.bytes("key1"))
                 .clustering("Column1")
@@ -155,7 +155,7 @@ public class ReadCommandTest
     @Test
     public void testSinglePartitionSliceAbort() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
 
         cfs.truncateBlocking();
 
@@ -186,7 +186,7 @@ public class ReadCommandTest
     @Test
     public void testSinglePartitionNamesAbort() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
 
         cfs.truncateBlocking();
 
@@ -217,7 +217,7 @@ public class ReadCommandTest
     @Test
     public void testSinglePartitionGroupMerge() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF3);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF3);
 
         String[][][] groups = new String[][][] {
             new String[][] {
@@ -347,7 +347,7 @@ public class ReadCommandTest
     @Test
     public void testSerializer() throws IOException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
 
         new RowUpdateBuilder(cfs.metadata.get(), 0, ByteBufferUtil.bytes("key"))
         .clustering("dd")
@@ -378,7 +378,7 @@ public class ReadCommandTest
     @Test
     public void testCountDeletedRows() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF4);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF4);
 
         String[][][] groups = new String[][][] {
                 new String[][] {
@@ -467,7 +467,7 @@ public class ReadCommandTest
     @Test
     public void testCountWithNoDeletedRow() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF5);
+        Table cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF5);
 
         String[][][] groups = new String[][][] {
                 new String[][] {

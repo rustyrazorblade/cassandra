@@ -42,7 +42,7 @@ import org.apache.cassandra.utils.memory.HeapAllocator;
 
 public class Scrubber implements Closeable
 {
-    private final ColumnFamilyStore cfs;
+    private final Table cfs;
     private final SSTableReader sstable;
     private final LifecycleTransaction transaction;
     private final File destination;
@@ -81,19 +81,19 @@ public class Scrubber implements Closeable
     };
     private final SortedSet<Partition> outOfOrder = new TreeSet<>(partitionComparator);
 
-    public Scrubber(ColumnFamilyStore cfs, LifecycleTransaction transaction, boolean skipCorrupted, boolean checkData)
+    public Scrubber(Table cfs, LifecycleTransaction transaction, boolean skipCorrupted, boolean checkData)
     {
         this(cfs, transaction, skipCorrupted, checkData, false);
     }
 
-    public Scrubber(ColumnFamilyStore cfs, LifecycleTransaction transaction, boolean skipCorrupted, boolean checkData,
+    public Scrubber(Table cfs, LifecycleTransaction transaction, boolean skipCorrupted, boolean checkData,
                     boolean reinsertOverflowedTTLRows)
     {
         this(cfs, transaction, skipCorrupted, new OutputHandler.LogOutput(), checkData, reinsertOverflowedTTLRows);
     }
 
     @SuppressWarnings("resource")
-    public Scrubber(ColumnFamilyStore cfs,
+    public Scrubber(Table cfs,
                     LifecycleTransaction transaction,
                     boolean skipCorrupted,
                     OutputHandler outputHandler,

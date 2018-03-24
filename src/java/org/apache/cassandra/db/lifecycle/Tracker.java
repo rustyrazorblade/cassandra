@@ -28,7 +28,7 @@ import com.google.common.base.Predicate;
 import com.google.common.base.Predicates;
 import com.google.common.collect.*;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
@@ -68,7 +68,7 @@ public class Tracker
 
     private final Collection<INotificationConsumer> subscribers = new CopyOnWriteArrayList<>();
 
-    public final ColumnFamilyStore cfstore;
+    public final Table cfstore;
     final AtomicReference<View> view;
     public final boolean loadsstables;
 

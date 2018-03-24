@@ -20,7 +20,6 @@ package org.apache.cassandra.db.lifecycle;
 import java.io.File;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Predicate;
@@ -30,7 +29,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.io.sstable.SSTable;
@@ -534,7 +533,7 @@ public class LifecycleTransaction extends Transactional.AbstractTransactional
         log.untrackNew(table);
     }
 
-    public static boolean removeUnfinishedLeftovers(ColumnFamilyStore cfs)
+    public static boolean removeUnfinishedLeftovers(Table cfs)
     {
         return LogTransaction.removeUnfinishedLeftovers(cfs.getDirectories().getCFDirectories());
     }

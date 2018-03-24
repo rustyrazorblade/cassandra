@@ -49,9 +49,9 @@ public class OperationTest extends SchemaLoader
     private static final String CLUSTERING_CF_NAME = "clustering_test_cf";
     private static final String STATIC_CF_NAME = "static_sasi_test_cf";
 
-    private static ColumnFamilyStore BACKEND;
-    private static ColumnFamilyStore CLUSTERING_BACKEND;
-    private static ColumnFamilyStore STATIC_BACKEND;
+    private static Table BACKEND;
+    private static Table CLUSTERING_BACKEND;
+    private static Table STATIC_BACKEND;
 
     @BeforeClass
     public static void loadSchema() throws ConfigurationException
@@ -696,7 +696,7 @@ public class OperationTest extends SchemaLoader
         return getColumn(BACKEND, name);
     }
 
-    private static ColumnMetadata getColumn(ColumnFamilyStore cfs, ByteBuffer name)
+    private static ColumnMetadata getColumn(Table cfs, ByteBuffer name)
     {
         return cfs.metadata().getColumn(name);
     }

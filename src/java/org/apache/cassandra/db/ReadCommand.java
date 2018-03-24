@@ -19,7 +19,6 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.util.function.LongPredicate;
-import java.util.function.Predicate;
 
 import javax.annotation.Nullable;
 
@@ -280,7 +279,7 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
      */
     public abstract ReadCommand copyAsDigestQuery();
 
-    protected abstract UnfilteredPartitionIterator queryStorage(ColumnFamilyStore cfs, ReadExecutionController executionController);
+    protected abstract UnfilteredPartitionIterator queryStorage(Table cfs, ReadExecutionController executionController);
 
     protected abstract int oldestUnrepairedTombstone();
 
@@ -298,7 +297,7 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
              : 0;
     }
 
-    public Index getIndex(ColumnFamilyStore cfs)
+    public Index getIndex(Table cfs)
     {
         return null != index
              ? cfs.indexManager.getIndex(index)
@@ -310,7 +309,7 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
         if (table.indexes.isEmpty() || rowFilter.isEmpty())
             return null;
 
-        ColumnFamilyStore cfs = Keyspace.openAndGetStore(table);
+        Table cfs = Keyspace.openAndGetStore(table);
 
         Index index = cfs.indexManager.getBestIndexFor(rowFilter);
 
@@ -345,7 +344,7 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
     {
         long startTimeNanos = System.nanoTime();
 
-        ColumnFamilyStore cfs = Keyspace.openAndGetStore(metadata());
+        Table cfs = Keyspace.openAndGetStore(metadata());
         Index index = getIndex(cfs);
 
         Index.Searcher searcher = null;
@@ -573,7 +572,7 @@ public abstract class ReadCommand extends MonitorableImpl implements ReadQuery
     // Skip purgeable tombstones. We do this because it's safe to do (post-merge of the memtable and sstable at least), it
     // can save us some bandwith, and avoid making us throw a TombstoneOverwhelmingException for purgeable tombstones (which
     // are to some extend an artefact of compaction lagging behind and hence counting them is somewhat unintuitive).
-    protected UnfilteredPartitionIterator withoutPurgeableTombstones(UnfilteredPartitionIterator iterator, ColumnFamilyStore cfs)
+    protected UnfilteredPartitionIterator withoutPurgeableTombstones(UnfilteredPartitionIterator iterator, Table cfs)
     {
         class WithoutPurgeableTombstones extends PurgeFunction
         {

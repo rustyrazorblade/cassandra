@@ -18,7 +18,7 @@ import java.util.stream.Collectors;
 import org.apache.cassandra.concurrent.SEPExecutor;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.transport.ProtocolVersion;
@@ -693,7 +693,7 @@ public class ViewComplexTest extends CQLTester
         if (flush)
         {
             // compact sstable 2 and 4, 5;
-            ColumnFamilyStore cfs = ks.getColumnFamilyStore("mv");
+            Table cfs = ks.getColumnFamilyStore("mv");
             List<String> sstables = cfs.getLiveSSTables()
                                        .stream()
                                        .sorted((s1, s2) -> s1.descriptor.generation - s2.descriptor.generation)
@@ -957,7 +957,7 @@ public class ViewComplexTest extends CQLTester
         createView("mv",
                    "create materialized view %s as select * from %%s where p1 is not null and p2 is not null primary key (p2, p1)"
                            + " with gc_grace_seconds=5;");
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore("mv");
+        Table cfs = ks.getColumnFamilyStore("mv");
         cfs.disableAutoCompaction();
 
         updateView("UPDATE %s USING TIMESTAMP 1 set v1 =1 where p1 = 1 AND p2 = 1;");
@@ -1009,7 +1009,7 @@ public class ViewComplexTest extends CQLTester
         createView("mv",
                    "create materialized view %s as select * from %%s where p is not null and v1 is not null primary key (v1, p)"
                            + " with gc_grace_seconds=5;");
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore("mv");
+        Table cfs = ks.getColumnFamilyStore("mv");
         cfs.disableAutoCompaction();
 
         updateView("Insert into %s (p, v1, v2) values (1, 1, 1) ;");
@@ -1105,7 +1105,7 @@ public class ViewComplexTest extends CQLTester
         if (flush)
         {
             // compact sstable 2 and 3;
-            ColumnFamilyStore cfs = ks.getColumnFamilyStore("mv");
+            Table cfs = ks.getColumnFamilyStore("mv");
             List<String> sstables = cfs.getLiveSSTables()
                                        .stream()
                                        .sorted(Comparator.comparingInt(s -> s.descriptor.generation))

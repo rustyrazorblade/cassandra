@@ -22,7 +22,7 @@ import java.util.Collections;
 
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
@@ -138,7 +138,7 @@ public class ShortReadPartitionsProtection extends Transformation<UnfilteredRowI
                       ? command.limits().count() - counted(mergedResultCounter)
                       : command.limits().perPartitionCount();
 
-        ColumnFamilyStore.metricsFor(command.metadata().id).shortReadProtectionRequests.mark();
+        Table.metricsFor(command.metadata().id).shortReadProtectionRequests.mark();
         Tracing.trace("Requesting {} extra rows from {} for short read protection", toQuery, source);
 
         PartitionRangeReadCommand cmd = makeFetchAdditionalPartitionReadCommand(toQuery);

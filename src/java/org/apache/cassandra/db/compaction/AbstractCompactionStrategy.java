@@ -26,6 +26,7 @@ import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
@@ -34,7 +35,6 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -72,7 +72,7 @@ public abstract class AbstractCompactionStrategy
 
     protected Map<String, String> options;
 
-    protected final ColumnFamilyStore cfs;
+    protected final Table cfs;
     protected float tombstoneThreshold;
     protected long tombstoneCompactionInterval;
     protected boolean uncheckedTombstoneCompaction;
@@ -93,7 +93,7 @@ public abstract class AbstractCompactionStrategy
      */
     protected boolean isActive = false;
 
-    protected AbstractCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options)
+    protected AbstractCompactionStrategy(Table cfs, Map<String, String> options)
     {
         assert cfs != null;
         this.cfs = cfs;

@@ -33,6 +33,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.DebuggableScheduledThreadPoolExecutor;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.cql3.UntypedResultSet;
@@ -200,7 +201,7 @@ public class BatchlogManager implements BatchlogManagerMBean
         setRate(DatabaseDescriptor.getBatchlogReplayThrottleInKB());
 
         UUID limitUuid = UUIDGen.maxTimeUUID(System.currentTimeMillis() - getBatchlogTimeout());
-        ColumnFamilyStore store = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.BATCHES);
+        Table store = Keyspace.open(SchemaConstants.SYSTEM_KEYSPACE_NAME).getColumnFamilyStore(SystemKeyspace.BATCHES);
         int pageSize = calculatePageSize(store);
         // There cannot be any live content where token(id) <= token(lastReplayedUuid) as every processed batch is
         // deleted, but the tombstoned content may still be present in the tables. To avoid walking over it we specify
@@ -236,7 +237,7 @@ public class BatchlogManager implements BatchlogManagerMBean
     }
 
     // read less rows (batches) per page if they are very large
-    static int calculatePageSize(ColumnFamilyStore store)
+    static int calculatePageSize(Table store)
     {
         double averageRowSize = store.getMeanPartitionSize();
         if (averageRowSize <= 0)

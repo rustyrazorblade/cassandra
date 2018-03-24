@@ -163,9 +163,9 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
     /**
      * The underlying column family containing the source data for these indexes
      */
-    public final ColumnFamilyStore baseCfs;
+    public final Table baseCfs;
 
-    public SecondaryIndexManager(ColumnFamilyStore baseCfs)
+    public SecondaryIndexManager(Table baseCfs)
     {
         this.baseCfs = baseCfs;
         baseCfs.getTracker().subscribe(this);
@@ -333,7 +333,7 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
      */
     public void rebuildIndexesBlocking(Set<String> indexNames)
     {
-        try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
+        try (Table.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
              Refs<SSTableReader> allSSTables = viewFragment.refs)
         {
             Set<Index> toRebuild = indexes.values().stream()
@@ -351,22 +351,22 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
     }
 
     /**
-     * Checks if the specified {@link ColumnFamilyStore} is a secondary index.
+     * Checks if the specified {@link Table} is a secondary index.
      *
-     * @param cfs the <code>ColumnFamilyStore</code> to check.
-     * @return <code>true</code> if the specified <code>ColumnFamilyStore</code> is a secondary index,
+     * @param cfs the <code>Table</code> to check.
+     * @return <code>true</code> if the specified <code>Table</code> is a secondary index,
      * <code>false</code> otherwise.
      */
-    public static boolean isIndexColumnFamilyStore(ColumnFamilyStore cfs)
+    public static boolean isIndexColumnFamilyStore(Table cfs)
     {
         return isIndexColumnFamily(cfs.name);
     }
 
     /**
-     * Checks if the specified {@link ColumnFamilyStore} is the one secondary index.
+     * Checks if the specified {@link Table} is the one secondary index.
      *
-     * @param cfName the name of the <code>ColumnFamilyStore</code> to check.
-     * @return <code>true</code> if the specified <code>ColumnFamilyStore</code> is a secondary index,
+     * @param cfName the name of the <code>Table</code> to check.
+     * @return <code>true</code> if the specified <code>Table</code> is a secondary index,
      * <code>false</code> otherwise.
      */
     public static boolean isIndexColumnFamily(String cfName)
@@ -375,22 +375,22 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
     }
 
     /**
-     * Returns the parent of the specified {@link ColumnFamilyStore}.
+     * Returns the parent of the specified {@link Table}.
      *
-     * @param cfs the <code>ColumnFamilyStore</code>
-     * @return the parent of the specified <code>ColumnFamilyStore</code>
+     * @param cfs the <code>Table</code>
+     * @return the parent of the specified <code>Table</code>
      */
-    public static ColumnFamilyStore getParentCfs(ColumnFamilyStore cfs)
+    public static Table getParentCfs(Table cfs)
     {
         String parentCfs = getParentCfsName(cfs.name);
         return cfs.keyspace.getColumnFamilyStore(parentCfs);
     }
 
     /**
-     * Returns the parent name of the specified {@link ColumnFamilyStore}.
+     * Returns the parent name of the specified {@link Table}.
      *
-     * @param cfName the <code>ColumnFamilyStore</code> name
-     * @return the parent name of the specified <code>ColumnFamilyStore</code>
+     * @param cfName the <code>Table</code> name
+     * @return the parent name of the specified <code>Table</code>
      */
     public static String getParentCfsName(String cfName)
     {
@@ -401,10 +401,10 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
     /**
      * Returns the index name
      *
-     * @param cfs the <code>ColumnFamilyStore</code>
+     * @param cfs the <code>Table</code>
      * @return the index name
      */
-    public static String getIndexName(ColumnFamilyStore cfs)
+    public static String getIndexName(Table cfs)
     {
         return getIndexName(cfs.name);
     }
@@ -412,7 +412,7 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
     /**
      * Returns the index name
      *
-     * @param cfName the <code>ColumnFamilyStore</code> name
+     * @param cfName the <code>Table</code> name
      * @return the index name
      */
     public static String getIndexName(String cfName)
@@ -693,7 +693,7 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
             try
             {
                 Class<? extends Index> indexClass = FBUtilities.classForName(className, "Index");
-                Constructor<? extends Index> ctor = indexClass.getConstructor(ColumnFamilyStore.class, IndexMetadata.class);
+                Constructor<? extends Index> ctor = indexClass.getConstructor(Table.class, IndexMetadata.class);
                 newIndex = ctor.newInstance(baseCfs, indexDef);
             }
             catch (Exception e)
@@ -807,9 +807,9 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
     /**
      * @return all backing Tables used by registered indexes
      */
-    public Set<ColumnFamilyStore> getAllIndexColumnFamilyStores()
+    public Set<Table> getAllIndexColumnFamilyStores()
     {
-        Set<ColumnFamilyStore> backingTables = new HashSet<>();
+        Set<Table> backingTables = new HashSet<>();
         indexes.values().forEach(index -> index.getBackingTable().ifPresent(backingTables::add));
         return backingTables;
     }

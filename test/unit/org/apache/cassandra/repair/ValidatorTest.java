@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.repair;
 
-import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
@@ -29,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 
 import com.google.common.hash.Hasher;
 
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.CompactionsTest;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -40,7 +40,6 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.db.BufferDecoratedKey;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.EmptyIterators;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.IPartitioner;
@@ -101,7 +100,7 @@ public class ValidatorTest
 
         InetAddressAndPort remote = InetAddressAndPort.getByName("127.0.0.2");
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace).getColumnFamilyStore(columnFamily);
+        Table cfs = Keyspace.open(keyspace).getColumnFamilyStore(columnFamily);
 
         Validator validator = new Validator(desc, remote, 0, PreviewKind.NONE);
         MerkleTrees tree = new MerkleTrees(partitioner);
@@ -173,7 +172,7 @@ public class ValidatorTest
     public void simpleValidationTest(int n) throws Exception
     {
         Keyspace ks = Keyspace.open(keyspace);
-        ColumnFamilyStore cfs = ks.getColumnFamilyStore(columnFamily);
+        Table cfs = ks.getColumnFamilyStore(columnFamily);
         cfs.clearUnsafe();
 
         // disable compaction while flushing

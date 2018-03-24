@@ -31,7 +31,7 @@ import com.google.common.util.concurrent.Uninterruptibles;
 import io.airlift.airline.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -108,14 +108,14 @@ public abstract class CompactionStress implements Runnable
         return dataDirectories;
     }
 
-    ColumnFamilyStore initCf(StressProfile stressProfile, boolean loadSSTables)
+    Table initCf(StressProfile stressProfile, boolean loadSSTables)
     {
         generateTokens(stressProfile.seedStr, StorageService.instance.getTokenMetadata(), numTokens);
 
         CreateTableStatement.RawStatement createStatement = stressProfile.getCreateStatement();
         List<File> dataDirectories = getDataDirectories();
 
-        ColumnFamilyStore cfs = StressCQLSSTableWriter.Builder.createOfflineTable(createStatement, Collections.EMPTY_LIST, dataDirectories);
+        Table cfs = StressCQLSSTableWriter.Builder.createOfflineTable(createStatement, Collections.EMPTY_LIST, dataDirectories);
 
         if (loadSSTables)
         {
@@ -216,7 +216,7 @@ public abstract class CompactionStress implements Runnable
             CompactionManager.instance.setRate(0);
 
             StressProfile stressProfile = getStressProfile();
-            ColumnFamilyStore cfs = initCf(stressProfile, true);
+            Table cfs = initCf(stressProfile, true);
             cfs.getCompactionStrategyManager().compactionLogger.enable();
 
             List<Future<?>> futures = new ArrayList<>(threads);
@@ -287,7 +287,7 @@ public abstract class CompactionStress implements Runnable
         public void run()
         {
             StressProfile stressProfile = getStressProfile();
-            ColumnFamilyStore cfs = initCf(stressProfile, false);
+            Table cfs = initCf(stressProfile, false);
             Directories directories = cfs.getDirectories();
 
             StressSettings settings = StressSettings.parse(new String[]{ "write", "-pop seq=1.." + partitions });

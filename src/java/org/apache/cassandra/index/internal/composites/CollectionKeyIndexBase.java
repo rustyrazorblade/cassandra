@@ -43,7 +43,7 @@ import org.apache.cassandra.schema.IndexMetadata;
  */
 public abstract class CollectionKeyIndexBase extends CassandraIndex
 {
-    public CollectionKeyIndexBase(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public CollectionKeyIndexBase(Table baseCfs, IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);
     }

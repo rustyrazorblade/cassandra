@@ -22,7 +22,7 @@ import java.nio.ByteBuffer;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
@@ -37,7 +37,7 @@ import org.apache.cassandra.schema.IndexMetadata;
  */
 public class CollectionKeyIndex extends CollectionKeyIndexBase
 {
-    public CollectionKeyIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public CollectionKeyIndex(Table baseCfs, IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);
     }

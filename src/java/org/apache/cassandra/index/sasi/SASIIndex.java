@@ -64,7 +64,7 @@ public class SASIIndex implements Index, INotificationConsumer
 {
     private static class SASIIndexBuildingSupport implements IndexBuildingSupport
     {
-        public SecondaryIndexBuilder getIndexBuildTask(ColumnFamilyStore cfs,
+        public SecondaryIndexBuilder getIndexBuildTask(Table cfs,
                                                        Set<Index> indexes,
                                                        Collection<SSTableReader> sstablesToRebuild)
         {
@@ -94,11 +94,11 @@ public class SASIIndex implements Index, INotificationConsumer
 
     private static final SASIIndexBuildingSupport INDEX_BUILDER_SUPPORT = new SASIIndexBuildingSupport();
 
-    private final ColumnFamilyStore baseCfs;
+    private final Table baseCfs;
     private final IndexMetadata config;
     private final ColumnIndex index;
 
-    public SASIIndex(ColumnFamilyStore baseCfs, IndexMetadata config)
+    public SASIIndex(Table baseCfs, IndexMetadata config)
     {
         this.baseCfs = baseCfs;
         this.config = config;
@@ -201,7 +201,7 @@ public class SASIIndex implements Index, INotificationConsumer
         return true;
     }
 
-    public Optional<ColumnFamilyStore> getBackingTable()
+    public Optional<Table> getBackingTable()
     {
         return Optional.empty();
     }
@@ -289,7 +289,7 @@ public class SASIIndex implements Index, INotificationConsumer
     public Searcher searcherFor(ReadCommand command) throws InvalidRequestException
     {
         TableMetadata config = command.metadata();
-        ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(config.id);
+        Table cfs = Schema.instance.getColumnFamilyStoreInstance(config.id);
         return controller -> new QueryPlan(cfs, command, DatabaseDescriptor.getRangeRpcTimeout()).execute(controller);
     }
 

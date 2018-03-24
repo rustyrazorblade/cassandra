@@ -66,7 +66,7 @@ public class AutoSavingCacheTest
 
     private static void doTestSerializeAndLoadKeyCache() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
         cfs.truncateBlocking();
         for (int i = 0; i < 2; i++)
         {

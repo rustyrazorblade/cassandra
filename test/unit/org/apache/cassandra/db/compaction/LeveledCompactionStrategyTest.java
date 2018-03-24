@@ -41,7 +41,7 @@ import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.UpdateBuilder;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.Range;
@@ -72,7 +72,7 @@ public class LeveledCompactionStrategyTest
     private static final String KEYSPACE1 = "LeveledCompactionStrategyTest";
     private static final String CF_STANDARDDLEVELED = "StandardLeveled";
     private Keyspace keyspace;
-    private ColumnFamilyStore cfs;
+    private Table cfs;
 
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
@@ -210,7 +210,7 @@ public class LeveledCompactionStrategyTest
     /**
      * wait for leveled compaction to quiesce on the given columnfamily
      */
-    public static void waitForLeveling(ColumnFamilyStore cfs) throws InterruptedException
+    public static void waitForLeveling(Table cfs) throws InterruptedException
     {
         CompactionStrategyManager strategyManager = cfs.getCompactionStrategyManager();
         while (true)

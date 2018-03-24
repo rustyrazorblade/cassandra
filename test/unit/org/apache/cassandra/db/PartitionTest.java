@@ -67,7 +67,7 @@ public class PartitionTest
     @Test
     public void testSingleColumn() throws IOException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
         PartitionUpdate update = new RowUpdateBuilder(cfs.metadata(), 5, "key1")
                                  .clustering("c")
                                  .add("val", "val1")
@@ -88,7 +88,7 @@ public class PartitionTest
     @Test
     public void testManyColumns() throws IOException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_TENCOL);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_TENCOL);
         RowUpdateBuilder builder = new RowUpdateBuilder(cfs.metadata(), 5, "key1")
                                    .clustering("c")
                                    .add("val", "val1");
@@ -122,7 +122,7 @@ public class PartitionTest
 
     public void testDigest(int version) throws NoSuchAlgorithmException
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_TENCOL);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_TENCOL);
 
         try
         {
@@ -173,7 +173,7 @@ public class PartitionTest
         long timestamp = System.currentTimeMillis();
         int localDeletionTime = (int) (timestamp / 1000);
 
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_TENCOL);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_TENCOL);
         RowUpdateBuilder builder = new RowUpdateBuilder(cfs.metadata(), 5, "key1").clustering("c").add("val", "val1");
         for (int i = 0; i < 10; i++)
             builder.add("val" + i, "val" + i);

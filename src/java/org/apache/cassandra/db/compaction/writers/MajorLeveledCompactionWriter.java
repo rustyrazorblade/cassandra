@@ -19,7 +19,7 @@ package org.apache.cassandra.db.compaction.writers;
 
 import java.util.Set;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.SerializationHeader;
@@ -42,7 +42,7 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
     private Directories.DataDirectory sstableDirectory;
     private final int levelFanoutSize;
 
-    public MajorLeveledCompactionWriter(ColumnFamilyStore cfs,
+    public MajorLeveledCompactionWriter(Table cfs,
                                         Directories directories,
                                         LifecycleTransaction txn,
                                         Set<SSTableReader> nonExpiredSSTables,
@@ -52,7 +52,7 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
     }
 
     @Deprecated
-    public MajorLeveledCompactionWriter(ColumnFamilyStore cfs,
+    public MajorLeveledCompactionWriter(Table cfs,
                                         Directories directories,
                                         LifecycleTransaction txn,
                                         Set<SSTableReader> nonExpiredSSTables,
@@ -64,7 +64,7 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
     }
 
     @SuppressWarnings("resource")
-    public MajorLeveledCompactionWriter(ColumnFamilyStore cfs,
+    public MajorLeveledCompactionWriter(Table cfs,
                                         Directories directories,
                                         LifecycleTransaction txn,
                                         Set<SSTableReader> nonExpiredSSTables,

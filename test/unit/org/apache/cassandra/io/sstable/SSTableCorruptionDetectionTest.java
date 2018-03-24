@@ -68,7 +68,7 @@ public class SSTableCorruptionDetectionTest extends SSTableWriterTestBase
     private static Random random;
     private static SSTableWriter writer;
     private static LifecycleTransaction txn;
-    private static ColumnFamilyStore cfs;
+    private static Table cfs;
     private static SSTableReader ssTableReader;
 
     @BeforeClass

@@ -27,8 +27,8 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -72,7 +72,7 @@ public class SSTableMetadataTest
     public void testTrackMaxDeletionTime()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+        Table store = keyspace.getColumnFamilyStore("Standard1");
         long timestamp = System.currentTimeMillis();
         for(int i = 0; i < 10; i++)
         {
@@ -149,7 +149,7 @@ public class SSTableMetadataTest
     public void testWithDeletes() throws ExecutionException, InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard2");
+        Table store = keyspace.getColumnFamilyStore("Standard2");
         long timestamp = System.currentTimeMillis();
         DecoratedKey key = Util.dk("deletetest");
         for (int i = 0; i<5; i++)
@@ -202,7 +202,7 @@ public class SSTableMetadataTest
     public void trackMaxMinColNames() throws CharacterCodingException, ExecutionException, InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard3");
+        Table store = keyspace.getColumnFamilyStore("Standard3");
         for (int j = 0; j < 8; j++)
         {
             String key = "row" + j;
@@ -259,7 +259,7 @@ public class SSTableMetadataTest
          */
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
 
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("StandardComposite2");
+        Table cfs = keyspace.getColumnFamilyStore("StandardComposite2");
 
         for (int i = 0; i < 10; i++)
         {
@@ -295,7 +295,7 @@ public class SSTableMetadataTest
     /*@Test
     public void testLegacyCounterShardTracking()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore("Counter1");
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore("Counter1");
 
         // A cell with all shards
         CounterContext.ContextState state = CounterContext.ContextState.allocate(1, 1, 1);

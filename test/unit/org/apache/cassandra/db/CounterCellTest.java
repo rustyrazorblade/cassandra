@@ -27,7 +27,6 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
@@ -82,7 +81,7 @@ public class CounterCellTest
     @Test
     public void testCreate()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         long delta = 3L;
 
         Cell cell = createLegacyCounterCell(cfs, ByteBufferUtil.bytes("val"), delta, 1);
@@ -96,27 +95,27 @@ public class CounterCellTest
 
     }
 
-    private Cell createLegacyCounterCell(ColumnFamilyStore cfs, ByteBuffer colName, long count, long ts)
+    private Cell createLegacyCounterCell(Table cfs, ByteBuffer colName, long count, long ts)
     {
         ColumnMetadata cDef = cfs.metadata().getColumn(colName);
         ByteBuffer val = CounterContext.instance().createLocal(count);
         return BufferCell.live(cDef, ts, val);
     }
 
-    private Cell createCounterCell(ColumnFamilyStore cfs, ByteBuffer colName, CounterId id, long count, long ts)
+    private Cell createCounterCell(Table cfs, ByteBuffer colName, CounterId id, long count, long ts)
     {
         ColumnMetadata cDef = cfs.metadata().getColumn(colName);
         ByteBuffer val = CounterContext.instance().createGlobal(id, ts, count);
         return BufferCell.live(cDef, ts, val);
     }
 
-    private Cell createCounterCellFromContext(ColumnFamilyStore cfs, ByteBuffer colName, ContextState context, long ts)
+    private Cell createCounterCellFromContext(Table cfs, ByteBuffer colName, ContextState context, long ts)
     {
         ColumnMetadata cDef = cfs.metadata().getColumn(colName);
         return BufferCell.live(cDef, ts, context.context);
     }
 
-    private Cell createDeleted(ColumnFamilyStore cfs, ByteBuffer colName, long ts, int localDeletionTime)
+    private Cell createDeleted(Table cfs, ByteBuffer colName, long ts, int localDeletionTime)
     {
         ColumnMetadata cDef = cfs.metadata().getColumn(colName);
         return BufferCell.tombstone(cDef, ts, localDeletionTime);
@@ -125,7 +124,7 @@ public class CounterCellTest
     @Test
     public void testReconcile()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         ByteBuffer col = ByteBufferUtil.bytes("val");
 
         Cell left;
@@ -185,7 +184,7 @@ public class CounterCellTest
     @Test
     public void testDiff()
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         ByteBuffer col = ByteBufferUtil.bytes("val");
 
         Cell leftCell;
@@ -258,7 +257,7 @@ public class CounterCellTest
     @Test
     public void testUpdateDigest() throws Exception
     {
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(COUNTER1);
         ByteBuffer col = ByteBufferUtil.bytes("val");
 
         Hasher hasher1 = HashingUtils.CURRENT_HASH_FUNCTION.newHasher();

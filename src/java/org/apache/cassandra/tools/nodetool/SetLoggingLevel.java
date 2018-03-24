@@ -72,7 +72,7 @@ public class SetLoggingLevel extends NodeToolCmd
         {
             classQualifiers = Lists.newArrayList(
                     "org.apache.cassandra.db.compaction",
-                    "org.apache.cassandra.db.ColumnFamilyStore",
+                    "org.apache.cassandra.db.Table",
                     "org.apache.cassandra.io.sstable.IndexSummaryRedistribution");
         }
         else if (target.equals("cql"))

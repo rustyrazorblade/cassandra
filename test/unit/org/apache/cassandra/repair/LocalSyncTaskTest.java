@@ -20,7 +20,6 @@ package org.apache.cassandra.repair;
 
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -29,7 +28,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -58,7 +57,7 @@ public class LocalSyncTaskTest extends AbstractRepairTest
     private static final IPartitioner partitioner = Murmur3Partitioner.instance;
     public static final String KEYSPACE1 = "DifferencerTest";
     public static final String CF_STANDARD = "Standard1";
-    public static ColumnFamilyStore cfs;
+    public static Table cfs;
 
     @BeforeClass
     public static void defineSchema() throws Exception
@@ -104,7 +103,7 @@ public class LocalSyncTaskTest extends AbstractRepairTest
         Range<Token> range = new Range<>(partitioner.getMinimumToken(), partitioner.getRandomToken());
         UUID parentRepairSession = UUID.randomUUID();
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Standard1");
+        Table cfs = keyspace.getColumnFamilyStore("Standard1");
 
         ActiveRepairService.instance.registerParentRepairSession(parentRepairSession, FBUtilities.getBroadcastAddressAndPort(),
                                                                  Arrays.asList(cfs), Arrays.asList(range), false,

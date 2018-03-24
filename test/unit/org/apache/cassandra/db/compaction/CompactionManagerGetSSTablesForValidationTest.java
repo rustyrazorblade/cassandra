@@ -32,12 +32,12 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.statements.CreateTableStatement;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -57,7 +57,7 @@ public class CompactionManagerGetSSTablesForValidationTest
 {
     private String ks;
     private static final String tbl = "tbl";
-    private ColumnFamilyStore cfs;
+    private Table cfs;
     private static InetAddressAndPort coordinator;
 
     private static Token MT;

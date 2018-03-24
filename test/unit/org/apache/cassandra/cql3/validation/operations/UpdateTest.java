@@ -27,10 +27,9 @@ import org.apache.cassandra.cql3.Attributes;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.UntypedResultSet.Row;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 
-import static org.apache.commons.lang3.StringUtils.isEmpty;
 import static org.junit.Assert.assertTrue;
 
 public class UpdateTest extends CQLTester
@@ -634,7 +633,7 @@ public class UpdateTest extends CQLTester
     private boolean isMemtableEmpty()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(currentTable());
+        Table cfs = keyspace.getColumnFamilyStore(currentTable());
         return cfs.metric.allMemtablesLiveDataSize.getValue() == 0;
     }
 }

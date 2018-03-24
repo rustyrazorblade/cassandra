@@ -19,7 +19,6 @@ package org.apache.cassandra.db.compaction;
 
 import java.util.*;
 import java.util.function.LongPredicate;
-import java.util.function.Predicate;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
@@ -33,7 +32,7 @@ public class SSTableSplitter
 
     private CompactionInfo.Holder info;
 
-    public SSTableSplitter(ColumnFamilyStore cfs, LifecycleTransaction transaction, int sstableSizeInMB)
+    public SSTableSplitter(Table cfs, LifecycleTransaction transaction, int sstableSizeInMB)
     {
         this.task = new SplittingCompactionTask(cfs, transaction, sstableSizeInMB);
     }
@@ -60,7 +59,7 @@ public class SSTableSplitter
     {
         private final int sstableSizeInMB;
 
-        public SplittingCompactionTask(ColumnFamilyStore cfs, LifecycleTransaction transaction, int sstableSizeInMB)
+        public SplittingCompactionTask(Table cfs, LifecycleTransaction transaction, int sstableSizeInMB)
         {
             super(cfs, transaction, CompactionManager.NO_GC, false);
             this.sstableSizeInMB = sstableSizeInMB;
@@ -76,7 +75,7 @@ public class SSTableSplitter
         }
 
         @Override
-        public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs,
+        public CompactionAwareWriter getCompactionAwareWriter(Table cfs,
                                                               Directories directories,
                                                               LifecycleTransaction txn,
                                                               Set<SSTableReader> nonExpiredSSTables)
@@ -93,7 +92,7 @@ public class SSTableSplitter
 
     public static class SplitController extends CompactionController
     {
-        public SplitController(ColumnFamilyStore cfs)
+        public SplitController(Table cfs)
         {
             super(cfs, CompactionManager.NO_GC);
         }

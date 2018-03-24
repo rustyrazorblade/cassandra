@@ -35,7 +35,7 @@ import org.apache.cassandra.schema.IndexMetadata;
 
 public class KeysIndex extends CassandraIndex
 {
-    public KeysIndex(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+    public KeysIndex(Table baseCfs, IndexMetadata indexDef)
     {
         super(baseCfs, indexDef);
     }

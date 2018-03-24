@@ -31,7 +31,7 @@ import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -103,7 +103,7 @@ public class ByteBufDataOutputPlusTest
 
     private QueuedMessage getMessage()
     {
-        ColumnFamilyStore cfs1 = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        Table cfs1 = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
         ByteBuffer buf = ByteBuffer.allocate(1 << 10);
         RowUpdateBuilder rowUpdateBuilder = new RowUpdateBuilder(cfs1.metadata.get(), 0, "k")
                                             .clustering("bytes");

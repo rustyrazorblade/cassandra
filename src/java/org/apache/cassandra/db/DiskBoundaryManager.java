@@ -40,7 +40,7 @@ public class DiskBoundaryManager
     private static final Logger logger = LoggerFactory.getLogger(DiskBoundaryManager.class);
     private volatile DiskBoundaries diskBoundaries;
 
-    public DiskBoundaries getDiskBoundaries(ColumnFamilyStore cfs)
+    public DiskBoundaries getDiskBoundaries(Table cfs)
     {
         if (!cfs.getPartitioner().splitter().isPresent())
             return new DiskBoundaries(cfs.getDirectories().getWriteableLocations(), BlacklistedDirectories.getDirectoriesVersion());
@@ -66,7 +66,7 @@ public class DiskBoundaryManager
            diskBoundaries.invalidate();
     }
 
-    private static DiskBoundaries getDiskBoundaryValue(ColumnFamilyStore cfs)
+    private static DiskBoundaries getDiskBoundaryValue(Table cfs)
     {
         Collection<Range<Token>> localRanges;
 

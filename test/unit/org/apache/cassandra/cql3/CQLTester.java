@@ -422,12 +422,12 @@ public abstract class CQLTester
         return list.isEmpty() ? Collections.<String>emptyList() : new ArrayList<>(list);
     }
 
-    public ColumnFamilyStore getCurrentColumnFamilyStore()
+    public Table getCurrentColumnFamilyStore()
     {
         return getCurrentColumnFamilyStore(KEYSPACE);
     }
 
-    public ColumnFamilyStore getCurrentColumnFamilyStore(String keyspace)
+    public Table getCurrentColumnFamilyStore(String keyspace)
     {
         String currentTable = currentTable();
         return currentTable == null
@@ -448,14 +448,14 @@ public abstract class CQLTester
 
     public void flush(String keyspace)
     {
-        ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
+        Table store = getCurrentColumnFamilyStore(keyspace);
         if (store != null)
             store.forceBlockingFlush();
     }
 
     public void disableCompaction(String keyspace)
     {
-        ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
+        Table store = getCurrentColumnFamilyStore(keyspace);
         if (store != null)
             store.disableAutoCompaction();
     }
@@ -464,7 +464,7 @@ public abstract class CQLTester
     {
         try
         {
-            ColumnFamilyStore store = getCurrentColumnFamilyStore();
+            Table store = getCurrentColumnFamilyStore();
             if (store != null)
                 store.forceMajorCompaction();
         }
@@ -481,7 +481,7 @@ public abstract class CQLTester
 
     public void enableCompaction(String keyspace)
     {
-        ColumnFamilyStore store = getCurrentColumnFamilyStore(keyspace);
+        Table store = getCurrentColumnFamilyStore(keyspace);
         if (store != null)
             store.enableAutoCompaction();
     }
@@ -493,7 +493,7 @@ public abstract class CQLTester
 
     public void cleanupCache()
     {
-        ColumnFamilyStore store = getCurrentColumnFamilyStore();
+        Table store = getCurrentColumnFamilyStore();
         if (store != null)
             store.cleanupCache();
     }

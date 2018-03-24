@@ -25,7 +25,7 @@ import com.google.common.annotations.VisibleForTesting;
 import org.apache.cassandra.cache.InstrumentingCache;
 import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
@@ -109,7 +109,7 @@ public class SSTableRewriter extends Transactional.AbstractTransactional impleme
         return new SSTableRewriter(transaction, maxAge, calculateOpenInterval(false), keepOriginals);
     }
 
-    public static SSTableRewriter construct(ColumnFamilyStore cfs, LifecycleTransaction transaction, boolean keepOriginals, long maxAge)
+    public static SSTableRewriter construct(Table cfs, LifecycleTransaction transaction, boolean keepOriginals, long maxAge)
     {
         return new SSTableRewriter(transaction, maxAge, calculateOpenInterval(cfs.supportsEarlyOpen()), keepOriginals);
     }

@@ -33,7 +33,7 @@ import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.cql3.statements.IndexTarget;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.Cell;
@@ -873,7 +873,7 @@ public class SecondaryIndexTest extends CQLTester
         createIndex(String.format("CREATE CUSTOM INDEX c_idx_1 ON %%s(c) USING '%s' WITH OPTIONS = {'foo':'a'}", indexClassName));
         createIndex(String.format("CREATE CUSTOM INDEX c_idx_2 ON %%s(c) USING '%s' WITH OPTIONS = {'foo':'b'}", indexClassName));
 
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        Table cfs = getCurrentColumnFamilyStore();
         TableMetadata cfm = cfs.metadata();
         StubIndex index1 = (StubIndex)cfs.indexManager.getIndex(cfm.indexes
                                                                    .get("c_idx_1")
@@ -915,7 +915,7 @@ public class SecondaryIndexTest extends CQLTester
         createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY ((a), b))");
         createIndex(String.format("CREATE CUSTOM INDEX c_idx ON %%s(c) USING '%s'", indexClassName));
 
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        Table cfs = getCurrentColumnFamilyStore();
         TableMetadata cfm = cfs.metadata();
         StubIndex index1 = (StubIndex) cfs.indexManager.getIndex(cfm.indexes
                 .get("c_idx")
@@ -1539,7 +1539,7 @@ public class SecondaryIndexTest extends CQLTester
     {
         private final CountDownLatch latch = new CountDownLatch(1);
 
-        public IndexBlockingOnInitialization(ColumnFamilyStore baseCfs, IndexMetadata indexDef)
+        public IndexBlockingOnInitialization(Table baseCfs, IndexMetadata indexDef)
         {
             super(baseCfs, indexDef);
         }

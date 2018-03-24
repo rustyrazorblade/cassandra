@@ -19,7 +19,6 @@ package org.apache.cassandra.db.compaction;
 
 import java.util.*;
 import java.util.function.LongPredicate;
-import java.util.function.Predicate;
 
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.db.Memtable;
@@ -54,7 +53,7 @@ public class CompactionController implements AutoCloseable
     private static final String NEVER_PURGE_TOMBSTONES_PROPERTY = Config.PROPERTY_PREFIX + "never_purge_tombstones";
     static final boolean NEVER_PURGE_TOMBSTONES = Boolean.getBoolean(NEVER_PURGE_TOMBSTONES_PROPERTY);
 
-    public final ColumnFamilyStore cfs;
+    public final Table cfs;
     private final boolean compactingRepaired;
     // note that overlapIterator and overlappingSSTables will be null if NEVER_PURGE_TOMBSTONES is set - this is a
     // good thing so that noone starts using them and thinks that if overlappingSSTables is empty, there
@@ -69,18 +68,18 @@ public class CompactionController implements AutoCloseable
 
     public final int gcBefore;
 
-    protected CompactionController(ColumnFamilyStore cfs, int maxValue)
+    protected CompactionController(Table cfs, int maxValue)
     {
         this(cfs, null, maxValue);
     }
 
-    public CompactionController(ColumnFamilyStore cfs, Set<SSTableReader> compacting, int gcBefore)
+    public CompactionController(Table cfs, Set<SSTableReader> compacting, int gcBefore)
     {
         this(cfs, compacting, gcBefore, null,
              cfs.getCompactionStrategyManager().getCompactionParams().tombstoneOption());
     }
 
-    public CompactionController(ColumnFamilyStore cfs, Set<SSTableReader> compacting, int gcBefore, RateLimiter limiter, TombstoneOption tombstoneOption)
+    public CompactionController(Table cfs, Set<SSTableReader> compacting, int gcBefore, RateLimiter limiter, TombstoneOption tombstoneOption)
     {
         assert cfs != null;
         this.cfs = cfs;
@@ -165,7 +164,7 @@ public class CompactionController implements AutoCloseable
      * @param ignoreOverlaps don't check if data shadows/overlaps any data in other sstables
      * @return
      */
-    public static Set<SSTableReader> getFullyExpiredSSTables(ColumnFamilyStore cfStore,
+    public static Set<SSTableReader> getFullyExpiredSSTables(Table cfStore,
                                                              Iterable<SSTableReader> compacting,
                                                              Iterable<SSTableReader> overlapping,
                                                              int gcBefore,
@@ -238,7 +237,7 @@ public class CompactionController implements AutoCloseable
         return new HashSet<>(candidates);
     }
 
-    public static Set<SSTableReader> getFullyExpiredSSTables(ColumnFamilyStore cfStore,
+    public static Set<SSTableReader> getFullyExpiredSSTables(Table cfStore,
                                                              Iterable<SSTableReader> compacting,
                                                              Iterable<SSTableReader> overlapping,
                                                              int gcBefore)

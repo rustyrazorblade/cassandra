@@ -20,7 +20,7 @@ package org.apache.cassandra.index.internal;
 import java.util.Set;
 import java.util.UUID;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.compaction.CompactionInfo;
 import org.apache.cassandra.db.compaction.CompactionInterruptedException;
@@ -35,12 +35,12 @@ import org.apache.cassandra.utils.UUIDGen;
  */
 public class CollatedViewIndexBuilder extends SecondaryIndexBuilder
 {
-    private final ColumnFamilyStore cfs;
+    private final Table cfs;
     private final Set<Index> indexers;
     private final ReducingKeyIterator iter;
     private final UUID compactionId;
 
-    public CollatedViewIndexBuilder(ColumnFamilyStore cfs, Set<Index> indexers, ReducingKeyIterator iter)
+    public CollatedViewIndexBuilder(Table cfs, Set<Index> indexers, ReducingKeyIterator iter)
     {
         this.cfs = cfs;
         this.indexers = indexers;

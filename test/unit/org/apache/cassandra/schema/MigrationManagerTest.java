@@ -37,7 +37,7 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
@@ -178,7 +178,7 @@ public class MigrationManagerTest
                                        "key0", "col0", "val0");
 
         // flush to exercise more than just hitting the memtable
-        ColumnFamilyStore cfs = Keyspace.open(ksName).getColumnFamilyStore(tableName);
+        Table cfs = Keyspace.open(ksName).getColumnFamilyStore(tableName);
         assertNotNull(cfs);
         cfs.forceBlockingFlush();
 
@@ -201,7 +201,7 @@ public class MigrationManagerTest
             QueryProcessor.executeInternal(String.format("INSERT INTO %s.%s (key, name, val) VALUES (?, ?, ?)",
                                                          KEYSPACE1, TABLE1),
                                            "dropCf", "col" + i, "anyvalue");
-        ColumnFamilyStore store = Keyspace.open(cfm.keyspace).getColumnFamilyStore(cfm.name);
+        Table store = Keyspace.open(cfm.keyspace).getColumnFamilyStore(cfm.name);
         assertNotNull(store);
         store.forceBlockingFlush();
         assertTrue(store.getDirectories().sstableLister(Directories.OnTxnErr.THROW).list().size() > 0);
@@ -250,7 +250,7 @@ public class MigrationManagerTest
         // test reads and writes.
         QueryProcessor.executeInternal("INSERT INTO newkeyspace1.newstandard1 (key, col, val) VALUES (?, ?, ?)",
                                        "key0", "col0", "val0");
-        ColumnFamilyStore store = Keyspace.open(cfm.keyspace).getColumnFamilyStore(cfm.name);
+        Table store = Keyspace.open(cfm.keyspace).getColumnFamilyStore(cfm.name);
         assertNotNull(store);
         store.forceBlockingFlush();
 
@@ -272,7 +272,7 @@ public class MigrationManagerTest
             QueryProcessor.executeInternal(String.format("INSERT INTO %s.%s (key, name, val) VALUES (?, ?, ?)",
                                                          KEYSPACE1, TABLE2),
                                            "dropKs", "col" + i, "anyvalue");
-        ColumnFamilyStore cfs = Keyspace.open(cfm.keyspace).getColumnFamilyStore(cfm.name);
+        Table cfs = Keyspace.open(cfm.keyspace).getColumnFamilyStore(cfm.name);
         assertNotNull(cfs);
         cfs.forceBlockingFlush();
         assertTrue(!cfs.getDirectories().sstableLister(Directories.OnTxnErr.THROW).list().isEmpty());
@@ -353,7 +353,7 @@ public class MigrationManagerTest
                                                      EMPTY_KEYSPACE, tableName),
                                        "key0", "col0", "val0");
 
-        ColumnFamilyStore cfs = Keyspace.open(newKs.name).getColumnFamilyStore(newCf.name);
+        Table cfs = Keyspace.open(newKs.name).getColumnFamilyStore(newCf.name);
         assertNotNull(cfs);
         cfs.forceBlockingFlush();
 
@@ -500,7 +500,7 @@ public class MigrationManagerTest
     {
         // persist keyspace definition in the system keyspace
         SchemaKeyspace.makeCreateKeyspaceMutation(Schema.instance.getKeyspaceMetadata(KEYSPACE6), FBUtilities.timestampMicros()).build().applyUnsafe();
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE6).getColumnFamilyStore(TABLE1i);
+        Table cfs = Keyspace.open(KEYSPACE6).getColumnFamilyStore(TABLE1i);
         String indexName = TABLE1i + "_birthdate_key_index";
 
         // insert some data.  save the sstable descriptor so we can make sure it's marked for delete after the drop
@@ -511,9 +511,9 @@ public class MigrationManagerTest
                                        "key0", "col0", 1L, 1L);
 
         cfs.forceBlockingFlush();
-        ColumnFamilyStore indexCfs = cfs.indexManager.getIndexByName(indexName)
-                                                     .getBackingTable()
-                                                     .orElseThrow(throwAssert("Cannot access index cfs"));
+        Table indexCfs = cfs.indexManager.getIndexByName(indexName)
+                                         .getBackingTable()
+                                         .orElseThrow(throwAssert("Cannot access index cfs"));
         Descriptor desc = indexCfs.getLiveSSTables().iterator().next().descriptor;
 
         // drop the index

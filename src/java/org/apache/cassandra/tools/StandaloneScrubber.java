@@ -28,8 +28,8 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import org.apache.commons.cli.*;
 
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.schema.Schema;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.*;
@@ -74,8 +74,8 @@ public class StandaloneScrubber
             // Do not load sstables since they might be broken
             Keyspace keyspace = Keyspace.openWithoutSSTables(options.keyspaceName);
 
-            ColumnFamilyStore cfs = null;
-            for (ColumnFamilyStore c : keyspace.getValidColumnFamilies(true, false, options.cfName))
+            Table cfs = null;
+            for (Table c : keyspace.getValidColumnFamilies(true, false, options.cfName))
             {
                 if (c.name.equals(options.cfName))
                 {
@@ -165,7 +165,7 @@ public class StandaloneScrubber
         }
     }
 
-    private static void checkManifest(CompactionStrategyManager strategyManager, ColumnFamilyStore cfs, Collection<SSTableReader> sstables)
+    private static void checkManifest(CompactionStrategyManager strategyManager, Table cfs, Collection<SSTableReader> sstables)
     {
         if (strategyManager.getCompactionParams().klass().equals(LeveledCompactionStrategy.class))
         {

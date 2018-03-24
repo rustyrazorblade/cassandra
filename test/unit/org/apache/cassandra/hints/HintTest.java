@@ -331,7 +331,7 @@ public class HintTest
         return builder.build();
     }
 
-    private static ColumnFamilyStore cfs(String table)
+    private static Table cfs(String table)
     {
         return Schema.instance.getColumnFamilyStoreInstance(Schema.instance.getTableMetadata(KEYSPACE, table).id);
     }

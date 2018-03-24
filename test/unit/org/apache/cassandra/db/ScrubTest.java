@@ -115,7 +115,7 @@ public class ScrubTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         cfs.clearUnsafe();
 
         // insert data and verify we get it back w/ range query
@@ -137,7 +137,7 @@ public class ScrubTest
 
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COUNTER_CF);
+        Table cfs = keyspace.getColumnFamilyStore(COUNTER_CF);
         cfs.clearUnsafe();
 
         fillCounterCF(cfs, numPartitions);
@@ -197,7 +197,7 @@ public class ScrubTest
 
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(COUNTER_CF);
+        Table cfs = keyspace.getColumnFamilyStore(COUNTER_CF);
         cfs.clearUnsafe();
 
         fillCounterCF(cfs, 2);
@@ -240,7 +240,7 @@ public class ScrubTest
 
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         cfs.clearUnsafe();
 
         // insert data and verify we get it back w/ range query
@@ -276,7 +276,7 @@ public class ScrubTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         cfs.clearUnsafe();
 
         // insert data and verify we get it back w/ range query
@@ -294,7 +294,7 @@ public class ScrubTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
+        Table cfs = keyspace.getColumnFamilyStore(CF);
         cfs.clearUnsafe();
 
         // insert data and verify we get it back w/ range query
@@ -327,7 +327,7 @@ public class ScrubTest
             CompactionManager.instance.disableAutoCompaction();
             Keyspace keyspace = Keyspace.open(KEYSPACE);
             String columnFamily = CF3;
-            ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(columnFamily);
+            Table cfs = keyspace.getColumnFamilyStore(columnFamily);
             cfs.clearUnsafe();
 
             List<String> keys = Arrays.asList("t", "a", "b", "z", "c", "y", "d");
@@ -428,7 +428,7 @@ public class ScrubTest
             ChunkCache.instance.invalidateFile(sstable.getFilename());
     }
 
-    private static void assertOrderedAll(ColumnFamilyStore cfs, int expectedSize)
+    private static void assertOrderedAll(Table cfs, int expectedSize)
     {
         assertOrdered(Util.cmd(cfs).build(), expectedSize);
     }
@@ -447,7 +447,7 @@ public class ScrubTest
         assertEquals(expectedSize, size);
     }
 
-    protected void fillCF(ColumnFamilyStore cfs, int partitionsPerSSTable)
+    protected void fillCF(Table cfs, int partitionsPerSSTable)
     {
         for (int i = 0; i < partitionsPerSSTable; i++)
         {
@@ -462,7 +462,7 @@ public class ScrubTest
         cfs.forceBlockingFlush();
     }
 
-    public static void fillIndexCF(ColumnFamilyStore cfs, boolean composite, long ... values)
+    public static void fillIndexCF(Table cfs, boolean composite, long ... values)
     {
         assertTrue(values.length % 2 == 0);
         for (int i = 0; i < values.length; i +=2)
@@ -486,7 +486,7 @@ public class ScrubTest
         cfs.forceBlockingFlush();
     }
 
-    protected void fillCounterCF(ColumnFamilyStore cfs, int partitionsPerSSTable) throws WriteTimeoutException
+    protected void fillCounterCF(Table cfs, int partitionsPerSSTable) throws WriteTimeoutException
     {
         for (int i = 0; i < partitionsPerSSTable; i++)
         {
@@ -505,14 +505,14 @@ public class ScrubTest
         QueryProcessor.process(String.format("CREATE TABLE \"%s\".test_compact_static_columns (a bigint, b timeuuid, c boolean static, d text, PRIMARY KEY (a, b))", KEYSPACE), ConsistencyLevel.ONE);
 
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("test_compact_static_columns");
+        Table cfs = keyspace.getColumnFamilyStore("test_compact_static_columns");
 
         QueryProcessor.executeInternal(String.format("INSERT INTO \"%s\".test_compact_static_columns (a, b, c, d) VALUES (123, c3db07e8-b602-11e3-bc6b-e0b9a54a6d93, true, 'foobar')", KEYSPACE));
         cfs.forceBlockingFlush();
         CompactionManager.instance.performScrub(cfs, false, true, 2);
 
         QueryProcessor.process("CREATE TABLE \"Keyspace1\".test_scrub_validation (a text primary key, b int)", ConsistencyLevel.ONE);
-        ColumnFamilyStore cfs2 = keyspace.getColumnFamilyStore("test_scrub_validation");
+        Table cfs2 = keyspace.getColumnFamilyStore("test_scrub_validation");
 
         new Mutation(UpdateBuilder.create(cfs2.metadata(), "key").newRow().add("b", LongType.instance.decompose(1L)).build()).apply();
         cfs2.forceBlockingFlush();
@@ -570,7 +570,7 @@ public class ScrubTest
     {
         CompactionManager.instance.disableAutoCompaction();
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
+        Table cfs = keyspace.getColumnFamilyStore(cfName);
         cfs.clearUnsafe();
 
         int numRows = 1000;
@@ -587,9 +587,9 @@ public class ScrubTest
         assertOrdered(Util.cmd(cfs).filterOn(colName, Operator.EQ, 1L).build(), numRows / 2);
 
         // scrub index
-        Set<ColumnFamilyStore> indexCfss = cfs.indexManager.getAllIndexColumnFamilyStores();
+        Set<Table> indexCfss = cfs.indexManager.getAllIndexColumnFamilyStores();
         assertTrue(indexCfss.size() == 1);
-        for(ColumnFamilyStore indexCfs : indexCfss)
+        for(Table indexCfs : indexCfss)
         {
             for (int i = 0; i < scrubs.length; i++)
             {
@@ -657,7 +657,7 @@ public class ScrubTest
         QueryProcessor.process(String.format("CREATE TABLE \"%s\".cf_with_duplicates_3_0 (a int, b int, c int, PRIMARY KEY (a, b))", KEYSPACE), ConsistencyLevel.ONE);
 
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("cf_with_duplicates_3_0");
+        Table cfs = keyspace.getColumnFamilyStore("cf_with_duplicates_3_0");
 
         Path legacySSTableRoot = Paths.get(System.getProperty(INVALID_LEGACY_SSTABLE_ROOT_PROP),
                                            "Keyspace1",

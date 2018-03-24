@@ -58,7 +58,7 @@ public class DeletePartitionTest
 
     public void testDeletePartition(DecoratedKey key, boolean flushBeforeRemove, boolean flushAfterRemove)
     {
-        ColumnFamilyStore store = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
+        Table store = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
         ColumnMetadata column = store.metadata().getColumn(ByteBufferUtil.bytes("val"));
 
         // write

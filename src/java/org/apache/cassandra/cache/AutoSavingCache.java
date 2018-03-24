@@ -39,7 +39,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.compaction.CompactionInfo;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -219,7 +219,7 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
                     if (indexName.isEmpty())
                         indexName = null;
 
-                    ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(tableId);
+                    Table cfs = Schema.instance.getColumnFamilyStoreInstance(tableId);
                     if (indexName != null && cfs != null)
                         cfs = cfs.indexManager.getIndexByName(indexName).getBackingTable().orElse(null);
 
@@ -366,7 +366,7 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
                 {
                     K key = keyIterator.next();
 
-                    ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(key.tableId);
+                    Table cfs = Schema.instance.getColumnFamilyStoreInstance(key.tableId);
                     if (cfs == null)
                         continue; // the table or 2i has been dropped.
                     if (key.indexName != null)
@@ -441,8 +441,8 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
 
     public interface CacheSerializer<K extends CacheKey, V>
     {
-        void serialize(K key, DataOutputPlus out, ColumnFamilyStore cfs) throws IOException;
+        void serialize(K key, DataOutputPlus out, Table cfs) throws IOException;
 
-        Future<Pair<K, V>> deserialize(DataInputPlus in, ColumnFamilyStore cfs) throws IOException;
+        Future<Pair<K, V>> deserialize(DataInputPlus in, Table cfs) throws IOException;
     }
 }

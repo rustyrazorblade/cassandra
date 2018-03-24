@@ -226,7 +226,7 @@ public class RecoveryManagerTest
     {
         CommitLog.instance.resetUnsafe(true);
         Keyspace keyspace1 = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore cfs = keyspace1.getColumnFamilyStore(CF_COUNTER1);
+        Table cfs = keyspace1.getColumnFamilyStore(CF_COUNTER1);
 
         for (int i = 0; i < 10; ++i)
         {
@@ -248,7 +248,7 @@ public class RecoveryManagerTest
     public void testRecoverPIT() throws Exception
     {
         CommitLog.instance.resetUnsafe(true);
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
         Date date = CommitLogArchiver.format.parse("2112:12:12 12:12:12");
         long timeMS = date.getTime() - 5000;
 
@@ -276,7 +276,7 @@ public class RecoveryManagerTest
     public void testRecoverPITUnordered() throws Exception
     {
         CommitLog.instance.resetUnsafe(true);
-        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
+        Table cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
         Date date = CommitLogArchiver.format.parse("2112:12:12 12:12:12");
         long timeMS = date.getTime();
 

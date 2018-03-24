@@ -33,7 +33,7 @@ import org.junit.Test;
 
 import junit.framework.Assert;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.dht.AbstractBounds;
@@ -58,7 +58,7 @@ public class ViewTest
     @Test
     public void testSSTablesInBounds()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         View initialView = fakeView(0, 5, cfs);
         for (int i = 0 ; i < 5 ; i++)
         {
@@ -85,7 +85,7 @@ public class ViewTest
     @Test
     public void testCompaction()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         View initialView = fakeView(0, 5, cfs, true);
         View cur = initialView;
         List<SSTableReader> readers = ImmutableList.copyOf(initialView.sstables);
@@ -158,7 +158,7 @@ public class ViewTest
     @Test
     public void testFlushing()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         View initialView = fakeView(1, 0, cfs);
         View cur = initialView;
         Memtable memtable1 = initialView.getCurrentMemtable();
@@ -209,12 +209,12 @@ public class ViewTest
         Assert.assertEquals(sstable, cur.sstablesMap.get(sstable));
     }
 
-    static View fakeView(int memtableCount, int sstableCount, ColumnFamilyStore cfs)
+    static View fakeView(int memtableCount, int sstableCount, Table cfs)
     {
         return fakeView(memtableCount, sstableCount, cfs, false);
     }
 
-    static View fakeView(int memtableCount, int sstableCount, ColumnFamilyStore cfs, boolean keepRef)
+    static View fakeView(int memtableCount, int sstableCount, Table cfs, boolean keepRef)
     {
         List<Memtable> memtables = new ArrayList<>();
         List<SSTableReader> sstables = new ArrayList<>();

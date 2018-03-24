@@ -39,9 +39,9 @@ import com.datastax.driver.core.exceptions.InvalidQueryException;
 import org.apache.cassandra.concurrent.SEPExecutor;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -915,7 +915,7 @@ public class ViewTest extends CQLTester
         assertRows(execute("SELECT a, b, c from mv WHERE b = ?", 0), row(0, 0, 0));
         assertRows(execute("SELECT a, b, c from mv WHERE b = ?", 1), row(0, 1, null));
 
-        ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore("mv");
+        Table cfs = Keyspace.open(keyspace()).getColumnFamilyStore("mv");
         cfs.forceBlockingFlush();
         Assert.assertEquals(1, cfs.getLiveSSTables().size());
     }
@@ -1334,7 +1334,7 @@ public class ViewTest extends CQLTester
         CompactionManager.instance.setConcurrentViewBuilders(concurrentViewBuilders);
         CompactionManager.instance.setCoreCompactorThreads(1);
         CompactionManager.instance.setMaximumCompactorThreads(1);
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        Table cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
         for (int i = 0; i < 1024; i++)

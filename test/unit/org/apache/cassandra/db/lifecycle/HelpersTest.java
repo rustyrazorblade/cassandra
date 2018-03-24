@@ -32,7 +32,7 @@ import org.junit.Test;
 
 import junit.framework.Assert;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.MockSchema;
@@ -148,7 +148,7 @@ public class HelpersTest
     @Test
     public void testSetupDeletionNotification()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         Iterable<SSTableReader> readers = Lists.newArrayList(MockSchema.sstable(1, cfs), MockSchema.sstable(2, cfs));
         Throwable accumulate = Helpers.setReplaced(readers, null);
         Assert.assertNull(accumulate);
@@ -161,7 +161,7 @@ public class HelpersTest
     @Test
     public void testMarkObsolete()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         LogTransaction txnLogs = new LogTransaction(OperationType.UNKNOWN);
         Iterable<SSTableReader> readers = Lists.newArrayList(MockSchema.sstable(1, cfs), MockSchema.sstable(2, cfs));
         Iterable<SSTableReader> readersToKeep = Lists.newArrayList(MockSchema.sstable(3, cfs), MockSchema.sstable(4, cfs));
@@ -188,7 +188,7 @@ public class HelpersTest
     @Test
     public void testObsoletionPerformance()
     {
-        ColumnFamilyStore cfs = MockSchema.newCFS();
+        Table cfs = MockSchema.newCFS();
         LogTransaction txnLogs = new LogTransaction(OperationType.UNKNOWN);
         List<SSTableReader> readers = new ArrayList<>();
 

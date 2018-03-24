@@ -41,11 +41,6 @@ import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.Memory;
-import org.apache.cassandra.schema.CachingParams;
-import org.apache.cassandra.schema.KeyspaceMetadata;
-import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.AlwaysPresentFilter;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -63,27 +58,27 @@ public class MockSchema
     public static final IndexSummary indexSummary;
     private static final FileHandle RANDOM_ACCESS_READER_FACTORY = new FileHandle.Builder(temp("mocksegmentedfile").getAbsolutePath()).complete();
 
-    public static Memtable memtable(ColumnFamilyStore cfs)
+    public static Memtable memtable(Table cfs)
     {
         return new Memtable(cfs.metadata());
     }
 
-    public static SSTableReader sstable(int generation, ColumnFamilyStore cfs)
+    public static SSTableReader sstable(int generation, Table cfs)
     {
         return sstable(generation, false, cfs);
     }
 
-    public static SSTableReader sstable(int generation, boolean keepRef, ColumnFamilyStore cfs)
+    public static SSTableReader sstable(int generation, boolean keepRef, Table cfs)
     {
         return sstable(generation, 0, keepRef, cfs);
     }
 
-    public static SSTableReader sstable(int generation, int size, ColumnFamilyStore cfs)
+    public static SSTableReader sstable(int generation, int size, Table cfs)
     {
         return sstable(generation, size, false, cfs);
     }
 
-    public static SSTableReader sstable(int generation, int size, boolean keepRef, ColumnFamilyStore cfs)
+    public static SSTableReader sstable(int generation, int size, boolean keepRef, Table cfs)
     {
         Descriptor descriptor = new Descriptor(cfs.getDirectories().getDirectoryForNewSSTables(),
                                                cfs.keyspace.getName(),
@@ -129,16 +124,16 @@ public class MockSchema
         return reader;
     }
 
-    public static ColumnFamilyStore newCFS()
+    public static Table newCFS()
     {
         return newCFS(ks.getName());
     }
 
-    public static ColumnFamilyStore newCFS(String ksname)
+    public static Table newCFS(String ksname)
     {
         String cfname = "mockcf" + (id.incrementAndGet());
         TableMetadata metadata = newTableMetadata(ksname, cfname);
-        return new ColumnFamilyStore(ks, cfname, 0, new TableMetadataRef(metadata), new Directories(metadata), false, false, false);
+        return new Table(ks, cfname, 0, new TableMetadataRef(metadata), new Directories(metadata), false, false, false);
     }
 
     public static TableMetadata newTableMetadata(String ksname, String cfname)

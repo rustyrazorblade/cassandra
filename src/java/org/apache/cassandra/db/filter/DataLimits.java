@@ -211,7 +211,7 @@ public abstract class DataLimits
     /**
      * Estimate the number of results that a full scan of the provided cfs would yield.
      */
-    public abstract float estimateTotalResults(ColumnFamilyStore cfs);
+    public abstract float estimateTotalResults(Table cfs);
 
     public static abstract class Counter extends StoppingTransformation<BaseRowIterator<?>>
     {
@@ -436,7 +436,7 @@ public abstract class DataLimits
             return this;
         }
 
-        public float estimateTotalResults(ColumnFamilyStore cfs)
+        public float estimateTotalResults(Table cfs)
         {
             // TODO: we should start storing stats on the number of rows (instead of the number of cells, which
             // is what getMeanColumns returns)
@@ -689,7 +689,7 @@ public abstract class DataLimits
         }
 
         @Override
-        public float estimateTotalResults(ColumnFamilyStore cfs)
+        public float estimateTotalResults(Table cfs)
         {
             // For the moment, we return the estimated number of rows as we have no good way of estimating 
             // the number of groups that will be returned. Hopefully, we should be able to fix

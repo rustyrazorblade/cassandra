@@ -31,14 +31,13 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
 import org.apache.cassandra.db.DiskBoundaries;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.index.Index;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
-import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
@@ -77,7 +76,7 @@ public class CompactionStrategyManager implements INotificationConsumer
 {
     private static final Logger logger = LoggerFactory.getLogger(CompactionStrategyManager.class);
     public final CompactionLogger compactionLogger;
-    private final ColumnFamilyStore cfs;
+    private final Table cfs;
     private final boolean partitionSSTablesByTokenRange;
     private final Supplier<DiskBoundaries> boundariesSupplier;
 
@@ -111,13 +110,13 @@ public class CompactionStrategyManager implements INotificationConsumer
     private boolean supportsEarlyOpen;
     private int fanout;
 
-    public CompactionStrategyManager(ColumnFamilyStore cfs)
+    public CompactionStrategyManager(Table cfs)
     {
         this(cfs, cfs::getDiskBoundaries, cfs.getPartitioner().splitter().isPresent());
     }
 
     @VisibleForTesting
-    public CompactionStrategyManager(ColumnFamilyStore cfs, Supplier<DiskBoundaries> boundariesSupplier,
+    public CompactionStrategyManager(Table cfs, Supplier<DiskBoundaries> boundariesSupplier,
                                      boolean partitionSSTablesByTokenRange)
     {
         cfs.getTracker().subscribe(this);

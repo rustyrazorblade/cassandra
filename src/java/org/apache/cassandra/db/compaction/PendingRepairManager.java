@@ -36,7 +36,7 @@ import com.google.common.collect.Maps;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
@@ -60,7 +60,7 @@ class PendingRepairManager
 {
     private static final Logger logger = LoggerFactory.getLogger(PendingRepairManager.class);
 
-    private final ColumnFamilyStore cfs;
+    private final Table cfs;
     private final CompactionParams params;
     private volatile ImmutableMap<UUID, AbstractCompactionStrategy> strategies = ImmutableMap.of();
 
@@ -75,7 +75,7 @@ class PendingRepairManager
         }
     }
 
-    PendingRepairManager(ColumnFamilyStore cfs, CompactionParams params)
+    PendingRepairManager(Table cfs, CompactionParams params)
     {
         this.cfs = cfs;
         this.params = params;
@@ -405,7 +405,7 @@ class PendingRepairManager
         private final UUID sessionID;
         private final long repairedAt;
 
-        RepairFinishedCompactionTask(ColumnFamilyStore cfs, LifecycleTransaction transaction, UUID sessionID, long repairedAt)
+        RepairFinishedCompactionTask(Table cfs, LifecycleTransaction transaction, UUID sessionID, long repairedAt)
         {
             super(cfs, transaction);
             this.sessionID = sessionID;
@@ -440,7 +440,7 @@ class PendingRepairManager
             }
         }
 
-        public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables)
+        public CompactionAwareWriter getCompactionAwareWriter(Table cfs, Directories directories, LifecycleTransaction txn, Set<SSTableReader> nonExpiredSSTables)
         {
             throw new UnsupportedOperationException();
         }

@@ -12,7 +12,7 @@ import static org.junit.Assert.fail;
 import org.apache.cassandra.cql3.Attributes;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.ExpirationDateOverflowHandling;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.rows.AbstractCell;
@@ -323,7 +323,7 @@ public class TTLTest extends CQLTester
         createTable(simple, clustering);
 
         Keyspace keyspace = Keyspace.open(KEYSPACE);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(currentTable());
+        Table cfs = keyspace.getColumnFamilyStore(currentTable());
 
         assertEquals(0, cfs.getLiveSSTables().size());
 

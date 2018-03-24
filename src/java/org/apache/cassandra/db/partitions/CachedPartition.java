@@ -18,6 +18,7 @@
 package org.apache.cassandra.db.partitions;
 
 import org.apache.cassandra.cache.IRowCacheEntry;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.io.ISerializer;
 
@@ -45,7 +46,7 @@ public interface CachedPartition extends Partition, IRowCacheEntry
     /**
      * The number of rows that were live at the time the partition was cached.
      *
-     * See {@link org.apache.cassandra.db.ColumnFamilyStore#isFilterFullyCoveredBy} to see why we need this.
+     * See {@link Table#isFilterFullyCoveredBy} to see why we need this.
      *
      * @return the number of rows in this partition that were live at the time the
      * partition was cached (this can be different from the number of live rows now

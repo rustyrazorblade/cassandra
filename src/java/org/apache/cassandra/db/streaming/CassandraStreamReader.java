@@ -99,7 +99,7 @@ public class CassandraStreamReader
     {
         long totalSize = totalSize();
 
-        ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(tableId);
+        Table cfs = Table.getIfExists(tableId);
         if (cfs == null)
         {
             // schema was dropped during streaming
@@ -145,7 +145,7 @@ public class CassandraStreamReader
         return header != null? header.toHeader(metadata) : null; //pre-3.0 sstable have no SerializationHeader
     }
 
-    protected SSTableMultiWriter createWriter(ColumnFamilyStore cfs, long totalSize, long repairedAt, UUID pendingRepair, SSTableFormat.Type format) throws IOException
+    protected SSTableMultiWriter createWriter(Table cfs, long totalSize, long repairedAt, UUID pendingRepair, SSTableFormat.Type format) throws IOException
     {
         Directories.DataDirectory localDir = cfs.getDirectories().getWriteableLocation(totalSize);
         if (localDir == null)

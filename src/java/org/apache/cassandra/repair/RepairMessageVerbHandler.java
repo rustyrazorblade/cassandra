@@ -23,7 +23,7 @@ import com.google.common.base.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -69,10 +69,10 @@ public class RepairMessageVerbHandler implements IVerbHandler<RepairMessage>
                 case PREPARE_MESSAGE:
                     PrepareMessage prepareMessage = (PrepareMessage) message.payload;
                     logger.debug("Preparing, {}", prepareMessage);
-                    List<ColumnFamilyStore> columnFamilyStores = new ArrayList<>(prepareMessage.tableIds.size());
+                    List<Table> columnFamilyStores = new ArrayList<>(prepareMessage.tableIds.size());
                     for (TableId tableId : prepareMessage.tableIds)
                     {
-                        ColumnFamilyStore columnFamilyStore = ColumnFamilyStore.getIfExists(tableId);
+                        Table columnFamilyStore = Table.getIfExists(tableId);
                         if (columnFamilyStore == null)
                         {
                             logErrorAndSendFailureResponse(String.format("Table with id %s was dropped during prepare phase of repair",
@@ -94,7 +94,7 @@ public class RepairMessageVerbHandler implements IVerbHandler<RepairMessage>
 
                 case SNAPSHOT:
                     logger.debug("Snapshotting {}", desc);
-                    final ColumnFamilyStore cfs = ColumnFamilyStore.getIfExists(desc.keyspace, desc.columnFamily);
+                    final Table cfs = Table.getIfExists(desc.keyspace, desc.columnFamily);
                     if (cfs == null)
                     {
                         logErrorAndSendFailureResponse(String.format("Table %s.%s was dropped during snapshot phase of repair",
@@ -127,7 +127,7 @@ public class RepairMessageVerbHandler implements IVerbHandler<RepairMessage>
                     ValidationRequest validationRequest = (ValidationRequest) message.payload;
                     logger.debug("Validating {}", validationRequest);
                     // trigger read-only compaction
-                    ColumnFamilyStore store = ColumnFamilyStore.getIfExists(desc.keyspace, desc.columnFamily);
+                    Table store = Table.getIfExists(desc.keyspace, desc.columnFamily);
                     if (store == null)
                     {
                         logger.error("Table {}.{} was dropped during snapshot phase of repair", desc.keyspace, desc.columnFamily);

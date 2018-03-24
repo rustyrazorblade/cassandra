@@ -37,7 +37,7 @@ import org.apache.cassandra.schema.Views;
 import org.apache.cassandra.service.StorageService;
 
 /**
- * Manages {@link View}'s for a single {@link ColumnFamilyStore}. All of the views for that table are created when this
+ * Manages {@link View}'s for a single {@link Table}. All of the views for that table are created when this
  * manager is initialized.
  *
  * The main purposes of the manager are to provide a single location for updates to be vetted to see whether they update

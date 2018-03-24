@@ -90,9 +90,9 @@ import org.json.simple.JSONObject;
 
 import static org.apache.cassandra.utils.Throwables.maybeFail;
 
-public class ColumnFamilyStore implements ColumnFamilyStoreMBean
+public class Table implements ColumnFamilyStoreMBean
 {
-    private static final Logger logger = LoggerFactory.getLogger(ColumnFamilyStore.class);
+    private static final Logger logger = LoggerFactory.getLogger(Table.class);
 
     /*
     We keep a pool of threads for each data directory, size of each pool is memtable_flush_writers.
@@ -235,13 +235,13 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         // only update these runtime-modifiable settings if they have not been modified.
         if (!minCompactionThreshold.isModified())
-            for (ColumnFamilyStore cfs : concatWithIndexes())
+            for (Table cfs : concatWithIndexes())
                 cfs.minCompactionThreshold = new DefaultValue(metadata().params.compaction.minCompactionThreshold());
         if (!maxCompactionThreshold.isModified())
-            for (ColumnFamilyStore cfs : concatWithIndexes())
+            for (Table cfs : concatWithIndexes())
                 cfs.maxCompactionThreshold = new DefaultValue(metadata().params.compaction.maxCompactionThreshold());
         if (!crcCheckChance.isModified())
-            for (ColumnFamilyStore cfs : concatWithIndexes())
+            for (Table cfs : concatWithIndexes())
                 cfs.crcCheckChance = new DefaultValue(metadata().params.crcCheckChance);
 
         compactionStrategyManager.maybeReload(metadata());
@@ -297,7 +297,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             public void run()
             {
                 for (Keyspace keyspace : Keyspace.all())
-                    for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
+                    for (Table cfs : keyspace.getColumnFamilyStores())
                         CompactionManager.instance.submitBackground(cfs);
             }
         };
@@ -364,14 +364,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     }
 
     @VisibleForTesting
-    public ColumnFamilyStore(Keyspace keyspace,
-                             String columnFamilyName,
-                             int generation,
-                             TableMetadataRef metadata,
-                             Directories directories,
-                             boolean loadSSTables,
-                             boolean registerBookeeping,
-                             boolean offline)
+    public Table(Keyspace keyspace,
+                 String columnFamilyName,
+                 int generation,
+                 TableMetadataRef metadata,
+                 Directories directories,
+                 boolean loadSSTables,
+                 boolean registerBookeeping,
+                 boolean offline)
     {
         assert directories != null;
         assert metadata != null : "null metadata for " + keyspace + ":" + columnFamilyName;
@@ -551,28 +551,28 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     }
 
 
-    public static ColumnFamilyStore createColumnFamilyStore(Keyspace keyspace, TableMetadataRef metadata, boolean loadSSTables)
+    public static Table createColumnFamilyStore(Keyspace keyspace, TableMetadataRef metadata, boolean loadSSTables)
     {
         return createColumnFamilyStore(keyspace, metadata.name, metadata, loadSSTables);
     }
 
-    public static synchronized ColumnFamilyStore createColumnFamilyStore(Keyspace keyspace,
-                                                                         String columnFamily,
-                                                                         TableMetadataRef metadata,
-                                                                         boolean loadSSTables)
+    public static synchronized Table createColumnFamilyStore(Keyspace keyspace,
+                                                             String columnFamily,
+                                                             TableMetadataRef metadata,
+                                                             boolean loadSSTables)
     {
         Directories directories = new Directories(metadata.get());
         return createColumnFamilyStore(keyspace, columnFamily, metadata, directories, loadSSTables, true, false);
     }
 
     /** This is only directly used by offline tools */
-    public static synchronized ColumnFamilyStore createColumnFamilyStore(Keyspace keyspace,
-                                                                         String columnFamily,
-                                                                         TableMetadataRef metadata,
-                                                                         Directories directories,
-                                                                         boolean loadSSTables,
-                                                                         boolean registerBookkeeping,
-                                                                         boolean offline)
+    public static synchronized Table createColumnFamilyStore(Keyspace keyspace,
+                                                             String columnFamily,
+                                                             TableMetadataRef metadata,
+                                                             Directories directories,
+                                                             boolean loadSSTables,
+                                                             boolean registerBookkeeping,
+                                                             boolean offline)
     {
         // get the max generation number, to prevent generation conflicts
         Directories.SSTableLister lister = directories.sstableLister(Directories.OnTxnErr.IGNORE).includeBackups(true);
@@ -588,7 +588,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         Collections.sort(generations);
         int value = (generations.size() > 0) ? (generations.get(generations.size() - 1)) : 0;
 
-        return new ColumnFamilyStore(keyspace, columnFamily, value, metadata, directories, loadSSTables, registerBookkeeping, offline);
+        return new Table(keyspace, columnFamily, value, metadata, directories, loadSSTables, registerBookkeeping, offline);
     }
 
     /**
@@ -775,7 +775,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public static void rebuildSecondaryIndex(String ksName, String cfName, String... idxNames)
     {
-        ColumnFamilyStore cfs = Keyspace.open(ksName).getColumnFamilyStore(cfName);
+        Table cfs = Keyspace.open(ksName).getColumnFamilyStore(cfName);
 
         logger.info("User Requested secondary index re-build for {}/{} indexes: {}", ksName, cfName, Joiner.on(',').join(idxNames));
         cfs.indexManager.rebuildIndexesBlocking(Sets.newHashSet(Arrays.asList(idxNames)));
@@ -786,7 +786,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         try
         {
             Constructor<? extends AbstractCompactionStrategy> constructor =
-                compactionParams.klass().getConstructor(ColumnFamilyStore.class, Map.class);
+                compactionParams.klass().getConstructor(Table.class, Map.class);
             return constructor.newInstance(this, compactionParams.options());
         }
         catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException | InstantiationException e)
@@ -872,7 +872,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         onHeapTotal += memtable.getAllocator().onHeap().owns();
         offHeapTotal += memtable.getAllocator().offHeap().owns();
 
-        for (ColumnFamilyStore indexCfs : indexManager.getAllIndexColumnFamilyStores())
+        for (Table indexCfs : indexManager.getAllIndexColumnFamilyStores())
         {
             MemtableAllocator allocator = indexCfs.getTracker().getView().getCurrentMemtable().getAllocator();
             onHeapRatio += allocator.onHeap().ownershipRatio();
@@ -902,7 +902,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         synchronized (data)
         {
             Memtable current = data.getView().getCurrentMemtable();
-            for (ColumnFamilyStore cfs : concatWithIndexes())
+            for (Table cfs : concatWithIndexes())
                 if (!cfs.data.getView().getCurrentMemtable().isClean())
                     return switchMemtableIfCurrent(current);
             return waitForFlushes();
@@ -1029,7 +1029,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
             // submit flushes for the memtable for any indexed sub-cfses, and our own
             AtomicReference<CommitLogPosition> commitLogUpperBound = new AtomicReference<>();
-            for (ColumnFamilyStore cfs : concatWithIndexes())
+            for (Table cfs : concatWithIndexes())
             {
                 // switch all memtables, regardless of their dirty status, setting the barrier
                 // so that we can reach a coordinated decision about cleanliness once they
@@ -1232,7 +1232,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             float largestRatio = 0f;
             Memtable largest = null;
             float liveOnHeap = 0, liveOffHeap = 0;
-            for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
+            for (Table cfs : Table.all())
             {
                 // we take a reference to the current main memtable for the CF prior to snapping its ownership ratios
                 // to ensure we have some ordering guarantee for performing the switchMemtableIf(), i.e. we will only
@@ -1245,7 +1245,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 onHeap += current.getAllocator().onHeap().ownershipRatio();
                 offHeap += current.getAllocator().offHeap().ownershipRatio();
 
-                for (ColumnFamilyStore indexCfs : cfs.indexManager.getAllIndexColumnFamilyStores())
+                for (Table indexCfs : cfs.indexManager.getAllIndexColumnFamilyStores())
                 {
                     MemtableAllocator allocator = indexCfs.getTracker().getView().getCurrentMemtable().getAllocator();
                     onHeap += allocator.onHeap().ownershipRatio();
@@ -1397,8 +1397,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     /*
      * Called after a BinaryMemtable flushes its in-memory data, or we add a file
-     * via bootstrap. This information is cached in the ColumnFamilyStore.
-     * This is useful for reads because the ColumnFamilyStore first looks in
+     * via bootstrap. This information is cached in the Table.
+     * This is useful for reads because the Table first looks in
      * the in-memory store and the into the disk to find the key. If invoked
      * during recoveryMode the onMemtableFlush() need not be invoked.
      *
@@ -1473,7 +1473,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public CompactionManager.AllSSTableOpStatus forceCleanup(int jobs) throws ExecutionException, InterruptedException
     {
-        return CompactionManager.instance.performCleanup(ColumnFamilyStore.this, jobs);
+        return CompactionManager.instance.performCleanup(Table.this, jobs);
     }
 
     public CompactionManager.AllSSTableOpStatus scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, boolean reinsertOverflowedTTL, int jobs) throws ExecutionException, InterruptedException
@@ -1490,7 +1490,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         try
         {
-            return CompactionManager.instance.performScrub(ColumnFamilyStore.this, skipCorrupted, checkData, reinsertOverflowedTTL, jobs);
+            return CompactionManager.instance.performScrub(Table.this, skipCorrupted, checkData, reinsertOverflowedTTL, jobs);
         }
         catch(Throwable t)
         {
@@ -1516,7 +1516,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         logger.warn("Rebuilding index for {} because of <{}>", name, failure.getMessage());
 
-        ColumnFamilyStore parentCfs = SecondaryIndexManager.getParentCfs(this);
+        Table parentCfs = SecondaryIndexManager.getParentCfs(this);
         assert parentCfs.indexManager.getAllIndexColumnFamilyStores().contains(this);
 
         String indexName = SecondaryIndexManager.getIndexName(this);
@@ -1527,12 +1527,12 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public CompactionManager.AllSSTableOpStatus verify(Verifier.Options options) throws ExecutionException, InterruptedException
     {
-        return CompactionManager.instance.performVerify(ColumnFamilyStore.this, options);
+        return CompactionManager.instance.performVerify(Table.this, options);
     }
 
     public CompactionManager.AllSSTableOpStatus sstablesRewrite(boolean excludeCurrentVersion, int jobs) throws ExecutionException, InterruptedException
     {
-        return CompactionManager.instance.performSSTableRewrite(ColumnFamilyStore.this, excludeCurrentVersion, jobs);
+        return CompactionManager.instance.performSSTableRewrite(Table.this, excludeCurrentVersion, jobs);
     }
 
     public CompactionManager.AllSSTableOpStatus relocateSSTables(int jobs) throws ExecutionException, InterruptedException
@@ -1755,7 +1755,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     public Set<SSTableReader> snapshotWithoutFlush(String snapshotName, Predicate<SSTableReader> predicate, boolean ephemeral)
     {
         Set<SSTableReader> snapshottedSSTables = new HashSet<>();
-        for (ColumnFamilyStore cfs : concatWithIndexes())
+        for (Table cfs : concatWithIndexes())
         {
             final JSONArray filesJSONArr = new JSONArray();
             try (RefViewFragment currentView = cfs.selectAndReference(View.select(SSTableSet.CANONICAL, (x) -> predicate == null || predicate.apply(x))))
@@ -2068,9 +2068,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         CompactionManager.instance.forceCompactionForTokenRange(this, tokenRanges);
     }
 
-    public static Iterable<ColumnFamilyStore> all()
+    public static Iterable<Table> all()
     {
-        List<Iterable<ColumnFamilyStore>> stores = new ArrayList<Iterable<ColumnFamilyStore>>(Schema.instance.getKeyspaces().size());
+        List<Iterable<Table>> stores = new ArrayList<Iterable<Table>>(Schema.instance.getKeyspaces().size());
         for (Keyspace keyspace : Keyspace.all())
         {
             stores.add(keyspace.getColumnFamilyStores());
@@ -2111,7 +2111,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     @VisibleForTesting
     public void clearUnsafe()
     {
-        for (final ColumnFamilyStore cfs : concatWithIndexes())
+        for (final Table cfs : concatWithIndexes())
         {
             cfs.runWithCompactionsDisabled(new Callable<Void>()
             {
@@ -2167,7 +2167,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         long now = System.currentTimeMillis();
         // make sure none of our sstables are somehow in the future (clock drift, perhaps)
-        for (ColumnFamilyStore cfs : concatWithIndexes())
+        for (Table cfs : concatWithIndexes())
             for (SSTableReader sstable : cfs.getLiveSSTables())
                 now = Math.max(now, sstable.maxDataAge);
         truncatedAt = now;
@@ -2187,7 +2187,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 indexManager.truncateAllIndexesBlocking(truncatedAt);
                 viewManager.truncateBlocking(replayAfter, truncatedAt);
 
-                SystemKeyspace.saveTruncationRecord(ColumnFamilyStore.this, truncatedAt, replayAfter);
+                SystemKeyspace.saveTruncationRecord(Table.this, truncatedAt, replayAfter);
                 logger.trace("cleaning out row cache");
                 invalidateCaches();
             }
@@ -2219,11 +2219,11 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         {
             logger.trace("Cancelling in-progress compactions for {}", metadata.name);
 
-            Iterable<ColumnFamilyStore> selfWithAuxiliaryCfs = interruptViews
+            Iterable<Table> selfWithAuxiliaryCfs = interruptViews
                                                                ? Iterables.concat(concatWithIndexes(), viewManager.allViewsCfs())
                                                                : concatWithIndexes();
 
-            for (ColumnFamilyStore cfs : selfWithAuxiliaryCfs)
+            for (Table cfs : selfWithAuxiliaryCfs)
                 cfs.getCompactionStrategyManager().pause();
             try
             {
@@ -2232,7 +2232,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                 CompactionManager.instance.waitForCessation(selfWithAuxiliaryCfs);
 
                 // doublecheck that we finished, instead of timing out
-                for (ColumnFamilyStore cfs : selfWithAuxiliaryCfs)
+                for (Table cfs : selfWithAuxiliaryCfs)
                 {
                     if (!cfs.getTracker().getCompacting().isEmpty())
                     {
@@ -2254,7 +2254,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             }
             finally
             {
-                for (ColumnFamilyStore cfs : selfWithAuxiliaryCfs)
+                for (Table cfs : selfWithAuxiliaryCfs)
                     cfs.getCompactionStrategyManager().resume();
             }
         }
@@ -2338,7 +2338,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         try
         {
             TableParams.builder().crcCheckChance(crcCheckChance).build().validate();
-            for (ColumnFamilyStore cfs : concatWithIndexes())
+            for (Table cfs : concatWithIndexes())
             {
                 cfs.crcCheckChance.set(crcCheckChance);
                 for (SSTableReader sstable : cfs.getSSTables(SSTableSet.LIVE))
@@ -2451,7 +2451,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return metadata().isIndex();
     }
 
-    public Iterable<ColumnFamilyStore> concatWithIndexes()
+    public Iterable<Table> concatWithIndexes()
     {
         // we return the main CFS first, which we rely on for simplicity in switchMemtable(), for getting the
         // latest commit log segment position
@@ -2584,10 +2584,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     }
 
     /**
-     * Returns a ColumnFamilyStore by id if it exists, null otherwise
+     * Returns a Table by id if it exists, null otherwise
      * Differently from others, this method does not throw exception if the table does not exist.
      */
-    public static ColumnFamilyStore getIfExists(TableId id)
+    public static Table getIfExists(TableId id)
     {
         TableMetadata metadata = Schema.instance.getTableMetadata(id);
         if (metadata == null)
@@ -2603,10 +2603,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     }
 
     /**
-     * Returns a ColumnFamilyStore by ksname and cfname if it exists, null otherwise
+     * Returns a Table by ksname and cfname if it exists, null otherwise
      * Differently from others, this method does not throw exception if the keyspace or table does not exist.
      */
-    public static ColumnFamilyStore getIfExists(String ksName, String cfName)
+    public static Table getIfExists(String ksName, String cfName)
     {
         if (ksName == null || cfName == null)
             return null;
