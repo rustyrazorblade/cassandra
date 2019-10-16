@@ -27,6 +27,7 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Ordering;
 
+import org.apache.cassandra.utils.LongAccumulator;
 import org.apache.cassandra.utils.ObjectSizes;
 
 import static com.google.common.collect.Iterables.concat;
@@ -651,7 +652,7 @@ public class BTree
     }
 
     // returns true if the provided node is a leaf, false if it is a branch
-    static boolean isLeaf(Object[] node)
+    public static boolean isLeaf(Object[] node)
     {
         return (node.length & 1) == 1;
     }
@@ -1367,5 +1368,36 @@ public class BTree
         }
 
         return false;
+    }
+
+    /**
+     * Simple method to walk the btree accumulate a long value using the supplied accumulator function
+     *
+     * Public method
+     *
+     */
+    public static <V> long accumulate(Object[] btree, LongAccumulator<V> accumulator, long start)
+    {
+        long value = start;
+        boolean isLeaf = isLeaf(btree);
+        int childOffset = isLeaf ? Integer.MAX_VALUE : getChildStart(btree);
+        int limit = isLeaf ? getLeafKeyEnd(btree) : btree.length - 1;
+        for (int i = 0 ; i < limit ; i++)
+        {
+            // we want to visit in iteration order, so we visit our key nodes inbetween our children
+            int idx = isLeaf ? i : (i / 2) + (i % 2 == 0 ? childOffset : 0);
+            Object current = btree[idx];
+            if (idx < childOffset)
+            {
+                V castedCurrent = (V) current;
+                value = accumulator.apply(castedCurrent, value);
+            }
+            else
+            {
+                value = accumulate((Object[]) current, accumulator, value);
+            }
+        }
+
+        return value;
     }
 }

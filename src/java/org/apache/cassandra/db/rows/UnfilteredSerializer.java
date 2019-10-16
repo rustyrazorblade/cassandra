@@ -19,8 +19,6 @@ package org.apache.cassandra.db.rows;
 
 import java.io.IOException;
 
-import com.google.common.collect.Collections2;
-
 import net.nicoulaj.compilecommand.annotations.Inline;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.db.*;
@@ -353,18 +351,16 @@ public class UnfilteredSerializer
             size += Columns.serializer.serializedSubsetSize(row.columns(), header.columns(isStatic));
 
         SearchIterator<ColumnMetadata, ColumnMetadata> si = headerColumns.iterator();
-        for (ColumnData data : row)
-        {
+
+        return row.accumulate((data, v) -> {
             ColumnMetadata column = si.next(data.column());
             assert column != null;
 
             if (data.column.isSimple())
-                size += Cell.serializer.serializedSize((Cell) data, column, pkLiveness, header);
+                return v + Cell.serializer.serializedSize((Cell) data, column, pkLiveness, header);
             else
-                size += sizeOfComplexColumn((ComplexColumnData) data, column, hasComplexDeletion, pkLiveness, header);
-        }
-
-        return size;
+                return v + sizeOfComplexColumn((ComplexColumnData) data, column, hasComplexDeletion, pkLiveness, header);
+        }, size);
     }
 
     private long sizeOfComplexColumn(ComplexColumnData data, ColumnMetadata column, boolean hasComplexDeletion, LivenessInfo rowLiveness, SerializationHeader header)

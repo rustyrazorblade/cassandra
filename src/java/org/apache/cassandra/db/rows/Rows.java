@@ -21,13 +21,13 @@ import java.util.*;
 
 import com.google.common.collect.Iterators;
 import com.google.common.collect.PeekingIterator;
+import com.google.common.primitives.Ints;
 
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.partitions.PartitionStatisticsCollector;
 import org.apache.cassandra.utils.MergeIterator;
-import org.apache.cassandra.utils.WrappedInt;
 
 /**
  * Static utilities to work on Row objects.
@@ -89,15 +89,13 @@ public abstract class Rows
         collector.update(row.primaryKeyLivenessInfo());
         collector.update(row.deletion().time());
 
-        //we have to wrap these for the lambda
-        final WrappedInt columnCount = new WrappedInt(0);
-        final WrappedInt cellCount = new WrappedInt(0);
-
-        row.apply(cd -> {
+        long result = row.accumulate((cd, l) -> {
+            int columnCount = Ints.checkedCast(l & 0xFFFFFFFF);
+            int cellCount = Ints.checkedCast(l >> 32);
             if (cd.column().isSimple())
             {
-                columnCount.increment();
-                cellCount.increment();
+                columnCount++;
+                cellCount++;
                 Cells.collectStats((Cell) cd, collector);
             }
             else
@@ -106,18 +104,22 @@ public abstract class Rows
                 collector.update(complexData.complexDeletion());
                 if (complexData.hasCells())
                 {
-                    columnCount.increment();
+                    columnCount++;
                     for (Cell cell : complexData)
                     {
-                        cellCount.increment();
+                        cellCount++;
                         Cells.collectStats(cell, collector);
                     }
                 }
             }
-        }, false);
+            return (cellCount << 32) | columnCount;
+        }, 0);
 
-        collector.updateColumnSetPerRow(columnCount.get());
-        return cellCount.get();
+        int columnCount = Ints.checkedCast(result & 0xFFFFFFFF);
+        int cellCount = Ints.checkedCast(result >> 32);
+
+        collector.updateColumnSetPerRow(columnCount);
+        return cellCount;
     }
 
     /**
