@@ -52,7 +52,7 @@ public class ColumnConditionTest
 
     private static Row newRow(ColumnMetadata definition, ByteBuffer value)
     {
-        BufferCell cell = new BufferCell(definition, 0L, Cell.NO_TTL, Cell.NO_DELETION_TIME, value, null);
+        BufferCell cell = BufferCell.create(definition, 0L, Cell.NO_TTL, Cell.NO_DELETION_TIME, value, null);
         return BTreeRow.singleCellRow(Clustering.EMPTY, cell);
     }
 
@@ -68,12 +68,12 @@ public class ColumnConditionTest
                 UUID uuid = UUIDGen.getTimeUUID(now, i);
                 ByteBuffer key = TimeUUIDSerializer.instance.serialize(uuid);
                 ByteBuffer value = values.get(i);
-                BufferCell cell = new BufferCell(definition,
-                                                 0L,
-                                                 Cell.NO_TTL,
-                                                 Cell.NO_DELETION_TIME,
-                                                 value,
-                                                 CellPath.create(key));
+                BufferCell cell = BufferCell.create(definition,
+                                                    0L,
+                                                    Cell.NO_TTL,
+                                                    Cell.NO_DELETION_TIME,
+                                                    value,
+                                                    CellPath.create(key));
                 builder.addCell(cell);
             }
         }
@@ -88,12 +88,12 @@ public class ColumnConditionTest
         {
             for (ByteBuffer value : values)
             {
-                BufferCell cell = new BufferCell(definition,
-                                                 0L,
-                                                 Cell.NO_TTL,
-                                                 Cell.NO_DELETION_TIME,
-                                                 ByteBufferUtil.EMPTY_BYTE_BUFFER,
-                                                 CellPath.create(value));
+                BufferCell cell = BufferCell.create(definition,
+                                                    0L,
+                                                    Cell.NO_TTL,
+                                                    Cell.NO_DELETION_TIME,
+                                                    ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                    CellPath.create(value));
                 builder.addCell(cell);
             }
         }
@@ -108,12 +108,12 @@ public class ColumnConditionTest
         {
             for (Map.Entry<ByteBuffer, ByteBuffer> entry : values.entrySet())
             {
-                BufferCell cell = new BufferCell(definition,
-                                                 0L,
-                                                 Cell.NO_TTL,
-                                                 Cell.NO_DELETION_TIME,
-                                                 entry.getValue(),
-                                                 CellPath.create(entry.getKey()));
+                BufferCell cell = BufferCell.create(definition,
+                                                    0L,
+                                                    Cell.NO_TTL,
+                                                    Cell.NO_DELETION_TIME,
+                                                    entry.getValue(),
+                                                    CellPath.create(entry.getKey()));
                 builder.addCell(cell);
             }
         }

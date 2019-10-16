@@ -597,12 +597,12 @@ public class ThrottledUnfilteredIteratorTest extends CQLTester
 
     private static Cell createCell(ColumnMetadata metadata, int v, long timestamp, int localDeletionTime)
     {
-        return new BufferCell(metadata,
-                              timestamp,
-                              BufferCell.NO_TTL,
-                              localDeletionTime,
-                              ByteBufferUtil.bytes(v),
-                              null);
+        return BufferCell.create(metadata,
+                                 timestamp,
+                                 BufferCell.NO_TTL,
+                                 localDeletionTime,
+                                 ByteBufferUtil.bytes(v),
+                                 null);
     }
 
     @Test

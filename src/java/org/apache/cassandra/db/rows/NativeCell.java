@@ -145,12 +145,12 @@ public class NativeCell extends AbstractCell
 
     public Cell withUpdatedTimestampAndLocalDeletionTime(long newTimestamp, int newLocalDeletionTime)
     {
-        return new BufferCell(column, newTimestamp, ttl(), newLocalDeletionTime, value(), path());
+        return BufferCell.create(column, newTimestamp, ttl(), newLocalDeletionTime, value(), path());
     }
 
     public Cell withUpdatedColumn(ColumnMetadata column)
     {
-        return new BufferCell(column, timestamp(), ttl(), localDeletionTime(), value(), path());
+        return BufferCell.create(column, timestamp(), ttl(), localDeletionTime(), value(), path());
     }
 
     public long unsharedHeapSizeExcludingData()

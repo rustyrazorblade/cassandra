@@ -604,7 +604,7 @@ public class BTreeRow extends AbstractRow
     public static class Builder implements Row.Builder
     {
         // a simple marker class that will sort to the beginning of a run of complex cells to store the deletion time
-        private static class ComplexColumnDeletion extends BufferCell
+        private static class ComplexColumnDeletion extends BufferCell.Complex
         {
             public ComplexColumnDeletion(ColumnMetadata column, DeletionTime deletionTime)
             {

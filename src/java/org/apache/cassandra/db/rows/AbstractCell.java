@@ -72,7 +72,7 @@ public abstract class AbstractCell extends Cell
 
         ByteBuffer value = value();
         ByteBuffer marked = CounterContext.instance().markLocalToBeCleared(value);
-        return marked == value ? this : new BufferCell(column, timestamp(), ttl(), localDeletionTime(), marked, path());
+        return marked == value ? this : BufferCell.create(column, timestamp(), ttl(), localDeletionTime(), marked, path());
     }
 
     public Cell purge(DeletionPurger purger, int nowInSec)
@@ -101,13 +101,13 @@ public abstract class AbstractCell extends Cell
     public Cell copy(AbstractAllocator allocator)
     {
         CellPath path = path();
-        return new BufferCell(column, timestamp(), ttl(), localDeletionTime(), allocator.clone(value()), path == null ? null : path.copy(allocator));
+        return BufferCell.create(column, timestamp(), ttl(), localDeletionTime(), allocator.clone(value()), path == null ? null : path.copy(allocator));
     }
 
     // note: while the cell returned may be different, the value is the same, so if the value is offheap it must be referenced inside a guarded context (or copied)
     public Cell updateAllTimestamp(long newTimestamp)
     {
-        return new BufferCell(column, isTombstone() ? newTimestamp - 1 : newTimestamp, ttl(), localDeletionTime(), value(), path());
+        return BufferCell.create(column, isTombstone() ? newTimestamp - 1 : newTimestamp, ttl(), localDeletionTime(), value(), path());
     }
 
     public int dataSize()

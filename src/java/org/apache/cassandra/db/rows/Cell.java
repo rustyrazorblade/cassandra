@@ -252,7 +252,7 @@ public abstract class Cell extends ColumnData
                 }
             }
 
-            return new BufferCell(column, timestamp, ttl, localDeletionTime, value, path);
+            return BufferCell.create(column, timestamp, ttl, localDeletionTime, value, path);
         }
 
         public long serializedSize(Cell cell, ColumnMetadata column, LivenessInfo rowLiveness, SerializationHeader header)

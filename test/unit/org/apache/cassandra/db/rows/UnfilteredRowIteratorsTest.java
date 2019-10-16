@@ -179,7 +179,7 @@ public class UnfilteredRowIteratorsTest
 
     public Cell cell(ColumnMetadata metadata, int v)
     {
-        return new BufferCell(metadata,
-                              1L, BufferCell.NO_TTL, BufferCell.NO_DELETION_TIME, ByteBufferUtil.bytes(v), null);
+        return BufferCell.create(metadata,
+                                 1L, BufferCell.NO_TTL, BufferCell.NO_DELETION_TIME, ByteBufferUtil.bytes(v), null);
     }
 }

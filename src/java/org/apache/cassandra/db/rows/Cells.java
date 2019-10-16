@@ -207,7 +207,7 @@ public abstract class Cells
         else if (merged == rightValue && timestamp == rightTimestamp)
             return right;
         else // merge clocks and timestamps.
-            return new BufferCell(left.column(), timestamp, Cell.NO_TTL, Cell.NO_DELETION_TIME, merged, left.path());
+            return BufferCell.create(left.column(), timestamp, Cell.NO_TTL, Cell.NO_DELETION_TIME, merged, left.path());
     }
 
     /**
