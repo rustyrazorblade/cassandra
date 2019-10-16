@@ -112,6 +112,27 @@ public class BTree
         public static Dir desc(boolean desc) { return desc ? DESC : ASC; }
     }
 
+    private interface Getter<T>
+    {
+        <K> K getNextAt(T source, int idx);
+    }
+
+    private static final Getter<Iterator> ITERATOR_GETTER = new Getter<Iterator>()
+    {
+        public <K> K getNextAt(Iterator source, int idx)
+        {
+            return (K) source.next();
+        }
+    };
+
+    private static final Getter<Object[]> ARRAY_GETTER = new Getter<Object[]>()
+    {
+        public <K> K getNextAt(Object[] source, int idx)
+        {
+            return (K) source[idx];
+        }
+    };
+
     public static Object[] empty()
     {
         return EMPTY_LEAF;
@@ -124,7 +145,7 @@ public class BTree
 
     public static <C, K extends C, V extends C> Object[] build(Collection<K> source, UpdateFunction<K, V> updateF)
     {
-        return buildInternal(source, source.size(), updateF);
+        return buildInternal(source.iterator(), ITERATOR_GETTER, source.size(), updateF);
     }
 
     /**
@@ -138,29 +159,38 @@ public class BTree
     {
         if (size < 0)
             throw new IllegalArgumentException(Integer.toString(size));
-        return buildInternal(source, size, updateF);
+        return buildInternal(source.iterator(), ITERATOR_GETTER, size, updateF);
     }
 
-    private static <C, K extends C, V extends C> Object[] buildLeaf(Iterator<K> it, int size, UpdateFunction<K, V> updateF)
+    public static <C, K extends C, V extends C> Object[] build(Object[] source, int size, UpdateFunction<K, V> updateF)
+    {
+        if (size < 0)
+            throw new IllegalArgumentException(Integer.toString(size));
+        return buildInternal(source, ARRAY_GETTER, size, updateF);
+    }
+
+    private static <C, K extends C, V extends C, S> Object[] buildLeaf(S source, Getter<S> getter, int size, int startIdx, UpdateFunction<K, V> updateF)
     {
         V[] values = (V[]) new Object[size | 1];
 
+        int idx = startIdx;
         for (int i = 0; i < size; i++)
         {
-            K k = it.next();
+            K k = getter.getNextAt(source, idx);
             values[i] = updateF.apply(k);
+            idx++;
         }
         if (updateF != UpdateFunction.noOp())
             updateF.allocated(ObjectSizes.sizeOfArray(values));
         return values;
     }
 
-    private static <C, K extends C, V extends C> Object[] buildInternal(Iterator<K> it, int size, int level, UpdateFunction<K, V> updateF)
+    private static <C, K extends C, V extends C, S> Object[] buildInternal(S source, Getter<S> getter, int size, int level, int startIdx, UpdateFunction<K, V> updateF)
     {
         assert size > 0;
         assert level >= 0;
         if (level == 0)
-            return buildLeaf(it, size, updateF);
+            return buildLeaf(source, getter, size, startIdx, updateF);
 
         // calcuate child num: (size - (childNum - 1)) / maxChildSize <= childNum
         int childNum = size / (TREE_SIZE[level - 1] + 1) + 1;
@@ -172,23 +202,23 @@ public class BTree
         int[] indexOffsets = new int[childNum];
         int childPos = childNum - 1;
 
-        int index = 0;
+        int index = startIdx;
         for (int i = 0; i < childNum - 1; i++)
         {
             // Calculate the next childSize by splitting the remaining values to the remaining child nodes.
             // The performance could be improved by pre-compute the childSize (see #9989 comments).
             int childSize = (size - index) / (childNum - i);
             // Build the tree with inorder traversal
-            values[childPos + i] = (V) buildInternal(it, childSize, level - 1, updateF);
+            values[childPos + i] = (V) buildInternal(source, getter, childSize, level - 1, index, updateF);
             index += childSize;
             indexOffsets[i] = index;
 
-            K k = it.next();
+            K k = getter.getNextAt(source, index);
             values[i] = updateF.apply(k);
             index++;
         }
 
-        values[childPos + childNum - 1] = (V) buildInternal(it, size - index, level - 1, updateF);
+        values[childPos + childNum - 1] = (V) buildInternal(source, getter, size - index, level - 1, index, updateF);
         indexOffsets[childNum - 1] = size;
 
         values[childPos + childNum] = (V) indexOffsets;
@@ -196,7 +226,7 @@ public class BTree
         return values;
     }
 
-    private static <C, K extends C, V extends C> Object[] buildInternal(Iterable<K> source, int size, UpdateFunction<K, V> updateF)
+    private static <C, K extends C, V extends C, S> Object[] buildInternal(S source, Getter<S> getter, int size, UpdateFunction<K, V> updateF)
     {
         assert size >= 0;
         if (size == 0)
@@ -206,8 +236,7 @@ public class BTree
         int level = 0;
         while (size > TREE_SIZE[level])
             level++;
-        Iterator<K> it = source.iterator();
-        return buildInternal(it, size, level, updateF);
+        return buildInternal(source, getter, size, level, 0, updateF);
     }
 
     public static <C, K extends C, V extends C> Object[] update(Object[] btree,
@@ -1172,7 +1201,7 @@ public class BTree
         {
             if (auto)
                 autoEnforce();
-            return BTree.build(Arrays.asList(values).subList(0, count), UpdateFunction.noOp());
+            return BTree.build(values, count, UpdateFunction.noOp());
         }
     }
 
