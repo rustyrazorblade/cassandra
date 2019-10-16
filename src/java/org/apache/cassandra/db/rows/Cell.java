@@ -68,12 +68,18 @@ public abstract class Cell extends ColumnData
      */
     public abstract boolean isCounterCell();
 
+    public abstract boolean hasBuffer();
+
     /**
      * The cell value.
      *
      * @return the cell value.
      */
     public abstract ByteBuffer value();
+
+    public abstract boolean hasArray();
+
+    public abstract byte[] array();
 
     /**
      * The cell timestamp.
@@ -214,7 +220,7 @@ public abstract class Cell extends ColumnData
                 header.getType(column).writeValue(cell.value(), out);
         }
 
-        public Cell deserialize(DataInputPlus in, LivenessInfo rowLiveness, ColumnMetadata column, SerializationHeader header, SerializationHelper helper) throws IOException
+        public Cell deserialize(DataInputPlus in, LivenessInfo rowLiveness, ColumnMetadata column, SerializationHeader header, SerializationHelper helper, boolean bufferCellRequired) throws IOException
         {
             int flags = in.readUnsignedByte();
             boolean hasValue = (flags & HAS_EMPTY_VALUE_MASK) == 0;
@@ -235,24 +241,30 @@ public abstract class Cell extends ColumnData
                             ? column.cellPathSerializer().deserialize(in)
                             : null;
 
-            ByteBuffer value = ByteBufferUtil.EMPTY_BYTE_BUFFER;
-            if (hasValue)
-            {
-                if (helper.canSkipValue(column) || (path != null && helper.canSkipValue(path)))
-                {
-                    header.getType(column).skipValue(in);
-                }
-                else
-                {
-                    boolean isCounter = localDeletionTime == NO_DELETION_TIME && column.type.isCounter();
+            boolean isCounter = localDeletionTime == NO_DELETION_TIME && column.type.isCounter();
+            bufferCellRequired |= isCounter;
 
-                    value = header.getType(column).readValue(in, DatabaseDescriptor.getMaxValueSize());
-                    if (isCounter)
-                        value = helper.maybeClearCounterValue(value);
-                }
+            if (!hasValue || helper.canSkipValue(column) || (path != null && helper.canSkipValue(path)))
+            {
+                if (bufferCellRequired)
+                    return BufferCell.create(column, timestamp, ttl, localDeletionTime, ByteBufferUtil.EMPTY_BYTE_BUFFER, path);
+                else
+                    return ArrayCell.create(column, timestamp, ttl, localDeletionTime, ByteBufferUtil.EMPTY_BYTE_ARRAY, path);
             }
 
-            return BufferCell.create(column, timestamp, ttl, localDeletionTime, value, path);
+            if (bufferCellRequired)
+            {
+                ByteBuffer value = header.getType(column).readValue(in, DatabaseDescriptor.getMaxValueSize());
+                if (isCounter)
+                    value = helper.maybeClearCounterValue(value);
+                return BufferCell.create(column, timestamp, ttl, localDeletionTime, value, path);
+            }
+            else
+            {
+                byte[] value = header.getType(column).readArrayValue(in, DatabaseDescriptor.getMaxValueSize());
+                return ArrayCell.create(column, timestamp, ttl, localDeletionTime, value, path);
+
+            }
         }
 
         public long serializedSize(Cell cell, ColumnMetadata column, LivenessInfo rowLiveness, SerializationHeader header)
