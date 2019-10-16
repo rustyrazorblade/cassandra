@@ -81,6 +81,15 @@ public abstract class Cell extends ColumnData
 
     public abstract byte[] array();
 
+    public boolean hasValue()
+    {
+        if (hasBuffer())
+            return value().remaining() > 0;
+        if (hasArray())
+            return array().length > 0;
+        return false;
+    }
+
     /**
      * The cell timestamp.
      * <p>
@@ -184,7 +193,7 @@ public abstract class Cell extends ColumnData
         public void serialize(Cell cell, ColumnMetadata column, DataOutputPlus out, LivenessInfo rowLiveness, SerializationHeader header) throws IOException
         {
             assert cell != null;
-            boolean hasValue = cell.value().hasRemaining();
+            boolean hasValue = cell.hasValue();
             boolean isDeleted = cell.isTombstone();
             boolean isExpiring = cell.isExpiring();
             boolean useRowTimestamp = !rowLiveness.isEmpty() && cell.timestamp() == rowLiveness.timestamp();
@@ -217,10 +226,15 @@ public abstract class Cell extends ColumnData
                 column.cellPathSerializer().serialize(cell.path(), out);
 
             if (hasValue)
-                header.getType(column).writeValue(cell.value(), out);
+            {
+                if (cell.hasBuffer())
+                    header.getType(column).writeValue(cell.value(), out);
+                else
+                    header.getType(column).writeValue(cell.array(), out);
+            }
         }
 
-        public Cell deserialize(DataInputPlus in, LivenessInfo rowLiveness, ColumnMetadata column, SerializationHeader header, SerializationHelper helper, boolean bufferCellRequired) throws IOException
+        public Cell deserialize(DataInputPlus in, LivenessInfo rowLiveness, ColumnMetadata column, SerializationHeader header, SerializationHelper helper) throws IOException
         {
             int flags = in.readUnsignedByte();
             boolean hasValue = (flags & HAS_EMPTY_VALUE_MASK) == 0;
@@ -242,7 +256,7 @@ public abstract class Cell extends ColumnData
                             : null;
 
             boolean isCounter = localDeletionTime == NO_DELETION_TIME && column.type.isCounter();
-            bufferCellRequired |= isCounter;
+            boolean bufferCellRequired = helper.flag == SerializationHelper.Flag.FROM_REMOTE ||  isCounter;
 
             if (!hasValue || helper.canSkipValue(column) || (path != null && helper.canSkipValue(path)))
             {
@@ -288,7 +302,12 @@ public abstract class Cell extends ColumnData
                 size += column.cellPathSerializer().serializedSize(cell.path());
 
             if (hasValue)
-                size += header.getType(column).writtenLength(cell.value());
+            {
+                if (cell.hasBuffer())
+                    size += header.getType(column).writtenLength(cell.value());
+                else
+                    size += header.getType(column).writtenLength(cell.array());
+            }
 
             return size;
         }
