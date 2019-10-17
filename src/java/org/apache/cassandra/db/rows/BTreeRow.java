@@ -20,6 +20,7 @@ package org.apache.cassandra.db.rows;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.LongPredicate;
 import java.util.function.Predicate;
 
 import com.google.common.base.Function;
@@ -91,7 +92,7 @@ public class BTreeRow extends AbstractRow
         int minDeletionTime = Math.min(minDeletionTime(primaryKeyLivenessInfo), minDeletionTime(deletion.time()));
         if (minDeletionTime != Integer.MIN_VALUE)
         {
-            long result = BTree.<ColumnData>accumulate(btree, (cd, l) -> Math.min(l, minDeletionTime(cd)) , minDeletionTime);
+            long result = BTree.<ColumnData>accumulate(btree, (cd, l) -> Math.min(l, minDeletionTime(cd)) , minDeletionTime, false);
             minDeletionTime = Ints.checkedCast(result);
         }
 
@@ -179,15 +180,20 @@ public class BTreeRow extends AbstractRow
         BTree.apply(btree, funtion, stopCondition, reversed);
     }
 
-    public long accumulate(LongAccumulator<ColumnData> accumulator, long start)
+    public long accumulate(LongAccumulator<ColumnData> accumulator, long start, boolean reversed)
     {
-        return BTree.accumulate(btree, accumulator, start);
+        return BTree.accumulate(btree, accumulator, start, l -> false, reversed);
+    }
+
+    public long accumulate(LongAccumulator<ColumnData> accumulator, long start, LongPredicate stopCondition, boolean reversed)
+    {
+        return BTree.accumulate(btree, accumulator, start, stopCondition, reversed);
     }
 
     private static int minDeletionTime(Object[] btree, LivenessInfo info, DeletionTime rowDeletion)
     {
         long min = Math.min(minDeletionTime(info), minDeletionTime(rowDeletion));
-        min = BTree.<ColumnData>accumulate(btree, (cd, l) -> Math.min(l, minDeletionTime(cd)), min);
+        min = BTree.<ColumnData>accumulate(btree, (cd, l) -> Math.min(l, minDeletionTime(cd)), min, false);
         return Ints.checkedCast(min);
     }
 
@@ -340,35 +346,28 @@ public class BTreeRow extends AbstractRow
 
     public boolean hasComplex()
     {
-        WrappedBoolean hasComplex = new WrappedBoolean(false);
-        apply(cd -> {
-            hasComplex.set(cd != null && cd.column.isComplex());
-        }, Predicates.alwaysTrue(), true);
-        return hasComplex.get();
+        long result = accumulate((cd, v) -> (cd != null && cd.column.isComplex()) ? 1 : -1 , 0, v -> v != 0, true);
+        return result == 1;
     }
 
     public boolean hasComplexDeletion()
     {
-        final WrappedBoolean result = new WrappedBoolean(false);
-
         // We start by the end cause we know complex columns sort before simple ones
-        apply(c -> {}, cd -> {
+        long result = accumulate((cd, v) -> {
             if (cd.column.isSimple())
             {
-                result.set(false);
-                return true;
+                return -1;
             }
 
             if (!((ComplexColumnData) cd).complexDeletion().isLive())
             {
-                result.set(true);
-                return true;
+                return 1;
             }
 
-            return false;
-        }, true);
+            return -1;
+        }, 0, v -> v != 0, true);
 
-        return result.get();
+        return result == 1;
     }
 
     public Row markCounterLocalToBeCleared()
@@ -399,7 +398,7 @@ public class BTreeRow extends AbstractRow
             return true;
         if (!deletion().time().validate())
             return true;
-        return accumulate(INVALID_DELETION_ACCUMULATOR, 0) > 0;
+        return accumulate(INVALID_DELETION_ACCUMULATOR, 0, false) > 0;
     }
 
     /**
@@ -467,7 +466,7 @@ public class BTreeRow extends AbstractRow
                      + primaryKeyLivenessInfo.dataSize()
                      + deletion.dataSize();
 
-        return Ints.checkedCast(accumulate((cd, v) -> v + cd.dataSize(), dataSize));
+        return Ints.checkedCast(accumulate((cd, v) -> v + cd.dataSize(), dataSize, false));
     }
 
     public long unsharedHeapSizeExcludingData()
@@ -476,7 +475,7 @@ public class BTreeRow extends AbstractRow
                       + clustering.unsharedHeapSizeExcludingData()
                       + BTree.sizeOfStructureOnHeap(btree);
 
-        return accumulate((cd, v) -> v + cd.unsharedHeapSizeExcludingData(), heapSize);
+        return accumulate((cd, v) -> v + cd.unsharedHeapSizeExcludingData(), heapSize, false);
     }
 
     public static Row.Builder sortedBuilder()

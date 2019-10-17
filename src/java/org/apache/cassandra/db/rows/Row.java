@@ -19,6 +19,7 @@ package org.apache.cassandra.db.rows;
 
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.LongPredicate;
 
 import com.google.common.base.Predicate;
 import com.google.common.hash.Hasher;
@@ -295,7 +296,12 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
     /**
      * Apply an accumulation funtion to every column in a row
      */
-    public long accumulate(LongAccumulator<ColumnData> accumulator, long start);
+    public long accumulate(LongAccumulator<ColumnData> accumulator, long start, LongPredicate stopCondition, boolean reverse);
+
+    default long accumulate(LongAccumulator<ColumnData> accumulator, long start, boolean reverse)
+    {
+        return accumulate(accumulator, start, l -> false, reverse);
+    }
 
     /**
      * A row deletion/tombstone.

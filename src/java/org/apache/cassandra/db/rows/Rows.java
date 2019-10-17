@@ -113,7 +113,7 @@ public abstract class Rows
                 }
             }
             return (cellCount << 32) | columnCount;
-        }, 0);
+        }, 0, false);
 
         int columnCount = Ints.checkedCast(result & 0xFFFFFFFF);
         int cellCount = Ints.checkedCast(result >> 32);
