@@ -45,10 +45,13 @@ public abstract class ClusteringBoundOrBoundary extends AbstractBufferClustering
 {
     public static final ClusteringBoundOrBoundary.Serializer serializer = new Serializer();
 
+    private final Kind kind;
+
     protected ClusteringBoundOrBoundary(Kind kind, ByteBuffer[] values)
     {
-        super(kind, values);
+        super(values);
         assert values.length > 0 || !kind.isBoundary();
+        this.kind = kind;
     }
 
     public static ClusteringBoundOrBoundary create(Kind kind, ByteBuffer[] values)
@@ -56,6 +59,11 @@ public abstract class ClusteringBoundOrBoundary extends AbstractBufferClustering
         return kind.isBoundary()
                 ? new ClusteringBoundary(kind, values)
                 : new ClusteringBound(kind, values);
+    }
+
+    public Kind kind()
+    {
+        return kind;
     }
 
     public boolean isBoundary()
