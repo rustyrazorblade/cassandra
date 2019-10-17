@@ -25,6 +25,7 @@ import org.apache.cassandra.index.sasi.utils.AbstractIterator;
 import org.apache.cassandra.index.sasi.utils.CombinedValue;
 import org.apache.cassandra.index.sasi.utils.MappedBuffer;
 import org.apache.cassandra.index.sasi.utils.RangeIterator;
+import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.MergeIterator;
 
 import com.carrotsearch.hppc.LongOpenHashSet;
@@ -373,11 +374,15 @@ public class TokenTree
             }
             else
             {
-                Iterators.addAll(loadedKeys, o.iterator());
+                try (CloseableIterator<DecoratedKey> mi = o.iterator())
+                {
+                    Iterators.addAll(loadedKeys, mi);
+
+                }
             }
         }
 
-        public Iterator<DecoratedKey> iterator()
+        public MergeIterator<DecoratedKey, DecoratedKey> iterator()
         {
             List<Iterator<DecoratedKey>> keys = new ArrayList<>(info.size());
 

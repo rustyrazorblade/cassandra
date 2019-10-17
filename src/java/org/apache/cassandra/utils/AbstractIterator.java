@@ -30,6 +30,12 @@ public abstract class AbstractIterator<V> implements Iterator<V>, PeekingIterato
     private State state = State.MUST_FETCH;
     private V next;
 
+    protected void resetState()
+    {
+        state = State.MUST_FETCH;
+        next = null;
+    }
+
     protected V endOfData()
     {
         state = State.DONE;

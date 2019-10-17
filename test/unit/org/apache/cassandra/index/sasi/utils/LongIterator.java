@@ -27,6 +27,8 @@ import com.carrotsearch.hppc.LongOpenHashSet;
 import com.carrotsearch.hppc.LongSet;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.index.sasi.disk.Token;
+import org.apache.cassandra.utils.CloseableIterator;
+import org.apache.cassandra.utils.FBUtilities;
 
 public class LongIterator extends RangeIterator<Long, Token>
 {
@@ -88,9 +90,9 @@ public class LongIterator extends RangeIterator<Long, Token>
         }
 
         @Override
-        public Iterator<DecoratedKey> iterator()
+        public CloseableIterator<DecoratedKey> iterator()
         {
-            return Collections.emptyIterator();
+            return FBUtilities.closeableIterator(Collections.emptyIterator());
         }
     }
 

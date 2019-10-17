@@ -466,7 +466,7 @@ public class MergeIteratorComparisonTest
     public <T> void testMergeIterator(Reducer<T, ?> reducer, List<List<T>> lists, Comparator<T> comparator)
     {
         {
-            IMergeIterator<T,?> tested = MergeIterator.get(closeableIterators(lists), comparator, reducer);
+            IMergeIterator<T,?> tested = MergeIterator.getTransforming(closeableIterators(lists), comparator, reducer);
             IMergeIterator<T,?> base = new MergeIteratorPQ<>(closeableIterators(lists), comparator, reducer);
             // If test fails, try the version below for improved reporting:
             Object[] basearr = Iterators.toArray(base, Object.class);
@@ -480,7 +480,7 @@ public class MergeIteratorComparisonTest
         cmp = new CountingComparator<>(comparator); cmpb = new CountingComparator<>(comparator);
         System.out.println();
         for (int i=0; i<10; ++i) {
-            benchmarkIterator(MergeIterator.get(closeableIterators(lists), cmp, reducer), cmp);
+            benchmarkIterator(MergeIterator.getTransforming(closeableIterators(lists), cmp, reducer), cmp);
             benchmarkIterator(new MergeIteratorPQ<>(closeableIterators(lists), cmpb, reducer), cmpb);
         }
         System.out.format("MI: %.2f\n", cmp.count / (double) cmpb.count);
@@ -653,7 +653,7 @@ public class MergeIteratorComparisonTest
         protected final ArrayDeque<CandidatePQ<In>> candidates;
         public MergeIteratorPQ(List<? extends Iterator<In>> iters, Comparator<In> comp, Reducer<In, Out> reducer)
         {
-            super(iters, reducer);
+            reset(iters, comp, reducer);
             this.queue = new PriorityQueue<>(Math.max(1, iters.size()));
             for (int i = 0; i < iters.size(); i++)
             {
@@ -664,6 +664,11 @@ public class MergeIteratorComparisonTest
                 this.queue.add(candidate);
             }
             this.candidates = new ArrayDeque<>(queue.size());
+        }
+
+        protected void returnToPool()
+        {
+
         }
 
         protected final Out computeNext()

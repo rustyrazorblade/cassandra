@@ -39,6 +39,7 @@ import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.MurmurHash;
 import org.apache.cassandra.utils.Pair;
 
@@ -833,8 +834,10 @@ public class OnDiskIndexTest
 
         while (results.hasNext())
         {
-            for (DecoratedKey key : results.next())
-                keys.add(key);
+            try (CloseableIterator<DecoratedKey> keyIter = results.next().iterator())
+            {
+                keyIter.forEachRemaining(keys::add);
+            }
         }
 
         return keys;

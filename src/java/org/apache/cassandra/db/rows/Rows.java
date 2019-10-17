@@ -154,7 +154,7 @@ public abstract class Rows
         for (Row row : inputs)
             inputIterators.add(row == null ? Collections.emptyIterator() : row.iterator());
 
-        Iterator<?> iter = MergeIterator.get(inputIterators, ColumnData.comparator, new MergeIterator.Reducer<ColumnData, Object>()
+        MergeIterator.Reducer<ColumnData, ColumnData> reducer = new MergeIterator.Reducer<ColumnData, ColumnData>()
         {
             ColumnData mergedData;
             ColumnData[] inputDatas = new ColumnData[inputs.length];
@@ -166,7 +166,7 @@ public abstract class Rows
                     inputDatas[idx - 1] = current;
             }
 
-            protected Object getReduced()
+            protected ColumnData getReduced()
             {
                 for (int i = 0 ; i != inputDatas.length ; i++)
                 {
@@ -233,10 +233,13 @@ public abstract class Rows
                 mergedData = null;
                 Arrays.fill(inputDatas, null);
             }
-        });
+        };
+        try (MergeIterator<ColumnData, ColumnData> iter = MergeIterator.get(inputIterators, ColumnData.comparator, reducer))
+        {
+            while (iter.hasNext())
+                iter.next();
+        }
 
-        while (iter.hasNext())
-            iter.next();
     }
 
     public static Row merge(Row row1, Row row2)

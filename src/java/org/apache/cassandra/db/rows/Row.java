@@ -700,12 +700,14 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
                 columnDataIterators.add(row == null ? Collections.emptyIterator() : row.iterator());
 
             columnDataReducer.setActiveDeletion(activeDeletion);
-            Iterator<ColumnData> merged = MergeIterator.get(columnDataIterators, ColumnData.comparator, columnDataReducer);
-            while (merged.hasNext())
+            try (MergeIterator<ColumnData, ColumnData> merged = MergeIterator.get(columnDataIterators, ColumnData.comparator, columnDataReducer))
             {
-                ColumnData data = merged.next();
-                if (data != null)
-                    dataBuffer.add(data);
+                while (merged.hasNext())
+                {
+                    ColumnData data = merged.next();
+                    if (data != null)
+                        dataBuffer.add(data);
+                }
             }
 
             // Because some data might have been shadowed by the 'activeDeletion', we could have an empty row
@@ -806,12 +808,14 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
                         cellReducer.setActiveDeletion(activeDeletion);
                     }
 
-                    Iterator<Cell> cells = MergeIterator.get(complexCells, Cell.comparator, cellReducer);
-                    while (cells.hasNext())
+                    try (MergeIterator<Cell, Cell> cells = MergeIterator.get(complexCells, Cell.comparator, cellReducer))
                     {
-                        Cell merged = cells.next();
-                        if (merged != null)
-                            complexBuilder.addCell(merged);
+                        while (cells.hasNext())
+                        {
+                            Cell merged = cells.next();
+                            if (merged != null)
+                                complexBuilder.addCell(merged);
+                        }
                     }
                     return complexBuilder.build();
                 }

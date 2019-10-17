@@ -117,7 +117,7 @@ public class FQLReplayTest
              ChronicleQueue queue2 = ChronicleQueueBuilder.single(f2).build();
              FQLQueryIterator iter = new FQLQueryIterator(queue.createTailer(), 101);
              FQLQueryIterator iter2 = new FQLQueryIterator(queue2.createTailer(), 101);
-             MergeIterator<FQLQuery, List<FQLQuery>> merger = MergeIterator.get(Lists.newArrayList(iter, iter2), FQLQuery::compareTo, new Replay.Reducer()))
+             MergeIterator<FQLQuery, List<FQLQuery>> merger = MergeIterator.getTransforming(Lists.newArrayList(iter, iter2), FQLQuery::compareTo, new Replay.Reducer()))
         {
             long last = -1;
 
