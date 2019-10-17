@@ -42,16 +42,20 @@ import org.apache.cassandra.utils.btree.UpdateFunction;
 /**
  * Immutable implementation of a Row object.
  */
-public class BTreeRow extends AbstractRow
+public abstract class BTreeRow extends AbstractRow
 {
-    private static final long EMPTY_SIZE = ObjectSizes.measure(emptyRow(Clustering.EMPTY));
+//    private static final long EMPTY_SIZE = ObjectSizes.measure(emptyRow(Clustering.EMPTY));
 
-    private final Clustering clustering;
     private final LivenessInfo primaryKeyLivenessInfo;
-    private final Deletion deletion;
 
     // The data for each columns present in this row in column sorted order.
     private final Object[] btree;
+
+    private BTreeRow(LivenessInfo primaryKeyLivenessInfo, Object[] btree)
+    {
+        this.primaryKeyLivenessInfo = primaryKeyLivenessInfo;
+        this.btree = btree;
+    }
 
     // We need to filter the tombstones of a row on every read (twice in fact: first to remove purgeable tombstone, and then after reconciliation to remove
     // all tombstone since we don't return them to the client) as well as on compaction. But it's likely that many rows won't have any tombstone at all, so
@@ -60,25 +64,139 @@ public class BTreeRow extends AbstractRow
     // time to know if we have any deleted information or not. If we any "true" tombstone (i.e. not an expiring cell), this value will be forced to
     // Integer.MIN_VALUE, but if we don't and have expiring cells, this will the time at which the first expiring cell expires. If we have no tombstones and
     // no expiring cells, this will be Integer.MAX_VALUE;
-    private final int minLocalDeletionTime;
+    protected abstract int minLocalDeletionTime();
 
-    private BTreeRow(Clustering clustering,
-                     LivenessInfo primaryKeyLivenessInfo,
-                     Deletion deletion,
-                     Object[] btree,
-                     int minLocalDeletionTime)
+    protected abstract long emptySize();
+
+    private static class LiveClustered extends BTreeRow
     {
-        assert !deletion.isShadowedBy(primaryKeyLivenessInfo);
-        this.clustering = clustering;
-        this.primaryKeyLivenessInfo = primaryKeyLivenessInfo;
-        this.deletion = deletion;
-        this.btree = btree;
-        this.minLocalDeletionTime = minLocalDeletionTime;
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new LiveClustered(LivenessInfo.EMPTY, BTree.empty(), Clustering.EMPTY));
+        private final Clustering clustering;
+
+        public LiveClustered(LivenessInfo primaryKeyLivenessInfo, Object[] btree, Clustering clustering)
+        {
+            super(primaryKeyLivenessInfo, btree);
+            this.clustering = clustering;
+        }
+
+        protected int minLocalDeletionTime()
+        {
+            return Integer.MAX_VALUE;
+        }
+
+        public Deletion deletion()
+        {
+            return Deletion.LIVE;
+        }
+
+        public Clustering clustering()
+        {
+            return clustering;
+        }
+
+        protected long emptySize()
+        {
+            return EMPTY_SIZE;
+        }
     }
 
-    private BTreeRow(Clustering clustering, Object[] btree, int minLocalDeletionTime)
+    private static class LiveUnclustered extends BTreeRow
     {
-        this(clustering, LivenessInfo.EMPTY, Deletion.LIVE, btree, minLocalDeletionTime);
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new LiveUnclustered(LivenessInfo.EMPTY, BTree.empty()));
+        public LiveUnclustered(LivenessInfo primaryKeyLivenessInfo, Object[] btree)
+        {
+            super(primaryKeyLivenessInfo, btree);
+        }
+
+        protected int minLocalDeletionTime()
+        {
+            return Integer.MAX_VALUE;
+        }
+
+        public Deletion deletion()
+        {
+            return Deletion.LIVE;
+        }
+
+        public Clustering clustering()
+        {
+            return Clustering.EMPTY;
+        }
+
+        protected long emptySize()
+        {
+            return EMPTY_SIZE;
+        }
+    }
+
+    private static class WithDeletionClustered extends BTreeRow
+    {
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new WithDeletionClustered(LivenessInfo.EMPTY, BTree.empty(), Clustering.EMPTY, Deletion.LIVE, 0));
+        private final Clustering clustering;
+        private final Deletion deletion;
+        private final int minLocalDeletionTime;
+
+        public WithDeletionClustered(LivenessInfo primaryKeyLivenessInfo, Object[] btree, Clustering clustering, Deletion deletion, int minLocalDeletionTime)
+        {
+            super(primaryKeyLivenessInfo, btree);
+            this.clustering = clustering;
+            this.deletion = deletion;
+            this.minLocalDeletionTime = minLocalDeletionTime;
+        }
+
+        protected int minLocalDeletionTime()
+        {
+            return minLocalDeletionTime;
+        }
+
+        protected long emptySize()
+        {
+            return EMPTY_SIZE;
+        }
+
+        public Clustering clustering()
+        {
+            return clustering;
+        }
+
+        public Deletion deletion()
+        {
+            return deletion;
+        }
+    }
+
+    private static class WithDeletionUnclustered extends BTreeRow
+    {
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new WithDeletionUnclustered(LivenessInfo.EMPTY, BTree.empty(), Deletion.LIVE, 0));
+        private final Deletion deletion;
+        private final int minLocalDeletionTime;
+
+        public WithDeletionUnclustered(LivenessInfo primaryKeyLivenessInfo, Object[] btree, Deletion deletion, int minLocalDeletionTime)
+        {
+            super(primaryKeyLivenessInfo, btree);
+            this.deletion = deletion;
+            this.minLocalDeletionTime = minLocalDeletionTime;
+        }
+
+        protected int minLocalDeletionTime()
+        {
+            return minLocalDeletionTime;
+        }
+
+        protected long emptySize()
+        {
+            return EMPTY_SIZE;
+        }
+
+        public Clustering clustering()
+        {
+            return Clustering.EMPTY;
+        }
+
+        public Deletion deletion()
+        {
+            return deletion;
+        }
     }
 
     // Note that it's often easier/safer to use the sortedBuilder/unsortedBuilder or one of the static creation method below. Only directly useful in a small amount of cases.
@@ -87,6 +205,7 @@ public class BTreeRow extends AbstractRow
                                   Deletion deletion,
                                   Object[] btree)
     {
+        assert !deletion.isShadowedBy(primaryKeyLivenessInfo);
         int minDeletionTime = Math.min(minDeletionTime(primaryKeyLivenessInfo), minDeletionTime(deletion.time()));
         if (minDeletionTime != Integer.MIN_VALUE)
         {
@@ -97,43 +216,59 @@ public class BTreeRow extends AbstractRow
         return create(clustering, primaryKeyLivenessInfo, deletion, btree, minDeletionTime);
     }
 
+    private static BTreeRow create(Clustering clustering, Object[] btree, int minLocalDeletionTime)
+    {
+        return create(clustering, LivenessInfo.EMPTY, Deletion.LIVE, btree, minLocalDeletionTime);
+    }
+
     public static BTreeRow create(Clustering clustering,
                                   LivenessInfo primaryKeyLivenessInfo,
                                   Deletion deletion,
                                   Object[] btree,
                                   int minDeletionTime)
     {
-        return new BTreeRow(clustering, primaryKeyLivenessInfo, deletion, btree, minDeletionTime);
+        boolean hasDeletion = minDeletionTime < Integer.MAX_VALUE;
+        if (clustering.size() > 0)
+        {
+            return hasDeletion ? new WithDeletionClustered(primaryKeyLivenessInfo, btree, clustering, deletion, minDeletionTime)
+                               : new LiveClustered(primaryKeyLivenessInfo, btree, clustering);
+        }
+        else
+        {
+            return hasDeletion ? new WithDeletionUnclustered(primaryKeyLivenessInfo, btree, deletion, minDeletionTime)
+                               : new LiveUnclustered(primaryKeyLivenessInfo, btree);
+
+        }
     }
 
     public static BTreeRow emptyRow(Clustering clustering)
     {
-        return new BTreeRow(clustering, BTree.empty(), Integer.MAX_VALUE);
+        return create(clustering, BTree.empty(), Integer.MAX_VALUE);
     }
 
     public static BTreeRow singleCellRow(Clustering clustering, Cell cell)
     {
         if (cell.column().isSimple())
-            return new BTreeRow(clustering, BTree.singleton(cell), minDeletionTime(cell));
+            return create(clustering, BTree.singleton(cell), minDeletionTime(cell));
 
         ComplexColumnData complexData = new ComplexColumnData(cell.column(), new Cell[]{ cell }, DeletionTime.LIVE);
-        return new BTreeRow(clustering, BTree.singleton(complexData), minDeletionTime(cell));
+        return create(clustering, BTree.singleton(complexData), minDeletionTime(cell));
     }
 
     public static BTreeRow emptyDeletedRow(Clustering clustering, Deletion deletion)
     {
         assert !deletion.isLive();
-        return new BTreeRow(clustering, LivenessInfo.EMPTY, deletion, BTree.empty(), Integer.MIN_VALUE);
+        return create(clustering, LivenessInfo.EMPTY, deletion, BTree.empty(), Integer.MIN_VALUE);
     }
 
     public static BTreeRow noCellLiveRow(Clustering clustering, LivenessInfo primaryKeyLivenessInfo)
     {
         assert !primaryKeyLivenessInfo.isEmpty();
-        return new BTreeRow(clustering,
-                            primaryKeyLivenessInfo,
-                            Deletion.LIVE,
-                            BTree.empty(),
-                            minDeletionTime(primaryKeyLivenessInfo));
+        return create(clustering,
+                      primaryKeyLivenessInfo,
+                      Deletion.LIVE,
+                      BTree.empty(),
+                      minDeletionTime(primaryKeyLivenessInfo));
     }
 
     private static int minDeletionTime(Cell cell)
@@ -187,11 +322,6 @@ public class BTreeRow extends AbstractRow
         return min.get();
     }
 
-    public Clustering clustering()
-    {
-        return clustering;
-    }
-
     public Collection<ColumnMetadata> columns()
     {
         return Collections2.transform(columnData(), ColumnData::column);
@@ -212,11 +342,6 @@ public class BTreeRow extends AbstractRow
         return primaryKeyLivenessInfo().isEmpty()
                && deletion().isLive()
                && BTree.isEmpty(btree);
-    }
-
-    public Deletion deletion()
-    {
-        return deletion;
     }
 
     public Cell getCell(ColumnMetadata c)
@@ -275,14 +400,14 @@ public class BTreeRow extends AbstractRow
         Map<ByteBuffer, DroppedColumn> droppedColumns = metadata.droppedColumns;
 
         boolean mayFilterColumns = !filter.fetchesAllColumns(isStatic());
-        boolean mayHaveShadowed = activeDeletion.supersedes(deletion.time());
+        boolean mayHaveShadowed = activeDeletion.supersedes(deletion().time());
 
         if (!mayFilterColumns && !mayHaveShadowed && droppedColumns.isEmpty())
             return this;
 
 
         LivenessInfo newInfo = primaryKeyLivenessInfo;
-        Deletion newDeletion = deletion;
+        Deletion newDeletion = deletion();
         if (mayHaveShadowed)
         {
             if (activeDeletion.deletes(newInfo.timestamp()))
@@ -322,7 +447,7 @@ public class BTreeRow extends AbstractRow
         if (filter.allFetchedColumnsAreQueried())
             return this;
 
-        return transformAndFilter(primaryKeyLivenessInfo, deletion, (cd) -> {
+        return transformAndFilter(primaryKeyLivenessInfo, deletion(), (cd) -> {
 
             ColumnMetadata column = cd.column();
             if (column.isComplex())
@@ -365,14 +490,14 @@ public class BTreeRow extends AbstractRow
 
     public Row markCounterLocalToBeCleared()
     {
-        return transformAndFilter(primaryKeyLivenessInfo, deletion, (cd) -> cd.column().isCounterColumn()
+        return transformAndFilter(primaryKeyLivenessInfo, deletion(), (cd) -> cd.column().isCounterColumn()
                                                                             ? cd.markCounterLocalToBeCleared()
                                                                             : cd);
     }
 
     public boolean hasDeletion(int nowInSec)
     {
-        return nowInSec >= minLocalDeletionTime;
+        return nowInSec >= minLocalDeletionTime();
     }
 
     /**
@@ -386,9 +511,9 @@ public class BTreeRow extends AbstractRow
         LivenessInfo newInfo = primaryKeyLivenessInfo.isEmpty() ? primaryKeyLivenessInfo : primaryKeyLivenessInfo.withUpdatedTimestamp(newTimestamp);
         // If the deletion is shadowable and the row has a timestamp, we'll forced the deletion timestamp to be less than the row one, so we
         // should get rid of said deletion.
-        Deletion newDeletion = deletion.isLive() || (deletion.isShadowable() && !primaryKeyLivenessInfo.isEmpty())
+        Deletion newDeletion = deletion().isLive() || (deletion().isShadowable() && !primaryKeyLivenessInfo.isEmpty())
                              ? Deletion.LIVE
-                             : new Deletion(new DeletionTime(newTimestamp - 1, deletion.time().localDeletionTime()), deletion.isShadowable());
+                             : new Deletion(new DeletionTime(newTimestamp - 1, deletion().time().localDeletionTime()), deletion().isShadowable());
 
         return transformAndFilter(newInfo, newDeletion, (cd) -> cd.updateAllTimestamp(newTimestamp));
     }
@@ -400,9 +525,9 @@ public class BTreeRow extends AbstractRow
         //    the row, and so in particular it can't shadow the row deletion. So if there is a
         //    already a row deletion we have nothing to do.
         //  - we set the minLocalDeletionTime to MIN_VALUE because we know the deletion is live
-        return newDeletion.isLive() || !deletion.isLive()
+        return newDeletion.isLive() || !deletion().isLive()
              ? this
-             : new BTreeRow(clustering, primaryKeyLivenessInfo, Deletion.regular(newDeletion), btree, Integer.MIN_VALUE);
+             : create(clustering(), primaryKeyLivenessInfo, Deletion.regular(newDeletion), btree, Integer.MIN_VALUE);
     }
 
     public Row purge(DeletionPurger purger, int nowInSec, boolean enforceStrictLiveness)
@@ -411,7 +536,7 @@ public class BTreeRow extends AbstractRow
             return this;
 
         LivenessInfo newInfo = purger.shouldPurge(primaryKeyLivenessInfo, nowInSec) ? LivenessInfo.EMPTY : primaryKeyLivenessInfo;
-        Deletion newDeletion = purger.shouldPurge(deletion.time()) ? Deletion.LIVE : deletion;
+        Deletion newDeletion = purger.shouldPurge(deletion().time()) ? Deletion.LIVE : deletion();
 
         // when enforceStrictLiveness is set, a row is considered dead when it's PK liveness info is not present
         if (enforceStrictLiveness && newDeletion.isLive() && newInfo.isEmpty())
@@ -424,21 +549,21 @@ public class BTreeRow extends AbstractRow
     {
         Object[] transformed = BTree.transformAndFilter(btree, function);
 
-        if (btree == transformed && info == this.primaryKeyLivenessInfo && deletion == this.deletion)
+        if (btree == transformed && info == this.primaryKeyLivenessInfo && deletion == this.deletion())
             return this;
 
         if (info.isEmpty() && deletion.isLive() && BTree.isEmpty(transformed))
             return null;
 
         int minDeletionTime = minDeletionTime(transformed, info, deletion.time());
-        return BTreeRow.create(clustering, info, deletion, transformed, minDeletionTime);
+        return BTreeRow.create(clustering(), info, deletion, transformed, minDeletionTime);
     }
 
     public int dataSize()
     {
-        int dataSize = clustering.dataSize()
+        int dataSize = clustering().dataSize()
                      + primaryKeyLivenessInfo.dataSize()
-                     + deletion.dataSize();
+                     + deletion().dataSize();
 
         for (ColumnData cd : this)
             dataSize += cd.dataSize();
@@ -447,8 +572,8 @@ public class BTreeRow extends AbstractRow
 
     public long unsharedHeapSizeExcludingData()
     {
-        long heapSize = EMPTY_SIZE
-                      + clustering.unsharedHeapSizeExcludingData()
+        long heapSize = emptySize()
+                      + clustering().unsharedHeapSizeExcludingData()
                       + BTree.sizeOfStructureOnHeap(btree);
 
         for (ColumnData cd : this)
