@@ -386,7 +386,7 @@ public class BTreeRow extends AbstractRow
     {
         public long apply(ColumnData cd, long v)
         {
-            if (cd != null && cd.column.isComplex())
+            if (cd != null && cd.hasInvalidDeletions())
                 v++;
             return v;
         }
