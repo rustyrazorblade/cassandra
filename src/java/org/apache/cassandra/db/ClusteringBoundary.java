@@ -55,11 +55,11 @@ public class ClusteringBoundary extends ClusteringBoundOrBoundary
 
     public ClusteringBound openBound(boolean reversed)
     {
-        return ClusteringBound.create(kind.openBoundOfBoundary(reversed), values);
+        return ClusteringBound.create(kind().openBoundOfBoundary(reversed), values);
     }
 
     public ClusteringBound closeBound(boolean reversed)
     {
-        return ClusteringBound.create(kind.closeBoundOfBoundary(reversed), values);
+        return ClusteringBound.create(kind().closeBoundOfBoundary(reversed), values);
     }
 }

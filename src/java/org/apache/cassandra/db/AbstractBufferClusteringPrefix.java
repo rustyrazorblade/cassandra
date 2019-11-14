@@ -26,18 +26,11 @@ public abstract class AbstractBufferClusteringPrefix extends AbstractClusteringP
     public static final ByteBuffer[] EMPTY_VALUES_ARRAY = new ByteBuffer[0];
     private static final long EMPTY_SIZE = ObjectSizes.measure(Clustering.make(EMPTY_VALUES_ARRAY));
 
-    protected final Kind kind;
     protected final ByteBuffer[] values;
 
-    protected AbstractBufferClusteringPrefix(Kind kind, ByteBuffer[] values)
+    protected AbstractBufferClusteringPrefix(ByteBuffer[] values)
     {
-        this.kind = kind;
         this.values = values;
-    }
-
-    public Kind kind()
-    {
-        return kind;
     }
 
     public ClusteringPrefix clustering()

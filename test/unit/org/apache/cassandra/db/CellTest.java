@@ -405,7 +405,7 @@ public class CellTest
     private Cell expiring(TableMetadata cfm, String columnName, String value, long timestamp, int ttl, int localExpirationTime)
     {
         ColumnMetadata cdef = cfm.getColumn(ByteBufferUtil.bytes(columnName));
-        return new BufferCell(cdef, timestamp, ttl, localExpirationTime, ByteBufferUtil.bytes(value), null);
+        return BufferCell.create(cdef, timestamp, ttl, localExpirationTime, ByteBufferUtil.bytes(value), null);
     }
 
     private Cell deleted(TableMetadata cfm, String columnName, int localDeletionTime, long timestamp)

@@ -34,6 +34,11 @@ public class BufferClustering extends AbstractBufferClusteringPrefix implements 
 {
     BufferClustering(ByteBuffer... values)
     {
-        super(Kind.CLUSTERING, values);
+        super(values);
+    }
+
+    public Kind kind()
+    {
+        return Kind.CLUSTERING;
     }
 }

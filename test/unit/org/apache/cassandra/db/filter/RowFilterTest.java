@@ -81,7 +81,7 @@ public class RowFilterTest
                 return BTreeRow.create(Clustering.STATIC_CLUSTERING,
                                        LivenessInfo.EMPTY,
                                        Row.Deletion.LIVE,
-                                       BTree.singleton(new BufferCell(s, 1, Cell.NO_TTL, Cell.NO_DELETION_TIME, one, null)));
+                                       BTree.singleton(BufferCell.create(s, 1, Cell.NO_TTL, Cell.NO_DELETION_TIME, one, null)));
             }
             public void close()
             {
@@ -115,7 +115,7 @@ public class RowFilterTest
                 return BTreeRow.create(Clustering.EMPTY,
                                        LivenessInfo.EMPTY,
                                        Row.Deletion.LIVE,
-                                       BTree.singleton(new BufferCell(r, 1, Cell.NO_TTL, Cell.NO_DELETION_TIME, one, null)));
+                                       BTree.singleton(BufferCell.create(r, 1, Cell.NO_TTL, Cell.NO_DELETION_TIME, one, null)));
             }
             public void close()
             {

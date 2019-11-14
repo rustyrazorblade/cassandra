@@ -133,12 +133,12 @@ public class ClusteringBound extends ClusteringBoundOrBoundary
 
     public boolean isInclusive()
     {
-        return kind == Kind.INCL_START_BOUND || kind == Kind.INCL_END_BOUND;
+        return kind() == Kind.INCL_START_BOUND || kind() == Kind.INCL_END_BOUND;
     }
 
     public boolean isExclusive()
     {
-        return kind == Kind.EXCL_START_BOUND || kind == Kind.EXCL_END_BOUND;
+        return kind() == Kind.EXCL_START_BOUND || kind() == Kind.EXCL_END_BOUND;
     }
 
     // For use by intersects, it's called with the sstable bound opposite to the slice bound
