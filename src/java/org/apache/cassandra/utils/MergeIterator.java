@@ -18,31 +18,131 @@
 package org.apache.cassandra.utils;
 
 import java.util.*;
+import java.util.function.Supplier;
+
+import com.google.common.base.Preconditions;
+
+import io.netty.util.concurrent.FastThreadLocal;
 
 /** Merges sorted input iterators which individually contain unique items. */
 public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implements IMergeIterator<In, Out>
 {
-    protected final Reducer<In,Out> reducer;
-    protected final List<? extends Iterator<In>> iterators;
-
-    protected MergeIterator(List<? extends Iterator<In>> iters, Reducer<In, Out> reducer)
+    private static class MergeIteratorPool<T extends MergeIterator>
     {
-        this.iterators = iters;
-        this.reducer = reducer;
+        private final Supplier<T> iteratorSupplier;
+        private final FastThreadLocal<Queue<T>> queues = new FastThreadLocal<Queue<T>>()
+        {
+            protected Queue<T> initialValue() throws Exception
+            {
+                return new LinkedList<>();
+            }
+        };
+
+        public MergeIteratorPool(Supplier<T> iteratorSupplier)
+        {
+            this.iteratorSupplier = iteratorSupplier;
+        }
+
+        protected Queue<T> initialValue() throws Exception
+        {
+            return new LinkedList<>();
+        }
+
+        T get()
+        {
+            T next = queues.get().poll();
+            if (next == null)
+            {
+                next = iteratorSupplier.get();
+            }
+            return next;
+        }
+
+        void put(T iter)
+        {
+            queues.get().add(iter);
+        }
+
+    }
+
+    private static final MergeIteratorPool<TrivialOneToOne> trivialOneToOne = new MergeIteratorPool<>(() -> new TrivialOneToOne());
+    private static final MergeIteratorPool<OneToOne> oneToOne = new MergeIteratorPool<>(() -> new OneToOne());
+    private static final MergeIteratorPool<ManyToOne> manyToOne = new MergeIteratorPool<>(() -> new ManyToOne());
+
+    protected Reducer<In,Out> reducer;
+    protected List<? extends Iterator<In>> iterators;
+    protected boolean active = false;
+
+
+    @SuppressWarnings("resource")
+    private static <In, Out> MergeIterator<In, Out> getSimple(List<? extends Iterator<In>> sources,
+                                                              Comparator<? super In> comparator,
+                                                              Reducer<In, Out> reducer)
+    {
+        Preconditions.checkArgument(sources.size() < ManyToOne.DEFAULT_SIZE);
+        MergeIterator<In, Out> mi;
+        if (sources.size() == 1)
+        {
+            mi = reducer.trivialReduceIsTrivial() ? trivialOneToOne.get()
+                                                  : oneToOne.get();
+        }
+        else
+        {
+            mi = manyToOne.get();
+        }
+
+        mi.reset(sources, comparator, reducer);
+        return mi;
+    }
+
+
+    @SuppressWarnings("resource")
+    public static <T> MergeIterator<T, T> get(List<? extends Iterator<T>> sources,
+                                                       Comparator<? super T> comparator,
+                                                       Reducer<T, T> reducer)
+    {
+
+        if (sources.size() < ManyToOne.DEFAULT_SIZE)
+        {
+            return getSimple(sources, comparator, reducer);
+        }
+        else
+        {
+            // since the in and out types are the same, we can nest pooled iterators
+            List<Iterator<T>> subSources = new ArrayList<>((int) Math.ceil((double) sources.size() / ManyToOne.DEFAULT_SIZE));
+            for (int i=0; i<sources.size(); i+=ManyToOne.DEFAULT_SIZE)
+            {
+                Iterator<T> subIter = get(sources.subList(i, Math.min(i + ManyToOne.DEFAULT_SIZE, sources.size())), comparator, reducer);
+                subSources.add(subIter);
+            }
+            return get(subSources, comparator, reducer);
+        }
     }
 
     @SuppressWarnings("resource")
-    public static <In, Out> MergeIterator<In, Out> get(List<? extends Iterator<In>> sources,
-                                                       Comparator<? super In> comparator,
-                                                       Reducer<In, Out> reducer)
+    public static <In, Out> MergeIterator<In, Out> getTransforming(List<? extends Iterator<In>> sources,
+                                                                    Comparator<? super In> comparator,
+                                                                    Reducer<In, Out> reducer)
     {
-        if (sources.size() == 1)
+        if (sources.size() < ManyToOne.DEFAULT_SIZE)
         {
-            return reducer.trivialReduceIsTrivial()
-                 ? new TrivialOneToOne<>(sources, reducer)
-                 : new OneToOne<>(sources, reducer);
+            return getSimple(sources, comparator, reducer);
         }
-        return new ManyToOne<>(sources, comparator, reducer);
+        else
+        {
+            // since the in and out types are not the same, we allocate a new iterator to handle the sources
+            ManyToOne<In, Out> mi = new ManyToOne<>(sources.size());
+            mi.reset(sources, comparator, reducer);
+            return mi;
+        }
+    }
+
+    protected void reset(List<? extends Iterator<In>> sources, Comparator<? super In> comparator, Reducer<In, Out> reducer)
+    {
+        Preconditions.checkState(!active);
+        this.iterators = sources;
+        this.reducer = reducer;
+        active = true;
     }
 
     public Iterable<? extends Iterator<In>> iterators()
@@ -52,6 +152,7 @@ public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implem
 
     public void close()
     {
+        Preconditions.checkState(active);
         for (Iterator<In> iterator : this.iterators)
         {
             try
@@ -66,7 +167,15 @@ public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implem
         }
 
         reducer.close();
+
+        iterators = null;
+        reducer = null;
+        active = false;
+        resetState();
+        returnToPool();
     }
+
+    protected abstract void returnToPool();
 
     /**
      * A MergeIterator that consumes multiple input values per output value.
@@ -116,10 +225,13 @@ public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implem
      */
     static final class ManyToOne<In,Out> extends MergeIterator<In,Out>
     {
+        static final int DEFAULT_SIZE = 32;
+        protected final Candidate<In>[] candidates;
         protected final Candidate<In>[] heap;
 
         /** Number of non-exhausted iterators. */
-        int size;
+        int size = -1;
+        int numIters = -1;
 
         /**
          * Position of the deepest, right-most child that needs advancing before we can start consuming.
@@ -127,28 +239,60 @@ public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implem
          * in this range that needs advancing is not in correct order. The trees rooted at any position that does
          * not need advancing, however, retain their prior-held binary heap property.
          */
-        int needingAdvance;
+        int needingAdvance = -1;
 
         /**
          * The number of elements to keep in order before the binary heap starts, exclusive of the top heap element.
          */
         static final int SORTED_SECTION_SIZE = 4;
 
-        public ManyToOne(List<? extends Iterator<In>> iters, Comparator<? super In> comp, Reducer<In, Out> reducer)
+        public ManyToOne()
         {
-            super(iters, reducer);
+            this(DEFAULT_SIZE);
+        }
 
-            @SuppressWarnings("unchecked")
-            Candidate<In>[] heap = new Candidate[iters.size()];
-            this.heap = heap;
-            size = 0;
-
-            for (int i = 0; i < iters.size(); i++)
+        public ManyToOne(int size)
+        {
+            this.heap = new Candidate[size];
+            this.candidates = new Candidate[size];
+            for (int i=0; i<size; i++)
             {
-                Candidate<In> candidate = new Candidate<>(i, iters.get(i), comp);
-                heap[size++] = candidate;
+                candidates[i] = new Candidate<>();
+            }
+        }
+
+        protected void reset(List<? extends Iterator<In>> sources, Comparator<? super In> comparator, Reducer<In, Out> reducer)
+        {
+            super.reset(sources, comparator, reducer);
+
+            size = 0;
+            for (int i=0; i<sources.size(); i++)
+            {
+                heap[i] = candidates[i];
+                heap[i].reset(i, iterators.get(i), comparator);
+                size++;
             }
             needingAdvance = size;
+            numIters = size;
+        }
+
+        public void close()
+        {
+            for (int i=0; i<numIters; i++)
+            {
+                heap[i] = null;
+                candidates[i].close();
+            }
+            size = -1;
+            needingAdvance = -1;
+            numIters = -1;
+            super.close();
+        }
+
+        protected void returnToPool()
+        {
+            if (heap.length == DEFAULT_SIZE)
+                manyToOne.put(this);
         }
 
         protected final Out computeNext()
@@ -348,19 +492,40 @@ public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implem
     // Holds and is comparable by the head item of an iterator it owns
     protected static final class Candidate<In> implements Comparable<Candidate<In>>
     {
-        private final Iterator<? extends In> iter;
-        private final Comparator<? super In> comp;
-        private final int idx;
+        private Iterator<? extends In> iter;
+        private Comparator<? super In> comp;
+        private int idx = -1;
         private In item;
         private In lowerBound;
         boolean equalParent;
+        boolean active = false;
 
-        public Candidate(int idx, Iterator<? extends In> iter, Comparator<? super In> comp)
+        protected void reset(int idx, Iterator<? extends In> iter, Comparator<? super In> comp)
         {
+            Preconditions.checkState(!active);
+
             this.iter = iter;
             this.comp = comp;
             this.idx = idx;
+            this.item = null;
             this.lowerBound = iter instanceof IteratorWithLowerBound ? ((IteratorWithLowerBound<In>)iter).lowerBound() : null;
+            this.equalParent = false;
+
+            active = true;
+        }
+
+        protected void close()
+        {
+            Preconditions.checkState(active);
+
+            this.iter = null;
+            this.comp = null;
+            this.idx = -1;
+            this.item = null;
+            this.lowerBound = null;
+            this.equalParent = false;
+
+            active = false;
         }
 
         /** @return this if our iterator had an item, and it is now available, otherwise null */
@@ -451,12 +616,24 @@ public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implem
 
     private static class OneToOne<In, Out> extends MergeIterator<In, Out>
     {
-        private final Iterator<In> source;
+        Iterator<In> source;
 
-        public OneToOne(List<? extends Iterator<In>> sources, Reducer<In, Out> reducer)
+        protected void reset(List<? extends Iterator<In>> sources, Comparator<? super In> comparator, Reducer<In, Out> reducer)
         {
-            super(sources, reducer);
+            Preconditions.checkArgument(sources.size() == 1);
+            super.reset(sources, comparator, reducer);
             source = sources.get(0);
+        }
+
+        public void close()
+        {
+            source = null;
+            super.close();
+        }
+
+        protected void returnToPool()
+        {
+            oneToOne.put(this);
         }
 
         protected Out computeNext()
@@ -471,12 +648,23 @@ public abstract class MergeIterator<In,Out> extends AbstractIterator<Out> implem
 
     private static class TrivialOneToOne<In, Out> extends MergeIterator<In, Out>
     {
-        private final Iterator<In> source;
+        Iterator<In> source;
 
-        public TrivialOneToOne(List<? extends Iterator<In>> sources, Reducer<In, Out> reducer)
+        protected void reset(List<? extends Iterator<In>> sources, Comparator<? super In> comparator, Reducer<In, Out> reducer)
         {
-            super(sources, reducer);
+            super.reset(sources, comparator, reducer);
             source = sources.get(0);
+        }
+
+        public void close()
+        {
+            source = null;
+            super.close();
+        }
+
+        protected void returnToPool()
+        {
+            trivialOneToOne.put(this);
         }
 
         @SuppressWarnings("unchecked")

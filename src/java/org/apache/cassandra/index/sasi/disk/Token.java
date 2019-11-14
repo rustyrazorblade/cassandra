@@ -23,8 +23,9 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.index.sasi.utils.CombinedValue;
 
 import com.carrotsearch.hppc.LongSet;
+import org.apache.cassandra.utils.CloseableIterator;
 
-public abstract class Token implements CombinedValue<Long>, Iterable<DecoratedKey>
+public abstract class Token implements CombinedValue<Long>
 {
     protected final long token;
 
@@ -44,4 +45,6 @@ public abstract class Token implements CombinedValue<Long>, Iterable<DecoratedKe
     {
         return Longs.compare(token, ((Token) o).token);
     }
+
+    public abstract CloseableIterator<DecoratedKey> iterator();
 }

@@ -105,7 +105,7 @@ public class Replay implements Runnable
         {
             readQueues = arguments.stream().map(s -> ChronicleQueueBuilder.single(s).readOnly(true).build()).collect(Collectors.toList());
             iterators = readQueues.stream().map(ChronicleQueue::createTailer).map(tailer -> new FQLQueryIterator(tailer, readAhead)).collect(Collectors.toList());
-            try (MergeIterator<FQLQuery, List<FQLQuery>> iter = MergeIterator.get(iterators, FQLQuery::compareTo, new Reducer());
+            try (MergeIterator<FQLQuery, List<FQLQuery>> iter = MergeIterator.getTransforming(iterators, FQLQuery::compareTo, new Reducer());
                  QueryReplayer replayer = new QueryReplayer(iter, targetHosts, resultPaths, filters, queryStorePath))
             {
                 replayer.replay();

@@ -48,6 +48,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.schema.MigrationManager;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CloseableIterator;
 
 import com.google.common.util.concurrent.Futures;
 
@@ -150,8 +151,10 @@ public class PerSSTableIndexWriterTest extends SchemaLoader
 
             while (tokens.hasNext())
             {
-                for (DecoratedKey key : tokens.next())
-                    actualKeys.add(key);
+                try (CloseableIterator<DecoratedKey> keyIter = tokens.next().iterator())
+                {
+                    keyIter.forEachRemaining(actualKeys::add);
+                }
             }
 
             Assert.assertEquals(count++, (int) Int32Type.instance.compose(term.getTerm()));

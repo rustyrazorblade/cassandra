@@ -31,6 +31,9 @@ import org.apache.cassandra.index.sasi.utils.RangeIterator;
 
 import com.carrotsearch.hppc.LongOpenHashSet;
 import com.carrotsearch.hppc.LongSet;
+import org.apache.cassandra.utils.CloseableIterator;
+import org.apache.cassandra.utils.FBUtilities;
+
 import com.google.common.collect.PeekingIterator;
 
 public class KeyRangeIterator extends RangeIterator<Long, Token>
@@ -116,14 +119,17 @@ public class KeyRangeIterator extends RangeIterator<Long, Token>
             }
             else
             {
-                for (DecoratedKey key : o)
-                    keys.add(key);
+                try (CloseableIterator<DecoratedKey> iter = o.iterator())
+                {
+                    while (iter.hasNext())
+                        keys.add(iter.next());
+                }
             }
         }
 
-        public Iterator<DecoratedKey> iterator()
+        public CloseableIterator<DecoratedKey> iterator()
         {
-            return keys.iterator();
+            return FBUtilities.closeableIterator(keys.iterator());
         }
     }
 }

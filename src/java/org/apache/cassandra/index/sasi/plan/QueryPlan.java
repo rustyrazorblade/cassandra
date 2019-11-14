@@ -29,6 +29,7 @@ import org.apache.cassandra.exceptions.RequestTimeoutException;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.AbstractIterator;
+import org.apache.cassandra.utils.CloseableIterator;
 
 public class QueryPlan
 {
@@ -75,7 +76,7 @@ public class QueryPlan
         private final QueryController controller;
         private final ReadExecutionController executionController;
 
-        private Iterator<DecoratedKey> currentKeys = null;
+        private CloseableIterator<DecoratedKey> currentKeys = null;
 
         public ResultIterator(Operation operationTree, QueryController controller, ReadExecutionController executionController)
         {
@@ -96,6 +97,12 @@ public class QueryPlan
             {
                 if (currentKeys == null || !currentKeys.hasNext())
                 {
+                    if (currentKeys != null)
+                    {
+                        currentKeys.close();
+                        currentKeys = null;
+                    }
+
                     if (!operationTree.hasNext())
                          return endOfData();
 
@@ -163,6 +170,8 @@ public class QueryPlan
 
         public void close()
         {
+            if (currentKeys != null)
+                FileUtils.closeQuietly(currentKeys);
             FileUtils.closeQuietly(operationTree);
             controller.finish();
         }

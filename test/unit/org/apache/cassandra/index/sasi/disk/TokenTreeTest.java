@@ -38,6 +38,8 @@ import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.index.sasi.utils.RangeUnionIterator;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.SequentialWriterOption;
+import org.apache.cassandra.utils.CloseableIterator;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MurmurHash;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.SequentialWriter;
@@ -349,8 +351,10 @@ public class TokenTreeTest
             }
 
             final Set<Long> offsets = new TreeSet<>();
-            for (DecoratedKey key : tokenA)
-                 offsets.add(LongType.instance.compose(key.getKey()));
+            try (CloseableIterator<DecoratedKey> keyIter = tokenA.iterator())
+            {
+                keyIter.forEachRemaining(key -> offsets.add(LongType.instance.compose(key.getKey())));
+            }
 
             Set<Long> expected = new TreeSet<>();
             {
@@ -579,13 +583,13 @@ public class TokenTreeTest
         }
 
         @Override
-        public Iterator<DecoratedKey> iterator()
+        public CloseableIterator<DecoratedKey> iterator()
         {
             List<DecoratedKey> keys = new ArrayList<>(offsets.size());
             for (LongCursor offset : offsets)
                  keys.add(dk(offset.value));
 
-            return keys.iterator();
+            return FBUtilities.closeableIterator(keys.iterator());
         }
     }
 
@@ -601,8 +605,10 @@ public class TokenTreeTest
     private static Set<DecoratedKey> convert(Token results)
     {
         Set<DecoratedKey> keys = new HashSet<>();
-        for (DecoratedKey key : results)
-            keys.add(key);
+        try (CloseableIterator<DecoratedKey> keyIter = results.iterator())
+        {
+            keyIter.forEachRemaining(keys::add);
+        }
 
         return keys;
     }
