@@ -83,6 +83,8 @@ public class ByteBufferUtil
     /** Represents an unset value in bound variables */
     public static final ByteBuffer UNSET_BYTE_BUFFER = ByteBuffer.wrap(new byte[]{});
 
+    public static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
+
     @Inline
     public static int compareUnsigned(ByteBuffer o1, ByteBuffer o2)
     {
@@ -337,6 +339,12 @@ public class ByteBufferUtil
     public static void writeWithVIntLength(ByteBuffer bytes, DataOutputPlus out) throws IOException
     {
         out.writeUnsignedVInt(bytes.remaining());
+        out.write(bytes);
+    }
+
+    public static void writeWithVIntLength(byte[] bytes, DataOutputPlus out) throws IOException
+    {
+        out.writeUnsignedVInt(bytes.length);
         out.write(bytes);
     }
 

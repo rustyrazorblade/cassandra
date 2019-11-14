@@ -162,9 +162,47 @@ public abstract class Cells
                 return leftLocalDeletionTime > rightLocalDeletionTime ? left : right;
         }
 
-        ByteBuffer leftValue = left.value();
-        ByteBuffer rightValue = right.value();
-        return leftValue.compareTo(rightValue) >= 0 ? left : right;
+        if (left.hasArray() && right.hasArray())
+        {
+            return compare(left.array(), right.array()) >= 0 ? left : right;
+        }
+        else if (left.hasBuffer() && right.hasBuffer())
+        {
+            ByteBuffer leftValue = left.value();
+            ByteBuffer rightValue = right.value();
+            return leftValue.compareTo(rightValue) >= 0 ? left : right;
+        }
+        else if (left.hasArray())
+        {
+            return compare(right.value(), left.array()) < 0 ? left : right;
+        }
+        else
+        {
+            return compare(left.value(), right.array()) >= 0 ? left : right;
+        }
+    }
+
+    private static int compare(byte[] l, byte[] r)
+    {
+        int n = Math.min(l.length, r.length);
+        for (int i = 0; i < n; i++) {
+            int cmp = Byte.compare(l[i], r[i]);
+            if (cmp != 0)
+                return cmp;
+        }
+        return l.length - r.length;
+    }
+
+    private static int compare(ByteBuffer l, byte[] r)
+    {
+        int n = Math.min(l.remaining(), r.length);
+        int lpos = l.position();
+        for (int i = 0; i < n; i++) {
+            int cmp = Byte.compare(l.get(lpos + i), r[i]);
+            if (cmp != 0)
+                return cmp;
+        }
+        return l.remaining() - r.length;
     }
 
     private static Cell resolveCounter(Cell left, Cell right)

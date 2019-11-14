@@ -45,7 +45,7 @@ public class SerializationHelper
         LOCAL, FROM_REMOTE, PRESERVE_SIZE
     }
 
-    private final Flag flag;
+    public final Flag flag;
     public final int version;
 
     private final ColumnFilter columnsToFetch;

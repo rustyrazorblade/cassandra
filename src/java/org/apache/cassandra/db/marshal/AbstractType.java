@@ -413,12 +413,29 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
             ByteBufferUtil.writeWithVIntLength(value, out);
     }
 
+    public void writeValue(byte[] value, DataOutputPlus out) throws IOException
+    {
+        assert value.length > 0;
+        if (valueLengthIfFixed() >= 0)
+            out.write(value);
+        else
+            ByteBufferUtil.writeWithVIntLength(value, out);
+    }
+
     public long writtenLength(ByteBuffer value)
     {
         assert value.hasRemaining();
         return valueLengthIfFixed() >= 0
              ? value.remaining()
              : TypeSizes.sizeofWithVIntLength(value);
+    }
+
+    public long writtenLength(byte[] value)
+    {
+        assert value.length > 0;
+        return valueLengthIfFixed() >= 0
+               ? value.length
+               : TypeSizes.sizeofWithVIntLength(value);
     }
 
     public ByteBuffer readValue(DataInputPlus in) throws IOException
@@ -444,6 +461,38 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
                                                     l, maxValueSize));
 
             return ByteBufferUtil.read(in, l);
+        }
+    }
+
+    public byte[] readArrayValue(DataInputPlus in) throws IOException
+    {
+        return readArrayValue(in, Integer.MAX_VALUE);
+    }
+
+    public byte[] readArrayValue(DataInputPlus in, int maxValueSize) throws IOException
+    {
+        int length = valueLengthIfFixed();
+
+        if (length >= 0)
+        {
+            byte[] val = new byte[length];
+            in.readFully(val);
+            return val;
+        }
+        else
+        {
+            int l = (int)in.readUnsignedVInt();
+            if (l < 0)
+                throw new IOException("Corrupt (negative) value length encountered");
+
+            if (l > maxValueSize)
+                throw new IOException(String.format("Corrupt value length %d encountered, as it exceeds the maximum of %d, " +
+                                                    "which is set via max_value_size_in_mb in cassandra.yaml",
+                                                    l, maxValueSize));
+
+            byte[] val = new byte[l];
+            in.readFully(val);
+            return val;
         }
     }
 

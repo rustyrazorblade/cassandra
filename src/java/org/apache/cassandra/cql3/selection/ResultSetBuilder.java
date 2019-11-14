@@ -114,7 +114,7 @@ public final class ResultSetBuilder
     {
         return c.isCounterCell()
              ? ByteBufferUtil.bytes(CounterContext.instance().total(c.value()))
-             : c.value();
+             : c.hasBuffer() ? c.value() : ByteBuffer.wrap(c.array());
     }
 
     /**

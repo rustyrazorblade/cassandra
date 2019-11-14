@@ -158,4 +158,19 @@ public class NativeCell extends AbstractCell
         return EMPTY_SIZE;
     }
 
+
+    public boolean hasBuffer()
+    {
+        return true;
+    }
+
+    public boolean hasArray()
+    {
+        return false;
+    }
+
+    public byte[] array()
+    {
+        throw new UnsupportedOperationException();
+    }
 }

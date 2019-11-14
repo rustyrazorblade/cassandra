@@ -15,40 +15,41 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.cassandra.db.rows;
 
 import java.nio.ByteBuffer;
 
 import org.apache.cassandra.db.ExpirationDateOverflowHandling;
-import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.db.marshal.ByteType;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.memory.AbstractAllocator;
 
-public abstract class BufferCell extends AbstractCell
+public abstract class ArrayCell extends AbstractCell
 {
     private final long timestamp;
 
-    public BufferCell(ColumnMetadata column, long timestamp)
+    public ArrayCell(ColumnMetadata column, long timestamp)
     {
         super(column);
         this.timestamp = timestamp;
     }
 
-    private static class Live extends BufferCell
+    private static class Live extends ArrayCell
     {
-        private static final long EMPTY_SIZE = ObjectSizes.measure(new Live(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, ByteBufferUtil.EMPTY_BYTE_BUFFER));
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new ArrayCell.Live(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, ByteBufferUtil.EMPTY_BYTE_ARRAY));
 
-        private final ByteBuffer value;
+        private final byte[] value;
 
-        public Live(ColumnMetadata column, long timestamp, ByteBuffer value)
+        public Live(ColumnMetadata column, long timestamp, byte[] value)
         {
             super(column, timestamp);
             this.value = value;
         }
 
-        public ByteBuffer value()
+        public byte[] array()
         {
             return value;
         }
@@ -74,9 +75,9 @@ public abstract class BufferCell extends AbstractCell
         }
     }
 
-    private static class Tombstone extends BufferCell
+    private static class Tombstone extends ArrayCell
     {
-        private static final long EMPTY_SIZE = ObjectSizes.measure(new Tombstone(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, 0));
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new ArrayCell.Tombstone(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, 0));
 
         private final int localDeletionTime;
 
@@ -122,15 +123,15 @@ public abstract class BufferCell extends AbstractCell
         }
     }
 
-    private static class Simple extends BufferCell
+    private static class Simple extends ArrayCell
     {
-        private static final long EMPTY_SIZE = ObjectSizes.measure(new Simple(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, 0, 0, ByteBufferUtil.EMPTY_BYTE_BUFFER));
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new ArrayCell.Simple(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, 0, 0, ByteBufferUtil.EMPTY_BYTE_ARRAY));
         private final int ttl;
         private final int localDeletionTime;
 
-        private final ByteBuffer value;
+        private final byte[] value;
 
-        public Simple(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, ByteBuffer value)
+        public Simple(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, byte[] value)
         {
             super(column, timestamp);
             this.ttl = ttl;
@@ -138,7 +139,7 @@ public abstract class BufferCell extends AbstractCell
             this.value = value;
         }
 
-        public ByteBuffer value()
+        public byte[] array()
         {
             return value;
         }
@@ -165,16 +166,16 @@ public abstract class BufferCell extends AbstractCell
     }
 
     // public for BTree row builder
-    public static class Complex extends BufferCell
+    public static class Complex extends ArrayCell
     {
-        private static final long EMPTY_SIZE = ObjectSizes.measure(new Complex(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, 0, 0, ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
+        private static final long EMPTY_SIZE = ObjectSizes.measure(new Complex(ColumnMetadata.regularColumn("", "", "", ByteType.instance), 0L, 0, 0, ByteBufferUtil.EMPTY_BYTE_ARRAY, null));
         private final int ttl;
         private final int localDeletionTime;
 
-        private final ByteBuffer value;
+        private final byte[] value;
         private final CellPath path;
 
-        public Complex(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, ByteBuffer value, CellPath path)
+        public Complex(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, byte[] value, CellPath path)
         {
             super(column, timestamp);
             this.ttl = ttl;
@@ -183,7 +184,7 @@ public abstract class BufferCell extends AbstractCell
             this.path = path;
         }
 
-        public ByteBuffer value()
+        public byte[] array()
         {
             return value;
         }
@@ -209,13 +210,13 @@ public abstract class BufferCell extends AbstractCell
         }
     }
 
-    public static BufferCell create(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, ByteBuffer value, CellPath path)
+    public static ArrayCell create(ColumnMetadata column, long timestamp, int ttl, int localDeletionTime, byte[] value, CellPath path)
     {
         assert column.isComplex() == (path != null);
         if (path != null)
             return new Complex(column, timestamp, ttl, localDeletionTime, value, path);
 
-        if (value.remaining() == 0 && ttl == NO_TTL)
+        if (value.length == 0 && ttl == NO_TTL)
             return new Tombstone(column, timestamp, localDeletionTime);
 
         if (ttl == NO_TTL && localDeletionTime == NO_DELETION_TIME)
@@ -224,35 +225,35 @@ public abstract class BufferCell extends AbstractCell
         return new Simple(column, timestamp, ttl, localDeletionTime, value);
     }
 
-    public static BufferCell live(ColumnMetadata column, long timestamp, ByteBuffer value)
+    public static ArrayCell live(ColumnMetadata column, long timestamp, byte[] value)
     {
         return live(column, timestamp, value, null);
     }
 
-    public static BufferCell live(ColumnMetadata column, long timestamp, ByteBuffer value, CellPath path)
+    public static ArrayCell live(ColumnMetadata column, long timestamp, byte[] value, CellPath path)
     {
         return create(column, timestamp, NO_TTL, NO_DELETION_TIME, value, path);
     }
 
-    public static BufferCell expiring(ColumnMetadata column, long timestamp, int ttl, int nowInSec, ByteBuffer value)
+    public static ArrayCell expiring(ColumnMetadata column, long timestamp, int ttl, int nowInSec, byte[] value)
     {
         return expiring(column, timestamp, ttl, nowInSec, value, null);
     }
 
-    public static BufferCell expiring(ColumnMetadata column, long timestamp, int ttl, int nowInSec, ByteBuffer value, CellPath path)
+    public static ArrayCell expiring(ColumnMetadata column, long timestamp, int ttl, int nowInSec, byte[] value, CellPath path)
     {
         assert ttl != NO_TTL;
         return create(column, timestamp, ttl, ExpirationDateOverflowHandling.computeLocalExpirationTime(nowInSec, ttl), value, path);
     }
 
-    public static BufferCell tombstone(ColumnMetadata column, long timestamp, int nowInSec)
+    public static ArrayCell tombstone(ColumnMetadata column, long timestamp, int nowInSec)
     {
         return tombstone(column, timestamp, nowInSec, null);
     }
 
-    public static BufferCell tombstone(ColumnMetadata column, long timestamp, int nowInSec, CellPath path)
+    public static ArrayCell tombstone(ColumnMetadata column, long timestamp, int nowInSec, CellPath path)
     {
-        return create(column, timestamp, NO_TTL, nowInSec, ByteBufferUtil.EMPTY_BYTE_BUFFER, path);
+        return create(column, timestamp, NO_TTL, nowInSec, ByteBufferUtil.EMPTY_BYTE_ARRAY, path);
     }
 
     public long timestamp()
@@ -262,40 +263,37 @@ public abstract class BufferCell extends AbstractCell
 
     public Cell withUpdatedColumn(ColumnMetadata newColumn)
     {
-        return create(newColumn, timestamp, ttl(), localDeletionTime(), value(), path());
+        return create(newColumn, timestamp, ttl(), localDeletionTime(), array(), path());
     }
 
     public Cell withUpdatedValue(ByteBuffer newValue)
     {
-        return create(column, timestamp, ttl(), localDeletionTime(), newValue, path());
+        throw new UnsupportedOperationException();
     }
 
     public Cell withUpdatedTimestampAndLocalDeletionTime(long newTimestamp, int newLocalDeletionTime)
     {
-        return create(column, newTimestamp, ttl(), newLocalDeletionTime, value(), path());
+        return create(column, newTimestamp, ttl(), newLocalDeletionTime, array(), path());
     }
 
     public Cell copy(AbstractAllocator allocator)
     {
-        if (!value().hasRemaining())
-            return this;
-
-        return create(column, timestamp, ttl(), localDeletionTime(), allocator.clone(value()), path() == null ? null : path().copy(allocator));
+        throw new UnsupportedOperationException();
     }
 
     public boolean hasBuffer()
     {
-        return true;
+        return false;
+    }
+
+    public ByteBuffer value()
+    {
+        throw new UnsupportedOperationException();
     }
 
     public boolean hasArray()
     {
-        return false;
-    }
-
-    public byte[] array()
-    {
-        throw new UnsupportedOperationException();
+        return true;
     }
 
     protected abstract long emptySize();
