@@ -18,8 +18,7 @@
 package org.apache.cassandra.db.rows;
 
 import java.io.IOException;
-
-import com.google.common.collect.Collections2;
+import java.util.Map;
 
 import net.nicoulaj.compilecommand.annotations.Inline;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -29,7 +28,6 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.WrappedException;
 
 /**
@@ -212,6 +210,7 @@ public class UnfilteredSerializer
     {
         boolean isStatic = row.isStatic();
 
+        Map<ColumnMetadata, ColumnMetadata> columnsMap = header.columnsMap(isStatic);
         Columns headerColumns = header.columns(isStatic);
         LivenessInfo pkLiveness = row.primaryKeyLivenessInfo();
         Row.Deletion deletion = row.deletion();
@@ -229,8 +228,6 @@ public class UnfilteredSerializer
         if ((flags & HAS_ALL_COLUMNS) == 0)
             Columns.serializer.serializeSubset(row.columns(), headerColumns, out);
 
-        SearchIterator<ColumnMetadata, ColumnMetadata> si = headerColumns.iterator();
-
         try
         {
             row.apply(cd -> {
@@ -239,7 +236,7 @@ public class UnfilteredSerializer
                 // and if that type have been recently altered, that may not be the type we want to serialize the column
                 // with. So we use the ColumnMetadata from the "header" which is "current". Also see #11810 for what
                 // happens if we don't do that.
-                ColumnMetadata column = si.next(cd.column());
+                ColumnMetadata column = columnsMap.get(cd.column());
                 assert column != null : cd.column.toString();
 
                 try
@@ -334,6 +331,7 @@ public class UnfilteredSerializer
 
         boolean isStatic = row.isStatic();
         Columns headerColumns = header.columns(isStatic);
+        Map<ColumnMetadata, ColumnMetadata> columnsMap = header.columnsMap(isStatic);
         LivenessInfo pkLiveness = row.primaryKeyLivenessInfo();
         Row.Deletion deletion = row.deletion();
         boolean hasComplexDeletion = row.hasComplexDeletion();
@@ -352,19 +350,15 @@ public class UnfilteredSerializer
         if (!hasAllColumns)
             size += Columns.serializer.serializedSubsetSize(row.columns(), header.columns(isStatic));
 
-        SearchIterator<ColumnMetadata, ColumnMetadata> si = headerColumns.iterator();
-        for (ColumnData data : row)
-        {
-            ColumnMetadata column = si.next(data.column());
+        return row.accumulate((data, v) -> {
+            ColumnMetadata column = columnsMap.get(data.column());
             assert column != null;
 
             if (data.column.isSimple())
-                size += Cell.serializer.serializedSize((Cell) data, column, pkLiveness, header);
+                return v + Cell.serializer.serializedSize((Cell) data, column, pkLiveness, header);
             else
-                size += sizeOfComplexColumn((ComplexColumnData) data, column, hasComplexDeletion, pkLiveness, header);
-        }
-
-        return size;
+                return v + sizeOfComplexColumn((ComplexColumnData) data, column, hasComplexDeletion, pkLiveness, header);
+        }, size, false);
     }
 
     private long sizeOfComplexColumn(ComplexColumnData data, ColumnMetadata column, boolean hasComplexDeletion, LivenessInfo rowLiveness, SerializationHeader header)

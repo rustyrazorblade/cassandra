@@ -19,6 +19,7 @@ package org.apache.cassandra.db.rows;
 
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.LongPredicate;
 
 import com.google.common.base.Predicate;
 import com.google.common.hash.Hasher;
@@ -29,6 +30,7 @@ import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.paxos.Commit;
 import org.apache.cassandra.utils.HashingUtils;
+import org.apache.cassandra.utils.LongAccumulator;
 import org.apache.cassandra.utils.MergeIterator;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTree;
@@ -290,6 +292,16 @@ public interface Row extends Unfiltered, Iterable<ColumnData>
      * Apply a funtion to every column in a row until a stop condition is reached
      */
     public void apply(Consumer<ColumnData> function, Predicate<ColumnData> stopCondition, boolean reverse);
+
+    /**
+     * Apply an accumulation funtion to every column in a row
+     */
+    public long accumulate(LongAccumulator<ColumnData> accumulator, long start, LongPredicate stopCondition, boolean reverse);
+
+    default long accumulate(LongAccumulator<ColumnData> accumulator, long start, boolean reverse)
+    {
+        return accumulate(accumulator, start, l -> false, reverse);
+    }
 
     /**
      * A row deletion/tombstone.

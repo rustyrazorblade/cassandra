@@ -17,7 +17,6 @@
 package org.apache.cassandra.db.rows;
 
 import java.nio.ByteBuffer;
-import java.util.AbstractCollection;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -26,10 +25,10 @@ import java.util.stream.StreamSupport;
 import com.google.common.collect.Iterables;
 import com.google.common.hash.Hasher;
 
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.UserType;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.HashingUtils;
 
@@ -69,8 +68,7 @@ public abstract class AbstractRow implements Row
         deletion().digest(hasher);
         primaryKeyLivenessInfo().digest(hasher);
 
-        for (ColumnData cd : this)
-            cd.digest(hasher);
+        apply(cd -> cd.digest(hasher), false);
     }
 
     public void validateData(TableMetadata metadata)
@@ -87,20 +85,7 @@ public abstract class AbstractRow implements Row
         if (deletion().time().localDeletionTime() < 0)
             throw new MarshalException("A local deletion time should not be negative");
 
-        for (ColumnData cd : this)
-            cd.validate();
-    }
-
-    public boolean hasInvalidDeletions()
-    {
-        if (primaryKeyLivenessInfo().isExpiring() && (primaryKeyLivenessInfo().ttl() < 0 || primaryKeyLivenessInfo().localExpirationTime() < 0))
-            return true;
-        if (!deletion().time().validate())
-            return true;
-        for (ColumnData cd : this)
-            if (cd.hasInvalidDeletions())
-                return true;
-        return false;
+        apply(cd -> cd.validate(), false);
     }
 
     public String toString()

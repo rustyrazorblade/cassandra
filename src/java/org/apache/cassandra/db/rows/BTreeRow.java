@@ -20,12 +20,14 @@ package org.apache.cassandra.db.rows;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.LongPredicate;
 import java.util.function.Predicate;
 
 import com.google.common.base.Function;
+import com.google.common.base.Predicates;
 import com.google.common.collect.Collections2;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
+import com.google.common.primitives.Ints;
 
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -90,8 +92,8 @@ public class BTreeRow extends AbstractRow
         int minDeletionTime = Math.min(minDeletionTime(primaryKeyLivenessInfo), minDeletionTime(deletion.time()));
         if (minDeletionTime != Integer.MIN_VALUE)
         {
-            for (ColumnData cd : BTree.<ColumnData>iterable(btree))
-                minDeletionTime = Math.min(minDeletionTime, minDeletionTime(cd));
+            long result = BTree.<ColumnData>accumulate(btree, (cd, l) -> Math.min(l, minDeletionTime(cd)) , minDeletionTime, false);
+            minDeletionTime = Ints.checkedCast(result);
         }
 
         return create(clustering, primaryKeyLivenessInfo, deletion, btree, minDeletionTime);
@@ -178,13 +180,21 @@ public class BTreeRow extends AbstractRow
         BTree.apply(btree, funtion, stopCondition, reversed);
     }
 
+    public long accumulate(LongAccumulator<ColumnData> accumulator, long start, boolean reversed)
+    {
+        return BTree.accumulate(btree, accumulator, start, l -> false, reversed);
+    }
+
+    public long accumulate(LongAccumulator<ColumnData> accumulator, long start, LongPredicate stopCondition, boolean reversed)
+    {
+        return BTree.accumulate(btree, accumulator, start, stopCondition, reversed);
+    }
+
     private static int minDeletionTime(Object[] btree, LivenessInfo info, DeletionTime rowDeletion)
     {
-        //we have to wrap this for the lambda
-        final WrappedInt min = new WrappedInt(Math.min(minDeletionTime(info), minDeletionTime(rowDeletion)));
-
-        BTree.<ColumnData>apply(btree, cd -> min.set( Math.min(min.get(), minDeletionTime(cd)) ), cd -> min.get() == Integer.MIN_VALUE, false);
-        return min.get();
+        long min = Math.min(minDeletionTime(info), minDeletionTime(rowDeletion));
+        min = BTree.<ColumnData>accumulate(btree, (cd, l) -> Math.min(l, minDeletionTime(cd)), min, false);
+        return Ints.checkedCast(min);
     }
 
     public Clustering clustering()
@@ -332,35 +342,32 @@ public class BTreeRow extends AbstractRow
         });
     }
 
+    private static final Predicate<ColumnData> ALWAYS_TRUE = cd -> true;
+
     public boolean hasComplex()
     {
-        // We start by the end cause we know complex columns sort after the simple ones
-        ColumnData cd = Iterables.getFirst(BTree.<ColumnData>iterable(btree, BTree.Dir.DESC), null);
-        return cd != null && cd.column.isComplex();
+        long result = accumulate((cd, v) -> (cd != null && cd.column.isComplex()) ? 1 : -1 , 0, v -> v != 0, true);
+        return result == 1;
     }
 
     public boolean hasComplexDeletion()
     {
-        final WrappedBoolean result = new WrappedBoolean(false);
-
         // We start by the end cause we know complex columns sort before simple ones
-        apply(c -> {}, cd -> {
+        long result = accumulate((cd, v) -> {
             if (cd.column.isSimple())
             {
-                result.set(false);
-                return true;
+                return -1;
             }
 
             if (!((ComplexColumnData) cd).complexDeletion().isLive())
             {
-                result.set(true);
-                return true;
+                return 1;
             }
 
-            return false;
-        }, true);
+            return -1;
+        }, 0, v -> v != 0, true);
 
-        return result.get();
+        return result == 1;
     }
 
     public Row markCounterLocalToBeCleared()
@@ -373,6 +380,25 @@ public class BTreeRow extends AbstractRow
     public boolean hasDeletion(int nowInSec)
     {
         return nowInSec >= minLocalDeletionTime;
+    }
+
+    private static final LongAccumulator<ColumnData> INVALID_DELETION_ACCUMULATOR = new LongAccumulator<ColumnData>()
+    {
+        public long apply(ColumnData cd, long v)
+        {
+            if (cd != null && cd.hasInvalidDeletions())
+                v++;
+            return v;
+        }
+    };
+
+    public boolean hasInvalidDeletions()
+    {
+        if (primaryKeyLivenessInfo().isExpiring() && (primaryKeyLivenessInfo().ttl() < 0 || primaryKeyLivenessInfo().localExpirationTime() < 0))
+            return true;
+        if (!deletion().time().validate())
+            return true;
+        return accumulate(INVALID_DELETION_ACCUMULATOR, 0, false) > 0;
     }
 
     /**
@@ -440,9 +466,7 @@ public class BTreeRow extends AbstractRow
                      + primaryKeyLivenessInfo.dataSize()
                      + deletion.dataSize();
 
-        for (ColumnData cd : this)
-            dataSize += cd.dataSize();
-        return dataSize;
+        return Ints.checkedCast(accumulate((cd, v) -> v + cd.dataSize(), dataSize, false));
     }
 
     public long unsharedHeapSizeExcludingData()
@@ -451,9 +475,7 @@ public class BTreeRow extends AbstractRow
                       + clustering.unsharedHeapSizeExcludingData()
                       + BTree.sizeOfStructureOnHeap(btree);
 
-        for (ColumnData cd : this)
-            heapSize += cd.unsharedHeapSizeExcludingData();
-        return heapSize;
+        return accumulate((cd, v) -> v + cd.unsharedHeapSizeExcludingData(), heapSize, false);
     }
 
     public static Row.Builder sortedBuilder()

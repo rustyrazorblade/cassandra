@@ -22,6 +22,9 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Maps;
+
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.TypeParser;
@@ -53,6 +56,30 @@ public class SerializationHeader
 
     private final Map<ByteBuffer, AbstractType<?>> typeMap;
 
+    private final Map<ColumnMetadata, ColumnMetadata> staticsMap;
+    private final Map<ColumnMetadata, ColumnMetadata> regularsMap;
+
+    private static Map<ColumnMetadata, ColumnMetadata> columnsToMap(Columns columns)
+    {
+        if (columns.isEmpty())
+            return Collections.emptyMap();
+
+        if (columns.size() == 1)
+        {
+            ColumnMetadata cd = Iterables.getOnlyElement(columns);
+            return Collections.singletonMap(cd, cd);
+        }
+
+        Map<ColumnMetadata, ColumnMetadata> map = Maps.newHashMapWithExpectedSize(columns.size());
+
+        for (ColumnMetadata cd : columns)
+        {
+            map.put(cd, cd);
+        }
+
+        return map;
+    }
+
     private SerializationHeader(boolean isForSSTable,
                                 AbstractType<?> keyType,
                                 List<AbstractType<?>> clusteringTypes,
@@ -66,6 +93,9 @@ public class SerializationHeader
         this.columns = columns;
         this.stats = stats;
         this.typeMap = typeMap;
+
+        this.staticsMap = columnsToMap(columns.statics);
+        this.regularsMap = columnsToMap(columns.regulars);
     }
 
     public static SerializationHeader makeWithoutStats(TableMetadata metadata)
@@ -124,6 +154,11 @@ public class SerializationHeader
     public RegularAndStaticColumns columns()
     {
         return columns;
+    }
+
+    public Map<ColumnMetadata, ColumnMetadata> columnsMap(boolean isStatic)
+    {
+        return isStatic ? staticsMap : regularsMap;
     }
 
     public boolean hasStatic()
