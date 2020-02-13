@@ -51,343 +51,6 @@ The directory structure of Cassandra data consists of different directories for 
 
 Figure 1. Directory Structure for Cassandra Data
 
-Incremental Backups
-^^^^^^^^^^^^^^^^^^^
-In the following sub-sections we shall discuss configuring and creating incremental backups.
-  
-Configuring for Incremental Backups
-***********************************
-
-To create incremental backups set ``incremental_backups`` to ``true`` in ``cassandra.yaml``.
-
-::
- 
- incremental_backups: true
-
-This is the only setting needed to create incremental backups.  By default ``incremental_backups`` setting is  set to ``false`` because a new set of SSTable files is created for each data flush and if several CQL statements are to be run the ``backups`` directory could  fill up quickly and use up storage that is needed to store table data. 
-Incremental backups may also be enabled on the command line with the Nodetool command ``nodetool enablebackup``. Incremental backups may be disabled with ``nodetool disablebackup`` command. Status of incremental backups, whether they are enabled may be found with ``nodetool statusbackup``. 
-
-Setting Up Example Tables for Backups and Snapshots
-**************************************************** 
-In this section we shall create some example data that could be used to demonstrate incremental backups and snapshots. We have used a three node Cassandra cluster. First, the keyspaces are created. Subsequently tables are created within a keyspace and table data is added. We have used two keyspaces ``CQLKeyspace`` and ``CatalogKeyspace`` with two tables within each. Create ``CQLKeyspace``. 
-
-::
-
- cqlsh> CREATE KEYSPACE CQLKeyspace
-   ... WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3};
-
-Create table ``t`` in the ``CQLKeyspace`` keyspace.
-
-::
-
- cqlsh> USE CQLKeyspace;
- cqlsh:cqlkeyspace> CREATE TABLE t (
-               ...     id int,
-               ...     k int,
-               ...     v text,
-               ...     PRIMARY KEY (id)
-               ... );
-
-
-Add data to table ``t``:
-
-::
-
- cqlsh:cqlkeyspace> 
- cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (0, 0, 'val0');
- cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (1, 1, 'val1');
-
-
-A table query lists the data:
-
-::
-
- cqlsh:cqlkeyspace> SELECT * FROM t;
-
- id | k | v
- ----+---+------
-  1 | 1 | val1
-  0 | 0 | val0
-
-  (2 rows)
- 
-Create another table ``t2``:
-
-::
-
- cqlsh:cqlkeyspace> CREATE TABLE t2 (
-               ...     id int,
-               ...     k int,
-               ...     v text,
-               ...     PRIMARY KEY (id)
-               ... );
-
-Add data to table ``t2``:
- 
-::
-
- cqlsh:cqlkeyspace> INSERT INTO t2 (id, k, v) VALUES (0, 0, 'val0');
- cqlsh:cqlkeyspace> INSERT INTO t2 (id, k, v) VALUES (1, 1, 'val1');
- cqlsh:cqlkeyspace> INSERT INTO t2 (id, k, v) VALUES (2, 2, 'val2');
-
-
-A table query lists table data:
-
-::
-
- cqlsh:cqlkeyspace> SELECT * FROM t2;
-
- id | k | v
- ----+---+------
-  1 | 1 | val1
-  0 | 0 | val0
-  2 | 2 | val2
-
-  (3 rows)
-
-Create a second keyspace ``CatalogKeyspace``:
-
-::
-
- cqlsh:cqlkeyspace> CREATE KEYSPACE CatalogKeyspace
-               ... WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3};
- 
-Create a table called ``journal`` in ``CatalogKeyspace``:
-
-::
-
- cqlsh:cqlkeyspace> USE CatalogKeyspace;
- cqlsh:catalogkeyspace> CREATE TABLE journal (
-                   ...     id int,
-                   ...     name text,
-                   ...     publisher text,
-                   ...     PRIMARY KEY (id)
-                   ... );
-
- 
-Add data to table ``journal``:
-
-::
-
- cqlsh:catalogkeyspace> INSERT INTO journal (id, name, publisher) VALUES (0, 'Apache 
- Cassandra Magazine', 'Apache Cassandra');
- cqlsh:catalogkeyspace> INSERT INTO journal (id, name, publisher) VALUES (1, 'Couchbase 
- Magazine', 'Couchbase');
-
-Query table ``journal`` to list its data:
-
-::
-
- cqlsh:catalogkeyspace> SELECT * FROM journal;
-
- id | name                      | publisher
- ----+---------------------------+------------------
-  1 |        Couchbase Magazine |        Couchbase
-  0 | Apache Cassandra Magazine | Apache Cassandra
-
-  (2 rows)
-
-Add another table called ``magazine``:
-
-::
-
- cqlsh:catalogkeyspace> CREATE TABLE magazine (
-                   ...     id int,
-                   ...     name text,
-                   ...     publisher text,
-                   ...     PRIMARY KEY (id)
-                   ... );
-
-Add table data to ``magazine``:
-
-::
-
- cqlsh:catalogkeyspace> INSERT INTO magazine (id, name, publisher) VALUES (0, 'Apache 
- Cassandra Magazine', 'Apache Cassandra');
- cqlsh:catalogkeyspace> INSERT INTO magazine (id, name, publisher) VALUES (1, 'Couchbase 
- Magazine', 'Couchbase');
-
-List table ``magazine``’s data:
- 
-::
-
- cqlsh:catalogkeyspace> SELECT * from magazine;
-
- id | name                      | publisher
- ----+---------------------------+------------------
-  1 |        Couchbase Magazine |        Couchbase
-  0 | Apache Cassandra Magazine | Apache Cassandra
-
-(2 rows)
-
-Creating Incremental Backups
-****************************** 
-After each table is created flush the table data with ``nodetool flush`` command. Incremental backups get created.
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t 
- [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t2
- [ec2-user@ip-10-0-2-238 ~]$ nodetool flush catalogkeyspace journal magazine
-
-Finding Incremental Backups
-***************************
-
-Incremental backups are created within the Cassandra’s ``data`` directory within a table directory. Backups may be found with following command.
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ find -name backups
- 
- ./cassandra/data/data/cqlkeyspace/t-d132e240c21711e9bbee19821dcea330/backups
- ./cassandra/data/data/cqlkeyspace/t2-d993a390c22911e9b1350d927649052c/backups
- ./cassandra/data/data/catalogkeyspace/journal-296a2d30c22a11e9b1350d927649052c/backups
- ./cassandra/data/data/catalogkeyspace/magazine-446eae30c22a11e9b1350d927649052c/backups
-
-Creating an Incremental Backup
-******************************
-This section discusses how incremental backups are created in more detail starting with when a new keyspace is created and a table is added.  Create a keyspace called ``CQLKeyspace`` (arbitrary name).
-
-::
-
- cqlsh> CREATE KEYSPACE CQLKeyspace
-   ... WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3}
-
-Create a table called ``t`` within the ``CQLKeyspace`` keyspace:
-
-::
-
- cqlsh> USE CQLKeyspace;
- cqlsh:cqlkeyspace> CREATE TABLE t (
-               ...     id int,
-               ...     k int,
-               ...     v text,
-               ...     PRIMARY KEY (id)
-               ... );
-
-Flush the keyspace and table:
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t 
-
-Search for backups and a ``backups`` directory should get listed even though we have added no table data yet. 
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ find -name backups
- 
- ./cassandra/data/data/cqlkeyspace/t-d132e240c21711e9bbee19821dcea330/backups
-
-Change directory to the ``backups`` directory and list files and no files get listed as no table data has been added yet:
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/cqlkeyspace/t- 
- d132e240c21711e9bbee19821dcea330/backups
- [ec2-user@ip-10-0-2-238 backups]$ ls -l
- total 0
-
-Next, add a row of data to table ``t`` that we created:
-
-::
-
- cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (0, 0, 'val0');
-
-Run the ``nodetool flush`` command to flush table data:
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t
-
-List the files and directories in the ``backups`` directory and SSTable files for an incremental backup get listed:
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/cqlkeyspace/t- 
- d132e240c21711e9bbee19821dcea330/backups
- [ec2-user@ip-10-0-2-238 backups]$ ls -l
- total 36
- -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 00:32 na-1-big-CompressionInfo.db
- -rw-rw-r--. 2 ec2-user ec2-user   43 Aug 19 00:32 na-1-big-Data.db
- -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 00:32 na-1-big-Digest.crc32
- -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 00:32 na-1-big-Filter.db
- -rw-rw-r--. 2 ec2-user ec2-user    8 Aug 19 00:32 na-1-big-Index.db
- -rw-rw-r--. 2 ec2-user ec2-user 4673 Aug 19 00:32 na-1-big-Statistics.db
- -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 00:32 na-1-big-Summary.db
- -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 00:32 na-1-big-TOC.txt
- 
-Add another row of data:
-
-::
-
- cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (1, 1, 'val1');
-
-Again, run the ``nodetool flush`` command:
- 
-::
-
- [ec2-user@ip-10-0-2-238 backups]$  nodetool flush cqlkeyspace t
-
-A new incremental backup gets created for the new  data added. List the files in the ``backups`` directory for table ``t`` and two sets of SSTable files get listed, one for each incremental backup. The SSTable files are timestamped, which distinguishes the first incremental backup from the second:
-
-::
-
- [ec2-user@ip-10-0-2-238 backups]$ ls -l
- total 72
- -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 00:32 na-1-big-CompressionInfo.db
- -rw-rw-r--. 2 ec2-user ec2-user   43 Aug 19 00:32 na-1-big-Data.db
- -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 00:32 na-1-big-Digest.crc32
- -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 00:32 na-1-big-Filter.db
- -rw-rw-r--. 2 ec2-user ec2-user    8 Aug 19 00:32 na-1-big-Index.db
- -rw-rw-r--. 2 ec2-user ec2-user 4673 Aug 19 00:32 na-1-big-Statistics.db
- -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 00:32 na-1-big-Summary.db
- -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 00:32 na-1-big-TOC.txt
- -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 00:35 na-2-big-CompressionInfo.db
- -rw-rw-r--. 2 ec2-user ec2-user   41 Aug 19 00:35 na-2-big-Data.db
- -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 00:35 na-2-big-Digest.crc32
- -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 00:35 na-2-big-Filter.db
- -rw-rw-r--. 2 ec2-user ec2-user    8 Aug 19 00:35 na-2-big-Index.db
- -rw-rw-r--. 2 ec2-user ec2-user 4673 Aug 19 00:35 na-2-big-Statistics.db
- -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 00:35 na-2-big-Summary.db
- -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 00:35 na-2-big-TOC.txt
- [ec2-user@ip-10-0-2-238 backups]$ 
-
-The ``backups`` directory for table ``cqlkeyspace/t`` is created within the ``data`` directory for the table:
- 
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/cqlkeyspace/t- 
- d132e240c21711e9bbee19821dcea330
- [ec2-user@ip-10-0-2-238 t-d132e240c21711e9bbee19821dcea330]$ ls -l
- total 36
- drwxrwxr-x. 2 ec2-user ec2-user  226 Aug 19 02:30 backups
- -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 02:30 na-1-big-CompressionInfo.db
- -rw-rw-r--. 2 ec2-user ec2-user   79 Aug 19 02:30 na-1-big-Data.db
- -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 02:30 na-1-big-Digest.crc32
- -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:30 na-1-big-Filter.db
- -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:30 na-1-big-Index.db
- -rw-rw-r--. 2 ec2-user ec2-user 4696 Aug 19 02:30 na-1-big-Statistics.db
- -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 02:30 na-1-big-Summary.db
- -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 02:30 na-1-big-TOC.txt
-
-The incremental backups for the other keyspaces/tables get created similarly. As an example the ``backups`` directory for table ``catalogkeyspace/magazine`` is created within the data directory:
-
-::
-
- [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/catalogkeyspace/magazine- 
- 446eae30c22a11e9b1350d927649052c
- [ec2-user@ip-10-0-2-238 magazine-446eae30c22a11e9b1350d927649052c]$ ls -l
- total 36
- drwxrwxr-x. 2 ec2-user ec2-user  226 Aug 19 02:38 backups
- -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 02:38 na-1-big-CompressionInfo.db
- -rw-rw-r--. 2 ec2-user ec2-user   97 Aug 19 02:38 na-1-big-Data.db
- -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 02:38 na-1-big-Digest.crc32
- -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:38 na-1-big-Filter.db
- -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:38 na-1-big-Index.db
- -rw-rw-r--. 2 ec2-user ec2-user 4687 Aug 19 02:38 na-1-big-Statistics.db
- -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 02:38 na-1-big-Summary.db
- -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 02:38 na-1-big-TOC.txt
 
 Snapshots
 ^^^^^^^^^
@@ -635,6 +298,350 @@ As an example delete a snapshot called ``magazine`` from keyspace ``cqlkeyspace`
  nodetool clearsnapshot -t magazine – cqlkeyspace
  Delete all snapshots from cqlkeyspace with the –all option.
  nodetool clearsnapshot –all -- cqlkeyspace
+
+
+
+Incremental Backups
+^^^^^^^^^^^^^^^^^^^
+In the following sub-sections we shall discuss configuring and creating incremental backups.
+
+Configuring for Incremental Backups
+***********************************
+
+To create incremental backups set ``incremental_backups`` to ``true`` in ``cassandra.yaml``.
+
+::
+
+ incremental_backups: true
+
+This is the only setting needed to create incremental backups.  By default ``incremental_backups`` setting is  set to ``false`` because a new set of SSTable files is created for each data flush and if several CQL statements are to be run the ``backups`` directory could  fill up quickly and use up storage that is needed to store table data.
+Incremental backups may also be enabled on the command line with the Nodetool command ``nodetool enablebackup``. Incremental backups may be disabled with ``nodetool disablebackup`` command. Status of incremental backups, whether they are enabled may be found with ``nodetool statusbackup``.
+
+Setting Up Example Tables for Backups and Snapshots
+****************************************************
+In this section we shall create some example data that could be used to demonstrate incremental backups and snapshots. We have used a three node Cassandra cluster. First, the keyspaces are created. Subsequently tables are created within a keyspace and table data is added. We have used two keyspaces ``CQLKeyspace`` and ``CatalogKeyspace`` with two tables within each. Create ``CQLKeyspace``.
+
+::
+
+ cqlsh> CREATE KEYSPACE CQLKeyspace
+   ... WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3};
+
+Create table ``t`` in the ``CQLKeyspace`` keyspace.
+
+::
+
+ cqlsh> USE CQLKeyspace;
+ cqlsh:cqlkeyspace> CREATE TABLE t (
+               ...     id int,
+               ...     k int,
+               ...     v text,
+               ...     PRIMARY KEY (id)
+               ... );
+
+
+Add data to table ``t``:
+
+::
+
+ cqlsh:cqlkeyspace>
+ cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (0, 0, 'val0');
+ cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (1, 1, 'val1');
+
+
+A table query lists the data:
+
+::
+
+ cqlsh:cqlkeyspace> SELECT * FROM t;
+
+ id | k | v
+ ----+---+------
+  1 | 1 | val1
+  0 | 0 | val0
+
+  (2 rows)
+
+Create another table ``t2``:
+
+::
+
+ cqlsh:cqlkeyspace> CREATE TABLE t2 (
+               ...     id int,
+               ...     k int,
+               ...     v text,
+               ...     PRIMARY KEY (id)
+               ... );
+
+Add data to table ``t2``:
+
+::
+
+ cqlsh:cqlkeyspace> INSERT INTO t2 (id, k, v) VALUES (0, 0, 'val0');
+ cqlsh:cqlkeyspace> INSERT INTO t2 (id, k, v) VALUES (1, 1, 'val1');
+ cqlsh:cqlkeyspace> INSERT INTO t2 (id, k, v) VALUES (2, 2, 'val2');
+
+
+A table query lists table data:
+
+::
+
+ cqlsh:cqlkeyspace> SELECT * FROM t2;
+
+ id | k | v
+ ----+---+------
+  1 | 1 | val1
+  0 | 0 | val0
+  2 | 2 | val2
+
+  (3 rows)
+
+Create a second keyspace ``CatalogKeyspace``:
+
+::
+
+ cqlsh:cqlkeyspace> CREATE KEYSPACE CatalogKeyspace
+               ... WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3};
+
+Create a table called ``journal`` in ``CatalogKeyspace``:
+
+::
+
+ cqlsh:cqlkeyspace> USE CatalogKeyspace;
+ cqlsh:catalogkeyspace> CREATE TABLE journal (
+                   ...     id int,
+                   ...     name text,
+                   ...     publisher text,
+                   ...     PRIMARY KEY (id)
+                   ... );
+
+
+Add data to table ``journal``:
+
+::
+
+ cqlsh:catalogkeyspace> INSERT INTO journal (id, name, publisher) VALUES (0, 'Apache
+ Cassandra Magazine', 'Apache Cassandra');
+ cqlsh:catalogkeyspace> INSERT INTO journal (id, name, publisher) VALUES (1, 'Couchbase
+ Magazine', 'Couchbase');
+
+Query table ``journal`` to list its data:
+
+::
+
+ cqlsh:catalogkeyspace> SELECT * FROM journal;
+
+ id | name                      | publisher
+ ----+---------------------------+------------------
+  1 |        Couchbase Magazine |        Couchbase
+  0 | Apache Cassandra Magazine | Apache Cassandra
+
+  (2 rows)
+
+Add another table called ``magazine``:
+
+::
+
+ cqlsh:catalogkeyspace> CREATE TABLE magazine (
+                   ...     id int,
+                   ...     name text,
+                   ...     publisher text,
+                   ...     PRIMARY KEY (id)
+                   ... );
+
+Add table data to ``magazine``:
+
+::
+
+ cqlsh:catalogkeyspace> INSERT INTO magazine (id, name, publisher) VALUES (0, 'Apache
+ Cassandra Magazine', 'Apache Cassandra');
+ cqlsh:catalogkeyspace> INSERT INTO magazine (id, name, publisher) VALUES (1, 'Couchbase
+ Magazine', 'Couchbase');
+
+List table ``magazine``’s data:
+
+::
+
+ cqlsh:catalogkeyspace> SELECT * from magazine;
+
+ id | name                      | publisher
+ ----+---------------------------+------------------
+  1 |        Couchbase Magazine |        Couchbase
+  0 | Apache Cassandra Magazine | Apache Cassandra
+
+(2 rows)
+
+Creating Incremental Backups
+******************************
+After each table is created flush the table data with ``nodetool flush`` command. Incremental backups get created.
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t
+ [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t2
+ [ec2-user@ip-10-0-2-238 ~]$ nodetool flush catalogkeyspace journal magazine
+
+Finding Incremental Backups
+***************************
+
+Incremental backups are created within the Cassandra’s ``data`` directory within a table directory. Backups may be found with following command.
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ find -name backups
+
+ ./cassandra/data/data/cqlkeyspace/t-d132e240c21711e9bbee19821dcea330/backups
+ ./cassandra/data/data/cqlkeyspace/t2-d993a390c22911e9b1350d927649052c/backups
+ ./cassandra/data/data/catalogkeyspace/journal-296a2d30c22a11e9b1350d927649052c/backups
+ ./cassandra/data/data/catalogkeyspace/magazine-446eae30c22a11e9b1350d927649052c/backups
+
+Creating an Incremental Backup
+******************************
+This section discusses how incremental backups are created in more detail starting with when a new keyspace is created and a table is added.  Create a keyspace called ``CQLKeyspace`` (arbitrary name).
+
+::
+
+ cqlsh> CREATE KEYSPACE CQLKeyspace
+   ... WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 3}
+
+Create a table called ``t`` within the ``CQLKeyspace`` keyspace:
+
+::
+
+ cqlsh> USE CQLKeyspace;
+ cqlsh:cqlkeyspace> CREATE TABLE t (
+               ...     id int,
+               ...     k int,
+               ...     v text,
+               ...     PRIMARY KEY (id)
+               ... );
+
+Flush the keyspace and table:
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t
+
+Search for backups and a ``backups`` directory should get listed even though we have added no table data yet.
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ find -name backups
+
+ ./cassandra/data/data/cqlkeyspace/t-d132e240c21711e9bbee19821dcea330/backups
+
+Change directory to the ``backups`` directory and list files and no files get listed as no table data has been added yet:
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/cqlkeyspace/t-
+ d132e240c21711e9bbee19821dcea330/backups
+ [ec2-user@ip-10-0-2-238 backups]$ ls -l
+ total 0
+
+Next, add a row of data to table ``t`` that we created:
+
+::
+
+ cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (0, 0, 'val0');
+
+Run the ``nodetool flush`` command to flush table data:
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ nodetool flush cqlkeyspace t
+
+List the files and directories in the ``backups`` directory and SSTable files for an incremental backup get listed:
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/cqlkeyspace/t-
+ d132e240c21711e9bbee19821dcea330/backups
+ [ec2-user@ip-10-0-2-238 backups]$ ls -l
+ total 36
+ -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 00:32 na-1-big-CompressionInfo.db
+ -rw-rw-r--. 2 ec2-user ec2-user   43 Aug 19 00:32 na-1-big-Data.db
+ -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 00:32 na-1-big-Digest.crc32
+ -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 00:32 na-1-big-Filter.db
+ -rw-rw-r--. 2 ec2-user ec2-user    8 Aug 19 00:32 na-1-big-Index.db
+ -rw-rw-r--. 2 ec2-user ec2-user 4673 Aug 19 00:32 na-1-big-Statistics.db
+ -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 00:32 na-1-big-Summary.db
+ -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 00:32 na-1-big-TOC.txt
+
+Add another row of data:
+
+::
+
+ cqlsh:cqlkeyspace> INSERT INTO t (id, k, v) VALUES (1, 1, 'val1');
+
+Again, run the ``nodetool flush`` command:
+
+::
+
+ [ec2-user@ip-10-0-2-238 backups]$  nodetool flush cqlkeyspace t
+
+A new incremental backup gets created for the new  data added. List the files in the ``backups`` directory for table ``t`` and two sets of SSTable files get listed, one for each incremental backup. The SSTable files are timestamped, which distinguishes the first incremental backup from the second:
+
+::
+
+ [ec2-user@ip-10-0-2-238 backups]$ ls -l
+ total 72
+ -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 00:32 na-1-big-CompressionInfo.db
+ -rw-rw-r--. 2 ec2-user ec2-user   43 Aug 19 00:32 na-1-big-Data.db
+ -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 00:32 na-1-big-Digest.crc32
+ -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 00:32 na-1-big-Filter.db
+ -rw-rw-r--. 2 ec2-user ec2-user    8 Aug 19 00:32 na-1-big-Index.db
+ -rw-rw-r--. 2 ec2-user ec2-user 4673 Aug 19 00:32 na-1-big-Statistics.db
+ -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 00:32 na-1-big-Summary.db
+ -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 00:32 na-1-big-TOC.txt
+ -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 00:35 na-2-big-CompressionInfo.db
+ -rw-rw-r--. 2 ec2-user ec2-user   41 Aug 19 00:35 na-2-big-Data.db
+ -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 00:35 na-2-big-Digest.crc32
+ -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 00:35 na-2-big-Filter.db
+ -rw-rw-r--. 2 ec2-user ec2-user    8 Aug 19 00:35 na-2-big-Index.db
+ -rw-rw-r--. 2 ec2-user ec2-user 4673 Aug 19 00:35 na-2-big-Statistics.db
+ -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 00:35 na-2-big-Summary.db
+ -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 00:35 na-2-big-TOC.txt
+ [ec2-user@ip-10-0-2-238 backups]$
+
+The ``backups`` directory for table ``cqlkeyspace/t`` is created within the ``data`` directory for the table:
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/cqlkeyspace/t-
+ d132e240c21711e9bbee19821dcea330
+ [ec2-user@ip-10-0-2-238 t-d132e240c21711e9bbee19821dcea330]$ ls -l
+ total 36
+ drwxrwxr-x. 2 ec2-user ec2-user  226 Aug 19 02:30 backups
+ -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 02:30 na-1-big-CompressionInfo.db
+ -rw-rw-r--. 2 ec2-user ec2-user   79 Aug 19 02:30 na-1-big-Data.db
+ -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 02:30 na-1-big-Digest.crc32
+ -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:30 na-1-big-Filter.db
+ -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:30 na-1-big-Index.db
+ -rw-rw-r--. 2 ec2-user ec2-user 4696 Aug 19 02:30 na-1-big-Statistics.db
+ -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 02:30 na-1-big-Summary.db
+ -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 02:30 na-1-big-TOC.txt
+
+The incremental backups for the other keyspaces/tables get created similarly. As an example the ``backups`` directory for table ``catalogkeyspace/magazine`` is created within the data directory:
+
+::
+
+ [ec2-user@ip-10-0-2-238 ~]$ cd ./cassandra/data/data/catalogkeyspace/magazine-
+ 446eae30c22a11e9b1350d927649052c
+ [ec2-user@ip-10-0-2-238 magazine-446eae30c22a11e9b1350d927649052c]$ ls -l
+ total 36
+ drwxrwxr-x. 2 ec2-user ec2-user  226 Aug 19 02:38 backups
+ -rw-rw-r--. 2 ec2-user ec2-user   47 Aug 19 02:38 na-1-big-CompressionInfo.db
+ -rw-rw-r--. 2 ec2-user ec2-user   97 Aug 19 02:38 na-1-big-Data.db
+ -rw-rw-r--. 2 ec2-user ec2-user   10 Aug 19 02:38 na-1-big-Digest.crc32
+ -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:38 na-1-big-Filter.db
+ -rw-rw-r--. 2 ec2-user ec2-user   16 Aug 19 02:38 na-1-big-Index.db
+ -rw-rw-r--. 2 ec2-user ec2-user 4687 Aug 19 02:38 na-1-big-Statistics.db
+ -rw-rw-r--. 2 ec2-user ec2-user   56 Aug 19 02:38 na-1-big-Summary.db
+ -rw-rw-r--. 2 ec2-user ec2-user   92 Aug 19 02:38 na-1-big-TOC.txt
+
+
+
+
 
 Restoring from  Incremental Backups and Snapshots
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
