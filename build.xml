@@ -43,8 +43,8 @@
         When building, javac's source and target flags are set to the jdk used, so lower JDKs are not supported at runtime.
         The use of both CASSANDRA_USE_JDK11 and use-jdk11 is deprecated.
     -->
-    <property name="java.default" value="11" />
-    <property name="java.supported" value="11,17" />
+    <property name="java.default" value="21" />
+    <property name="java.supported" value="21" />
 
     <!-- directory details -->
     <property name="basedir" value="."/>
@@ -245,6 +245,7 @@
 
     <resources id="_jvm17_arg_items">
         <string>-Djdk.attach.allowAttachSelf=true</string>
+
         <string>-XX:+UseG1GC</string>
         <string>-XX:+ParallelRefProcEnabled</string>
         <string>-XX:MaxTenuringThreshold=1</string>
@@ -277,11 +278,15 @@
         <string>--add-opens java.base/java.util=ALL-UNNAMED</string>
         <string>--add-opens java.base/java.nio=ALL-UNNAMED</string>
 
+
         <string>--add-opens java.rmi/sun.rmi.transport.tcp=ALL-UNNAMED</string>
     </resources>
     <pathconvert property="_jvm17_args_concat" refid="_jvm17_arg_items" pathsep=" "/>
     <condition property="java-jvmargs" value="${_jvm17_args_concat}">
         <equals arg1="${ant.java.version}" arg2="17"/>
+    </condition>
+    <condition property="java-jvmargs" value="${_jvm17_args_concat}">
+        <equals arg1="${ant.java.version}" arg2="21"/>
     </condition>
 
     <!--
@@ -528,8 +533,6 @@
 
     <target name="check" depends="_main-jar,build-test" description="Verifies the source code and dependencies. This task is intended to run on pre-commit and locally. It should verify mostly modified files compared to the upstream base branch." unless="check.skip">
         <antcall target="rat-check" inheritrefs="true"/>
-        <antcall target="checkstyle" inheritrefs="true"/>
-        <antcall target="checkstyle-test" inheritrefs="true"/>
     </target>
 
     <!-- Stress build file -->

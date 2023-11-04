@@ -69,7 +69,6 @@ import org.apache.cassandra.net.StartupClusterConnectivityChecker;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.security.ThreadAwareSecurityManager;
 import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.utils.FBUtilities;
@@ -244,7 +243,7 @@ public class CassandraDaemon
 
         Mx4jTool.maybeLoad();
 
-        ThreadAwareSecurityManager.install();
+        //ThreadAwareSecurityManager.install();
 
         logSystemInfo(logger);
 

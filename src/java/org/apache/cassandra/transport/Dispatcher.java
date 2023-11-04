@@ -20,6 +20,8 @@ package org.apache.cassandra.transport;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -59,6 +61,8 @@ public class Dispatcher
                                                                              "transport",
                                                                              "Native-Transport-Requests");
 
+    static final ExecutorService requestVirtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
     /** CASSANDRA-17812: Rate-limit new client connection setup to avoid overwhelming during bcrypt
      *
      * authExecutor is a separate thread pool for handling requests on connections that need to be authenticated.
@@ -97,6 +101,7 @@ public class Dispatcher
     public Dispatcher(boolean useLegacyFlusher)
     {
         this.useLegacyFlusher = useLegacyFlusher;
+
     }
 
     public void dispatch(Channel channel, Message.Request request, FlushItemConverter forFlusher, Overload backpressure)
@@ -106,9 +111,13 @@ public class Dispatcher
                               (request.type == Message.Type.AUTH_RESPONSE || request.type == Message.Type.CREDENTIALS);
 
         // Importantly, the authExecutor will handle the AUTHENTICATE message which may be CPU intensive.
-        LocalAwareExecutorPlus executor = isAuthQuery ? authExecutor : requestExecutor;
+//        LocalAwareExecutorPlus executor = isAuthQuery ? authExecutor : requestExecutor;
 
-        executor.submit(new RequestProcessor(channel, request, forFlusher, backpressure));
+        // switch to use a virtual thread pool
+
+        requestVirtualExecutor.submit(new RequestProcessor(channel, request, forFlusher, backpressure));
+        //executor.submit(new RequestProcessor(channel, request, forFlusher, backpressure));
+
         ClientMetrics.instance.markRequestDispatched();
     }
 
