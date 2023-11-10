@@ -61,7 +61,8 @@ public class Dispatcher
                                                                              "transport",
                                                                              "Native-Transport-Requests");
 
-    static final ExecutorService requestVirtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    @VisibleForTesting
+    static final ExecutorService requestVirtualExecutor = Executors.newCachedThreadPool();
 
     /** CASSANDRA-17812: Rate-limit new client connection setup to avoid overwhelming during bcrypt
      *
