@@ -1112,7 +1112,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                         logger.warn("Exception thrown when waiting on countdown latch");
                     }
 
-                    if(showStack) {
+                    if(showStack || System.getenv("CASSANDRA_ALWAYS_LOG_STACK").equals("true")) {
 
                         try
                         {
@@ -1129,12 +1129,13 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                             for (ThreadInfo threadInfo : threadInfos) {
                                 output.append(threadInfo.toString());
                                 output.append('\n');
-                                for (StackTraceElement ste : threadInfo.getStackTrace()) {
-                                    output.append("\tat " + ste.toString());
-                                }
-                                output.append('\n');
+//                                output.append("STACKTRACE");
+//                                for (StackTraceElement ste : threadInfo.getStackTrace()) {
+//                                    output.append("\tat " + ste.toString() + '\n');
+//                                }
+//                                output.append('\n');
                             }
-                            logger.warn("PostFlush may be blocked, generating thread dump" + output);
+                            logger.warn("PostFlush may be blocked, generating thread dump\n" + output);
 
                         } catch (SecurityException e) {
                             logger.error("Could not generate internal thredad dump");
@@ -1145,7 +1146,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                 });
 
                 thread.start();
-
                 latch.await();
                 showStackTrace.decrement();
             }
