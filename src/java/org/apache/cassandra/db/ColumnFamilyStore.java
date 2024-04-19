@@ -1094,6 +1094,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
             {
                 // we wait on the latch for the commitLogUpperBound to be set, and so that waiters
                 // on this task can rely on all prior flushes being complete
+                logger.info("Waiting on commit log latch");
+
                 latch.await();
             }
             catch (InterruptedException e)
@@ -1136,8 +1138,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
 
         private Flush(boolean truncate)
         {
-            if (logger.isTraceEnabled())
-                logger.trace("Creating flush task {}@{}", hashCode(), name);
+            logger.info("Creating flush task {}@{}", hashCode(), name);
             // if true, we won't flush, we'll just wait for any outstanding writes, switch the memtable, and discard
             this.truncate = truncate;
 
@@ -1175,25 +1176,30 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
             // we then issue the barrier; this lets us wait for all operations started prior to the barrier to complete;
             // since this happens after wiring up the commitLogUpperBound, we also know all operations with earlier
             // commit log segment position have also completed, i.e. the memtables are done and ready to flush
+            logger.info("Issuing write barrier");
             writeBarrier.issue();
+            logger.info("Creating PostFlush task");
             postFlush = new PostFlush(Iterables.get(memtables.values(), 0, null));
             postFlushTask = new FutureTask<>(postFlush);
         }
 
         public void run()
         {
-            if (logger.isTraceEnabled())
-                logger.trace("Flush task {}@{} starts executing, waiting on barrier", hashCode(), name);
+            logger.info("Flush task {}@{} starts executing, marking barrier blocking, waiting on barrier", hashCode(), name);
 
             long start = nanoTime();
 
             // mark writes older than the barrier as blocking progress, permitting them to exceed our memory limit
             // if they are stuck waiting on it, then wait for them all to complete
-            writeBarrier.markBlocking();
-            writeBarrier.await();
 
-            if (logger.isTraceEnabled())
-                logger.trace("Flush task for task {}@{} waited {} ms at the barrier", hashCode(), name, TimeUnit.NANOSECONDS.toMillis(nanoTime() - start));
+            writeBarrier.markBlocking();
+            logger.info("Calling writeBarrier.await()");
+
+            // how much free memory?
+            // what would cause the write barrier to block?
+            writeBarrier.await();
+            logger.info("Moved past writeBarrier.await().  Flush task for task {}@{} waited {} ms at the barrier",
+                        hashCode(), name, TimeUnit.NANOSECONDS.toMillis(nanoTime() - start));
 
             // mark all memtables as flushing, removing them from the live memtable list
             for (Map.Entry<ColumnFamilyStore, Memtable> entry : memtables.entrySet())
@@ -1217,20 +1223,17 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                 postFlush.flushFailure = t;
             }
 
-            if (logger.isTraceEnabled())
-                logger.trace("Flush task {}@{} signaling post flush task", hashCode(), name);
+            logger.info("Flush task {}@{} signaling post flush task", hashCode(), name);
 
             // signal the post-flush we've done our work
             postFlush.latch.decrement();
 
-            if (logger.isTraceEnabled())
-                logger.trace("Flush task task {}@{} finished", hashCode(), name);
+            logger.info("Flush task task {}@{} finished", hashCode(), name);
         }
 
         public Collection<SSTableReader> flushMemtable(ColumnFamilyStore cfs, Memtable memtable, boolean flushNonCf2i)
         {
-            if (logger.isTraceEnabled())
-                logger.trace("Flush task task {}@{} flushing memtable {}", hashCode(), name, memtable);
+            logger.info("Flush task task {}@{} flushing memtable {}", hashCode(), name, memtable);
 
             if (memtable.isClean() || truncate)
             {
@@ -1329,7 +1332,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
             cfs.replaceFlushed(memtable, sstables);
             reclaim(memtable);
             cfs.compactionStrategyManager.compactionLogger.flush(sstables);
-            logger.debug("Flushed to {} ({} sstables, {}), biggest {}, smallest {}",
+            logger.info("Flushed to {} ({} sstables, {}), biggest {}, smallest {}",
                          sstables,
                          sstables.size(),
                          FBUtilities.prettyPrintMemory(totalBytesOnDisk),

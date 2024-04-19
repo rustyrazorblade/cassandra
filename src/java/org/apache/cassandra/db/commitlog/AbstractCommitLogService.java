@@ -321,7 +321,10 @@ public abstract class AbstractCommitLogService
         {
             WaitQueue.Signal signal = context != null ? syncComplete.register(context, Context::stop) : syncComplete.register();
             if (lastSyncedAt < syncTime)
+            {
+                logger.info("Waiting for commit log sync");
                 signal.awaitUninterruptibly();
+            }
             else
                 signal.cancel();
         }

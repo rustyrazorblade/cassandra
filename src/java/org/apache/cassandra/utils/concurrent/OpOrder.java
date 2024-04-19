@@ -264,7 +264,9 @@ public class OpOrder
                     return;
                 }
                 else
+                {
                     signal.awaitUninterruptibly();
+                }
             }
             assert running == FINISHED;
         }
