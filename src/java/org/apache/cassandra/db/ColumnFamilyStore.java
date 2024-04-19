@@ -1105,7 +1105,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                     boolean showStack = true;
                     try
                     {
-                        showStack = !showStackTrace.await(3, TimeUnit.SECONDS);
+                        showStack = !showStackTrace.await(10, TimeUnit.SECONDS);
                     }
                     catch (InterruptedException e)
                     {
@@ -1129,11 +1129,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                             for (ThreadInfo threadInfo : threadInfos) {
                                 output.append(threadInfo.toString());
                                 output.append('\n');
-//                                output.append("STACKTRACE");
-//                                for (StackTraceElement ste : threadInfo.getStackTrace()) {
-//                                    output.append("\tat " + ste.toString() + '\n');
-//                                }
-//                                output.append('\n');
                             }
                             logger.warn("PostFlush may be blocked, generating thread dump\n" + output);
 
