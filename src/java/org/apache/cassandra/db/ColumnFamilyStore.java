@@ -19,6 +19,9 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
@@ -1095,8 +1098,56 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                 // we wait on the latch for the commitLogUpperBound to be set, and so that waiters
                 // on this task can rely on all prior flushes being complete
                 logger.info("Waiting on commit log latch");
+                CountDownLatch showStackTrace = newCountDownLatch(1);
+
+                Thread thread = new Thread(() -> {
+                    // After 3 seconds if we don't get the signal, print the stacktrace
+                    boolean showStack = true;
+                    try
+                    {
+                        showStack = !showStackTrace.await(3, TimeUnit.SECONDS);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        logger.warn("Exception thrown when waiting on countdown latch");
+                    }
+
+                    if(showStack) {
+
+                        try
+                        {
+                            StringBuilder output = new StringBuilder();
+                            ThreadMXBean threadMXBean = ManagementFactory.getThreadMXBean();
+
+                            // Optionally enable thread contention monitoring
+                            threadMXBean.setThreadContentionMonitoringEnabled(true);
+
+                            // Get thread information including stack traces
+                            ThreadInfo[] threadInfos = threadMXBean.dumpAllThreads(true, true);
+
+                            // Print thread dump
+                            for (ThreadInfo threadInfo : threadInfos) {
+                                output.append(threadInfo.toString());
+                                output.append('\n');
+                                for (StackTraceElement ste : threadInfo.getStackTrace()) {
+                                    output.append("\tat " + ste.toString());
+                                }
+                                output.append('\n');
+                            }
+                            logger.warn("PostFlush may be blocked, generating thread dump" + output);
+
+                        } catch (SecurityException e) {
+                            logger.error("Could not generate internal thredad dump");
+                        }
+                    } else {
+                        logger.info("No need to show stacktrace since we've moved past the latch");
+                    }
+                });
+
+                thread.start();
 
                 latch.await();
+                showStackTrace.decrement();
             }
             catch (InterruptedException e)
             {
