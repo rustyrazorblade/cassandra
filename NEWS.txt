@@ -70,6 +70,9 @@ using the provided 'sstableupgrade' tool.
 
 New features
 ------------
+    - JDK21 and Generational ZGC are now officially supported and generational ZGC is now the default Garbage Collector
+    when using JDK21. See jvm21-server.options for more details and configuration parameters. We do not recommend using
+    non-generational ZGC with Apache Cassandra.
     - CEP-37 Auto Repair is a fully automated scheduler that provides repair orchestration within Apache Cassandra. This
     significantly reduces operational overhead by eliminating the need for operators to deploy external tools to submit
     and manage repairs. See

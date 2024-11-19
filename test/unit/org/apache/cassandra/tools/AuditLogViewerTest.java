@@ -29,6 +29,13 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 
 import org.apache.cassandra.io.util.File;
+import net.openhft.chronicle.core.io.IORuntimeException;
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptAppender;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import net.openhft.chronicle.queue.rollcycles.TestRollCycles;
+import net.openhft.chronicle.wire.WireOut;
+
 import org.apache.commons.io.FileUtils;
 
 import org.junit.After;
@@ -98,7 +105,8 @@ public class AuditLogViewerTest
                        " -i,--ignore             Silently ignore unsupported records\n" + 
                        " -r,--roll_cycle <arg>   How often to roll the log file was rolled. May be\n" +
                        "                         necessary for Chronicle to correctly parse file\n" +
-                       "                         names. (MINUTELY, HOURLY, DAILY). Default HOURLY.\n";
+                       "                         names. (FIVE_MINUTELY, FAST_HOURLY, FAST_DAILY).\n" +
+                       "                         Default FAST_HOURLY.\n";
         Assertions.assertThat(tool.getStdout()).isEqualTo(help);
     }
 
@@ -162,7 +170,7 @@ public class AuditLogViewerTest
         records.add("Test foo bar 1");
         records.add("Test foo bar 2");
 
-        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(RollCycles.TEST_SECONDLY).build())
+        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(TestRollCycles.TEST_SECONDLY).build())
         {
             ExcerptAppender appender = queue.acquireAppender();
 
@@ -171,7 +179,7 @@ public class AuditLogViewerTest
 
             //Read those written records
             List<String> actualRecords = new ArrayList<>();
-            AuditLogViewer.dump(ImmutableList.of(path.toString()), RollCycles.TEST_SECONDLY.toString(), false, false, actualRecords::add);
+            AuditLogViewer.dump(ImmutableList.of(path.toString()), TestRollCycles.TEST_SECONDLY.toString(), false, false, actualRecords::add);
 
             assertRecordsMatch(records, actualRecords);
         }
@@ -180,12 +188,12 @@ public class AuditLogViewerTest
     @Test (expected = IORuntimeException.class)
     public void testRejectFutureVersionRecord()
     {
-        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(RollCycles.TEST_SECONDLY).build())
+        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(TestRollCycles.TEST_SECONDLY).build())
         {
             ExcerptAppender appender = queue.acquireAppender();
             appender.writeDocument(createFutureRecord());
 
-            AuditLogViewer.dump(ImmutableList.of(path.toString()), RollCycles.TEST_SECONDLY.toString(), false, false, dummy -> {});
+            AuditLogViewer.dump(ImmutableList.of(path.toString()), TestRollCycles.TEST_SECONDLY.toString(), false, false, dummy -> {});
         }
         catch (Exception e)
         {
@@ -201,7 +209,7 @@ public class AuditLogViewerTest
         records.add("Test foo bar 1");
         records.add("Test foo bar 2");
 
-        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(RollCycles.TEST_SECONDLY).build())
+        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(TestRollCycles.TEST_SECONDLY).build())
         {
             ExcerptAppender appender = queue.acquireAppender();
 
@@ -213,7 +221,7 @@ public class AuditLogViewerTest
 
             //Read those written records
             List<String> actualRecords = new ArrayList<>();
-            AuditLogViewer.dump(ImmutableList.of(path.toString()), RollCycles.TEST_SECONDLY.toString(), false, true, actualRecords::add);
+            AuditLogViewer.dump(ImmutableList.of(path.toString()), TestRollCycles.TEST_SECONDLY.toString(), false, true, actualRecords::add);
 
             // Assert all current records are present
             assertRecordsMatch(records, actualRecords);
@@ -223,12 +231,12 @@ public class AuditLogViewerTest
     @Test (expected = IORuntimeException.class)
     public void testRejectUnknownTypeRecord()
     {
-        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(RollCycles.TEST_SECONDLY).build())
+        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(TestRollCycles.TEST_SECONDLY).build())
         {
             ExcerptAppender appender = queue.acquireAppender();
             appender.writeDocument(createUnknownTypeRecord());
 
-            AuditLogViewer.dump(ImmutableList.of(path.toString()), RollCycles.TEST_SECONDLY.toString(), false, false, dummy -> {});
+            AuditLogViewer.dump(ImmutableList.of(path.toString()), TestRollCycles.TEST_SECONDLY.toString(), false, false, dummy -> {});
         }
         catch (Exception e)
         {
@@ -244,7 +252,7 @@ public class AuditLogViewerTest
         records.add("Test foo bar 1");
         records.add("Test foo bar 2");
 
-        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(RollCycles.TEST_SECONDLY).build())
+        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(path.toFile()).rollCycle(TestRollCycles.TEST_SECONDLY).build())
         {
             ExcerptAppender appender = queue.acquireAppender();
 
@@ -256,7 +264,7 @@ public class AuditLogViewerTest
 
             //Read those written records
             List<String> actualRecords = new ArrayList<>();
-            AuditLogViewer.dump(ImmutableList.of(path.toString()), RollCycles.TEST_SECONDLY.toString(), false, true, actualRecords::add);
+            AuditLogViewer.dump(ImmutableList.of(path.toString()), TestRollCycles.TEST_SECONDLY.toString(), false, true, actualRecords::add);
 
             // Assert all supported records are present
             assertRecordsMatch(records, actualRecords);
