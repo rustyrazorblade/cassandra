@@ -19,6 +19,15 @@ package org.apache.cassandra.audit;
 
 import java.nio.file.Path;
 
+import com.datastax.driver.core.PreparedStatement;
+import com.datastax.driver.core.ResultSet;
+import com.datastax.driver.core.Session;
+
+import net.openhft.chronicle.queue.ChronicleQueue;
+import net.openhft.chronicle.queue.ExcerptTailer;
+import net.openhft.chronicle.queue.impl.single.SingleChronicleQueueBuilder;
+import net.openhft.chronicle.queue.rollcycles.TestRollCycles;
+
 import org.junit.BeforeClass;
 import org.junit.Test;
 
@@ -74,7 +83,7 @@ public class BinAuditLoggerTest extends CQLTester
         ResultSet rs = session.execute(pstmt.bind(1));
 
         assertEquals(1, rs.all().size());
-        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(tempDir.toFile()).rollCycle(RollCycles.TEST_SECONDLY).build())
+        try (ChronicleQueue queue = SingleChronicleQueueBuilder.single(tempDir.toFile()).rollCycle(TestRollCycles.TEST_SECONDLY).build())
         {
             ExcerptTailer tailer = queue.createTailer();
             assertTrue(tailer.readDocument(wire -> {
