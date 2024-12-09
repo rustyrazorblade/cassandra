@@ -24,7 +24,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableMap;
@@ -35,6 +39,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.SequentialExecutorPlus;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
@@ -42,6 +47,7 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.compaction.writers.DefaultCompactionWriter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.File;
@@ -49,7 +55,9 @@ import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Refs;
+import org.apache.cassandra.utils.concurrent.BlockingQueues;
 
+import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
 import static org.apache.cassandra.db.compaction.CompactionHistoryTabularData.COMPACTION_TYPE_PROPERTY;
 import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
@@ -169,7 +177,7 @@ public class CompactionTask extends AbstractCompactionTask
             RateLimiter limiter = CompactionManager.instance.getRateLimiter();
             long start = nanoTime();
             long startTime = currentTimeMillis();
-            long totalKeysWritten = 0;
+            AtomicLong totalKeysWritten = new AtomicLong();
             long estimatedKeys = 0;
             long inputSizeBytes;
             long timeSpentWritingKeys;
@@ -193,22 +201,55 @@ public class CompactionTask extends AbstractCompactionTask
 
                 long lastBytesScanned = 0;
 
+
                 activeCompactions.beginCompaction(ci);
+
+                SequentialExecutorPlus backroundCompactionWriter = executorFactory()
+                                                            .localAware()
+                                                            .sequential( String.format("Compaction Writer #%s", taskId));
+
+                BlockingQueue<Future<?>> taskQueue = BlockingQueues.newBlockingQueue(10);
+
                 try (CompactionAwareWriter writer = getCompactionAwareWriter(cfs, getDirectories(), transaction, actuallyCompact))
                 {
                     // Note that we need to re-check this flag after calling beginCompaction above to avoid a window
                     // where the compaction does not exist in activeCompactions but the CSM gets paused.
                     // We already have the sstables marked compacting here so CompactionManager#waitForCessation will
                     // block until the below exception is thrown and the transaction is cancelled.
+                    // create a queue for the futures returned by backgroundCompactionWriter
+
                     if (!controller.cfs.getCompactionStrategyManager().isActive())
                         throw new CompactionInterruptedException(ci.getCompactionInfo());
                     estimatedKeys = writer.estimatedKeys();
                     while (ci.hasNext())
                     {
-                        if (writer.append(ci.next()))
-                            totalKeysWritten++;
+                        Future<?> peek = taskQueue.peek();
+                        if (peek != null && !peek.isDone() ) {
+                            Future<?> remove = taskQueue.remove();
+                            remove.get();
+                        }
 
-                        ci.setTargetDirectory(writer.getSStableDirectory().path());
+                        // pushing this to a background thread allows us to do the reads and writes in parallel
+                        // in some workloads this can double compaction throughput.
+
+                        UnfilteredRowIterator unfilteredRowIterator = ci.next();
+
+                        Callable<Void> task = () -> {
+                            logger.info("Compacting in thread");
+                            if (writer.append(unfilteredRowIterator))
+                                totalKeysWritten.getAndIncrement();
+                            ci.setTargetDirectory(writer.getSStableDirectory().path());
+                            return null;
+                        };
+
+                        // ensure we have room before putting anything else in the queue
+                        if (taskQueue.remainingCapacity() == 0) {
+                            taskQueue.remove().get();
+                        }
+
+                        Future<?> submit = backroundCompactionWriter.submit(task);
+                        taskQueue.add(submit);
+
                         long bytesScanned = scanners.getTotalBytesScanned();
 
                         // Rate limit the scanners, and account for compression
@@ -225,6 +266,13 @@ public class CompactionTask extends AbstractCompactionTask
                     timeSpentWritingKeys = TimeUnit.NANOSECONDS.toMillis(nanoTime() - start);
 
                     // point of no return
+                    // loop over the task queue and get all remaining futures, this will block until they are complete.
+                    // if any exceptions are thrown they'll be propagated before we call finish
+                    backroundCompactionWriter.shutdown();
+                    for (Future<?> future : taskQueue) {
+                        future.get();
+                    }
+
                     newSStables = writer.finish();
                 }
                 finally
@@ -268,13 +316,13 @@ public class CompactionTask extends AbstractCompactionTask
                                        FBUtilities.prettyPrintMemoryPerSecond(endsize, durationInNano),
                                        (int) totalSourceCQLRows / (TimeUnit.NANOSECONDS.toSeconds(durationInNano) + 1),
                                        totalSourceRows,
-                                       totalKeysWritten,
+                                       totalKeysWritten.getOpaque(),
                                        mergeSummary,
                                        timeSpentWritingKeys));
             if (logger.isTraceEnabled())
             {
                 logger.trace("CF Total Bytes Compacted: {}", FBUtilities.prettyPrintMemory(CompactionTask.addToTotalBytesCompacted(endsize)));
-                logger.trace("Actual #keys: {}, Estimated #keys:{}, Err%: {}", totalKeysWritten, estimatedKeys, ((double)(totalKeysWritten - estimatedKeys)/totalKeysWritten));
+                logger.trace("Actual #keys: {}, Estimated #keys:{}, Err%: {}", totalKeysWritten.getOpaque(), estimatedKeys, ((double)(totalKeysWritten.get() - estimatedKeys) / totalKeysWritten.get()));
             }
             cfs.getCompactionStrategyManager().compactionLogger.compaction(startTime, transaction.originals(), currentTimeMillis(), newSStables);
 
