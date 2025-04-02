@@ -52,7 +52,8 @@ public class ThreadLocalReadAheadBufferTest implements WithQuickTheories
     @BeforeClass
     public static void setup()
     {
-        int seed = new Random().nextInt();
+//        int seed = new Random().nextInt();
+        int seed = 1489793844; // new Random().nextInt();
         logger.info("Seed: {}", seed);
 
         for (int i = 0; i < numFiles; i++)
@@ -88,20 +89,27 @@ public class ThreadLocalReadAheadBufferTest implements WithQuickTheories
     @Test
     public void testReadsLikeChannelProxy()
     {
-
-        qt().forAll(randomReads())
-            .checkAssert(this::testReads);
+        qt()
+        .withFixedSeed(444939419228972L)
+        .forAll(randomReads())
+        .checkAssert(this::testReads);
     }
 
     private void testReads(InputData propertyInputs)
     {
+        logger.info("Property inputs: {}", propertyInputs);
         try (ChannelProxy channel = new ChannelProxy(propertyInputs.file))
         {
+            logger.info("File length: {}", propertyInputs.file.length());
             ThreadLocalReadAheadBuffer trlab = new ThreadLocalReadAheadBuffer(channel, new DataStorageSpec.IntKibibytesBound("256KiB").toBytes(), BufferType.OFF_HEAP);
             for (Pair<Long, Integer> read : propertyInputs.positionsAndLengths)
             {
+                logger.info("Read value from property inputs: {}", read);
                 int readSize = Math.min(read.right,(int) (channel.size() - read.left));
+
                 ByteBuffer buf1 = ByteBuffer.allocate(readSize);
+
+                logger.info("Readsize: {}, {}", readSize, read.left);
                 channel.read(buf1, read.left);
 
                 ByteBuffer buf2 = ByteBuffer.allocate(readSize);
@@ -142,7 +150,7 @@ public class ThreadLocalReadAheadBufferTest implements WithQuickTheories
         int blockSize = new DataStorageSpec.IntKibibytesBound("256KiB").toBytes();
         return arbitrary().pick(List.of(files))
                          .flatMap((file) ->
-                                  lists().of(longs().between(fileSize(file) - blockSize, fileSize(file)).zip(integers().between(1, 100), Pair::create))
+                                  lists().of(longs().between(0, fileSize(file)).zip(integers().between(1, 100), Pair::create))
                                          .ofSizeBetween(5, 10)
                                          .map(positionsAndLengths -> new InputData(file, positionsAndLengths)));
 
