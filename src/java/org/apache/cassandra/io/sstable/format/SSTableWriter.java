@@ -75,8 +75,8 @@ public abstract class SSTableWriter extends SSTable implements Transactional
     protected boolean isTransient;
     protected long maxDataAge = -1;
     protected final long keyCount;
-    protected final MetadataCollector metadataCollector;
-    protected final SerializationHeader header;
+    public final MetadataCollector metadataCollector;
+    public final SerializationHeader header;
     protected final List<SSTableFlushObserver> observers;
     protected final MmappedRegionsCache mmappedRegionsCache;
     protected final TransactionalProxy txnProxy = txnProxy();
@@ -332,7 +332,7 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         }
     }
 
-    protected Map<MetadataType, MetadataComponent> finalizeMetadata()
+    protected final Map<MetadataType, MetadataComponent> finalizeMetadata()
     {
         return metadataCollector.finalizeMetadata(getPartitioner().getClass().getCanonicalName(),
                                                   metadata().params.bloomFilterFpChance,
@@ -578,5 +578,13 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         {
             return new SSTableZeroCopyWriter(this, lifecycleNewTracker, owner);
         }
+    }
+
+    public void setFirst(DecoratedKey key) {
+        first = key;
+    }
+
+    public void setLast(DecoratedKey key) {
+        last = key;
     }
 }

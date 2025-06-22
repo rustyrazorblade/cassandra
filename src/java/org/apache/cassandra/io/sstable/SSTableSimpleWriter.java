@@ -64,7 +64,7 @@ class SSTableSimpleWriter extends AbstractSSTableSimpleWriter
      * @param maxSSTableSizeInMiB defines the max SSTable size if the value is positive.
      *                            Any non-positive value indicates the sstable size is unlimited.
      */
-    protected SSTableSimpleWriter(File directory, TableMetadataRef metadata, RegularAndStaticColumns columns, long maxSSTableSizeInMiB)
+    public SSTableSimpleWriter(File directory, TableMetadataRef metadata, RegularAndStaticColumns columns, long maxSSTableSizeInMiB)
     {
         super(directory, metadata, columns);
         this.maxSSTableSizeInBytes = maxSSTableSizeInMiB * 1024L * 1024L;

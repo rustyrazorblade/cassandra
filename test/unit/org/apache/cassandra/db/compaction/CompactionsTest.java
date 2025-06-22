@@ -22,6 +22,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -389,6 +390,7 @@ public class CompactionsTest
         {
             keys.add(Util.dk(Integer.toString(i)));
         }
+        Collections.sort(keys);
 
         int[] dks = {0, 1, 3};
         writeSSTableWithRangeTombstoneMaskingOneColumn(cfs, table, dks);
