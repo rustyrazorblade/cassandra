@@ -109,7 +109,7 @@ public abstract class DecoratedKey implements PartitionPosition, FilterKey
         // The OSS50 version avoids this by adding a terminator.
         return ByteSource.withTerminatorMaybeLegacy(version,
                                                     ByteSource.END_OF_STREAM,
-                                                    token.asComparableBytes(version),
+                                                    getToken().asComparableBytes(version),
                                                     keyComparableBytes(version));
     }
 
@@ -122,7 +122,7 @@ public abstract class DecoratedKey implements PartitionPosition, FilterKey
 
             return ByteSource.withTerminator(
                     before ? ByteSource.LT_NEXT_COMPONENT : ByteSource.GT_NEXT_COMPONENT,
-                    token.asComparableBytes(version),
+                    getToken().asComparableBytes(version),
                     keyComparableBytes(version));
         };
     }

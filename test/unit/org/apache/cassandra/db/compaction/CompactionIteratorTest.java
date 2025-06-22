@@ -456,6 +456,12 @@ public class CompactionIteratorTest extends CQLTester
         {
             return ImmutableSet.of();
         }
+
+        @Override
+        public boolean isFullRange()
+        {
+            return false;
+        }
     }
 
     @Test

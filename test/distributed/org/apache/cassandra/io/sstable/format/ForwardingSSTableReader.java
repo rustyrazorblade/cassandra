@@ -239,9 +239,9 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public KeyReader keyReader() throws IOException
+    public KeyReader keyReader(boolean detailed) throws IOException
     {
-        return delegate.keyReader();
+        return delegate.keyReader(detailed);
     }
 
     @Override
