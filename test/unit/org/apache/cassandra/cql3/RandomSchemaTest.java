@@ -38,6 +38,8 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -58,6 +60,7 @@ import static org.apache.cassandra.utils.Generators.IDENTIFIER_GEN;
 public class RandomSchemaTest extends CQLTester.InMemory
 {
     private static final Logger logger = LoggerFactory.getLogger(RandomSchemaTest.class);
+    static final boolean STRESS_CURSOR_COMPACTION = false;
 
     static
     {
@@ -79,35 +82,42 @@ public class RandomSchemaTest extends CQLTester.InMemory
             resetSchema();
 
             // TODO : when table level override of sstable format is allowed, migrate to that
-            SSTableFormat<?, ?> sstableFormat = ssTableFormatGen.generate(random);
-            DatabaseDescriptor.setSelectedSSTableFormat(sstableFormat);
+            if (!STRESS_CURSOR_COMPACTION)
+            {
+                SSTableFormat<?, ?> sstableFormat = ssTableFormatGen.generate(random);
+                DatabaseDescriptor.setSelectedSSTableFormat(sstableFormat);
+            }
 
             Gen<String> udtName = Generators.unique(IDENTIFIER_GEN);
 
             TypeGenBuilder withoutUnsafeEquality = AbstractTypeGenerators.withoutUnsafeEquality()
                                                                          .withUserTypeKeyspace(KEYSPACE)
                                                                          .withUDTNames(udtName);
-            TableMetadata metadata = new TableMetadataBuilder()
-                                     .withKeyspaceName(KEYSPACE)
-                                     .withTableKinds(TableMetadata.Kind.REGULAR)
-                                     .withKnownMemtables()
-                                     .withDefaultTypeGen(AbstractTypeGenerators.builder()
-                                                                               .withoutEmpty()
-                                                                               .withUserTypeKeyspace(KEYSPACE)
-                                                                               .withMaxDepth(2)
-                                                                               .withDefaultSetKey(withoutUnsafeEquality)
-                                                                               .withoutTypeKinds(AbstractTypeGenerators.TypeKind.COUNTER)
-                                                                               .withUDTNames(udtName)
-                                                                               .build())
-                                     .withPartitionColumnsCount(1)
-                                     .withPrimaryColumnTypeGen(new TypeGenBuilder(withoutUnsafeEquality)
-                                                               // map of vector of map crossed the size cut-off for one of the tests, so changed max depth from 2 to 1, so we can't have the second map
-                                                               .withMaxDepth(1)
-                                                               .build())
-                                     .withClusteringColumnsBetween(1, 2)
-                                     .withRegularColumnsBetween(1, 5)
-                                     .withStaticColumnsBetween(0, 2)
-                                     .build(random);
+            TableMetadata metadata;
+            do
+            {
+                metadata = new TableMetadataBuilder()
+                           .withKeyspaceName(KEYSPACE)
+                           .withTableKinds(TableMetadata.Kind.REGULAR)
+                           .withKnownMemtables()
+                           .withDefaultTypeGen(AbstractTypeGenerators.builder()
+                                                                     .withoutEmpty()
+                                                                     .withUserTypeKeyspace(KEYSPACE)
+                                                                     .withMaxDepth(2)
+                                                                     .withDefaultSetKey(withoutUnsafeEquality)
+                                                                     .withoutTypeKinds(AbstractTypeGenerators.TypeKind.COUNTER)
+                                                                     .withUDTNames(udtName)
+                                                                     .build())
+                           .withPartitionColumnsCount(1)
+                           .withPrimaryColumnTypeGen(new TypeGenBuilder(withoutUnsafeEquality)
+                                                     // map of vector of map crossed the size cut-off for one of the tests, so changed max depth from 2 to 1, so we can't have the second map
+                                                     .withMaxDepth(1)
+                                                     .build())
+                           .withClusteringColumnsBetween(1, 2)
+                           .withRegularColumnsBetween(1, 5)
+                           .withStaticColumnsBetween(0, 2)
+                           .build(random);
+            } while (STRESS_CURSOR_COMPACTION && CursorCompactor.unsupportedMetadata(metadata));
             maybeCreateUDTs(metadata);
             String createTable = metadata.toCqlString(false, false);
             // just to make the CREATE TABLE stmt easier to read for CUSTOM types
@@ -137,6 +147,7 @@ public class RandomSchemaTest extends CQLTester.InMemory
                     // check sstable
                     flush(KEYSPACE, metadata.name);
                     compact(KEYSPACE, metadata.name);
+                    ColumnFamilyStore cfs = getColumnFamilyStore(KEYSPACE, metadata.name);
                     assertRows(execute(selectStmt, (Object[]) rowKey), expected);
                     assertRows(execute(tokenStmt, (Object[]) partitionKeys), partitionKeys);
                     assertRowsNet(executeNet(selectStmt, (Object[]) rowKey), expected);

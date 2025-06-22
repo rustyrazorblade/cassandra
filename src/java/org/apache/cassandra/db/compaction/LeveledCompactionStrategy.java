@@ -297,6 +297,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         return levelFanoutSize;
     }
 
+    @Override
     public ScannerList getScanners(Collection<SSTableReader> sstables, Collection<Range<Token>> ranges)
     {
         Set<SSTableReader>[] sstablesPerLevel = manifest.getSStablesPerLevelSnapshot();
@@ -432,6 +433,12 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
             assert sstableIterator.hasNext(); // caller should check intersecting first
             SSTableReader currentSSTable = sstableIterator.next();
             currentScanner = currentSSTable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+        }
+
+        @Override
+        public boolean isFullRange()
+        {
+            return ranges == null;
         }
 
         public static Collection<SSTableReader> intersecting(Collection<SSTableReader> sstables, Collection<Range<Token>> ranges)

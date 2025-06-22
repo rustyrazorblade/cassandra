@@ -201,4 +201,38 @@ public class LocalPartitioner implements IPartitioner
             return EMPTY_SIZE + ObjectSizes.sizeOnHeapOf(token);
         }
     }
+
+    private class ReusableLocalToken extends LocalToken
+    {
+        void setToken(ByteBuffer token)
+        {
+            this.token = token;
+        }
+    }
+
+    private class ReusableLocalKey extends ReusableDecoratedKey
+    {
+        public ReusableLocalKey(int initialSize)
+        {
+            super(new ReusableLocalToken(), initialSize);
+        }
+
+        @Override
+        protected void recalculateToken()
+        {
+            ((ReusableLocalToken)getToken()).setToken(key);
+        }
+    }
+
+    @Override
+    public ReusableDecoratedKey createReusableKey(int initialSize)
+    {
+        return new ReusableLocalKey(initialSize);
+    }
+
+    @Override
+    public boolean supportsReusableKeys()
+    {
+        return true;
+    }
 }

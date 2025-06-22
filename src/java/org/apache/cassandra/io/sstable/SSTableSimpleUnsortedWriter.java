@@ -68,7 +68,7 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
     private final BlockingQueue<Buffer> writeQueue = newBlockingQueue(0);
     private final DiskWriter diskWriter = new DiskWriter();
 
-    SSTableSimpleUnsortedWriter(File directory, TableMetadataRef metadata, RegularAndStaticColumns columns, long maxSSTableSizeInMiB)
+    public SSTableSimpleUnsortedWriter(File directory, TableMetadataRef metadata, RegularAndStaticColumns columns, long maxSSTableSizeInMiB)
     {
         super(directory, metadata, columns);
         this.maxSStableSizeInBytes = maxSSTableSizeInMiB * 1024L * 1024L;
@@ -192,7 +192,7 @@ class SSTableSimpleUnsortedWriter extends AbstractSSTableSimpleWriter
         }
     }
 
-    static class SyncException extends RuntimeException
+    public static class SyncException extends RuntimeException
     {
         SyncException(IOException ioe)
         {
