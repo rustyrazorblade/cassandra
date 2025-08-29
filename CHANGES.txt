@@ -1,3 +1,6 @@
+trunk?? (The current trunk is on 5.1)
+* Support ZSTD dictionary compression (CASSANDRA-17021)
+
 5.1
  * Update snakeyaml to 2.4 (CASSANDRA-20928)
  * Update Netty to 4.1.125.Final (CASSANDRA-20925)
