@@ -47,15 +47,39 @@ make gen-asciidoc
 ```
 
 
-(The following has not yet been implemented, for now see the build instructions in the [cassandra-website](https://github.com/apache/cassandra-website) repo.)
-To build the documentation, run (from project root):
+To build the documentation locally using Docker and Antora (recommended):
 
 ```bash
-ant gen-doc
+# From the doc/ directory
+./build-docs.sh
 ```
-or (from this directory):
+
+This will:
+- Build the documentation using the official Antora Docker image
+- Output HTML files to `doc/build/site/`
+- Provide instructions for viewing the documentation
+
+To view the built documentation:
 
 ```bash
+# Open directly in browser
+open build/site/Cassandra/trunk/cassandra/index.html
+
+# Or start a local web server
+cd build/site
+python3 -m http.server 8080
+# Then navigate to: http://localhost:8080/Cassandra/trunk/cassandra/index.html
+```
+
+Alternatively, to build using a local Antora installation (requires Node.js):
+
+```bash
+# From project root
+ant gen-doc
+
+# Or from this directory
 make html
 ```
+
+For the full production documentation build, see the build instructions in the [cassandra-website](https://github.com/apache/cassandra-website) repo.
 
