@@ -31,6 +31,7 @@ import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.TableMetadata;
@@ -328,7 +329,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
                 {
                     // L0 makes no guarantees about overlapping-ness.  Just create a direct scanner for each
                     for (SSTableReader sstable : byLevel.get(level))
-                        scanners.add(sstable.getScanner(ranges));
+                        scanners.add(sstable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode()));
                 }
                 else
                 {
@@ -430,7 +431,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
             sstableIterator = this.sstables.iterator();
             assert sstableIterator.hasNext(); // caller should check intersecting first
             SSTableReader currentSSTable = sstableIterator.next();
-            currentScanner = currentSSTable.getScanner(ranges);
+            currentScanner = currentSSTable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode());
 
         }
 
@@ -477,7 +478,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
                     return endOfData();
                 }
                 SSTableReader currentSSTable = sstableIterator.next();
-                currentScanner = currentSSTable.getScanner(ranges);
+                currentScanner = currentSSTable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode());
             }
         }
 
