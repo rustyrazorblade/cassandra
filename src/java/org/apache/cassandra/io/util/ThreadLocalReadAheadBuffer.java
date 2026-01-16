@@ -21,22 +21,26 @@ package org.apache.cassandra.io.util;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import io.netty.util.concurrent.FastThreadLocal;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
+import org.apache.cassandra.utils.Closeable;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
-public final class ThreadLocalReadAheadBuffer
+public class ThreadLocalReadAheadBuffer implements Closeable
 {
+
     private static class Block
     {
         ByteBuffer buffer = null;
         int index = -1;
     }
 
-    private final ChannelProxy channel;
+    protected final ChannelProxy channel;
 
-    private final BufferType bufferType;
+    private final Supplier<ByteBuffer> bufferSupplier;
 
     private static final FastThreadLocal<Map<String, Block>> blockMap = new FastThreadLocal<>()
     {
@@ -47,15 +51,19 @@ public final class ThreadLocalReadAheadBuffer
         }
     };
 
-    private final int bufferSize;
+    private volatile int bufferSize = -1;
     private final long channelSize;
 
     public ThreadLocalReadAheadBuffer(ChannelProxy channel, int bufferSize, BufferType bufferType)
     {
+        this(channel, () -> bufferType.allocate(bufferSize));
+    }
+
+    public ThreadLocalReadAheadBuffer(ChannelProxy channel, Supplier<ByteBuffer> bufferSupplier)
+    {
         this.channel = channel;
         this.channelSize = channel.size();
-        this.bufferSize = bufferSize;
-        this.bufferType = bufferType;
+        this.bufferSupplier = bufferSupplier;
     }
 
     public boolean hasBuffer()
@@ -63,9 +71,6 @@ public final class ThreadLocalReadAheadBuffer
         return block().buffer != null;
     }
 
-    /**
-     * Safe to call only if {@link #hasBuffer()} is true
-     */
     public int remaining()
     {
         return getBlock().buffer.remaining();
@@ -81,8 +86,10 @@ public final class ThreadLocalReadAheadBuffer
         Block block = block();
         if (block.buffer == null)
         {
-            block.buffer = bufferType.allocate(bufferSize);
+            block.buffer = bufferSupplier.get();
             block.buffer.clear();
+            if (bufferSize == -1)
+                bufferSize = block.buffer.capacity();
         }
         return block;
     }
@@ -105,16 +112,20 @@ public final class ThreadLocalReadAheadBuffer
         if (block.index != blockNo)
         {
             blockBuffer.flip();
-            blockBuffer.limit(sizeToRead);
-            if (channel.read(blockBuffer, blockPosition) != sizeToRead)
-                throw new CorruptSSTableException(null, channel.filePath());
-
+            loadBlock(blockBuffer, blockPosition, sizeToRead);
             block.index = blockNo;
         }
 
         blockBuffer.flip();
         blockBuffer.limit(sizeToRead);
         blockBuffer.position((int) (realPosition - blockPosition));
+    }
+
+    protected void loadBlock(ByteBuffer blockBuffer, long blockPosition, int sizeToRead)
+    {
+        blockBuffer.limit(sizeToRead);
+        if (channel.read(blockBuffer, blockPosition) != sizeToRead)
+            throw new CorruptSSTableException(null, channel.filePath());
     }
 
     public int read(ByteBuffer dest, int length)
@@ -149,6 +160,7 @@ public final class ThreadLocalReadAheadBuffer
         }
     }
 
+    @Override
     public void close()
     {
         clear(true);
