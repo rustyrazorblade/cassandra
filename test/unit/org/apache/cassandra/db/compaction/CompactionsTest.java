@@ -115,25 +115,34 @@ public class CompactionsTest
     @Parameterized.Parameter(1)
     public DiskAccessMode backgroundWriteDiskAccessMode;
 
-    @Parameterized.Parameters(name = "diskAccessMode={0},backgroundWriteMode={1}")
+    @Parameterized.Parameter(2)
+    public boolean cursorCompactionEnabled;
+
+    @Parameterized.Parameters(name = "diskAccessMode={0},backgroundWriteMode={1},cursor={2}")
     public static Collection<Object[]> params()
     {
         // One direct-write cell instead of cross-multiplying: uncompressed CFs ignore the write mode.
-        return Arrays.asList(new Object[]{ DiskAccessMode.standard, DiskAccessMode.standard },
-                             new Object[]{ DiskAccessMode.direct, DiskAccessMode.standard },
-                             new Object[]{ DiskAccessMode.standard, DiskAccessMode.direct });
+        return Arrays.asList(new Object[]{ DiskAccessMode.standard, DiskAccessMode.standard, true },
+                             new Object[]{ DiskAccessMode.standard, DiskAccessMode.standard, false },
+                             new Object[]{ DiskAccessMode.direct, DiskAccessMode.standard, true },
+                             new Object[]{ DiskAccessMode.direct, DiskAccessMode.standard, false },
+                             new Object[]{ DiskAccessMode.standard, DiskAccessMode.direct, true },
+                             new Object[]{ DiskAccessMode.standard, DiskAccessMode.direct, false });
     }
 
     private DiskAccessMode originalDiskAccessMode;
     private DiskAccessMode originalBackgroundWriteDiskAccessMode;
+    private boolean originalCursorCompactionEnabled;
 
     @Before
     public void setCompactionParams()
     {
         originalDiskAccessMode = DatabaseDescriptor.getCompactionReadDiskAccessMode();
         originalBackgroundWriteDiskAccessMode = DatabaseDescriptor.getBackgroundWriteDiskAccessMode();
+        originalCursorCompactionEnabled = DatabaseDescriptor.cursorCompactionEnabled();
         DatabaseDescriptor.setCompactionReadDiskAccessMode(compactionReadDiskAccessMode);
         DatabaseDescriptor.setBackgroundWriteDiskAccessMode(backgroundWriteDiskAccessMode);
+        DatabaseDescriptor.setCursorCompactionEnabled(cursorCompactionEnabled);
     }
 
     @After
@@ -141,6 +150,7 @@ public class CompactionsTest
     {
         DatabaseDescriptor.setCompactionReadDiskAccessMode(originalDiskAccessMode);
         DatabaseDescriptor.setBackgroundWriteDiskAccessMode(originalBackgroundWriteDiskAccessMode);
+        DatabaseDescriptor.setCursorCompactionEnabled(originalCursorCompactionEnabled);
     }
 
     @BeforeClass
@@ -317,8 +327,8 @@ public class CompactionsTest
     public void testUserDefinedCompaction() throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        final String cfname = "Standard3"; // use clean(no sstable) CF
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfname);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_STANDARD3);
+        cfs.clearUnsafe();
         TableMetadata table = cfs.metadata();
 
         // disable compaction while flushing

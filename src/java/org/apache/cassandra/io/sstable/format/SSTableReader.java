@@ -38,6 +38,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import javax.annotation.Nullable;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
@@ -1396,48 +1398,64 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         return sstableMetadata;
     }
 
+    public RandomAccessReader openDataReader()
+    {
+        return openDataReaderInternal(null, null, false);
+    }
+
     public RandomAccessReader openDataReader(RateLimiter limiter)
     {
         assert limiter != null;
-        return dfile.createReader(limiter);
+        return openDataReaderInternal(null, limiter, false);
     }
 
-    public RandomAccessReader openDataReader()
+    public RandomAccessReader openDataReader(DiskAccessMode diskAccessMode)
     {
-        return dfile.createReader();
+        return openDataReaderInternal(diskAccessMode, null, false);
     }
 
     public RandomAccessReader openDataReaderForScan()
     {
-        return openDataReaderForScan(dfile.diskAccessMode());
+        return openDataReaderInternal(null, null, true);
     }
 
     public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
     {
-        boolean isSameDiskAccessMode = diskAccessMode == dfile.diskAccessMode();
-        boolean isDirectIONotSupported = diskAccessMode == DiskAccessMode.direct && !dfile.supportsDirectIO();
-
-        if (isSameDiskAccessMode || isDirectIONotSupported)
-            return dfile.createReader(null, true, OnReaderClose.RETAIN_FILE_OPEN);
-
-        FileHandle dataFile = dfile.toBuilder()
-                                   .withDiskAccessMode(diskAccessMode)
-                                   .complete();
-        try
-        {
-            return dataFile.createReader(null, true, OnReaderClose.CLOSE_FILE);
-        }
-        catch (Throwable t)
-        {
-            dataFile.close();
-            throw t;
-        }
+        return openDataReaderInternal(diskAccessMode, null, true);
     }
 
     public RandomAccessReader openDataReaderForScan(RateLimiter limiter)
     {
         assert limiter != null;
-        return dfile.createReader(limiter, true);
+        return openDataReaderInternal(null, limiter, true);
+    }
+
+    private RandomAccessReader openDataReaderInternal(@Nullable DiskAccessMode diskAccessMode,
+                                                      @Nullable RateLimiter limiter,
+                                                      boolean isScan)
+    {
+        if (canReuseDfile(diskAccessMode))
+            return dfile.createReader(limiter, isScan, OnReaderClose.RETAIN_FILE_OPEN);
+
+        FileHandle handle = dfile.toBuilder()
+                                 .withDiskAccessMode(diskAccessMode)
+                                 .complete();
+        try
+        {
+            return handle.createReader(limiter, isScan, OnReaderClose.CLOSE_FILE);
+        }
+        catch (Throwable t)
+        {
+            handle.close();
+            throw t;
+        }
+    }
+
+    private boolean canReuseDfile(@Nullable DiskAccessMode diskAccessMode)
+    {
+        return diskAccessMode == null
+               || diskAccessMode == dfile.diskAccessMode()
+               || (diskAccessMode == DiskAccessMode.direct && !dfile.supportsDirectIO());
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)
