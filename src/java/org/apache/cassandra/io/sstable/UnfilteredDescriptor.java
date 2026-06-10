@@ -44,6 +44,10 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
     private long unfilteredDataStart;
     private long prevUnfilteredSize;
     Columns rowColumns;
+    // For supersets of < 64 columns: bit i set means the i-th column of rowColumns (in
+    // iteration order) is ABSENT from this row; 0 means all present. Always 0 when
+    // rowColumns is already an exact subset (>= 64 column fallback) or for markers.
+    private long missingColumnsMask;
 
     public UnfilteredDescriptor(AbstractType<?>[] clusteringTypes)
     {
@@ -145,8 +149,29 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         }
         if (!UnfilteredSerializer.hasAllColumns(flags))
         {
-            // TODO: re-implement GC free
-            rowColumns = Columns.serializer.deserializeSubset(rowColumns, dataReader);
+            if (rowColumns.size() < 64)
+            {
+                // Garbage-free subset decode. Wire format per Columns.Serializer.deserializeSubset
+                // (Columns.java): an unsigned vint bitmask of MISSING columns, bit i corresponding
+                // to the i-th column of the superset in iteration order; 0 means all present.
+                // rowColumns stays the superset; consumers filter via missingColumnsMask().
+                long encoded = dataReader.readUnsignedVInt();
+                if ((encoded >>> rowColumns.size()) != 0)
+                    throw new IOException("Invalid Columns subset bytes; too many bits set: " + Long.toBinaryString(encoded));
+                missingColumnsMask = encoded;
+            }
+            else
+            {
+                // Rare shape (>= 64 columns in the header superset): keep the allocating path.
+                // The large-subset wire format is structural, not a single mask; accepted
+                // allocation, documented trade-off.
+                rowColumns = Columns.serializer.deserializeSubset(rowColumns, dataReader);
+                missingColumnsMask = 0;
+            }
+        }
+        else
+        {
+            missingColumnsMask = 0;
         }
     }
 
@@ -160,6 +185,7 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         unfilteredDataStart = 0;
         prevUnfilteredSize = 0;
         rowColumns = null;
+        missingColumnsMask = 0;
     }
 
     public long position()
@@ -205,6 +231,12 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
     public Columns rowColumns()
     {
         return rowColumns;
+    }
+
+    /** See {@link #missingColumnsMask} */
+    public long missingColumnsMask()
+    {
+        return missingColumnsMask;
     }
 
     @Override
