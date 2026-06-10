@@ -690,9 +690,12 @@ public class CursorCompactor extends CompactionInfo.Holder
                     if (oCellSource.state() == CELL_VALUE_START)
                         oCellSource.copyCellValue(tempCellBuffer2, copyColumnValueBuffer);
 
+                    // Matches Cells.resolveRegular: left (the current winner) wins ties, the
+                    // challenger only wins with a strictly greater value
+                    // (compareValues(left, right) >= 0 ? left : right).
                     int compare = Arrays.compareUnsigned(tempCellBuffer1.getData(), 0, tempCellBuffer1.getLength(), tempCellBuffer2.getData(), 0, tempCellBuffer2.getLength());
-                    if (compare >= 0) {
-                        // swap the buffers
+                    if (compare < 0) {
+                        // challenger wins: swap buffers so tempCellBuffer1 holds the winner's value
                         tempCellBuffer = tempCellBuffer1;
                         tempCellBuffer1 = tempCellBuffer2;
                         tempCellBuffer2 = tempCellBuffer;
@@ -765,7 +768,11 @@ public class CursorCompactor extends CompactionInfo.Holder
             }
             /** {@link org.apache.cassandra.db.rows.Cell.Serializer#serialize(Cell, ColumnMetadata, DataOutputPlus, LivenessInfo, SerializationHeader)} */
             boolean isDeleted = cellLiveness.isTombstone();
-            boolean isExpiring = cellLiveness.isExpiring();
+            // NOTE: ReusableLivenessInfo.isExpiring() means "has an expiration time", which is
+            // also true for tombstones. Cell flag semantics need AbstractCell.isExpiring(),
+            // i.e. ttl set — and Cell.Serializer treats deleted/expiring as mutually exclusive
+            // (else-if), so a tombstone must never carry IS_EXPIRING or a TTL field.
+            boolean isExpiring = cellLiveness.ttl() != LivenessInfo.NO_TTL;
             boolean useRowTimestamp = !rowLiveness.isEmpty() && cellLiveness.timestamp() == rowLiveness.timestamp();
             boolean useRowTTL = isExpiring && rowLiveness.isExpiring() &&
                                 cellLiveness.ttl() == rowLiveness.ttl() &&
@@ -773,7 +780,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             // Re-write cell flags to reflect resulting contents
             cellFlags &= Cell.Serializer.HAS_EMPTY_VALUE_MASK;
             if (isDeleted) cellFlags |= Cell.Serializer.IS_DELETED_MASK;
-            if (isExpiring) cellFlags |= Cell.Serializer.IS_EXPIRING_MASK;
+            else if (isExpiring) cellFlags |= Cell.Serializer.IS_EXPIRING_MASK;
             if (useRowTimestamp) cellFlags |= Cell.Serializer.USE_ROW_TIMESTAMP_MASK;
             if (useRowTTL) cellFlags |= Cell.Serializer.USE_ROW_TTL_MASK;
             ssTableCursorWriter.writeCellHeader(cellFlags, cellLiveness, cellSource.cellCursor().cellColumn);
@@ -839,6 +846,13 @@ public class CursorCompactor extends CompactionInfo.Holder
             // would otherwise always win (unless it had an empty value), until it expired and was translated to a tombstone
             if (leftLocalDeletionTime != rightLocalDeletionTime)
                 return leftLocalDeletionTime > rightLocalDeletionTime ? LEFT : RIGHT;
+
+            // Matches Cells.resolveRegular: both expiring at the same timestamp with the same
+            // expiration time but different TTLs — the lower TTL is probably from a more recent
+            // UPDATE USING TTL AND TIMESTAMP, so prefer it to be deterministic and closest to
+            // client intent.
+            if (!leftIsTombstone && left.ttl() != right.ttl())
+                return left.ttl() < right.ttl() ? LEFT : RIGHT;
         }
         return COMPARE;
     }
