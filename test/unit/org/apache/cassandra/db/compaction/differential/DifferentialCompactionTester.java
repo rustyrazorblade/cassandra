@@ -34,8 +34,6 @@ import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-import com.google.common.collect.ImmutableSet;
-
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -113,13 +111,37 @@ public abstract class DifferentialCompactionTester extends CQLTester
         final List<CapturedSSTable> sstables = new ArrayList<>();
     }
 
+    /** Creates the CompactionTask for one differential run. MUST honor keepOriginals=true. */
+    public interface TaskFactory
+    {
+        CompactionTask create(ColumnFamilyStore cfs, LifecycleTransaction txn, long gcBefore);
+    }
+
+    public static final TaskFactory DEFAULT_TASK = (cfs, txn, gcBefore) -> new CompactionTask(cfs, txn, gcBefore, true);
+
     /**
      * Runs both compaction paths over the current live sstables of the table and asserts
      * byte + logical equivalence. The byteDiffAllowlist contains component names (e.g.
      * "Statistics.db") that are permitted to differ at the byte level; logical equivalence
      * is always enforced.
      */
-    protected void assertCursorMatchesIterator(ColumnFamilyStore cfs, Set<String> byteDiffAllowlist) throws Exception
+    protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs, Set<String> byteDiffAllowlist) throws Exception
+    {
+        return assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), byteDiffAllowlist, DEFAULT_TASK);
+    }
+
+    /**
+     * Variant for partial-set compactions (inputs is a subset of the live sstables; the rest
+     * stay live and participate in purge-overlap decisions) and for custom CompactionTask
+     * shapes (e.g. multi-output writers via an overridden getCompactionAwareWriter).
+     */
+    /** Returns the iterator-path capture so scenarios can assert structural expectations
+     *  (e.g. multi-output scenarios MUST verify more than one sstable was produced —
+     *  a scenario that does not exercise its mechanism passes vacuously). */
+    protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs,
+                                                         Set<SSTableReader> inputs,
+                                                         Set<String> byteDiffAllowlist,
+                                                         TaskFactory taskFactory) throws Exception
     {
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
         Path scratch = Files.createTempDirectory("differential-compaction");
@@ -133,9 +155,19 @@ public abstract class DifferentialCompactionTester extends CQLTester
         DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
         try
         {
-            CapturedOutput iterator = compactPath(cfs, false, gcBefore, scratch.resolve("iterator"));
-            CapturedOutput cursor = compactPath(cfs, true, gcBefore, scratch.resolve("cursor"));
+            CapturedOutput iterator = compactPath(cfs, inputs, false, gcBefore, scratch.resolve("iterator"), taskFactory);
+            // the input INSTANCES were replaced during restore; re-resolve the subset by descriptor
+            Set<Descriptor> inputDescs = new HashSet<>();
+            for (SSTableReader in : inputs)
+                inputDescs.add(in.descriptor);
+            Set<SSTableReader> reResolved = new HashSet<>();
+            for (SSTableReader live : cfs.getLiveSSTables())
+                if (inputDescs.contains(live.descriptor))
+                    reResolved.add(live);
+            assertEquals("input subset lost across restore", inputs.size(), reResolved.size());
+            CapturedOutput cursor = compactPath(cfs, reResolved, true, gcBefore, scratch.resolve("cursor"), taskFactory);
             assertEquivalentOutputs(iterator, cursor, byteDiffAllowlist);
+            return iterator;
         }
         finally
         {
@@ -144,36 +176,57 @@ public abstract class DifferentialCompactionTester extends CQLTester
     }
 
     /**
-     * Runs one compaction path over the current live sstables, captures the outputs, and
-     * restores the live set to the original inputs so the other path sees identical bytes.
+     * Runs one compaction path over the given input subset (non-participating live sstables
+     * stay live and feed purge-overlap decisions), captures the outputs, and restores the live
+     * set so the other path sees identical bytes.
      */
-    protected CapturedOutput compactPath(ColumnFamilyStore cfs, boolean cursor, long gcBefore, Path scratch) throws Exception
+    protected CapturedOutput compactPath(ColumnFamilyStore cfs,
+                                         Set<SSTableReader> inputs,
+                                         boolean cursor,
+                                         long gcBefore,
+                                         Path scratch,
+                                         TaskFactory taskFactory) throws Exception
     {
         DatabaseDescriptor.setCursorCompactionEnabled(cursor);
 
-        Set<SSTableReader> inputs = ImmutableSet.copyOf(cfs.getLiveSSTables());
         assertFalse("scenario produced no input sstables", inputs.isEmpty());
+        Set<Descriptor> liveBeforeDescs = new HashSet<>();
+        int liveBeforeCount = 0;
+        for (SSTableReader live : cfs.getLiveSSTables())
+        {
+            liveBeforeDescs.add(live.descriptor);
+            liveBeforeCount++;
+        }
         List<Descriptor> inputDescriptors = new ArrayList<>();
         for (SSTableReader in : inputs)
+        {
+            assertTrue("input is not live", liveBeforeDescs.contains(in.descriptor));
             inputDescriptors.add(in.descriptor);
+        }
+        Set<Descriptor> inputDescs = new HashSet<>(inputDescriptors);
 
         if (cursor)
             assertCursorPathWillRun(cfs, inputs, gcBefore);
 
         LifecycleTransaction txn = cfs.getTracker().tryModify(inputs, OperationType.COMPACTION);
         assertNotNull("unable to mark inputs compacting", txn);
-        new CompactionTask(cfs, txn, gcBefore, true /* keepOriginals */).execute(ActiveCompactionsTracker.NOOP);
+        taskFactory.create(cfs, txn, gcBefore).execute(ActiveCompactionsTracker.NOOP);
 
-        // IMPORTANT: with keepOriginals=true the originals (or early-open clones of them, with
-        // moved starts) may remain in the live set as DIFFERENT reader instances. Outputs must
-        // therefore be identified by descriptor, never by instance, or the harness would treat
-        // retained originals as outputs and delete the input files.
-        Set<Descriptor> inputDescs = new HashSet<>(inputDescriptors);
+        // Outputs are identified by descriptor diff against the pre-compaction live set:
+        // with keepOriginals=true the originals (or early-open clones with moved starts) may
+        // remain live as DIFFERENT reader instances, and non-participating sstables are live
+        // throughout. Instance identity is never trusted here.
         List<SSTableReader> liveAfter = new ArrayList<>(cfs.getLiveSSTables());
         List<SSTableReader> outputs = new ArrayList<>();
+        List<SSTableReader> retainedInputClones = new ArrayList<>();
         for (SSTableReader reader : liveAfter)
-            if (!inputDescs.contains(reader.descriptor))
+        {
+            if (!liveBeforeDescs.contains(reader.descriptor))
                 outputs.add(reader);
+            else if (inputDescs.contains(reader.descriptor))
+                retainedInputClones.add(reader);
+            // else: non-participant — leave completely untouched
+        }
         outputs.sort(Comparator.comparing(SSTableReader::getFirst));
 
         CapturedOutput captured = new CapturedOutput();
@@ -186,11 +239,13 @@ public abstract class DifferentialCompactionTester extends CQLTester
                 outputFiles.add(out.descriptor.fileFor(c).toPath());
         }
 
-        // Restore: clear the whole live set (outputs AND any retained/moved-start originals),
-        // delete output files only, then reopen every input fresh from its descriptor so the
-        // second run sees pristine full-range readers identical to the first run's.
-        cfs.getTracker().removeUnsafe(new HashSet<>(liveAfter));
-        for (SSTableReader reader : liveAfter)
+        // Restore: delist + release outputs and any retained input clones, delete output files
+        // only, then reopen every input fresh from its descriptor so the second run sees
+        // pristine full-range readers identical to the first run's.
+        Set<SSTableReader> toRemove = new HashSet<>(outputs);
+        toRemove.addAll(retainedInputClones);
+        cfs.getTracker().removeUnsafe(toRemove);
+        for (SSTableReader reader : toRemove)
             reader.selfRef().release();
         for (Path f : outputFiles)
             Files.deleteIfExists(f);
@@ -204,7 +259,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
             reopened.add(SSTableReader.open(cfs, desc));
         }
         cfs.getTracker().addInitialSSTables(reopened);
-        assertEquals("restore failed: live sstable count", inputs.size(), cfs.getLiveSSTables().size());
+        assertEquals("restore failed: live sstable count", liveBeforeCount, cfs.getLiveSSTables().size());
 
         return captured;
     }
