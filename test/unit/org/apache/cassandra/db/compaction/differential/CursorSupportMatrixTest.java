@@ -30,7 +30,7 @@ import static org.junit.Assert.assertTrue;
 /**
  * Pins the cursor compaction support matrix at the metadata level.
  *
- * Each increment of the cursor completion work (see doc/cursor-compaction-plan.md) flips
+ * Each increment of the cursor completion work flips
  * its row here from unsupported to supported. A change in `unsupportedMetadata` semantics
  * that silently widens or narrows the fallback becomes a test failure instead of a silently
  * different code path in production.
