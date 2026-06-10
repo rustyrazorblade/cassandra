@@ -82,7 +82,7 @@ import static org.junit.Assert.fail;
  *  - the cursor run asserts {@link CursorCompactor#isSupported} up front: a scenario that
  *    silently falls back to the iterator path is a test bug, not a pass.
  *
- * Known limitation (journaled in doc/cursor-compaction-plan.md): nowInSec for TTL expiry
+ * Known limitation: nowInSec for TTL expiry
  * evaluation is taken inside CompactionTask per run; scenarios must not place TTL expiry
  * boundaries within seconds of the test run.
  */
@@ -231,32 +231,35 @@ public abstract class DifferentialCompactionTester extends CQLTester
         // with keepOriginals=true the originals (or early-open clones with moved starts) may
         // remain live as DIFFERENT reader instances, and non-participating sstables are live
         // throughout. Instance identity is never trusted here.
-        List<SSTableReader> liveAfter = new ArrayList<>(cfs.getLiveSSTables());
-        List<SSTableReader> outputs = new ArrayList<>();
         List<SSTableReader> retainedInputClones = new ArrayList<>();
-        for (SSTableReader reader : liveAfter)
-        {
-            if (!liveBeforeDescs.contains(reader.descriptor))
-                outputs.add(reader);
-            else if (inputDescs.contains(reader.descriptor))
-                retainedInputClones.add(reader);
-            // else: non-participant — leave completely untouched
-        }
-        outputs.sort(Comparator.comparing(SSTableReader::getFirst));
+        List<SSTableReader> outputs = identifyOutputs(cfs, liveBeforeDescs, inputDescs, retainedInputClones);
 
         CapturedOutput captured = new CapturedOutput();
-        List<Path> outputFiles = new ArrayList<>();
         int seq = 0;
         for (SSTableReader out : outputs)
-        {
             captured.sstables.add(capture(cfs, out, scratch.resolve("sstable-" + seq++)));
+
+        restoreAfterCompaction(cfs, outputs, retainedInputClones, inputDescriptors, liveBeforeCount);
+
+        return captured;
+    }
+
+    /**
+     * Delists + releases outputs and any retained input clones, deletes output files only,
+     * then reopens every input fresh from its descriptor so a subsequent run sees pristine
+     * full-range readers identical to this run's. Non-participating sstables are untouched.
+     */
+    protected void restoreAfterCompaction(ColumnFamilyStore cfs,
+                                          List<SSTableReader> outputs,
+                                          List<SSTableReader> retainedInputClones,
+                                          List<Descriptor> inputDescriptors,
+                                          int liveBeforeCount) throws Exception
+    {
+        List<Path> outputFiles = new ArrayList<>();
+        for (SSTableReader out : outputs)
             for (Component c : out.descriptor.discoverComponents())
                 outputFiles.add(out.descriptor.fileFor(c).toPath());
-        }
 
-        // Restore: delist + release outputs and any retained input clones, delete output files
-        // only, then reopen every input fresh from its descriptor so the second run sees
-        // pristine full-range readers identical to the first run's.
         Set<SSTableReader> toRemove = new HashSet<>(outputs);
         toRemove.addAll(retainedInputClones);
         cfs.getTracker().removeUnsafe(toRemove);
@@ -275,8 +278,24 @@ public abstract class DifferentialCompactionTester extends CQLTester
         }
         cfs.getTracker().addInitialSSTables(reopened);
         assertEquals("restore failed: live sstable count", liveBeforeCount, cfs.getLiveSSTables().size());
+    }
 
-        return captured;
+    /** Output identification by before/after descriptor diff; see compactPath for rationale. */
+    protected static List<SSTableReader> identifyOutputs(ColumnFamilyStore cfs,
+                                                         Set<Descriptor> liveBeforeDescs,
+                                                         Set<Descriptor> inputDescs,
+                                                         List<SSTableReader> retainedInputClonesOut)
+    {
+        List<SSTableReader> outputs = new ArrayList<>();
+        for (SSTableReader reader : cfs.getLiveSSTables())
+        {
+            if (!liveBeforeDescs.contains(reader.descriptor))
+                outputs.add(reader);
+            else if (inputDescs.contains(reader.descriptor))
+                retainedInputClonesOut.add(reader);
+        }
+        outputs.sort(Comparator.comparing(SSTableReader::getFirst));
+        return outputs;
     }
 
     /**
@@ -284,7 +303,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
      * this scenario, the test would compare iterator vs iterator and pass vacuously. Uses the
      * same isSupported check production uses, on equivalent scanners and controller.
      */
-    private void assertCursorPathWillRun(ColumnFamilyStore cfs, Set<SSTableReader> inputs, long gcBefore) throws Exception
+    protected void assertCursorPathWillRun(ColumnFamilyStore cfs, Set<SSTableReader> inputs, long gcBefore) throws Exception
     {
         try (CompactionController controller = new CompactionController(cfs, inputs, gcBefore);
              AbstractCompactionStrategy.ScannerList scanners =
@@ -384,7 +403,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
             }
             if (!divergences.isEmpty())
                 fail("BYTE divergence in output sstable " + i + " (iterator vs cursor):\n" + String.join("\n", divergences) +
-                     "\nIf a divergence is benign it must be added to the allowlist WITH justification in doc/cursor-compaction-plan.md");
+                     "\nIf a divergence is benign it must be added to the allowlist with a justifying comment next to the allowlist entry");
         }
     }
 
