@@ -31,7 +31,6 @@ import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.DeserializationHelper;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
@@ -93,6 +92,24 @@ public class SSTableCursorReader implements AutoCloseable
         }
     }
 
+    /**
+     * Observes complex (multi-cell) column boundaries during cell iteration: invoked once per
+     * complex column as its header is consumed, INCLUDING deletion-only columns with zero
+     * cells (which produce no readCellHeader result of their own). Arguments are reusable
+     * objects valid only within the callback.
+     */
+    public interface ComplexColumnListener
+    {
+        void onComplexColumn(ColumnMetadata column, DeletionTime complexDeletion, int cellCount);
+    }
+
+    private ComplexColumnListener complexColumnListener;
+
+    public void complexColumnListener(ComplexColumnListener listener)
+    {
+        this.complexColumnListener = listener;
+    }
+
     public class CellCursor {
         public ReusableLivenessInfo rowLiveness;
         public Columns columns;
@@ -101,7 +118,19 @@ public class SSTableCursorReader implements AutoCloseable
         public int columnsIndex;
         public int cellFlags;
         public final ReusableLivenessInfo cellLiveness = new ReusableLivenessInfo();
-        public CellPath cellPath;
+        // Cell path of the current cell, garbage-free: raw bytes in a grow-only scratch
+        // buffer (wire format: vint length + bytes, CollectionType.CollectionPathSerializer —
+        // the single serializer for all complex columns incl. UDTs). length < 0 => no path.
+        public byte[] cellPathBuffer = new byte[32];
+        public int cellPathLength = -1;
+        // Multi-cell column state: cells remaining in the current complex column's run, and
+        // the column-level deletion (LIVE when none or when the row had no complex deletion).
+        public int remainingCellsInColumn;
+        public final DeletionTime.ReusableDeletionTime complexDeletion = DeletionTime.ReusableDeletionTime.live();
+        // true when the last readCellHeader() call produced a cell; false when it only
+        // consumed trailing deletion-only complex column headers (the -1 return)
+        public boolean producedCell;
+        private boolean rowHasComplexDeletion;
         public AbstractType<?> cellType;
         public ColumnMetadata cellColumn;
         private ColumnMetadata[] columnsArray;
@@ -114,8 +143,11 @@ public class SSTableCursorReader implements AutoCloseable
         // reader) or in the >= 64 column fallback.
         private long presentMask;
 
-        void init (Columns columns, long missingColumnsMask, ReusableLivenessInfo rowLiveness)
+        void init (Columns columns, long missingColumnsMask, boolean rowHasComplexDeletion, ReusableLivenessInfo rowLiveness)
         {
+            this.rowHasComplexDeletion = rowHasComplexDeletion;
+            remainingCellsInColumn = 0;
+            complexDeletion.resetLive();
             if (this.columns != columns)
             {
                 // This will be a problem with changing columns
@@ -135,38 +167,75 @@ public class SSTableCursorReader implements AutoCloseable
             this.rowLiveness = rowLiveness;
             columnsIndex = 0;
             cellFlags = 0;
-            cellPath = null;
+            cellPathLength = -1;
             cellType = null;
+            producedCell = false;
         }
 
         public boolean hasNext()
+        {
+            return remainingCellsInColumn > 0 || columnsRemain();
+        }
+
+        private boolean columnsRemain()
         {
             return columnsSize >= 64 ? columnsIndex < columnsSize : presentMask != 0;
         }
 
         /**
-         * For Cell deserialization see {@link Cell.Serializer#deserialize}
+         * For Cell deserialization see {@link Cell.Serializer#deserialize};
+         * for complex (multi-cell) columns see UnfilteredSerializer.readComplexColumn:
+         * per complex column the stream carries [complex DeletionTime if the row flag
+         * HAS_COMPLEX_DELETION is set][cell count vint][cells...], cells path-sorted.
          *
-         * @return true if the cell has a value, false otherwise
+         * @return 1 if the next cell has a value, 0 if it has none (tombstone),
+         *         -1 if no cell remains in this row (any trailing deletion-only complex
+         *         column headers have been consumed; their deletions were surfaced via the
+         *         {@link ComplexColumnListener} if one is set)
          */
-        boolean readCellHeader() throws IOException
+        int readCellHeader() throws IOException
         {
             if (!hasNext()) throw new IllegalStateException();
 
-            // HOTSPOT: suprisingly expensive
-            int currIndex;
-            if (columnsSize >= 64)
+            producedCell = false;
+            while (remainingCellsInColumn == 0)
             {
-                currIndex = columnsIndex++;
+                if (!columnsRemain())
+                    return -1; // trailing deletion-only complex column(s) consumed; no cell
+                // HOTSPOT: suprisingly expensive
+                int currIndex;
+                if (columnsSize >= 64)
+                {
+                    currIndex = columnsIndex++;
+                }
+                else
+                {
+                    currIndex = Long.numberOfTrailingZeros(presentMask);
+                    presentMask &= presentMask - 1; // clear lowest set bit
+                    columnsIndex++;
+                }
+                cellColumn = columnsArray[currIndex];
+                cellType = cellTypeArray[currIndex];
+                if (!cellColumn.isComplex())
+                {
+                    complexDeletion.resetLive();
+                    remainingCellsInColumn = 1;
+                }
+                else
+                {
+                    if (rowHasComplexDeletion)
+                        serializationHeader.readDeletionTime(dataReader, complexDeletion);
+                    else
+                        complexDeletion.resetLive();
+                    remainingCellsInColumn = (int) dataReader.readUnsignedVInt();
+                    if (complexColumnListener != null)
+                        complexColumnListener.onComplexColumn(cellColumn, complexDeletion, remainingCellsInColumn);
+                    // a count of zero (deletion-only column) loops on to the next column
+                }
             }
-            else
-            {
-                currIndex = Long.numberOfTrailingZeros(presentMask);
-                presentMask &= presentMask - 1; // clear lowest set bit
-                columnsIndex++;
-            }
-            cellColumn = columnsArray[currIndex];
-            cellType = cellTypeArray[currIndex];
+            remainingCellsInColumn--;
+            producedCell = true;
+
             cellFlags = dataReader.readUnsignedByte();
             // TODO: specialize common case where flags == HAS_VALUE | USE_ROW_TS?
             boolean hasValue = Cell.Serializer.hasValue(cellFlags);
@@ -185,10 +254,20 @@ public class SSTableCursorReader implements AutoCloseable
             localDeletionTime = Cell.decodeLocalDeletionTime(localDeletionTime, ttl, deserializationHelper);
 
             cellLiveness.reset(timestamp, ttl, localDeletionTime);
-            cellPath = cellColumn.isComplex()
-                            ? cellColumn.cellPathSerializer().deserialize(dataReader)
-                            : null;
-            return hasValue;
+            if (cellColumn.isComplex())
+            {
+                // CollectionType.CollectionPathSerializer wire format: vint length + bytes
+                int pathLength = dataReader.readUnsignedVInt32();
+                if (cellPathBuffer.length < pathLength)
+                    cellPathBuffer = new byte[Math.max(pathLength, cellPathBuffer.length * 2)]; // grow-only, amortized
+                dataReader.readFully(cellPathBuffer, 0, pathLength);
+                cellPathLength = pathLength;
+            }
+            else
+            {
+                cellPathLength = -1;
+            }
+            return hasValue ? 1 : 0;
         }
     }
 
@@ -355,7 +434,9 @@ public class SSTableCursorReader implements AutoCloseable
             return corruptSSTable(e);
         }
 
-        staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(), unfilteredDescriptor.livenessInfo());
+        staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
+                                 UnfilteredSerializer.hasComplexDeletion(unfilteredDescriptor.flags()),
+                                 unfilteredDescriptor.livenessInfo());
         cellCursor = staticRowCellCursor;
         if (!staticRowCellCursor.hasNext())
         {
@@ -467,7 +548,9 @@ public class SSTableCursorReader implements AutoCloseable
         {
             unfilteredDescriptor.loadRow(dataReader, serializationHeader, deserializationHelper, basicUnfilteredFlags);
 
-            rowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(), unfilteredDescriptor.livenessInfo());
+            rowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
+                               UnfilteredSerializer.hasComplexDeletion(unfilteredDescriptor.flags()),
+                               unfilteredDescriptor.livenessInfo());
             cellCursor = rowCellCursor;
             if (!rowCellCursor.hasNext())
             {
@@ -490,7 +573,10 @@ public class SSTableCursorReader implements AutoCloseable
         if (state != State.CELL_HEADER_START) throw new IllegalStateException();
         try
         {
-            if (cellCursor.readCellHeader())
+            int cell = cellCursor.readCellHeader();
+            if (cell < 0)
+                return checkNextFlagsAfterCellValuesEnd();
+            if (cell > 0)
             {
                 return state = State.CELL_VALUE_START;
             }
