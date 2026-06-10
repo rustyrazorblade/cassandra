@@ -516,9 +516,17 @@ public class SSTableCursorWriter implements AutoCloseable
         long unfilteredEndPosition = getPosition();
 
         /**
-         * Matching the: {@link org.apache.cassandra.db.rows.Rows#collectStats} along with above cell level metadata updates
+         * Matching the: {@link org.apache.cassandra.db.rows.Rows#collectStats} along with above cell level metadata updates.
+         * The iterator path only collects row stats for non-empty rows
+         * ({@link org.apache.cassandra.io.sstable.format.SortedTableWriter#addStaticRow} guards with
+         * !row.isEmpty()): an empty static row is still WRITTEN for static-column tables whose
+         * partition has no static values, but it must not count towards totalRows/totalColumnsSet.
+         * Empty == no cells, no liveness timestamp/TTL, no row deletion.
          */
-        metadataCollector.updateColumnSetPerRow(columnsWrittenCount);
+        boolean rowIsEmpty = columnsWrittenCount == 0
+                             && (rowFlags & (HAS_TIMESTAMP | HAS_TTL | HAS_DELETION)) == 0;
+        if (!rowIsEmpty)
+            metadataCollector.updateColumnSetPerRow(columnsWrittenCount);
 
         if (isStatic)
         {
