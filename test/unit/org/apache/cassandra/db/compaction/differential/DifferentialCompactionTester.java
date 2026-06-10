@@ -358,7 +358,10 @@ public abstract class DifferentialCompactionTester extends CQLTester
                               " estimatedKeys=" + sstable.estimatedKeys() +
                               " totalRows=" + stats.totalRows +
                               " totalColumnsSet=" + stats.totalColumnsSet +
-                              " encodingStats=" + sstable.header.stats();
+                              " encodingStats=" + sstable.header.stats() +
+                              " metaEncodingStats=" + stats.encodingStats.minTimestamp + "/" + stats.encodingStats.minLocalDeletionTime + "/" + stats.encodingStats.minTTL +
+                              " tombstoneHist=" + stats.estimatedTombstoneDropTime +
+                              " cellsPerPartition=" + stats.estimatedCellPerPartitionCount.mean() + "/" + stats.estimatedCellPerPartitionCount.count();
 
         // 4. copy components for byte comparison
         Files.createDirectories(dir);
@@ -381,11 +384,12 @@ public abstract class DifferentialCompactionTester extends CQLTester
             CapturedSSTable it = iterator.sstables.get(i);
             CapturedSSTable cu = cursor.sstables.get(i);
 
-            assertEquals("stats summary divergence in output sstable " + i, it.statsSummary, cu.statsSummary);
-
+            // logical first: a row-level diff is far more debuggable than a stats mismatch
             if (!it.json.equals(cu.json))
                 fail("LOGICAL divergence in output sstable " + i + " (iterator vs cursor):\n" + firstJsonDiff(it.json, cu.json) +
                      "\niterator stats: " + it.statsSummary + "\ncursor stats:   " + cu.statsSummary);
+
+            assertEquals("stats summary divergence in output sstable " + i, it.statsSummary, cu.statsSummary);
 
             SortedSet<String> components = new TreeSet<>();
             components.addAll(it.componentSizes.keySet());

@@ -104,10 +104,20 @@ public class SSTableCursorReader implements AutoCloseable
     }
 
     private ComplexColumnListener complexColumnListener;
+    // When set (the merge consumer), a zero-cell (deletion-only) complex column becomes a
+    // stoppable position: readCellHeader returns with producedCell=false, cellColumn set and
+    // cellPathLength=-1 instead of skipping on; the normal CELL_END -> readCellHeader cycle
+    // resumes past it. Default off: plain consumers never see cell-less positions.
+    private boolean pauseAtEmptyComplexColumns;
 
     public void complexColumnListener(ComplexColumnListener listener)
     {
         this.complexColumnListener = listener;
+    }
+
+    public void pauseAtEmptyComplexColumns(boolean pause)
+    {
+        this.pauseAtEmptyComplexColumns = pause;
     }
 
     public class CellCursor {
@@ -123,6 +133,17 @@ public class SSTableCursorReader implements AutoCloseable
         // the single serializer for all complex columns incl. UDTs). length < 0 => no path.
         public byte[] cellPathBuffer = new byte[32];
         public int cellPathLength = -1;
+        private java.nio.ByteBuffer cellPathWindow;
+
+        /** Reusable ByteBuffer view of the current cell path (re-wrapped only when the
+         *  scratch grows); valid until the next readCellHeader. */
+        public java.nio.ByteBuffer cellPathWindow()
+        {
+            if (cellPathWindow == null || cellPathWindow.array() != cellPathBuffer)
+                cellPathWindow = java.nio.ByteBuffer.wrap(cellPathBuffer);
+            cellPathWindow.limit(cellPathLength).position(0);
+            return cellPathWindow;
+        }
         // Multi-cell column state: cells remaining in the current complex column's run, and
         // the column-level deletion (LIVE when none or when the row had no complex deletion).
         public int remainingCellsInColumn;
@@ -230,6 +251,13 @@ public class SSTableCursorReader implements AutoCloseable
                     remainingCellsInColumn = (int) dataReader.readUnsignedVInt();
                     if (complexColumnListener != null)
                         complexColumnListener.onComplexColumn(cellColumn, complexDeletion, remainingCellsInColumn);
+                    if (remainingCellsInColumn == 0 && pauseAtEmptyComplexColumns)
+                    {
+                        // deletion-only column surfaced as a position; cellColumn and
+                        // complexDeletion describe it, no cell fields are valid
+                        cellPathLength = -1;
+                        return 0;
+                    }
                     // a count of zero (deletion-only column) loops on to the next column
                 }
             }

@@ -95,6 +95,22 @@ public class SSTableCursorWriter implements AutoCloseable
     private final DataOutputBuffer rowBuffer = new DataOutputBuffer();
     private final ReusableDeletionTime openMarker = ReusableDeletionTime.live();
 
+    // Complex (multi-cell) column staging for the current row: cells stream into rowBuffer
+    // as usual; per complex column a marker records where its cells start in rowBuffer, the
+    // merged column deletion, and the surviving cell count. writeRowEnd assembles the final
+    // cell section ([deletion if row flag][count][cells] inserted at each marker) into
+    // rowAssemblyBuffer. Rows without complex columns keep the direct path untouched.
+    private static final int MAX_COMPLEX_MARKERS_GROWTH = 8;
+    private int complexMarkerCount;
+    private int[] markerStartOffset = new int[MAX_COMPLEX_MARKERS_GROWTH];
+    private int[] markerEndOffset = new int[MAX_COMPLEX_MARKERS_GROWTH];
+    private int[] markerCellCount = new int[MAX_COMPLEX_MARKERS_GROWTH];
+    private long[] markerDeletionMfda = new long[MAX_COMPLEX_MARKERS_GROWTH];
+    private long[] markerDeletionLdt = new long[MAX_COMPLEX_MARKERS_GROWTH];
+    private final DataOutputBuffer rowAssemblyBuffer = new DataOutputBuffer();
+    private final DeletionTime.ReusableDeletionTime reusableMarkerDeletion = DeletionTime.ReusableDeletionTime.live();
+    private ColumnMetadata lastCellColumn;
+
     private final ColumnMetadata[] staticColumns;
     private final ColumnMetadata[] regularColumns;
     private final IntArrayList missingColumns = new IntArrayList();
@@ -321,6 +337,8 @@ public class SSTableCursorWriter implements AutoCloseable
         // TOD: we should be able to skip the use of the row buffers in this special case, maybe it doesn't matter
         rowHeaderBuffer.clear();
         rowBuffer.clear();
+        complexMarkerCount = 0;
+        lastCellColumn = null;
         columnsWrittenCount = 0;
         missingColumns.clear();
         writeRowEnd(null, false);
@@ -350,6 +368,8 @@ public class SSTableCursorWriter implements AutoCloseable
         rowBuffer.clear();
         columnsWrittenCount = 0;
         nextCellIndex = 0;
+        complexMarkerCount = 0;
+        lastCellColumn = null;
 
         // copy TS/TTL/deletion data
         rowFlags |= writeRowTimeData(livenessInfo, deletionTime, rowHeaderBuffer);
@@ -396,7 +416,43 @@ public class SSTableCursorWriter implements AutoCloseable
         metadataCollector.update(deletionTime);
     }
 
-    public void writeCellHeader(int cellFlags, ReusableLivenessInfo cellLiveness, ColumnMetadata cellColumn) throws IOException
+    /**
+     * Opens a complex (multi-cell) column for the current row with its merged column-level
+     * deletion. Must precede any of the column's writeCellHeader calls; may also stand alone
+     * for a deletion-only column with zero surviving cells.
+     */
+    public void startComplexColumn(ColumnMetadata column, DeletionTime mergedDeletion) throws IOException
+    {
+        closeOpenComplexMarker();
+        advanceColumnSubset(column);
+        if (complexMarkerCount == markerStartOffset.length)
+        {
+            int n = complexMarkerCount + MAX_COMPLEX_MARKERS_GROWTH;
+            markerStartOffset = java.util.Arrays.copyOf(markerStartOffset, n);
+            markerEndOffset = java.util.Arrays.copyOf(markerEndOffset, n);
+            markerCellCount = java.util.Arrays.copyOf(markerCellCount, n);
+            markerDeletionMfda = java.util.Arrays.copyOf(markerDeletionMfda, n);
+            markerDeletionLdt = java.util.Arrays.copyOf(markerDeletionLdt, n);
+        }
+        markerStartOffset[complexMarkerCount] = rowBuffer.getLength();
+        markerEndOffset[complexMarkerCount] = -1;
+        markerCellCount[complexMarkerCount] = 0;
+        markerDeletionMfda[complexMarkerCount] = mergedDeletion.markedForDeleteAt();
+        markerDeletionLdt[complexMarkerCount] = mergedDeletion.localDeletionTime();
+        complexMarkerCount++;
+        lastCellColumn = column;
+        columnsWrittenCount++;
+        // tombstone stats for the merged deletion are collected when the row assembly
+        // writes it (writeDeletionTime updates the collector); counting here would double
+    }
+
+    private void closeOpenComplexMarker()
+    {
+        if (complexMarkerCount > 0 && markerEndOffset[complexMarkerCount - 1] < 0)
+            markerEndOffset[complexMarkerCount - 1] = rowBuffer.getLength();
+    }
+
+    private void advanceColumnSubset(ColumnMetadata cellColumn)
     {
         for (; nextCellIndex < columns.length; nextCellIndex++) {
             if (columns[nextCellIndex].compareTo(cellColumn) == 0)
@@ -406,12 +462,36 @@ public class SSTableCursorWriter implements AutoCloseable
         if (nextCellIndex == columns.length)
             throw new IllegalStateException("Column not found: " + cellColumn +" or cell writes out of order, or bug.");
         nextCellIndex++;
+    }
+
+    /** Appends the current complex cell's path (vint length + bytes) to the cell stream. */
+    public void writeCellPath(byte[] pathBuffer, int pathLength) throws IOException
+    {
+        rowBuffer.writeUnsignedVInt32(pathLength);
+        rowBuffer.write(pathBuffer, 0, pathLength);
+    }
+
+    public void writeCellHeader(int cellFlags, ReusableLivenessInfo cellLiveness, ColumnMetadata cellColumn) throws IOException
+    {
+        if (cellColumn.isComplex())
+        {
+            // subset advance + counting happened in startComplexColumn; just count the cell
+            if (lastCellColumn != cellColumn)
+                throw new IllegalStateException("complex cell without startComplexColumn: " + cellColumn);
+            markerCellCount[complexMarkerCount - 1]++;
+        }
+        else
+        {
+            closeOpenComplexMarker();
+            advanceColumnSubset(cellColumn);
+            lastCellColumn = cellColumn;
+            columnsWrittenCount++;
+        }
         writeCellHeader(cellFlags, cellLiveness, rowBuffer);
     }
 
     private void writeCellHeader(int cellFlags, ReusableLivenessInfo cellLiveness, DataOutputPlus writer) throws IOException
     {
-        columnsWrittenCount++;
         writer.writeByte(cellFlags);
         if (!Cell.Serializer.useRowTimestamp(cellFlags)) {
             long timestamp = cellLiveness.timestamp();
@@ -449,6 +529,43 @@ public class SSTableCursorWriter implements AutoCloseable
         boolean isExtended = isExtended(rowFlags);
         boolean isStatic = isExtended && UnfilteredSerializer.isStatic(rowExtendedFlags);
         int columnsLength = columns.length;
+
+        // Rows containing complex columns assemble their final cell section here: the cells
+        // streamed into rowBuffer; each marker contributes [deletion if HAS_COMPLEX_DELETION]
+        // [count vint] ahead of its cells. HAS_COMPLEX_DELETION (row-level) is decidable only
+        // now: any marker with a non-LIVE deletion sets it, and then EVERY complex column in
+        // the row serializes a deletion (LIVE included), matching UnfilteredSerializer.
+        DataOutputBuffer cellSection = rowBuffer;
+        if (complexMarkerCount > 0)
+        {
+            closeOpenComplexMarker();
+            boolean hasComplexDeletion = false;
+            for (int i = 0; i < complexMarkerCount; i++)
+                hasComplexDeletion |= markerDeletionMfda[i] != DeletionTime.LIVE.markedForDeleteAt()
+                                      || markerDeletionLdt[i] != DeletionTime.LIVE.localDeletionTime();
+            if (hasComplexDeletion)
+                rowFlags |= UnfilteredSerializer.HAS_COMPLEX_DELETION;
+
+            rowAssemblyBuffer.clear();
+            int pos = 0;
+            for (int i = 0; i < complexMarkerCount; i++)
+            {
+                int start = markerStartOffset[i];
+                rowAssemblyBuffer.write(rowBuffer.getData(), pos, start - pos);
+                if (hasComplexDeletion)
+                {
+                    reusableMarkerDeletion.reset(markerDeletionMfda[i], markerDeletionLdt[i]);
+                    writeDeletionTime(reusableMarkerDeletion, rowAssemblyBuffer);
+                }
+                rowAssemblyBuffer.writeUnsignedVInt32(markerCellCount[i]);
+                int end = markerEndOffset[i];
+                rowAssemblyBuffer.write(rowBuffer.getData(), start, end - start);
+                pos = end;
+            }
+            rowAssemblyBuffer.write(rowBuffer.getData(), pos, rowBuffer.getLength() - pos);
+            cellSection = rowAssemblyBuffer;
+        }
+
         if (columnsWrittenCount == columnsLength)
         {
             rowFlags |= HAS_ALL_COLUMNS;
@@ -506,12 +623,14 @@ public class SSTableCursorWriter implements AutoCloseable
             previousUnfilteredSize = offsetInPartition - previousRowStartOffset;
             previousRowStartOffset = offsetInPartition;
         }
-        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength() + rowBuffer.getLength()
+
+
+        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength() + cellSection.getLength()
                                        + TypeSizes.sizeofUnsignedVInt(previousUnfilteredSize));
         dataWriter.writeUnsignedVInt(previousUnfilteredSize);
 
         dataWriter.write(rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
-        dataWriter.write(rowBuffer.getData(), 0, rowBuffer.getLength());
+        dataWriter.write(cellSection.getData(), 0, cellSection.getLength());
 
         long unfilteredEndPosition = getPosition();
 
@@ -526,7 +645,16 @@ public class SSTableCursorWriter implements AutoCloseable
         boolean rowIsEmpty = columnsWrittenCount == 0
                              && (rowFlags & (HAS_TIMESTAMP | HAS_TTL | HAS_DELETION)) == 0;
         if (!rowIsEmpty)
-            metadataCollector.updateColumnSetPerRow(columnsWrittenCount);
+        {
+            // matching Rows.collectStats/StatsAccumulation.accumulateOnColumnData: a complex
+            // column counts toward totalColumnsSet only if it contributed >=1 cell; a
+            // deletion-only column is present in the row (subset encoding above) but uncounted
+            int statsColumnCount = columnsWrittenCount;
+            for (int i = 0; i < complexMarkerCount; i++)
+                if (markerCellCount[i] == 0)
+                    statsColumnCount--;
+            metadataCollector.updateColumnSetPerRow(statsColumnCount);
+        }
 
         if (isStatic)
         {

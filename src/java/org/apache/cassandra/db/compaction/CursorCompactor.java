@@ -41,6 +41,9 @@ import org.apache.cassandra.db.DeletionPurger;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
@@ -182,12 +185,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         // Cell value merge limitations
         for (ColumnMetadata column : metadata.regularAndStaticColumns())
         {
-            if (column.isComplex())
-            {
-                if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Complex columns are not supported. column=" + column);
-                return true;
-            }
-            else if (column.isCounterColumn())
+            if (column.isCounterColumn())
             {
                 if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Counter columns are not supported. column=" + column);
                 return true;
@@ -575,6 +573,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         else
         {
             int cellMergeLimit = rowMergeLimit;
+            currentComplexColumn = null;
             // loop through the columns and copy/merge each cell
             while (true)
             {
@@ -620,6 +619,11 @@ public class CursorCompactor extends CompactionInfo.Holder
         }
     }
 
+    // current output complex column state (reset per row)
+    private ColumnMetadata currentComplexColumn;
+    private boolean complexColumnStarted;
+    private final DeletionTime.ReusableDeletionTime mergedComplexDeletion = DeletionTime.ReusableDeletionTime.live();
+
     private DataOutputBuffer tempCellBuffer1 = new DataOutputBuffer();
     private DataOutputBuffer tempCellBuffer2 = new DataOutputBuffer();
     private final byte[] copyColumnValueBuffer = new byte[4096]; // used to copy cell contents (maybe piecemeal if very large, since we don't have a direct read option)
@@ -633,16 +637,70 @@ public class CursorCompactor extends CompactionInfo.Holder
         cellMergeCounters[cellMergeLimit - 1]++;
         // Nothing to sort, we basically need to pick the correct data to copy.
         // -> the latest data.
-        // TODO: handle counters/complex cells
+        // TODO: handle counter cells
         StatefulCursor cellSource = sstableCursors[0];
         SSTableCursorReader.CellCursor cellCursor = cellSource.cellCursor();
         ReusableLivenessInfo cellLiveness = cellCursor.cellLiveness;
         DataOutputBuffer tempCellBuffer = null;
 
-        if (cellCursor.cellColumn.isComplex())
-            throw new UnsupportedOperationException("TODO: Not ready for complex cells.");
         if (cellCursor.cellColumn.isCounterColumn())
             throw new UnsupportedOperationException("TODO: Not ready for counter cells.");
+
+        DeletionTime effectiveDeletion = activeDeletion;
+        if (cellCursor.cellColumn.isComplex())
+        {
+            // On entering a new output complex column, every source that owns it is
+            // positioned at it (column-ordered streams; this column is the merge minimum,
+            // and deletion-only positions sort ahead of its cells) — so the merged complex
+            // deletion is computable up front, before any of the column's cells is written.
+            if (currentComplexColumn != cellCursor.cellColumn)
+            {
+                currentComplexColumn = cellCursor.cellColumn;
+                complexColumnStarted = false;
+                mergedComplexDeletion.resetLive();
+                for (int i = 0; i < sstableCursors.length; i++)
+                {
+                    StatefulCursor c = sstableCursors[i];
+                    if (c.state() != UNFILTERED_END && isState(c.state(), CELL_VALUE_START | CELL_END)
+                        && c.cellCursor().cellColumn == currentComplexColumn)
+                    {
+                        DeletionTime d = c.cellCursor().complexDeletion;
+                        if (d.supersedes(mergedComplexDeletion))
+                            mergedComplexDeletion.reset(d);
+                    }
+                }
+                // a row/partition/range deletion that supersedes the column deletion deletes
+                // it (ColumnDataReducer semantics): the active deletion already covers it
+                if (!activeDeletion.isLive() && activeDeletion.supersedes(mergedComplexDeletion))
+                    mergedComplexDeletion.resetLive();
+                // the deletion itself purges like any tombstone
+                if (!mergedComplexDeletion.isLive()
+                    && purger.shouldPurge(mergedComplexDeletion.markedForDeleteAt(), mergedComplexDeletion.localDeletionTime()))
+                    mergedComplexDeletion.resetLive();
+                // a surviving deletion is output even with zero surviving cells, so the
+                // column (and the row) must open now; an all-LIVE column opens lazily at its
+                // first surviving cell — and emits nothing if none survives, exactly like
+                // the iterator dropping an empty ComplexColumnData
+                if (!mergedComplexDeletion.isLive())
+                {
+                    if (isRowDropped)
+                    {
+                        isRowDropped = false;
+                        lateStartRow(isStatic);
+                    }
+                    ssTableCursorWriter.startComplexColumn(currentComplexColumn, mergedComplexDeletion);
+                    complexColumnStarted = true;
+                }
+            }
+            if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(activeDeletion))
+                effectiveDeletion = mergedComplexDeletion;
+
+            if (!cellCursor.producedCell)
+            {
+                // deletion-only group: contribution already folded into the merged deletion
+                return isRowDropped;
+            }
+        }
 
         /** See: {@link Cells#reconcile(Cell, Cell)} */
         // Find latest cell value/delete info, only one cell can win(for now... same timestamp handling awaits)!
@@ -664,7 +722,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                 tempCellBuffer = null;
             }
             else { // COMPARE
-                if (activeDeletion.deletes(oCellLiveness)) {
+                if (effectiveDeletion.deletes(oCellLiveness)) {
                     if (oCellSource.state() == CELL_VALUE_START) oCellSource.skipCellValue();
                 }
                 else {
@@ -740,7 +798,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             }
         }
 
-        if (activeDeletion.deletes(cellLiveness) || purger.shouldPurge(cellLiveness, nowInSec))
+        if (effectiveDeletion.deletes(cellLiveness) || purger.shouldPurge(cellLiveness, nowInSec))
         {
             if (Cell.Serializer.hasValue(cellFlags))
             {
@@ -766,6 +824,11 @@ public class CursorCompactor extends CompactionInfo.Holder
                 isRowDropped = false;
                 lateStartRow(isStatic);
             }
+            if (cellSource.cellCursor().cellColumn.isComplex() && !complexColumnStarted)
+            {
+                ssTableCursorWriter.startComplexColumn(currentComplexColumn, mergedComplexDeletion);
+                complexColumnStarted = true;
+            }
             /** {@link org.apache.cassandra.db.rows.Cell.Serializer#serialize(Cell, ColumnMetadata, DataOutputPlus, LivenessInfo, SerializationHeader)} */
             boolean isDeleted = cellLiveness.isTombstone();
             // NOTE: ReusableLivenessInfo.isExpiring() means "has an expiration time", which is
@@ -784,6 +847,8 @@ public class CursorCompactor extends CompactionInfo.Holder
             if (useRowTimestamp) cellFlags |= Cell.Serializer.USE_ROW_TIMESTAMP_MASK;
             if (useRowTTL) cellFlags |= Cell.Serializer.USE_ROW_TTL_MASK;
             ssTableCursorWriter.writeCellHeader(cellFlags, cellLiveness, cellSource.cellCursor().cellColumn);
+            if (cellSource.cellCursor().cellColumn.isComplex())
+                ssTableCursorWriter.writeCellPath(cellSource.cellCursor().cellPathBuffer, cellSource.cellCursor().cellPathLength);
             if (Cell.Serializer.hasValue(cellFlags)) {
                 if (cellSource.state() == CELL_VALUE_START)
                 {
@@ -1318,7 +1383,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private int prepareAndSortCellsForMerge(int rowMergeLimit, int prevCellMergeLimit)
     {
-        sortPerturbedCursors(prevCellMergeLimit, rowMergeLimit, CursorCompactor::compareByColumn);
+        sortPerturbedCursors(prevCellMergeLimit, rowMergeLimit, cellComparator);
         // next row/partition/done
         if (sstableCursors[0].state() == UNFILTERED_END)
             return 0;
@@ -1378,7 +1443,10 @@ public class CursorCompactor extends CompactionInfo.Holder
             throw new IllegalStateException("We only sort through rows ready to be merged/copied. c1 = " + c1 + ", c2 = " + c2);
     }
 
-    private static int compareByColumn(StatefulCursor c1, StatefulCursor c2)
+    // hoisted so sorting never allocates a lambda per call
+    private final java.util.Comparator<StatefulCursor> cellComparator = this::compareByColumnAndPath;
+
+    private int compareByColumnAndPath(StatefulCursor c1, StatefulCursor c2)
     {
         if (c1 == c2) return 0;
         int tState = c1.state();
@@ -1389,10 +1457,34 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         boolean tIsAfterHeader = isState(tState, CELL_VALUE_START | CELL_END);
         boolean oIsAfterHeader = isState(oState, CELL_VALUE_START | CELL_END);
-        if (tIsAfterHeader && oIsAfterHeader)
-            return c1.cellCursor().cellColumn.compareTo(c2.cellCursor().cellColumn);
-        else
+        if (!(tIsAfterHeader && oIsAfterHeader))
             throw new IllegalStateException("We only sort through cells ready to be merged/copied. c1 = " + c1 + ", c2 = " + c2);
+
+        SSTableCursorReader.CellCursor cc1 = c1.cellCursor();
+        SSTableCursorReader.CellCursor cc2 = c2.cellCursor();
+        int byColumn = cc1.cellColumn.compareTo(cc2.cellColumn);
+        if (byColumn != 0 || !cc1.cellColumn.isComplex())
+            return byColumn;
+        // same complex column: deletion-only positions (no cell) sort before any cell so the
+        // column's deletion contributors group ahead of its cells
+        if (!cc1.producedCell || !cc2.producedCell)
+            return Boolean.compare(cc1.producedCell, cc2.producedCell);
+        // type-aware path order (map keys/set elements/list timeuuids compare by their type,
+        // not raw bytes); UDT field indexes are fixed-width unsigned and compare bytewise
+        AbstractType<?> pathType = pathType(cc1.cellColumn);
+        if (pathType == null)
+            return ByteBufferUtil.compareUnsigned(cc1.cellPathWindow(), cc2.cellPathWindow());
+        return pathType.compare(cc1.cellPathWindow(), cc2.cellPathWindow());
+    }
+
+    /** Path comparison type: collections expose it as nameComparator; UDT paths (field
+     *  indexes, fixed 2-byte unsigned) compare bytewise (null). */
+    private static AbstractType<?> pathType(ColumnMetadata column)
+    {
+        AbstractType<?> type = column.type;
+        if (type instanceof CollectionType)
+            return ((CollectionType<?>) type).nameComparator();
+        return null;
     }
 
     // Purge
@@ -1588,7 +1680,13 @@ public class CursorCompactor extends CompactionInfo.Holder
         try
         {
             for (SSTableReader reader : sstables)
-                cursors[i++] = new StatefulCursor(reader, diskAccessMode);
+            {
+                StatefulCursor cursor = new StatefulCursor(reader, diskAccessMode);
+                // the merge consumes deletion-only complex columns as positions (their
+                // column-level deletions must reach the merged output)
+                cursor.pauseAtEmptyComplexColumns(true);
+                cursors[i++] = cursor;
+            }
             return cursors;
         }
         catch (RuntimeException | Error e)

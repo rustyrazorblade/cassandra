@@ -64,6 +64,73 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         assertCursorMatchesIterator(cfs, ALLOWLIST);
     }
 
+    /** Multi-cell collections merged across sstables: element updates, full-collection
+     *  overwrites (complex deletion + cells), deletion-only columns, UDT field merges. */
+    @Test
+    public void multiCellColumnsAcrossSSTables() throws Exception
+    {
+        String udt = createType("CREATE TYPE %s (a int, b text)");
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, u " + udt + ", v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 4; pk++)
+            for (long ck = 0; ck < 8; ck++)
+                execute("INSERT INTO %s (pk, ck, m, s, u, v) VALUES (?, ?, ?, ?, {a: ?, b: ?}, ?)",
+                        pk, ck, map("k" + ck, ck, "shared", pk), set((int) ck, 7), (int) ck, "b" + ck, "v" + ck);
+        flush();
+
+        // sstable 2: element updates (merge new paths into existing columns), UDT field update
+        for (long pk = 0; pk < 4; pk++)
+            for (long ck = 0; ck < 8; ck += 2)
+            {
+                execute("UPDATE %s SET m[?] = ?, s = s + ? WHERE pk = ? AND ck = ?", "added" + ck, ck * 10, set(99), pk, ck);
+                execute("UPDATE %s SET u.b = ? WHERE pk = ? AND ck = ?", "upd" + ck, pk, ck);
+            }
+        flush();
+
+        // sstable 3: full-collection overwrites (complex deletion + fresh cells), deletion-only,
+        // and same-path overwrites (path-equal merge with newer timestamps)
+        execute("UPDATE %s SET m = ? WHERE pk = ? AND ck = ?", map("fresh", 1L), 0L, 0L);
+        execute("DELETE m FROM %s WHERE pk = ? AND ck = ?", 1L, 2L);
+        execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "shared", 555L, 2L, 4L);
+        execute("DELETE s FROM %s WHERE pk = ? AND ck = ?", 3L, 6L);
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** The headline interaction: complex deletions interleaved with range tombstones —
+     *  range deletes shadow whole rows including complex columns, complex deletions shadow
+     *  cells within a column, both merging across sstables. */
+    @Test
+    public void complexDeletionsWithRangeTombstones() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 3; pk++)
+            for (long ck = 0; ck < 20; ck++)
+                execute("INSERT INTO %s (pk, ck, m, v) VALUES (?, ?, ?, ?)", pk, ck, map("a" + ck, ck, "b", pk), "v" + ck);
+        flush();
+
+        // range tombstones over rows with complex data + complex deletions inside surviving rows
+        execute("DELETE FROM %s WHERE pk = 0 AND ck >= 5 AND ck < 12");
+        execute("UPDATE %s SET m = ? WHERE pk = 0 AND ck = ?", map("replaced", 1L), 2L);
+        execute("DELETE m FROM %s WHERE pk = 1 AND ck = ?", 15L);
+        flush();
+
+        // newer writes into ranges + paths shadowed by the earlier complex deletion
+        execute("INSERT INTO %s (pk, ck, m, v) VALUES (?, ?, ?, ?)", 0L, 7L, map("resurrect", 7L), "back");
+        execute("UPDATE %s SET m[?] = ? WHERE pk = 1 AND ck = ?", "post", 999L, 15L);
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
     /** Reversed clustering order changes on-disk ordering and bound comparisons. */
     @Test
     public void descendingClustering() throws Exception
