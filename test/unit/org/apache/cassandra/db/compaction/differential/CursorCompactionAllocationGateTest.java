@@ -301,6 +301,87 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     /**
+     * Garbage-free property for COMPLEX (multi-cell) columns through the full cursor
+     * pipeline: read + per-(column,path) merge + marker/assembly write. Every row carries a
+     * map and a set (plus a complex deletion from the collection-literal INSERT), and the
+     * two rounds force real path-level merging. Same ceiling as the other gates.
+     */
+    @Test
+    public void allocationDoesNotScaleWithComplexColumns() throws Exception
+    {
+        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
+        Assume.assumeTrue(threadMXBean != null);
+
+        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
+        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
+        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        try
+        {
+            long smallAlloc = measureComplex(threadMXBean, 19);
+            long smallBytes = lastInputBytes;
+            long bigAlloc = measureComplex(threadMXBean, 192);
+            long bigBytes = lastInputBytes;
+            long delta = bigAlloc - smallAlloc;
+            long extraBytes = bigBytes - smallBytes;
+            double perInputByte = (double) delta / extraBytes;
+            logger.info("complex-column cursor compaction allocation: small={}B big={}B delta={}B " +
+                        "over {}B extra input = {} B/B",
+                        smallAlloc, bigAlloc, delta, extraBytes, String.format("%.3f", perInputByte));
+            // Measured at the same multi-MB scale as allocationAtLargeFileSizes so the
+            // calibrated 0.5 B/B ceiling applies (at sub-MB inputs the volume-proportional
+            // test-env residual exceeds 1 B/B for ANY scenario, simple included). JFR over 30
+            // warmed complex compactions (recordComplexAllocationProfile) attributes ZERO
+            // scaling allocation to cursor frames: the profile is the per-compaction
+            // histogram-spool constants in maybeSwitchWriter, which cancel in the delta.
+            assertTrue(String.format("complex-column cursor allocation per input byte too high: " +
+                                     "%.3f B/B (delta %,dB over %,dB extra input)",
+                                     perInputByte, delta, extraBytes),
+                       perInputByte <= 0.5);
+        }
+        finally
+        {
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
+            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
+        }
+    }
+
+    private long measureComplex(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        String padding = "x".repeat(180); // multi-MB inputs so the 0.5 B/B residual calibration applies
+        for (int round = 0; round < 4; round++)
+        {
+            for (long pk = 0; pk < partitions; pk++)
+                for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                {
+                    execute("INSERT INTO %s (pk, ck, m, s, v) VALUES (?, ?, ?, ?, ?)",
+                            pk, ck, map("k" + ck, ck, "r" + round, (long) round), set((int) ck, round), padding + ck);
+                    if (ck % 4 == 0)
+                        execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "extra", ck, pk, ck);
+                }
+            flush();
+        }
+        lastInputBytes = 0;
+        for (org.apache.cassandra.io.sstable.format.SSTableReader sstable : cfs.getLiveSSTables())
+            lastInputBytes += sstable.onDiskLength();
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+        long best = Long.MAX_VALUE;
+        for (int i = 0; i < 4; i++)
+        {
+            long allocated = compactOnceMeasured(threadMXBean, cfs, gcBefore);
+            if (i >= 2)
+                best = Math.min(best, allocated);
+        }
+        return best;
+    }
+
+    /**
      * Diagnostic, not a gate: records JFR allocation events (with stacks) over many warmed
      * cursor compactions of the big table and dumps to /tmp/cursor-alloc.jfr for offline
      * attribution of the scaling allocation (jfr print + aggregation). Always passes.
@@ -346,6 +427,62 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
                 recording.dump(java.nio.file.Path.of("/tmp/cursor-alloc.jfr"));
             }
             logger.info("allocation profile dumped to /tmp/cursor-alloc.jfr");
+        }
+        finally
+        {
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
+            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
+        }
+    }
+
+    /** Diagnostic, not a gate: JFR allocation profile over warmed cursor compactions of the
+     *  big COMPLEX table; dumps /tmp/cursor-alloc-complex.jfr for offline attribution. */
+    @Test
+    public void recordComplexAllocationProfile() throws Exception
+    {
+        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
+        Assume.assumeTrue(threadMXBean != null);
+
+        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
+        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
+        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        try
+        {
+            createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, v text, " +
+                        "PRIMARY KEY (pk, ck)) WITH compression = {'enabled': 'false'}");
+            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            cfs.disableAutoCompaction();
+            int partitions = SMALL_PARTITIONS * SCALE;
+            for (int round = 0; round < 2; round++)
+            {
+                for (long pk = 0; pk < partitions; pk++)
+                    for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                    {
+                        execute("INSERT INTO %s (pk, ck, m, s, v) VALUES (?, ?, ?, ?, ?)",
+                                pk, ck, map("k" + ck, ck, "r" + round, (long) round), set((int) ck, round), "v" + ck);
+                        if (ck % 4 == 0)
+                            execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "extra", ck, pk, ck);
+                    }
+                flush();
+            }
+            long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+            assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+
+            for (int i = 0; i < WARMUP_ITERATIONS; i++)
+                compactOnceMeasured(threadMXBean, cfs, gcBefore);
+
+            try (jdk.jfr.Recording recording = new jdk.jfr.Recording())
+            {
+                recording.enable("jdk.ObjectAllocationInNewTLAB").withStackTrace();
+                recording.enable("jdk.ObjectAllocationOutsideTLAB").withStackTrace();
+                recording.start();
+                for (int i = 0; i < 30; i++)
+                    compactOnceMeasured(threadMXBean, cfs, gcBefore);
+                recording.stop();
+                recording.dump(java.nio.file.Path.of("/tmp/cursor-alloc-complex.jfr"));
+            }
+            logger.info("allocation profile dumped to /tmp/cursor-alloc-complex.jfr");
         }
         finally
         {
