@@ -33,6 +33,7 @@ import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.guardrails.Threshold;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -82,6 +83,11 @@ public class SSTableCursorWriter implements AutoCloseable
     private final boolean hasStaticColumns;
 
     private long partitionStart;
+    // Offset within the current partition of the previous non-static unfiltered's first byte.
+    // Used to write the previousUnfilteredSize field exactly as the iterator path does
+    // (see SortedTablePartitionWriter.addUnfiltered): rows/markers write the distance from the
+    // previous unfiltered's start; static rows write 0 and do not advance this offset.
+    private long previousRowStartOffset;
     // ROW contents, needed because of the order of writing and the var int fields
     private int rowFlags; // discovered as we go along
     private int rowExtendedFlags;
@@ -165,6 +171,7 @@ public class SSTableCursorWriter implements AutoCloseable
         hasDistinctLastClustering = false;
 
         partitionStart = dataWriter.position();
+        previousRowStartOffset = 0;
         writePartitionHeader(partitionKey, partitionKeyLength, partitionDeletionTime);
         updateIndexBlockStartOffset(dataWriter.position());
         return indexBlockStartOffset;
@@ -207,9 +214,20 @@ public class SSTableCursorWriter implements AutoCloseable
 
             indexFileWriter.writeUnsignedVInt(partitionStart);
 
-            // if the list of entries has one or fewer entries, no point in index entries.
+            // The trailing block must be counted BEFORE deciding whether to promote the index:
+            // the iterator (BigFormatPartitionWriter.finish + RowIndexEntry.create) promotes when
+            // the total block count INCLUDING the tail is > 1. A tail size of exactly 1 means only
+            // the end-of-partition marker remains since the last cut (the iterator's
+            // firstClustering == null case) and no tail block exists.
+            // The tail width itself includes the end-of-partition marker byte, matching the
+            // iterator, which indexes the final block AFTER SortedTablePartitionWriter.finish()
+            // has written the marker.
+            long tailBlockSize = (partitionEnd - partitionStart) - indexBlockStartOffset;
+            boolean hasTailBlock = tailBlockSize > 1;
+            int totalBlocks = rowIndexEntriesOffsets.size() + (hasTailBlock ? 1 : 0);
+
             /** See: {@link org.apache.cassandra.io.sstable.format.big.RowIndexEntry#create} */
-            if (rowIndexEntriesOffsets.size() <= 1)
+            if (totalBlocks <= 1)
             {
                 /**
                  * {@link RowIndexEntry#serialize(DataOutputPlus, ByteBuffer)}
@@ -218,9 +236,8 @@ public class SSTableCursorWriter implements AutoCloseable
             }
             else {
                 // add last block
-                long indexBlockSize = (partitionEnd - partitionStart - 1) - indexBlockStartOffset;
-                if (indexBlockSize != 0) {
-                    addIndexBlock(partitionEnd - 1, indexBlockSize);
+                if (hasTailBlock) {
+                    addIndexBlock(partitionEnd, tailBlockSize);
                 }
                 // if we have intermeddiate index info elements we also need to serialize the partitionDeletionTime
                 /** {@link RowIndexEntry.IndexedEntry#serialize(DataOutputPlus, ByteBuffer) */
@@ -303,8 +320,6 @@ public class SSTableCursorWriter implements AutoCloseable
         columns = staticColumns;
         // TOD: we should be able to skip the use of the row buffers in this special case, maybe it doesn't matter
         rowHeaderBuffer.clear();
-        // NOTE: if we are to write this value (which is not used), this is where we should compute it.
-        rowHeaderBuffer.writeUnsignedVInt32(0);
         rowBuffer.clear();
         columnsWrittenCount = 0;
         missingColumns.clear();
@@ -335,9 +350,6 @@ public class SSTableCursorWriter implements AutoCloseable
         rowBuffer.clear();
         columnsWrittenCount = 0;
         nextCellIndex = 0;
-
-        // NOTE: if we are to write this value (which is not used), this is where we should compute it.
-        rowHeaderBuffer.writeUnsignedVInt32(0);
 
         // copy TS/TTL/deletion data
         rowFlags |= writeRowTimeData(livenessInfo, deletionTime, rowHeaderBuffer);
@@ -484,8 +496,19 @@ public class SSTableCursorWriter implements AutoCloseable
             dataWriter.write(clustering, 0, clusteringLength);
         }
 
-        // Now that we know the size, write it + the rest of the data
-        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength() + rowBuffer.getLength());
+        // Matches UnfilteredSerializer.serialize: the row size includes the vint length of the
+        // previousUnfilteredSize field, which is written between the size and the row body.
+        // Static rows write 0 and do not advance the chain (UnfilteredSerializer.serializeStaticRow).
+        long previousUnfilteredSize = 0;
+        if (!isStatic)
+        {
+            long offsetInPartition = unfilteredStartPosition - partitionStart;
+            previousUnfilteredSize = offsetInPartition - previousRowStartOffset;
+            previousRowStartOffset = offsetInPartition;
+        }
+        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength() + rowBuffer.getLength()
+                                       + TypeSizes.sizeofUnsignedVInt(previousUnfilteredSize));
+        dataWriter.writeUnsignedVInt(previousUnfilteredSize);
 
         dataWriter.write(rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
         dataWriter.write(rowBuffer.getData(), 0, rowBuffer.getLength());
@@ -528,8 +551,6 @@ public class SSTableCursorWriter implements AutoCloseable
             dataWriter.write(clustering, 0, clusteringLength);
         }
         rowHeaderBuffer.clear();
-        // TODO: previousUnfilteredSize
-        rowHeaderBuffer.writeUnsignedVInt32(0);
 
         if (kind.isBoundary())
         {
@@ -546,7 +567,14 @@ public class SSTableCursorWriter implements AutoCloseable
                 openMarker.resetLive();
         }
 
-        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength());
+        // Matches UnfilteredSerializer.serialize(RangeTombstoneMarker...): marker size includes the
+        // vint length of previousUnfilteredSize, written between the size and the marker body.
+        long offsetInPartition = unfilteredStartPosition - partitionStart;
+        long previousUnfilteredSize = offsetInPartition - previousRowStartOffset;
+        previousRowStartOffset = offsetInPartition;
+        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength()
+                                       + TypeSizes.sizeofUnsignedVInt(previousUnfilteredSize));
+        dataWriter.writeUnsignedVInt(previousUnfilteredSize);
         dataWriter.write(rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
 
         long unfilteredEndPosition = getPosition();
