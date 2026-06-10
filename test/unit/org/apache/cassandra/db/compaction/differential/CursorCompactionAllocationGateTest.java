@@ -236,6 +236,72 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     /**
+     * Sparse rows: every other row omits a column, so the row carries a column-subset
+     * encoding instead of the all-columns flag. Exercises the per-row subset path in
+     * SSTableCursorReader (UnfilteredDescriptor.loadRow -> Columns.deserializeSubset ->
+     * CellCursor.init identity-cache miss), which the full-row scenario cannot see.
+     */
+    @Test
+    public void allocationDoesNotScaleWithSparseRows() throws Exception
+    {
+        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
+        Assume.assumeTrue(threadMXBean != null);
+
+        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
+        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
+        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        try
+        {
+            long smallAlloc = measureSparse(threadMXBean, SMALL_PARTITIONS);
+            long bigAlloc = measureSparse(threadMXBean, SMALL_PARTITIONS * SCALE);
+            long delta = bigAlloc - smallAlloc;
+            logger.info("sparse-row cursor compaction allocation: small={}B big={}B delta={}B ceiling={}B",
+                        smallAlloc, bigAlloc, delta, CEILING_BYTES);
+            assertTrue(String.format("sparse-row cursor compaction allocation scales with data: " +
+                                     "%,dB -> %,dB, delta %,dB exceeds ceiling %,dB",
+                                     smallAlloc, bigAlloc, delta, CEILING_BYTES),
+                       delta <= CEILING_BYTES);
+        }
+        finally
+        {
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
+            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
+        }
+    }
+
+    private long measureSparse(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, PRIMARY KEY (pk, ck)) " +
+                    "WITH compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (int round = 0; round < 2; round++)
+        {
+            for (long pk = 0; pk < partitions; pk++)
+                for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                {
+                    if (ck % 2 == 0)
+                        execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", pk, ck, ck);
+                    else
+                        execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)", pk, ck, ck, "val" + ck);
+                }
+            flush();
+        }
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+        long best = Long.MAX_VALUE;
+        for (int i = 0; i < WARMUP_ITERATIONS + MEASURED_ITERATIONS; i++)
+        {
+            long allocated = compactOnceMeasured(threadMXBean, cfs, gcBefore);
+            if (i >= WARMUP_ITERATIONS)
+                best = Math.min(best, allocated);
+        }
+        return best;
+    }
+
+    /**
      * Diagnostic, not a gate: records JFR allocation events (with stacks) over many warmed
      * cursor compactions of the big table and dumps to /tmp/cursor-alloc.jfr for offline
      * attribution of the scaling allocation (jfr print + aggregation). Always passes.
