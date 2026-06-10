@@ -84,6 +84,10 @@ public interface ClusteringPrefix<V> extends IMeasurableMemory, Clusterable<V>
         SSTABLE_UPPER_BOUND          ( 4,  1, v -> ByteSource.GTGT_NEXT_COMPONENT);
         // @formatter:on
 
+        // Kind.values() allocates a fresh array on every call; deserialization hot paths
+        // (one lookup per row/marker) must use this shared copy instead.
+        public static final Kind[] ALL_KINDS = Kind.values();
+
         private final int comparison;
 
         /**
