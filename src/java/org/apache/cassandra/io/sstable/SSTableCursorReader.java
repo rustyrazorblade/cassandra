@@ -107,7 +107,14 @@ public class SSTableCursorReader implements AutoCloseable
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
 
-        void init (Columns columns, ReusableLivenessInfo rowLiveness)
+        // Remaining PRESENT columns of this row as a bitmask over columnsArray indices.
+        // Garbage-free sparse-row iteration: rows that do not contain every header column
+        // pass the missing-columns mask instead of a freshly allocated Columns subset, so
+        // the identity cache below only rebuilds on a genuine superset change (stable per
+        // reader) or in the >= 64 column fallback.
+        private long presentMask;
+
+        void init (Columns columns, long missingColumnsMask, ReusableLivenessInfo rowLiveness)
         {
             if (this.columns != columns)
             {
@@ -122,6 +129,9 @@ public class SSTableCursorReader implements AutoCloseable
                 }
                 columnsSize = columns.size();
             }
+            presentMask = columnsSize >= 64
+                          ? -1L // fallback: columns is already the exact subset, walk it fully
+                          : ~missingColumnsMask & (columnsSize == 0 ? 0 : (-1L >>> (64 - columnsSize)));
             this.rowLiveness = rowLiveness;
             columnsIndex = 0;
             cellFlags = 0;
@@ -131,7 +141,7 @@ public class SSTableCursorReader implements AutoCloseable
 
         public boolean hasNext()
         {
-            return columnsIndex < columnsSize;
+            return columnsSize >= 64 ? columnsIndex < columnsSize : presentMask != 0;
         }
 
         /**
@@ -141,10 +151,20 @@ public class SSTableCursorReader implements AutoCloseable
          */
         boolean readCellHeader() throws IOException
         {
-            if (!(columnsIndex < columnsSize)) throw new IllegalStateException();
+            if (!hasNext()) throw new IllegalStateException();
 
             // HOTSPOT: suprisingly expensive
-            int currIndex = columnsIndex++;
+            int currIndex;
+            if (columnsSize >= 64)
+            {
+                currIndex = columnsIndex++;
+            }
+            else
+            {
+                currIndex = Long.numberOfTrailingZeros(presentMask);
+                presentMask &= presentMask - 1; // clear lowest set bit
+                columnsIndex++;
+            }
             cellColumn = columnsArray[currIndex];
             cellType = cellTypeArray[currIndex];
             cellFlags = dataReader.readUnsignedByte();
@@ -335,7 +355,7 @@ public class SSTableCursorReader implements AutoCloseable
             return corruptSSTable(e);
         }
 
-        staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.livenessInfo());
+        staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(), unfilteredDescriptor.livenessInfo());
         cellCursor = staticRowCellCursor;
         if (!staticRowCellCursor.hasNext())
         {
@@ -447,7 +467,7 @@ public class SSTableCursorReader implements AutoCloseable
         {
             unfilteredDescriptor.loadRow(dataReader, serializationHeader, deserializationHelper, basicUnfilteredFlags);
 
-            rowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.livenessInfo());
+            rowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(), unfilteredDescriptor.livenessInfo());
             cellCursor = rowCellCursor;
             if (!rowCellCursor.hasNext())
             {
