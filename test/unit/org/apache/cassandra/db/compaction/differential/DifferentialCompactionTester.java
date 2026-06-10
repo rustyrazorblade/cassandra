@@ -143,7 +143,22 @@ public abstract class DifferentialCompactionTester extends CQLTester
                                                          Set<String> byteDiffAllowlist,
                                                          TaskFactory taskFactory) throws Exception
     {
-        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        return assertCursorMatchesIterator(cfs, inputs, byteDiffAllowlist, taskFactory,
+                                           cfs.getDefaultGcBefore(FBUtilities.nowInSeconds()));
+    }
+
+    /**
+     * Variant with an explicit gcBefore: lets scenarios place purge decisions EXACTLY at the
+     * boundary (purge requires localDeletionTime < gcBefore) without controlling the wall
+     * clock — read the actual deletion time from the flushed sstable's stats, then run with
+     * gcBefore == ldt (retained) and gcBefore == ldt + 1 (purged).
+     */
+    protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs,
+                                                         Set<SSTableReader> inputs,
+                                                         Set<String> byteDiffAllowlist,
+                                                         TaskFactory taskFactory,
+                                                         long gcBefore) throws Exception
+    {
         Path scratch = Files.createTempDirectory("differential-compaction");
 
         // Early open must be off for keepOriginals to actually keep originals:
