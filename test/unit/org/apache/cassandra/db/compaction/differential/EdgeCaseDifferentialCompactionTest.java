@@ -1,0 +1,350 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.cassandra.db.compaction.differential;
+
+import java.util.Set;
+
+import org.junit.Test;
+
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.utils.ByteBufferUtil;
+
+/**
+ * Edge-case corpus for the differential cursor-vs-iterator compaction harness, covering the
+ * CURRENTLY SUPPORTED cursor compaction surface (see CursorCompactor.isSupported). Every
+ * scenario here must run the cursor path for real — the harness fails loudly on silent
+ * fallback. Scenarios for unsupported shapes belong in CursorSupportMatrixTest instead.
+ */
+public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTester
+{
+    private static final Set<String> ALLOWLIST = Set.of();
+
+    /** Reversed clustering order changes on-disk ordering and bound comparisons. */
+    @Test
+    public void descendingClustering() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH CLUSTERING ORDER BY (ck DESC)");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 5; pk++)
+                for (long ck = 0; ck < 30; ck++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "r" + round + "v" + ck);
+            execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?", (long) round, 5L, 15L);
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Multi-component clusterings: mixed types, shared prefixes, per-component bounds. */
+    @Test
+    public void compositeClustering() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck1 text, ck2 int, ck3 bigint, v text, " +
+                    "PRIMARY KEY (pk, ck1, ck2, ck3))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        String[] names = { "alpha", "beta", "gamma", "" /* empty string component */ };
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 4; pk++)
+                for (String ck1 : names)
+                    for (int ck2 = 0; ck2 < 5; ck2++)
+                        execute("INSERT INTO %s (pk, ck1, ck2, ck3, v) VALUES (?, ?, ?, ?, ?)",
+                                pk, ck1, ck2, (long) round, "v" + round);
+            // prefix range delete: full ck1, partial (ck1, ck2) prefix
+            execute("DELETE FROM %s WHERE pk = ? AND ck1 = ?", (long) round, "beta");
+            execute("DELETE FROM %s WHERE pk = ? AND ck1 = ? AND ck2 >= ? AND ck2 < ?",
+                    (long) round, "gamma", 1, 4);
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Wide partition crossing column-index block boundaries (indexed RowIndexEntry path). */
+    @Test
+    public void widePartitionCrossingIndexBlocks() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        String padding = "x".repeat(200);
+        // two sstables, each with the same single wide partition (~4000 rows * ~200B >> 64KiB index block)
+        for (int round = 0; round < 2; round++)
+        {
+            for (long ck = 0; ck < 4000; ck++)
+                execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ck, padding + "-" + round + "-" + ck);
+            // plus range tombstones inside the wide partition
+            execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?", 1L, round * 500L, round * 500L + 250L);
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Partition that crosses the column-index block threshold exactly once: the index has one
+     * cut block plus a tail. Iterator promotes the index (2 entries); exercises the cursor's
+     * promotion decision boundary (rowIndexEntriesOffsets.size() <= 1 check happens before the
+     * tail block is added).
+     */
+    @Test
+    public void partitionCrossingOneIndexBlock() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        String padding = "x".repeat(200);
+        // ~6KB partition: crosses the test config's column_index_size (4KiB) exactly once,
+        // producing one cut block plus a tail — the index promotion boundary
+        for (int round = 0; round < 2; round++)
+        {
+            for (long ck = 0; ck < 30; ck++)
+                execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ck, padding + "-" + round);
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Overlapping range tombstones across sstables: boundary markers must merge identically. */
+    @Test
+    public void overlappingRangeTombstones() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 3; pk++)
+            for (long ck = 0; ck < 100; ck++)
+                execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "v" + ck);
+        flush();
+
+        // sstable 2: ranges [10, 50), [60, 70]
+        execute("DELETE FROM %s WHERE pk = 0 AND ck >= 10 AND ck < 50");
+        execute("DELETE FROM %s WHERE pk = 0 AND ck >= 60 AND ck <= 70");
+        flush();
+
+        // sstable 3: ranges overlapping/adjacent to sstable 2's: [30, 65), (70, 80]
+        execute("DELETE FROM %s WHERE pk = 0 AND ck >= 30 AND ck < 65");
+        execute("DELETE FROM %s WHERE pk = 0 AND ck > 70 AND ck <= 80");
+        // and exact adjacency in another partition: [10,20) then [20,30)
+        execute("DELETE FROM %s WHERE pk = 1 AND ck >= 10 AND ck < 20");
+        flush();
+
+        execute("DELETE FROM %s WHERE pk = 1 AND ck >= 20 AND ck < 30");
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Frozen collections and tuples are single cells and inside the supported surface. */
+    @Test
+    public void frozenCollections() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, " +
+                    "m frozen<map<text, bigint>>, l frozen<list<text>>, s frozen<set<int>>, " +
+                    "t frozen<tuple<int, text>>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 5; pk++)
+                for (long ck = 0; ck < 10; ck++)
+                    execute("INSERT INTO %s (pk, ck, m, l, s, t) VALUES (?, ?, ?, ?, ?, (?, ?))",
+                            pk, ck,
+                            map("k" + round, ck, "x", (long) round),
+                            list("a" + round, "b" + ck),
+                            set((int) ck, round, 42),
+                            round, "tup" + ck);
+            execute("DELETE m FROM %s WHERE pk = ? AND ck = ?", 0L, (long) round);
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** TTLs: live expiring cells and already-expired cells (expiry far from run boundaries). */
+    @Test
+    public void expiringCells() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, v2 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // long TTLs: alive during both runs
+        for (long pk = 0; pk < 5; pk++)
+            for (long ck = 0; ck < 10; ck++)
+                execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?) USING TTL 86400", pk, ck, "a" + ck, "b" + ck);
+        flush();
+
+        // short TTLs: expired well before either run
+        for (long ck = 0; ck < 10; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?) USING TTL 1", 1L, ck, "expired" + ck);
+        // mixed: row with one TTL'd and one permanent cell
+        for (long ck = 0; ck < 10; ck++)
+            execute("UPDATE %s USING TTL 86400 SET v1 = ? WHERE pk = ? AND ck = ?", "ttl" + ck, 2L, ck);
+        flush();
+
+        Thread.sleep(2000); // let the short TTLs expire well before the first run
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Same-timestamp conflicting writes: reconciliation must tie-break identically. */
+    @Test
+    public void timestampTies() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 20; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 1L, ck, "aaa" + ck);
+        flush();
+
+        for (long ck = 0; ck < 20; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 1L, ck, "zzz" + ck);
+        flush();
+
+        // tombstone vs write at the same timestamp: delete wins
+        execute("DELETE FROM %s USING TIMESTAMP 2000 WHERE pk = 1 AND ck = 5");
+        for (long ck = 4; ck < 7; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 2000", 1L, ck, "tie" + ck);
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Newer partition deletion shadowing older data across several sstables. */
+    @Test
+    public void shadowedPartitions() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 6; pk++)
+                for (long ck = 0; ck < 10; ck++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "r" + round);
+            flush();
+        }
+        execute("DELETE FROM %s WHERE pk = 2");
+        execute("DELETE FROM %s WHERE pk = 3");
+        // resurrection after the partition delete
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 3L, 0L, "alive-again");
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Single-input compaction: pure rewrite, no merge. */
+    @Test
+    public void singleInputSSTable() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 10; pk++)
+            for (long ck = 0; ck < 10; ck++)
+                execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "v" + ck);
+        execute("DELETE FROM %s WHERE pk = 0 AND ck >= 2 AND ck < 6");
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Many inputs: 8-way merge exercises the merge heap harder than the usual 2-4. */
+    @Test
+    public void eightWayMerge() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 8; round++)
+        {
+            // partial, interleaved coverage: each sstable covers a sliding window
+            for (long pk = round; pk < round + 6; pk++)
+                for (long ck = 0; ck < 10; ck++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "r" + round + "c" + ck);
+            if (round % 2 == 0)
+                execute("DELETE FROM %s WHERE pk = ? AND ck = ?", (long) round, 3L);
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Disjoint inputs: no overlapping partitions, pure concatenation. */
+    @Test
+    public void disjointInputs() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = round * 100; pk < round * 100 + 10; pk++)
+                for (long ck = 0; ck < 5; ck++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "v" + ck);
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** Empty (zero-length) values are valid and distinct from null; both must survive merge. */
+    @Test
+    public void emptyAndNullValues() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, v2 blob, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 10; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)", 1L, ck, "value" + ck, ByteBufferUtil.bytes("cafe"));
+        flush();
+
+        // empty-string / empty-blob overwrites
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)", 1L, ck, "", ByteBufferUtil.EMPTY_BYTE_BUFFER);
+        // null overwrites (cell tombstones)
+        for (long ck = 5; ck < 8; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, null, null)", 1L, ck);
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+}
