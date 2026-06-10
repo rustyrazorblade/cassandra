@@ -54,7 +54,7 @@ import static org.apache.cassandra.utils.Generators.IDENTIFIER_GEN;
  * Reproducing a failure: every failure message is wrapped in a seed; plug it into
  * {@code withFixedSeed} below.
  *
- * Known coverage gaps (deliberate, journaled in doc/cursor-compaction-plan.md): null/empty
+ * Known coverage gaps (deliberate): null/empty
  * value domains and range deletes are exercised by the deterministic corpus only.
  */
 public class RandomDifferentialCompactionTest extends DifferentialCompactionTester
