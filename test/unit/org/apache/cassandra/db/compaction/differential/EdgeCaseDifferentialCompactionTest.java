@@ -35,6 +35,35 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
 {
     private static final Set<String> ALLOWLIST = Set.of();
 
+    /**
+     * Static-column table where some partitions have NO static values: an empty static row is
+     * written for those partitions but must not be counted in stats (totalRows/totalColumnsSet).
+     * Found by the randomized soak (finding #7); the original staticRows scenario gave every
+     * partition static data and so never produced an empty static row.
+     */
+    @Test
+    public void emptyStaticRows() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, s1 text static, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 2; round++)
+        {
+            for (long pk = 0; pk < 8; pk++)
+            {
+                // only even partitions ever get a static value
+                if (pk % 2 == 0)
+                    execute("INSERT INTO %s (pk, s1, ck, v) VALUES (?, ?, ?, ?)", pk, "static" + pk, (long) round, "v" + round);
+                else
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, (long) round, "v" + round);
+            }
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
     /** Reversed clustering order changes on-disk ordering and bound comparisons. */
     @Test
     public void descendingClustering() throws Exception
