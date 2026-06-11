@@ -150,8 +150,8 @@ public class BigCursorIndexWriter extends CursorIndexWriter
     }
 
     @Override
-    public void endPartition(byte[] key, int keyLength, int headerLength,
-                             DeletionTime partitionDeletionTime, long partitionEnd) throws IOException
+    public void endPartition(org.apache.cassandra.db.DecoratedKey decoratedKey, byte[] key, int keyLength,
+                             int headerLength, DeletionTime partitionDeletionTime, long partitionEnd) throws IOException
     {
         /**
          * {@link BigTableWriter#createRowIndexEntry(org.apache.cassandra.db.DecoratedKey, DeletionTime, long)}

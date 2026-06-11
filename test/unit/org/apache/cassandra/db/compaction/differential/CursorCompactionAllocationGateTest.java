@@ -72,6 +72,13 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     private static final int MEASURED_ITERATIONS = 3;
     private static final long CEILING_BYTES = 512 * 1024;
 
+    /** Format variants override: BTI adds inherent per-partition index work (trie nodes,
+     *  key snapshot, builder internals — paid by the iterator path too). */
+    protected long ceilingBytes()
+    {
+        return CEILING_BYTES;
+    }
+
     @Test
     public void allocationDoesNotScaleWithRows() throws Exception
     {
@@ -96,13 +103,13 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
 
             logger.info("cursor compaction allocation: small={}B big={}B delta={}B ceiling={}B " +
                         "(iterator path for context: small={}B big={}B delta={}B)",
-                        smallAlloc, bigAlloc, delta, CEILING_BYTES,
+                        smallAlloc, bigAlloc, delta, ceilingBytes(),
                         smallIter, bigIter, bigIter - smallIter);
             assertTrue(String.format("cursor compaction allocation scales with data: " +
                                      "%,dB (small) -> %,dB (big), delta %,dB exceeds ceiling %,dB. " +
                                      "A per-row/cell allocation has been introduced on the cursor hot path.",
                                      smallAlloc, bigAlloc, delta, CEILING_BYTES),
-                       delta <= CEILING_BYTES);
+                       delta <= ceilingBytes());
         }
         finally
         {
@@ -256,11 +263,11 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             long bigAlloc = measureSparse(threadMXBean, SMALL_PARTITIONS * SCALE);
             long delta = bigAlloc - smallAlloc;
             logger.info("sparse-row cursor compaction allocation: small={}B big={}B delta={}B ceiling={}B",
-                        smallAlloc, bigAlloc, delta, CEILING_BYTES);
+                        smallAlloc, bigAlloc, delta, ceilingBytes());
             assertTrue(String.format("sparse-row cursor compaction allocation scales with data: " +
                                      "%,dB -> %,dB, delta %,dB exceeds ceiling %,dB",
                                      smallAlloc, bigAlloc, delta, CEILING_BYTES),
-                       delta <= CEILING_BYTES);
+                       delta <= ceilingBytes());
         }
         finally
         {

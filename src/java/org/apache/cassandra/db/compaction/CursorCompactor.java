@@ -142,7 +142,8 @@ public class CursorCompactor extends CompactionInfo.Holder
             }
         }
         // BTI index writing is not supported yet
-        if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat))
+        if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat
+              || DatabaseDescriptor.getSelectedSSTableFormat() instanceof org.apache.cassandra.io.sstable.format.bti.BtiFormat))
         {
             if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only BIG sstable output format is supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
             return false;
@@ -455,7 +456,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         boolean partitionWritten = isPartitionStarted();
         if (partitionWritten)
         {
-            ssTableCursorWriter.writePartitionEnd(partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength);
+            ssTableCursorWriter.writePartitionEnd(partitionDescriptor.key(), partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength);
             // update metadata tracking of min/max clustering on last unfiltered
             if (unfilteredCount > 1) {
                 ssTableCursorWriter.updateClusteringMetadata(lastClustering);
