@@ -783,4 +783,157 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
 
         assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
     }
+
+    /**
+     * Nested types (task-15 M5): multi-cell collections whose VALUES are frozen collections,
+     * non-frozen UDTs containing frozen-collection fields, UDT-in-UDT, and tuples — the
+     * increment-2 machinery over nested single-cell payloads, merged and deleted across
+     * sstables.
+     */
+    @Test
+    public void nestedTypes() throws Exception
+    {
+        String inner = createType("CREATE TYPE %s (xs frozen<list<int>>, name text)");
+        String outer = createType("CREATE TYPE %s (i frozen<" + inner + ">, tag text)");
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, frozen<list<int>>>, " +
+                    "u " + inner + ", o " + outer + ", t tuple<int, text>, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 3; pk++)
+            for (long ck = 0; ck < 6; ck++)
+                execute("INSERT INTO %s (pk, ck, m, u, o, t) VALUES (?, ?, ?, " +
+                        "{xs: [1, 2], name: ?}, {i: {xs: [3], name: ?}, tag: ?}, (?, ?))",
+                        pk, ck, map("a", list(1, 2), "b", list((int) ck)),
+                        "n" + ck, "deep" + ck, "g" + ck, (int) ck, "t" + ck);
+        flush();
+
+        // element updates with fresh frozen-list values, UDT field updates (incl. the
+        // frozen-collection field as a single cell), element tombstone, complex deletion,
+        // tuple overwrite
+        for (long pk = 0; pk < 3; pk++)
+        {
+            execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "a", list(9, 9, 9), pk, 0L);
+            execute("UPDATE %s SET u.name = ?, u.xs = ? WHERE pk = ? AND ck = ?", "upd", list(7), pk, 1L);
+            execute("UPDATE %s SET o.tag = ? WHERE pk = ? AND ck = ?", "retag", pk, 2L);
+            execute("DELETE m[?] FROM %s WHERE pk = ? AND ck = ?", "b", pk, 3L);
+            execute("DELETE u FROM %s WHERE pk = ? AND ck = ?", pk, 4L);
+            execute("INSERT INTO %s (pk, ck, t) VALUES (?, ?, (?, ?))", pk, 5L, 42, "new");
+        }
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /** Vector and duration columns (task-15 M5): fixed-dimension float vectors and the
+     *  variable-length duration encoding as ordinary single cells, overwritten and
+     *  null-overwritten (cell tombstone) across sstables. */
+    @Test
+    public void vectorAndDuration() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, vec vector<float, 3>, dur duration, v text, " +
+                    "PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 10; ck++)
+            execute("INSERT INTO %s (pk, ck, vec, dur, v) VALUES (?, ?, [1.5, 2.5, " + ck + ".0], 2h30m, ?)",
+                    1L, ck, "v" + ck);
+        flush();
+
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, vec, dur, v) VALUES (?, ?, [9.0, 8.0, 7.0], 45s500ms, ?)",
+                    1L, ck, "w" + ck);
+        // null overwrites: cell tombstones for vector and duration cells
+        execute("INSERT INTO %s (pk, ck, vec, dur) VALUES (?, ?, null, null)", 1L, 7L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * More than 64 regular columns (task-15 M5): rows lacking columns switch from the
+     * 64-bit-mask column-subset encoding to the structurally different large-subset wire
+     * format (the documented allocating fallback from finding #9) — byte-compared here for
+     * the first time; previously only the old simple-suite exercised it without comparing
+     * the paths against each other.
+     */
+    @Test
+    public void over64Columns() throws Exception
+    {
+        StringBuilder ddl = new StringBuilder("CREATE TABLE %s (pk bigint, ck bigint");
+        for (int i = 0; i < 70; i++)
+            ddl.append(", c").append(i).append(" int");
+        ddl.append(", PRIMARY KEY (pk, ck))");
+        createTable(ddl.toString());
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // sparse rows: each ck sets a sliding 10-column window (subset encoding for >64 columns)
+        for (int round = 0; round < 2; round++)
+        {
+            for (long ck = 0; ck < 14; ck++)
+            {
+                StringBuilder stmt = new StringBuilder("INSERT INTO %s (pk, ck");
+                int base = (int) ck * 5 + round * 3;
+                for (int i = 0; i < 10; i++)
+                    stmt.append(", c").append((base + i) % 70);
+                stmt.append(") VALUES (?, ?");
+                for (int i = 0; i < 10; i++)
+                    stmt.append(", ").append(base + i);
+                stmt.append(')');
+                execute(stmt.toString(), 1L, ck);
+            }
+            // one full row per round: the HAS_ALL_COLUMNS path next to large subsets
+            StringBuilder full = new StringBuilder("INSERT INTO %s (pk, ck");
+            for (int i = 0; i < 70; i++)
+                full.append(", c").append(i);
+            full.append(") VALUES (?, ?");
+            for (int i = 0; i < 70; i++)
+                full.append(", ").append(i);
+            full.append(')');
+            execute(full.toString(), 1L, 99L);
+            flush();
+        }
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * ODD superset size at the subset-encoding mode boundary (finding #12, second bug):
+     * with 71 columns, the encoder and decoder must agree on present-index vs missing-index
+     * mode at exactly presentCount == 35 (the integer-division boundary of supersetCount/2).
+     * Rows at 34/35/36 present columns straddle the boundary from both sides.
+     */
+    @Test
+    public void over64ColumnsOddSupersetBoundary() throws Exception
+    {
+        StringBuilder ddl = new StringBuilder("CREATE TABLE %s (pk bigint, ck bigint");
+        for (int i = 0; i < 71; i++)
+            ddl.append(", c").append(i).append(" int");
+        ddl.append(", PRIMARY KEY (pk, ck))");
+        createTable(ddl.toString());
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 2; round++)
+        {
+            long ck = 0;
+            for (int present : new int[]{ 34, 35, 36, 70 })
+            {
+                StringBuilder stmt = new StringBuilder("INSERT INTO %s (pk, ck");
+                for (int i = 0; i < present; i++)
+                    stmt.append(", c").append((i + round) % 71); // shift per round so the merge unions
+                stmt.append(") VALUES (?, ?");
+                for (int i = 0; i < present; i++)
+                    stmt.append(", ").append(i);
+                stmt.append(')');
+                execute(stmt.toString(), 1L, ck++);
+            }
+            flush();
+        }
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
 }

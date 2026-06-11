@@ -664,24 +664,30 @@ public class SSTableCursorWriter implements AutoCloseable
 
     private void encodeLargeColumnsSubset() throws IOException
     {
-        // no columns are present, nothing to write
         rowHeaderBuffer.writeUnsignedVInt32(missingColumns.size());
-        if (missingColumns.size() > columns.length / 2)
+        // Mode selection must mirror Columns.Serializer.serializeLargeSubset AND its
+        // deserializer exactly: present-index mode iff presentCount < supersetCount / 2.
+        // The previous condition (missing > supersetCount / 2) agreed for even superset
+        // sizes but flipped the mode for odd sizes at missing == supersetCount/2 + 1,
+        // which the deserializer then read in the WRONG mode — corrupted output.
+        int presentCount = columns.length - missingColumns.size();
+        if (presentCount < columns.length / 2)
         {
-            // write present columns
+            // write present column indices: the gaps between missing indices, INCLUDING the
+            // tail after the last missing index — the previous tail loop's bound was the
+            // last missing index itself (vacuously empty), so present columns sorting after
+            // the last missing one were silently dropped from the encoding and the
+            // deserializer consumed row-body bytes as column indices — corrupted output
             int presentIndex = 0;
-            int missingIndex = 0;
             for (int i = 0; i < missingColumns.size(); i++)
             {
-                missingIndex = missingColumns.get(i);
+                int missingIndex = missingColumns.get(i);
                 for (; presentIndex < missingIndex; presentIndex++)
                     rowHeaderBuffer.writeUnsignedVInt32(presentIndex);
                 presentIndex = missingIndex + 1;
             }
-            if (missingIndex < columns.length-1) {
-                for (; presentIndex < missingIndex; presentIndex++)
-                    rowHeaderBuffer.writeUnsignedVInt32(presentIndex);
-            }
+            for (; presentIndex < columns.length; presentIndex++)
+                rowHeaderBuffer.writeUnsignedVInt32(presentIndex);
         }
         else
         {

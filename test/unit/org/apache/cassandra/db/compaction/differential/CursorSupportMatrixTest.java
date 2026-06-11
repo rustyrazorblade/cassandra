@@ -118,6 +118,26 @@ public class CursorSupportMatrixTest extends CQLTester
         }
     }
 
+    /** Task-15 hardening pins: vector and duration are inside the supported surface. */
+    @Test
+    public void vectorAndDurationSupported()
+    {
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, vec vector<float, 3>, dur duration, " +
+                        "PRIMARY KEY (pk, ck))");
+    }
+
+    /** Task-15 hardening pins: nested types (collections of frozen collections, UDTs holding
+     *  frozen collections, UDT-in-UDT) are inside the supported surface. */
+    @Test
+    public void nestedTypesSupported()
+    {
+        String inner = createType("CREATE TYPE %s (xs frozen<list<int>>, name text)");
+        String outer = createType("CREATE TYPE %s (i frozen<" + inner + ">, tag text)");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, " +
+                        "m map<text, frozen<list<int>>>, u " + inner + ", o " + outer + ", " +
+                        "PRIMARY KEY (pk, ck))");
+    }
+
     /** Increment 5 flips this to supported. */
     @Test
     public void countersUnsupported()
