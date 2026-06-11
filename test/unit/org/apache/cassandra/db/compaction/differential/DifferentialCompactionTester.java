@@ -184,6 +184,46 @@ public abstract class DifferentialCompactionTester extends CQLTester
     }
 
     /**
+     * Differential at TWO generations: the normal differential first (gen 1), then the inputs
+     * are genuinely compacted through the CURSOR path and the differential runs again over the
+     * cursor-produced outputs (gen 2). Write-side corruption that only manifests when the next
+     * merge re-reads the output — the increment-2 HAS_COMPLEX_DELETION flag bug class, which
+     * desynced the FOLLOWING compaction, not its own — fails gen 2 loudly here instead of
+     * surviving until production recompacts.
+     *
+     * Returns the GEN-1 iterator capture: scenario structural assertions target gen 1, whose
+     * shape the scenario controls directly.
+     */
+    protected CapturedOutput assertCursorMatchesIteratorAcrossGenerations(ColumnFamilyStore cfs,
+                                                                          Set<String> byteDiffAllowlist) throws Exception
+    {
+        CapturedOutput gen1 = assertCursorMatchesIterator(cfs, byteDiffAllowlist);
+
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        commitCompaction(cfs, cfs.getLiveSSTables(), true, gcBefore);
+        if (cfs.getLiveSSTables().isEmpty())
+            return gen1; // gen 1 purged everything; there are no gen-2 inputs
+
+        assertCursorMatchesIterator(cfs, byteDiffAllowlist);
+        return gen1;
+    }
+
+    /**
+     * Commits one compaction over the given inputs through the selected path WITHOUT restore:
+     * the live set genuinely becomes the outputs. Used by the cross-generation rung so the
+     * second differential reads cursor-produced sstables.
+     */
+    protected void commitCompaction(ColumnFamilyStore cfs, Set<SSTableReader> inputs, boolean cursor, long gcBefore) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(cursor);
+        if (cursor)
+            assertCursorPathWillRun(cfs, inputs, gcBefore);
+        LifecycleTransaction txn = cfs.getTracker().tryModify(inputs, OperationType.COMPACTION);
+        assertNotNull("unable to mark inputs compacting for commit", txn);
+        new CompactionTask(cfs, txn, gcBefore, false).execute(ActiveCompactionsTracker.NOOP);
+    }
+
+    /**
      * Runs one compaction path over the given input subset (non-participating live sstables
      * stay live and feed purge-overlap decisions), captures the outputs, and restores the live
      * set so the other path sees identical bytes.
