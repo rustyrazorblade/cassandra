@@ -91,6 +91,18 @@ public abstract class DifferentialCompactionTester extends CQLTester
     /** Fixed "now" used for JSON dumps so rendering cannot depend on wall clock. */
     private static final long DUMP_NOW_SEC = 0;
 
+    /**
+     * Scale mode for very large scenarios (millions of rows): the logical dump is streamed
+     * into a SHA-256 digest instead of being retained as a String, so capture memory stays
+     * flat regardless of row count. Byte comparison always streams. On a digest mismatch
+     * the byte-level comparison (which still reports exact offsets) is the debugging tool;
+     * rerun a reduced scenario without scale mode for a row-level JSON diff.
+     */
+    protected boolean scaleCapture()
+    {
+        return false;
+    }
+
     public static final class CapturedSSTable
     {
         final Path dir;                 // copied component files, named by component (e.g. "Data.db")
@@ -374,20 +386,42 @@ public abstract class DifferentialCompactionTester extends CQLTester
         }
 
         // 2. canonical logical dump
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ISSTableScanner scanner = sstable.getScanner())
-        {
-            JsonTransformer.toJsonLines(scanner, Util.iterToStream(scanner), true, false,
-                                        sstable.metadata(), DUMP_NOW_SEC, baos);
-        }
         // JsonTransformer's "expired" fields are computed from WALL CLOCK
-        // (currentTimeMillis), ignoring the fixed nowInSec passed above — so byte-identical
+        // (currentTimeMillis), ignoring the fixed nowInSec passed below — so byte-identical
         // outputs can render differently when a localExpirationTime falls between the two
         // paths' captures, which run seconds apart (materialized-view expired-liveness rows
         // sit permanently on that boundary: their expiration IS the write second). The flag
         // is derived from expires_at, which is still compared, so normalize it out.
-        String json = baos.toString(StandardCharsets.UTF_8)
-                          .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"");
+        String json;
+        if (scaleCapture())
+        {
+            // stream into a digest: capture memory stays flat at millions of rows
+            try (ISSTableScanner scanner = sstable.getScanner())
+            {
+                java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+                NormalizingDigestOutputStream out = new NormalizingDigestOutputStream(digest);
+                JsonTransformer.toJsonLines(scanner, Util.iterToStream(scanner), true, false,
+                                            sstable.metadata(), DUMP_NOW_SEC, out);
+                out.flushTail();
+                json = "sha256:" + org.apache.cassandra.utils.Hex.bytesToHex(digest.digest()) +
+                       " (" + out.bytesSeen + " bytes)";
+            }
+            catch (java.security.NoSuchAlgorithmException e)
+            {
+                throw new AssertionError(e);
+            }
+        }
+        else
+        {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ISSTableScanner scanner = sstable.getScanner())
+            {
+                JsonTransformer.toJsonLines(scanner, Util.iterToStream(scanner), true, false,
+                                            sstable.metadata(), DUMP_NOW_SEC, baos);
+            }
+            json = baos.toString(StandardCharsets.UTF_8)
+                       .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"");
+        }
 
         // 3. stats spot-check summary
         StatsMetadata stats = sstable.getSSTableMetadata();
@@ -424,8 +458,11 @@ public abstract class DifferentialCompactionTester extends CQLTester
             CapturedSSTable it = iterator.sstables.get(i);
             CapturedSSTable cu = cursor.sstables.get(i);
 
-            // logical first: a row-level diff is far more debuggable than a stats mismatch
-            if (!it.json.equals(cu.json))
+            // logical first: a row-level diff is far more debuggable than a stats mismatch.
+            // In scale mode the dump is a digest — defer it below the byte comparison, which
+            // still localizes divergences to exact offsets.
+            boolean digestMode = it.json.startsWith("sha256:");
+            if (!digestMode && !it.json.equals(cu.json))
                 fail("LOGICAL divergence in output sstable " + i + " (iterator vs cursor):\n" + firstJsonDiff(it.json, cu.json) +
                      "\niterator stats: " + it.statsSummary + "\ncursor stats:   " + cu.statsSummary);
 
@@ -437,26 +474,60 @@ public abstract class DifferentialCompactionTester extends CQLTester
             List<String> divergences = new ArrayList<>();
             for (String comp : components)
             {
-                byte[] a = readComponent(it.dir, comp);
-                byte[] b = readComponent(cu.dir, comp);
-                if (java.util.Arrays.equals(a, b))
+                Path a = it.dir.resolve(comp);
+                Path b = cu.dir.resolve(comp);
+                boolean hasA = Files.exists(a);
+                boolean hasB = Files.exists(b);
+                if (hasA != hasB)
+                {
+                    if (!byteDiffAllowlist.contains(comp))
+                        divergences.add(String.format("  %s: present only in %s path", comp, hasA ? "iterator" : "cursor"));
+                    continue;
+                }
+                if (!hasA)
+                    continue;
+                long firstDiff = firstFileDifference(a, b);
+                if (firstDiff < 0)
                     continue;
                 if (byteDiffAllowlist.contains(comp))
-                    continue; // logical equivalence already asserted above
-                divergences.add(describeByteDiff(comp, a, b));
+                    continue; // logical equivalence still asserted
+                divergences.add(describeFileDiff(comp, a, b, firstDiff));
             }
             if (!divergences.isEmpty())
                 fail("BYTE divergence in output sstable " + i + " (iterator vs cursor):\n" + String.join("\n", divergences) +
                      "\nIf a divergence is benign it must be added to the allowlist with a justifying comment next to the allowlist entry");
+
+            if (digestMode)
+                assertEquals("logical dump digest divergence in output sstable " + i +
+                             " (scale mode; rerun a reduced scenario without scale mode for a row-level diff)",
+                             it.json, cu.json);
         }
     }
 
-    private static byte[] readComponent(Path dir, String component)
+    /** Streaming comparison: -1 if byte-identical, else the offset of the first difference
+     *  (the shorter length when one file is a prefix of the other). */
+    private static long firstFileDifference(Path a, Path b)
     {
-        try
+        try (java.io.InputStream ia = new java.io.BufferedInputStream(Files.newInputStream(a), 1 << 16);
+             java.io.InputStream ib = new java.io.BufferedInputStream(Files.newInputStream(b), 1 << 16))
         {
-            Path p = dir.resolve(component);
-            return Files.exists(p) ? Files.readAllBytes(p) : null;
+            byte[] bufA = new byte[1 << 16];
+            byte[] bufB = new byte[1 << 16];
+            long offset = 0;
+            while (true)
+            {
+                int readA = ia.readNBytes(bufA, 0, bufA.length);
+                int readB = ib.readNBytes(bufB, 0, bufB.length);
+                int common = Math.min(readA, readB);
+                int mismatch = java.util.Arrays.mismatch(bufA, 0, common, bufB, 0, common);
+                if (mismatch >= 0)
+                    return offset + mismatch;
+                if (readA != readB)
+                    return offset + common; // same prefix, different length
+                if (readA == 0)
+                    return -1;
+                offset += readA;
+            }
         }
         catch (IOException e)
         {
@@ -464,40 +535,97 @@ public abstract class DifferentialCompactionTester extends CQLTester
         }
     }
 
-    private static String describeByteDiff(String component, byte[] a, byte[] b)
+    private static String describeFileDiff(String component, Path a, Path b, long firstDiff)
     {
-        if (a == null || b == null)
-            return String.format("  %s: present only in %s path", component, a == null ? "cursor" : "iterator");
-        int firstDiff = -1;
-        int max = Math.min(a.length, b.length);
-        for (int i = 0; i < max; i++)
+        try
         {
-            if (a[i] != b[i]) { firstDiff = i; break; }
+            return String.format("  %s: lengths %d vs %d, first divergence at offset %d%n    iterator: %s%n    cursor:   %s",
+                                 component, Files.size(a), Files.size(b), firstDiff,
+                                 hexContext(a, firstDiff), hexContext(b, firstDiff));
         }
-        if (firstDiff == -1)
-            firstDiff = max; // same prefix, different length
-        return String.format("  %s: lengths %d vs %d, first divergence at offset %d%n    iterator: %s%n    cursor:   %s",
-                             component, a.length, b.length, firstDiff,
-                             hexContext(a, firstDiff), hexContext(b, firstDiff));
+        catch (IOException e)
+        {
+            throw new UncheckedIOException(e);
+        }
     }
 
-    private static String hexContext(byte[] bytes, int offset)
+    private static String hexContext(Path file, long offset) throws IOException
     {
-        int from = Math.max(0, offset - 8);
-        int to = Math.min(bytes.length, offset + 24);
-        StringBuilder sb = new StringBuilder();
-        for (int i = from; i < to; i++)
+        long size = Files.size(file);
+        long from = Math.max(0, offset - 8);
+        int len = (int) Math.min(size - from, 32);
+        byte[] window = new byte[Math.max(len, 0)];
+        try (java.io.InputStream in = Files.newInputStream(file))
         {
-            if (i == offset)
+            in.skipNBytes(from);
+            in.readNBytes(window, 0, window.length);
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < window.length; i++)
+        {
+            long abs = from + i;
+            if (abs == offset)
                 sb.append('[');
-            sb.append(String.format("%02x", bytes[i]));
-            if (i == offset)
+            sb.append(String.format("%02x", window[i]));
+            if (abs == offset)
                 sb.append(']');
             sb.append(' ');
         }
-        if (to < bytes.length)
+        if (from + window.length < size)
             sb.append("...");
         return sb.toString();
+    }
+
+    /** Streams a JSON dump into a digest, normalizing the wall-clock-derived "expired"
+     *  fields line by line (toJsonLines emits one partition per line). */
+    private static final class NormalizingDigestOutputStream extends java.io.OutputStream
+    {
+        private final java.security.MessageDigest digest;
+        private final ByteArrayOutputStream line = new ByteArrayOutputStream();
+        long bytesSeen;
+
+        NormalizingDigestOutputStream(java.security.MessageDigest digest)
+        {
+            this.digest = digest;
+        }
+
+        @Override
+        public void write(int b)
+        {
+            line.write(b);
+            if (b == '\n')
+                flushTail();
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len)
+        {
+            int start = off;
+            int end = off + len;
+            for (int i = off; i < end; i++)
+            {
+                if (b[i] == '\n')
+                {
+                    line.write(b, start, i - start + 1);
+                    flushTail();
+                    start = i + 1;
+                }
+            }
+            if (start < end)
+                line.write(b, start, end - start);
+        }
+
+        void flushTail()
+        {
+            if (line.size() == 0)
+                return;
+            byte[] normalized = line.toString(StandardCharsets.UTF_8)
+                                    .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"")
+                                    .getBytes(StandardCharsets.UTF_8);
+            digest.update(normalized);
+            bytesSeen += normalized.length;
+            line.reset();
+        }
     }
 
     private static String firstJsonDiff(String a, String b)
