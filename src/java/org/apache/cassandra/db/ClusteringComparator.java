@@ -245,7 +245,17 @@ public class ClusteringComparator implements Comparator<Clusterable>
                     // compare swapped arguments to reverse the order
                     int cmp = Long.compare(v2Flags, v1Flags);
                     if (cmp != 0)
+                    {
+                        // Null ordering is type-independent: nulls sort first even on reversed
+                        // (DESC) columns, mirroring ClusteringComparator.compareComponent which
+                        // handles nulls before consulting the type. EMPTY vs VALUED, however, is
+                        // decided by the type: every base type sorts empty before values, so
+                        // ReversedType sorts empty AFTER values (it swaps operands around the
+                        // base comparison) — flip the flag-derived order for reversed columns.
+                        if ((v1Flags & 0b10) == 0 && (v2Flags & 0b10) == 0 && type.isReversed())
+                            cmp = -cmp;
                         return cmp;
+                    }
                     // null/empty == null/empty, continue...
                 }
                 clusteringBlock1 = clusteringBlock1 >>> 2;
