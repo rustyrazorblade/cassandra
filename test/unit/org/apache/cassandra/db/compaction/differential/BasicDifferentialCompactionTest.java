@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
-import java.util.Set;
 
 import org.junit.Test;
 
@@ -32,7 +31,6 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 public class BasicDifferentialCompactionTest extends DifferentialCompactionTester
 {
     /** Start empty: byte-identical output is the hypothesis increment 1 tests. */
-    private static final Set<String> ALLOWLIST = Set.of();
 
     @Test
     public void overlappingOverwrites() throws Exception
@@ -50,7 +48,7 @@ public class BasicDifferentialCompactionTest extends DifferentialCompactionTeste
             flush();
         }
 
-        assertCursorMatchesIterator(cfs, ALLOWLIST);
+        assertCursorMatchesIterator(cfs);
     }
 
     @Test
@@ -79,7 +77,7 @@ public class BasicDifferentialCompactionTest extends DifferentialCompactionTeste
             execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)", 3L, ck, ck + 100, "resurrect" + ck);
         flush();
 
-        assertCursorMatchesIterator(cfs, ALLOWLIST);
+        assertCursorMatchesIterator(cfs);
     }
 
     @Test
@@ -105,7 +103,7 @@ public class BasicDifferentialCompactionTest extends DifferentialCompactionTeste
         // ensure local deletion times are strictly in the past relative to both compaction runs
         Thread.sleep(1100);
 
-        assertCursorMatchesIterator(cfs, ALLOWLIST);
+        assertCursorMatchesIterator(cfs);
     }
 
     /** Same as tombstonesRetained but uncompressed, so Data.db bytes are directly comparable. */
@@ -132,7 +130,7 @@ public class BasicDifferentialCompactionTest extends DifferentialCompactionTeste
             execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)", 3L, ck, ck + 100, "resurrect" + ck);
         flush();
 
-        assertCursorMatchesIterator(cfs, ALLOWLIST);
+        assertCursorMatchesIterator(cfs);
     }
 
     @Test
@@ -157,6 +155,6 @@ public class BasicDifferentialCompactionTest extends DifferentialCompactionTeste
         execute("INSERT INTO %s (pk, s1) VALUES (?, ?)", 100L, 1L);
         flush();
 
-        assertCursorMatchesIterator(cfs, ALLOWLIST);
+        assertCursorMatchesIterator(cfs);
     }
 }

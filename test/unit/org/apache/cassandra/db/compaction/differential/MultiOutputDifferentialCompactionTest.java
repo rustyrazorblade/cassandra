@@ -44,7 +44,6 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
  */
 public class MultiOutputDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
 
     /** CompactionTask whose writer switches outputs once the current one exceeds maxBytes. */
     private static TaskFactory sizeCapped(long maxBytes)
@@ -82,7 +81,7 @@ public class MultiOutputDifferentialCompactionTest extends DifferentialCompactio
         }
 
         // ~40 partitions * ~1KB each; 8KB cap => several outputs, switch points mid-stream
-        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), ALLOWLIST, sizeCapped(8 * 1024));
+        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), sizeCapped(8 * 1024));
         assertTrue("scenario must produce multiple outputs to test anything, got " + out.sstables.size(),
                    out.sstables.size() >= 2);
     }
@@ -113,7 +112,7 @@ public class MultiOutputDifferentialCompactionTest extends DifferentialCompactio
         execute("DELETE FROM %s WHERE pk = 15");
         flush();
 
-        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), ALLOWLIST, sizeCapped(8 * 1024));
+        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), sizeCapped(8 * 1024));
         assertTrue("scenario must produce multiple outputs to test anything, got " + out.sstables.size(),
                    out.sstables.size() >= 2);
     }
@@ -138,7 +137,7 @@ public class MultiOutputDifferentialCompactionTest extends DifferentialCompactio
             flush();
         }
 
-        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), ALLOWLIST, sizeCapped(8 * 1024));
+        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), sizeCapped(8 * 1024));
         assertTrue("scenario must produce multiple outputs to test anything, got " + out.sstables.size(),
                    out.sstables.size() >= 2);
     }

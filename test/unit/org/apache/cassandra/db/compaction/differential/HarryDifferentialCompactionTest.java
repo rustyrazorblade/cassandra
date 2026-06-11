@@ -19,7 +19,6 @@
 package org.apache.cassandra.db.compaction.differential;
 
 import java.util.Arrays;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Test;
@@ -50,7 +49,6 @@ import static org.apache.cassandra.harry.checker.TestHelper.withRandom;
  */
 public class HarryDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
     private static final AtomicInteger idGen = new AtomicInteger(0);
 
     private static final int PARTITIONS = 30;
@@ -121,7 +119,7 @@ public class HarryDifferentialCompactionTest extends DifferentialCompactionTeste
 
             replay(schema, history);
 
-            assertCursorMatchesIterator(cfs, ALLOWLIST);
+            assertCursorMatchesIterator(cfs);
         });
     }
 

@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
-import java.util.Set;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -36,7 +35,6 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  */
 public class MaterializedViewDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
 
     @BeforeClass
     public static void startup()
@@ -72,6 +70,6 @@ public class MaterializedViewDifferentialCompactionTest extends DifferentialComp
         execute("UPDATE %s SET v1 = ? WHERE pk = ? AND ck = ?", 999L, 0L, 0L);
         flush(KEYSPACE, view);
 
-        assertCursorMatchesIteratorAcrossGenerations(viewCfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(viewCfs);
     }
 }
