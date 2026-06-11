@@ -901,6 +901,67 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
+     * OPEN-ENDED (single-sided) range tombstones: DELETE with only a lower or upper
+     * clustering bound produces markers whose other side is the unbounded partition edge —
+     * zero-component TOP/BOTTOM bounds, the same empty-prefix region finding #10 lived in
+     * (bound-kind comparisons, covered-clustering stats). Open RTs nest with each other,
+     * overlap bounded RTs and rows across sstables, and one partition is open-RT-only.
+     * Previously covered only probabilistically by the widened soak.
+     */
+    @Test
+    public void openEndedRangeTombstones() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 1; pk <= 2; pk++)
+            for (long ck = 0; ck < 30; ck++)
+                execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "v" + ck);
+        execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?", 1L, 10L, 20L); // bounded, for interleave
+        flush();
+
+        // open-ended deletes: up to TOP, down from BOTTOM, nested opens, and an RT-only partition
+        execute("DELETE FROM %s WHERE pk = ? AND ck >= ?", 1L, 25L);
+        execute("DELETE FROM %s WHERE pk = ? AND ck > ?", 1L, 27L);  // nests inside the >= 25 open range
+        execute("DELETE FROM %s WHERE pk = ? AND ck <= ?", 2L, 4L);
+        execute("DELETE FROM %s WHERE pk = ? AND ck >= ?", 3L, 0L);  // partition with ONLY an open RT
+        flush();
+
+        // resurrection inside open-deleted ranges with newer timestamps
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, 26L, "resurrected");
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 2L, 2L, "resurrected");
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /** DESC counterpart: single-sided bounds invert in on-disk clustering order, so the
+     *  open edge swaps between TOP and BOTTOM relative to the CQL bound direction. */
+    @Test
+    public void openEndedRangeTombstonesDescending() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH CLUSTERING ORDER BY (ck DESC) AND gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 30; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ck, "v" + ck);
+        flush();
+
+        execute("DELETE FROM %s WHERE pk = ? AND ck >= ?", 1L, 25L);
+        execute("DELETE FROM %s WHERE pk = ? AND ck <= ?", 1L, 4L);
+        flush();
+
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, 27L, "resurrected");
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
      * ODD superset size at the subset-encoding mode boundary (finding #12, second bug):
      * with 71 columns, the encoder and decoder must agree on present-index vs missing-index
      * mode at exactly presentCount == 35 (the integer-division boundary of supersetCount/2).
