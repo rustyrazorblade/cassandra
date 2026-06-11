@@ -510,4 +510,277 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
 
         assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
     }
+
+    /**
+     * Element-level tombstones inside multi-cell columns: a tombstone cell that CARRIES a
+     * CellPath (DELETE m['k'], set-element removal, list-index delete with its TimeUUID path)
+     * is a distinct wire shape from both whole-column complex deletions and pathless cell
+     * tombstones, and it flows through the path-ordered merge. Includes resurrection of a
+     * deleted path by a newer write and a tombstone for a path that never existed.
+     */
+    @Test
+    public void cellPathTombstones() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, l list<text>, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 3; pk++)
+            for (long ck = 0; ck < 8; ck++)
+                execute("INSERT INTO %s (pk, ck, m, s, l) VALUES (?, ?, ?, ?, ?)",
+                        pk, ck, map("k0", 0L, "k1", 1L, "shared", ck), set(1, 2, 3), list("a", "b", "c"));
+        flush();
+
+        // element-level tombstones, all path-carrying
+        for (long pk = 0; pk < 3; pk++)
+            for (long ck = 0; ck < 8; ck += 2)
+            {
+                execute("DELETE m[?] FROM %s WHERE pk = ? AND ck = ?", "k0", pk, ck);
+                execute("UPDATE %s SET s = s - ? WHERE pk = ? AND ck = ?", set(2), pk, ck);
+                execute("DELETE l[1] FROM %s WHERE pk = ? AND ck = ?", pk, ck);
+            }
+        flush();
+
+        // resurrect deleted paths with newer writes; tombstone a path that never existed
+        execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "k0", 100L, 0L, 0L);
+        execute("UPDATE %s SET s = s + ? WHERE pk = ? AND ck = ?", set(2), 0L, 0L);
+        execute("DELETE m[?] FROM %s WHERE pk = ? AND ck = ?", "ghost", 1L, 1L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Equal-timestamp conflicts INSIDE complex columns: path-level value ties (the finding-#4
+     * tie-break class, but on the increment-2 path-merge code) and complex-deletion-vs-cell
+     * ties (a complex deletion shadows cells with timestamp <= its own).
+     */
+    @Test
+    public void complexTimestampTies() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 10; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m[?] = ?, m[?] = ? WHERE pk = ? AND ck = ?",
+                    "k", 111L, "other", 1L, 1L, ck);
+        flush();
+
+        // same path, same timestamp, different value: greater value must win in both paths
+        for (long ck = 0; ck < 10; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m[?] = ? WHERE pk = ? AND ck = ?",
+                    "k", 222L, 1L, ck);
+        flush();
+
+        // complex deletion at ts 1500 vs cells at 1500 (shadowed: <= deletion) and 1501 (survives)
+        for (long ck = 0; ck < 5; ck++)
+        {
+            execute("DELETE m FROM %s USING TIMESTAMP 1500 WHERE pk = ? AND ck = ?", 1L, ck);
+            execute("UPDATE %s USING TIMESTAMP 1500 SET m[?] = ? WHERE pk = ? AND ck = ?", "atDel", 5L, 1L, ck);
+            execute("UPDATE %s USING TIMESTAMP 1501 SET m[?] = ? WHERE pk = ? AND ck = ?", "afterDel", 6L, 1L, ck);
+        }
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Row liveness shapes: UPDATE-built rows carry NO primary-key liveness (different row
+     * flags than INSERT-built rows), primary-key-only INSERTs carry liveness and ZERO cells,
+     * and merges must reconcile liveness presence/absence across sstables exactly.
+     */
+    @Test
+    public void rowLivenessShapes() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, v2 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // UPDATE-built rows (no liveness) and liveness-only rows in sstable 1
+        for (long ck = 0; ck < 10; ck++)
+            execute("UPDATE %s SET v1 = ?, v2 = ? WHERE pk = ? AND ck = ?", "u" + ck, "w" + ck, 1L, ck);
+        for (long ck = 10; ck < 15; ck++)
+            execute("INSERT INTO %s (pk, ck) VALUES (?, ?)", 1L, ck);
+        flush();
+
+        // sstable 2: INSERT onto UPDATE-rows (liveness arrives later), cell tombstones onto
+        // liveness-only rows (row must survive on liveness alone), cell delete that empties
+        // an UPDATE-row entirely (no liveness + no cells = row vanishes)
+        for (long ck = 0; ck < 4; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", 1L, ck, "i" + ck);
+        for (long ck = 10; ck < 13; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, null, null)", 1L, ck);
+        execute("DELETE v1, v2 FROM %s WHERE pk = ? AND ck = ?", 1L, 5L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Row-level TTL (INSERT USING TTL sets liveness TTL + cell TTLs) merged against
+     * cell-level TTL (UPDATE USING TTL sets only cell TTLs) and against plain writes;
+     * includes same-timestamp expiring writes whose TTLs differ (rules (c)/(d) of the
+     * resolveRegular decision table run off localExpirationTime/ttl, not just timestamps).
+     */
+    @Test
+    public void rowAndCellTtlMix() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, v2 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 12; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?) USING TTL 86400", 1L, ck, "a" + ck, "b" + ck);
+        flush();
+
+        // cell-level TTL different from the row TTL; plain overwrites clearing TTLs;
+        // expiring-vs-expiring same-timestamp ties with different TTLs
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TTL 172800 SET v1 = ? WHERE pk = ? AND ck = ?", "c" + ck, 1L, ck);
+        for (long ck = 6; ck < 9; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", 1L, ck, "plain" + ck);
+        for (long ck = 9; ck < 12; ck++)
+            execute("UPDATE %s USING TTL 100000 AND TIMESTAMP 5000 SET v2 = ? WHERE pk = ? AND ck = ?", "t1" + ck, 1L, ck);
+        flush();
+
+        for (long ck = 9; ck < 12; ck++)
+            execute("UPDATE %s USING TTL 50000 AND TIMESTAMP 5000 SET v2 = ? WHERE pk = ? AND ck = ?", "t2" + ck, 1L, ck);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Expiring-vs-live cells at the SAME timestamp, both directions across sstables: the
+     * CASSANDRA-14592 rule — an expiring (or deleted) cell beats a live one on timestamp
+     * tie regardless of value. Implemented in resolveRegular rule (a); this pins it at the
+     * differential level (timestampTies only covered live-vs-live and delete-vs-live).
+     */
+    @Test
+    public void expiringVsLiveTies() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // direction 1: live first, expiring second
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 1L, ck, "zzz-live" + ck);
+        // direction 2 partition: expiring first
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000 AND TTL 86400", 2L, ck, "aaa-ttl" + ck);
+        flush();
+
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000 AND TTL 86400", 1L, ck, "aaa-ttl" + ck);
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 2L, ck, "zzz-live" + ck);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * TTLs on collection cells: live expiring cells inside multi-cell columns, expired
+     * cells converted to (path-carrying) tombstones, and a complex deletion over TTL'd
+     * cells — expiry far from the run boundaries per the harness clock limitation.
+     */
+    @Test
+    public void collectionCellTtls() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 8; ck++)
+            execute("INSERT INTO %s (pk, ck, m, s) VALUES (?, ?, ?, ?)",
+                    1L, ck, map("perm", ck), set(1, 2));
+        flush();
+
+        // live TTL'd elements alongside permanent ones; expired elements (TTL 1)
+        for (long ck = 0; ck < 8; ck++)
+            execute("UPDATE %s USING TTL 86400 SET m[?] = ?, s = s + ? WHERE pk = ? AND ck = ?",
+                    "ttl", ck * 10, set(3), 1L, ck);
+        for (long ck = 0; ck < 4; ck++)
+            execute("UPDATE %s USING TTL 1 SET m[?] = ? WHERE pk = ? AND ck = ?", "gone", 9L, 1L, ck);
+        flush();
+
+        // complex deletion over a column whose surviving cells are TTL'd
+        execute("DELETE m FROM %s WHERE pk = ? AND ck = ?", 1L, 6L);
+        execute("UPDATE %s USING TTL 86400 SET m[?] = ? WHERE pk = ? AND ck = ?", "after", 1L, 1L, 6L);
+        flush();
+
+        Thread.sleep(2000); // let the TTL-1 elements expire well before the first run
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Complex columns in partitions crossing index blocks (test config column_index_size is
+     * 4KiB): the promoted-index machinery (findings #5/#6) and the BTI row trie have only
+     * ever seen simple-column rows at block boundaries. Range tombstones and complex
+     * deletions land mid-block so block-boundary state (open marker tracking) carries
+     * multi-cell content.
+     */
+    @Test
+    public void complexColumnsCrossingIndexBlocks() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000 AND compression = {'enabled': false}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        String pad = "x".repeat(120);
+        for (int round = 0; round < 2; round++)
+        {
+            for (long ck = 0; ck < 40; ck++)
+                execute("INSERT INTO %s (pk, ck, m) VALUES (?, ?, ?)",
+                        1L, ck, map("a" + round, pad + ck, "b" + round, pad, "c" + round, pad));
+            // range tombstone and complex deletions landing mid-partition
+            execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?", 1L, 10L + round, 14L + round);
+            execute("DELETE m FROM %s WHERE pk = ? AND ck = ?", 1L, 20L + round);
+            flush();
+        }
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * STATIC complex columns in the differential corpus (previously only covered at the
+     * reader level): element updates and complex deletions on static collections across
+     * sstables, static-only partitions, and partitions with no static values at all
+     * (empty static row + complex machinery in one row).
+     */
+    @Test
+    public void staticComplexColumns() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, sm map<text, bigint> static, ss set<int> static, " +
+                    "ck bigint, v text, PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 6; pk++)
+        {
+            // pk 0/1: static + rows; pk 2/3: rows only (empty static row); pk 4: static only
+            if (pk < 2 || pk == 4)
+                execute("UPDATE %s SET sm[?] = ?, ss = ss + ? WHERE pk = ?", "s" + pk, pk, set((int) pk), pk);
+            if (pk != 4)
+                for (long ck = 0; ck < 4; ck++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "v" + ck);
+        }
+        flush();
+
+        // static element updates, static element tombstone, static complex deletion
+        execute("UPDATE %s SET sm[?] = ? WHERE pk = ?", "added", 100L, 0L);
+        execute("DELETE sm[?] FROM %s WHERE pk = ?", "s1", 1L);
+        execute("DELETE ss FROM %s WHERE pk = ?", 0L);
+        execute("UPDATE %s SET sm[?] = ? WHERE pk = ?", "late", 5L, 2L); // statics arrive for a rows-only partition
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
 }
