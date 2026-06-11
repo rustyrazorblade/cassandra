@@ -837,8 +837,15 @@ public class CursorCompactor extends CompactionInfo.Holder
             // (i.e. before expiry, the pure tombstone; after expiry, whichever is more recent)
             // this inconsistency has no user-visible distinction, as at this point they are both logically tombstones
             // (the only possible difference is the time at which the cells become purgeable)
-            boolean leftIsTombstone = !left.isExpiring(); // !isExpiring() == isTombstone(), but does not need to consider localDeletionTime()
-            boolean rightIsTombstone = !right.isExpiring();
+            // NOTE: ReusableLivenessInfo.isExpiring() means "has an expiration time", which is
+            // also true for tombstones — !isExpiring() would be false for BOTH sides here (both
+            // have an expiration time once we are past the presence check above), making this
+            // tie-break dead and letting the localDeletionTime comparison below pick an expiring
+            // cell over a tombstone. Tombstone semantics need AbstractCell.isTombstone():
+            // within this block both sides have localExpirationTime set, so ttl == NO_TTL is
+            // exactly "is a tombstone" (mirrors Cells.resolveRegular's !left.isExpiring()).
+            boolean leftIsTombstone = left.ttl() == LivenessInfo.NO_TTL;
+            boolean rightIsTombstone = right.ttl() == LivenessInfo.NO_TTL;
             if (leftIsTombstone != rightIsTombstone)
                 return leftIsTombstone ? LEFT : RIGHT;
 
