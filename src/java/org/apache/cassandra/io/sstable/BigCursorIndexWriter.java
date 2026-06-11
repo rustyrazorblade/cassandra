@@ -113,10 +113,15 @@ public class BigCursorIndexWriter extends CursorIndexWriter
         /** {@link org.apache.cassandra.io.sstable.IndexInfo.Serializer#serialize(org.apache.cassandra.io.sstable.IndexInfo, org.apache.cassandra.io.util.DataOutputPlus)}*/
         rowIndexEntriesOffsets.addInt(rowIndexEntryOffset);
 
-        // first clustering is already in, write last entry
+        // The block's FIRST clustering was serialized into this buffer eagerly when the
+        // block's first row was written (descriptors are transient — by block-cut time that
+        // row's clustering no longer exists anywhere else). The IndexInfo wire format wants
+        // [firstName][lastName][offset][width][openMarker]; the first name is already in
+        // place, so only the last name is appended here.
         if (!hasDistinctLastClustering)
         {
-            // first entry is the last entry, copy it
+            // single-unfiltered block: first IS last, so duplicate the already-serialized
+            // first entry bytes by self-copy from this same buffer (no re-serialization)
             byte[] entriesData = rowIndexEntries.getData();
             long endOfFirstEntry = rowIndexEntries.position();
             rowIndexEntries.write(entriesData, rowIndexEntryOffset, (int) (endOfFirstEntry - rowIndexEntryOffset));

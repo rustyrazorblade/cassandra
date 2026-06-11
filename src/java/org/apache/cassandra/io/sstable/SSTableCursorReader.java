@@ -182,8 +182,17 @@ public class SSTableCursorReader implements AutoCloseable
                 }
                 columnsSize = columns.size();
             }
+            // Build the present-columns bitmask from the wire's MISSING-columns mask:
+            //   -1L >>> (64 - n)   is the "n low ones" template (e.g. n=3 -> 0b111): all 64
+            //                      bits set, then shifted so exactly the n column bits remain.
+            //                      n == 0 must be special-cased because Java shifts are mod 64
+            //                      (>>> 64 is a no-op, NOT zero).
+            //   ~missingColumnsMask flips missing->present but also sets every bit ABOVE the
+            //                      column range, so it is ANDed with the template to trim them.
+            // For >= 64 columns the wire uses a structurally different "large subset" format
+            // and `columns` was already replaced with the exact subset: walk it fully.
             presentMask = columnsSize >= 64
-                          ? -1L // fallback: columns is already the exact subset, walk it fully
+                          ? -1L
                           : ~missingColumnsMask & (columnsSize == 0 ? 0 : (-1L >>> (64 - columnsSize)));
             this.rowLiveness = rowLiveness;
             columnsIndex = 0;
@@ -231,8 +240,15 @@ public class SSTableCursorReader implements AutoCloseable
                 }
                 else
                 {
+                    // Bit i of presentMask corresponds to the i-th column of the superset in
+                    // its iteration order — the SAME order the serializer assigned bits and
+                    // the same order cells appear on disk. Walking bits low-to-high therefore
+                    // visits cells in exactly their on-disk order:
+                    //   numberOfTrailingZeros = index of the lowest set bit (next present column)
+                    //   x & (x - 1)           = clears that lowest set bit (subtracting 1 borrows
+                    //                           through the trailing zeros; the AND kills both)
                     currIndex = Long.numberOfTrailingZeros(presentMask);
-                    presentMask &= presentMask - 1; // clear lowest set bit
+                    presentMask &= presentMask - 1;
                     columnsIndex++;
                 }
                 cellColumn = columnsArray[currIndex];

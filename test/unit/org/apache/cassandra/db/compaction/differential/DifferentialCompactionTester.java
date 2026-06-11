@@ -162,13 +162,10 @@ public abstract class DifferentialCompactionTester extends CQLTester
         Path scratch = Files.createTempDirectory("differential-compaction");
 
         // Early open must be off for keepOriginals to actually keep originals:
-        // SSTableRewriter.moveStarts() obsoletes fully-covered originals regardless of the
-        // keepOriginals flag (only the bulk obsoleteOriginals() call is guarded by it).
-        // Early open affects read availability during compaction, not final output bytes,
-        // so disabling it does not weaken the differential comparison.
-        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
-        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
-        try
+        // Early open stays ENABLED here deliberately: keepOriginals=true with early open used
+        // to delete the originals (SSTableRewriter.moveStarts obsoleted fully-covered inputs
+        // unconditionally — now fixed and guarded by the flag), and this harness depends on
+        // the originals surviving, so every differential run doubles as the regression test.
         {
             CapturedOutput iterator = compactPath(cfs, inputs, false, gcBefore, scratch.resolve("iterator"), taskFactory);
             // the input INSTANCES were replaced during restore; re-resolve the subset by descriptor
@@ -183,10 +180,6 @@ public abstract class DifferentialCompactionTester extends CQLTester
             CapturedOutput cursor = compactPath(cfs, reResolved, true, gcBefore, scratch.resolve("cursor"), taskFactory);
             assertEquivalentOutputs(iterator, cursor, byteDiffAllowlist);
             return iterator;
-        }
-        finally
-        {
-            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
         }
     }
 
