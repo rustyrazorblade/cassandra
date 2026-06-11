@@ -682,6 +682,43 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
+     * Cell TOMBSTONE vs EXPIRING cell at the SAME timestamp: rule (b) of the reference
+     * decision table (Cells.resolveRegular) — the tombstone wins the tie, BEFORE any
+     * localDeletionTime comparison. This is the one same-timestamp pairing where both
+     * sides carry a localExpirationTime (tombstone: deletion second; expiring: expiry
+     * second), so a resolver that classifies "tombstone" via the loose
+     * ReusableLivenessInfo.isExpiring() predicate (true for tombstones too — the
+     * finding-#3 trap) never fires rule (b) and falls through to the ldt compare,
+     * which the expiring cell's future expiry second wins: deleted data resurrected
+     * until the TTL lapses. Both flush orders and both tombstone shapes
+     * (UPDATE SET v = null, DELETE v) across distinct partitions.
+     */
+    @Test
+    public void tombstoneVsExpiringTies() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // pk 1: tombstone flushed first, expiring second; tombstone via UPDATE SET null
+        for (long ck = 0; ck < 5; ck++)
+            execute("UPDATE %s USING TIMESTAMP 5000 SET v = null WHERE pk = ? AND ck = ?", 1L, ck);
+        // pk 2: expiring flushed first, tombstone second; tombstone via DELETE column
+        for (long ck = 0; ck < 5; ck++)
+            execute("UPDATE %s USING TTL 86400 AND TIMESTAMP 5000 SET v = ? WHERE pk = ? AND ck = ?", "live" + ck, 2L, ck);
+        flush();
+
+        for (long ck = 0; ck < 5; ck++)
+            execute("UPDATE %s USING TTL 86400 AND TIMESTAMP 5000 SET v = ? WHERE pk = ? AND ck = ?", "live" + ck, 1L, ck);
+        for (long ck = 0; ck < 5; ck++)
+            execute("DELETE v FROM %s USING TIMESTAMP 5000 WHERE pk = ? AND ck = ?", 2L, ck);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /**
      * TTLs on collection cells: live expiring cells inside multi-cell columns, expired
      * cells converted to (path-carrying) tombstones, and a complex deletion over TTL'd
      * cells — expiry far from the run boundaries per the harness clock limitation.
