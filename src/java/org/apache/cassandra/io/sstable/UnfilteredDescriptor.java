@@ -156,6 +156,9 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
                 // to the i-th column of the superset in iteration order; 0 means all present.
                 // rowColumns stays the superset; consumers filter via missingColumnsMask().
                 long encoded = dataReader.readUnsignedVInt();
+                // sanity: shifting out the valid column bits must leave nothing — any higher
+                // bit set means the vint encodes more columns than the header knows about
+                // (mirrors Columns.Serializer.deserializeSubset's corruption check)
                 if ((encoded >>> rowColumns.size()) != 0)
                     throw new IOException("Invalid Columns subset bytes; too many bits set: " + Long.toBinaryString(encoded));
                 missingColumnsMask = encoded;
