@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
-import java.util.Set;
 
 import org.junit.Test;
 
@@ -56,7 +55,6 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  */
 public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
 
     private static final int ROUNDS = Integer.getInteger("cassandra.test.differential.bigvolume.rounds", 20);
     private static final int PARTITIONS = Integer.getInteger("cassandra.test.differential.bigvolume.partitions", 2000);
@@ -133,6 +131,6 @@ public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionT
             logger.info("big-volume round {}/{} flushed", round + 1, ROUNDS);
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 }

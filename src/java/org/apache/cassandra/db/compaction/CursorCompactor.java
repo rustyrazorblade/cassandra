@@ -141,7 +141,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         // BTI index writing is not supported yet
         if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat))
         {
-            if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only BIG sstable output format is supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
+            if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only the BIG sstable output format is supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
             return false;
         }
         // TODO: Implement CompactionIterator.GarbageSkipper like functionality
@@ -645,7 +645,9 @@ public class CursorCompactor extends CompactionInfo.Holder
             throw new UnsupportedOperationException("TODO: Not ready for counter cells.");
 
         /** See: {@link Cells#reconcile(Cell, Cell)} */
-        // Find latest cell value/delete info, only one cell can win(for now... same timestamp handling awaits)!
+        // Find the winning cell across sources: resolveRegular implements the full
+        // Cells.resolveRegular decision table, including the same-timestamp tie-breaks
+        // (deleted/expiring beats live, greater deletion time, lower TTL, greater value)
         for (int i = 1; i < cellMergeLimit; i++)
         {
             StatefulCursor oCellSource = sstableCursors[i];
