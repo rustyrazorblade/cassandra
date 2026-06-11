@@ -26,7 +26,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.Set;
 
 import com.google.common.collect.ImmutableList;
 import org.junit.Test;
@@ -82,7 +81,6 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         CassandraRelevantProperties.TEST_BLOB_SHARED_SEED.setInt(42);
     }
 
-    private static final Set<String> ALLOWLIST = Set.of();
     private static final int DEFAULT_EXAMPLES = 10;
     private static final int EXAMPLES = Integer.getInteger("cassandra.test.differential.examples", DEFAULT_EXAMPLES);
 
@@ -270,7 +268,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
             flush(KEYSPACE, metadata.name);
         }
 
-        assertCursorMatchesIterator(cfs, ALLOWLIST);
+        assertCursorMatchesIterator(cfs);
     }
 
     private static String insertStmt(TableMetadata metadata)

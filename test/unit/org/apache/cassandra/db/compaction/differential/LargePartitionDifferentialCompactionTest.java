@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
-import java.util.Set;
 
 import org.junit.Test;
 
@@ -52,7 +51,6 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  */
 public class LargePartitionDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
 
     private static final int SSTABLES =
         Integer.getInteger("cassandra.test.differential.largepartition.sstables", 4);
@@ -126,6 +124,6 @@ public class LargePartitionDifferentialCompactionTest extends DifferentialCompac
             logger.info("large-partition round {}/{} flushed", round + 1, SSTABLES);
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 }

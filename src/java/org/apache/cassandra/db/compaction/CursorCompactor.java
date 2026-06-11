@@ -67,6 +67,7 @@ import org.apache.cassandra.io.sstable.format.SSTableWriter;
 import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -141,11 +142,12 @@ public class CursorCompactor extends CompactionInfo.Holder
                 }
             }
         }
-        // BTI index writing is not supported yet
+        // BIG and BTI have cursor index writers (BigCursorIndexWriter / BtiCursorIndexWriter);
+        // any other (future) output format falls back to the iterator path
         if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat
-              || DatabaseDescriptor.getSelectedSSTableFormat() instanceof org.apache.cassandra.io.sstable.format.bti.BtiFormat))
+              || DatabaseDescriptor.getSelectedSSTableFormat() instanceof BtiFormat))
         {
-            if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only BIG sstable output format is supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
+            if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only BIG and BTI sstable output formats are supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
             return false;
         }
         // TODO: Implement CompactionIterator.GarbageSkipper like functionality
@@ -704,7 +706,9 @@ public class CursorCompactor extends CompactionInfo.Holder
         }
 
         /** See: {@link Cells#reconcile(Cell, Cell)} */
-        // Find latest cell value/delete info, only one cell can win(for now... same timestamp handling awaits)!
+        // Find the winning cell across sources: resolveRegular implements the full
+        // Cells.resolveRegular decision table, including the same-timestamp tie-breaks
+        // (deleted/expiring beats live, greater deletion time, lower TTL, greater value)
         for (int i = 1; i < cellMergeLimit; i++)
         {
             StatefulCursor oCellSource = sstableCursors[i];

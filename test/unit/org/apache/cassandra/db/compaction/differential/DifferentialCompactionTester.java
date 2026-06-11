@@ -69,8 +69,9 @@ import static org.junit.Assert.fail;
  * selected by {@link DatabaseDescriptor#setCursorCompactionEnabled}), captures both outputs,
  * and asserts equivalence at two levels:
  *
- *  1. BYTE level: every output component must be byte-identical, unless the component is
- *     in the explicit allowlist of known/justified divergences.
+ *  1. BYTE level: every output component must be byte-identical. There is deliberately NO
+ *     exception mechanism — nothing is allowed to diverge; every divergence found to date
+ *     has been a bug in one of the paths.
  *  2. LOGICAL level: a canonical JSON dump (sstabledump format) of every output sstable
  *     must match exactly, and key stats metadata must match.
  *
@@ -133,13 +134,11 @@ public abstract class DifferentialCompactionTester extends CQLTester
 
     /**
      * Runs both compaction paths over the current live sstables of the table and asserts
-     * byte + logical equivalence. The byteDiffAllowlist contains component names (e.g.
-     * "Statistics.db") that are permitted to differ at the byte level; logical equivalence
-     * is always enforced.
+     * byte + logical equivalence of every output component.
      */
-    protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs, Set<String> byteDiffAllowlist) throws Exception
+    protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs) throws Exception
     {
-        return assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), byteDiffAllowlist, DEFAULT_TASK);
+        return assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK);
     }
 
     /**
@@ -152,10 +151,9 @@ public abstract class DifferentialCompactionTester extends CQLTester
      *  a scenario that does not exercise its mechanism passes vacuously). */
     protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs,
                                                          Set<SSTableReader> inputs,
-                                                         Set<String> byteDiffAllowlist,
                                                          TaskFactory taskFactory) throws Exception
     {
-        return assertCursorMatchesIterator(cfs, inputs, byteDiffAllowlist, taskFactory,
+        return assertCursorMatchesIterator(cfs, inputs, taskFactory,
                                            cfs.getDefaultGcBefore(FBUtilities.nowInSeconds()));
     }
 
@@ -167,7 +165,6 @@ public abstract class DifferentialCompactionTester extends CQLTester
      */
     protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs,
                                                          Set<SSTableReader> inputs,
-                                                         Set<String> byteDiffAllowlist,
                                                          TaskFactory taskFactory,
                                                          long gcBefore) throws Exception
     {
@@ -190,7 +187,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
                     reResolved.add(live);
             assertEquals("input subset lost across restore", inputs.size(), reResolved.size());
             CapturedOutput cursor = compactPath(cfs, reResolved, true, gcBefore, scratch.resolve("cursor"), taskFactory);
-            assertEquivalentOutputs(iterator, cursor, byteDiffAllowlist);
+            assertEquivalentOutputs(iterator, cursor);
             return iterator;
         }
     }
@@ -206,17 +203,16 @@ public abstract class DifferentialCompactionTester extends CQLTester
      * Returns the GEN-1 iterator capture: scenario structural assertions target gen 1, whose
      * shape the scenario controls directly.
      */
-    protected CapturedOutput assertCursorMatchesIteratorAcrossGenerations(ColumnFamilyStore cfs,
-                                                                          Set<String> byteDiffAllowlist) throws Exception
+    protected CapturedOutput assertCursorMatchesIteratorAcrossGenerations(ColumnFamilyStore cfs) throws Exception
     {
-        CapturedOutput gen1 = assertCursorMatchesIterator(cfs, byteDiffAllowlist);
+        CapturedOutput gen1 = assertCursorMatchesIterator(cfs);
 
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
         commitCompaction(cfs, cfs.getLiveSSTables(), true, gcBefore);
         if (cfs.getLiveSSTables().isEmpty())
             return gen1; // gen 1 purged everything; there are no gen-2 inputs
 
-        assertCursorMatchesIterator(cfs, byteDiffAllowlist);
+        assertCursorMatchesIterator(cfs);
         return gen1;
     }
 
@@ -450,7 +446,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
         return captured;
     }
 
-    protected void assertEquivalentOutputs(CapturedOutput iterator, CapturedOutput cursor, Set<String> byteDiffAllowlist)
+    protected void assertEquivalentOutputs(CapturedOutput iterator, CapturedOutput cursor)
     {
         assertEquals("output sstable count differs between paths", iterator.sstables.size(), cursor.sstables.size());
         for (int i = 0; i < iterator.sstables.size(); i++)
@@ -480,8 +476,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
                 boolean hasB = Files.exists(b);
                 if (hasA != hasB)
                 {
-                    if (!byteDiffAllowlist.contains(comp))
-                        divergences.add(String.format("  %s: present only in %s path", comp, hasA ? "iterator" : "cursor"));
+                    divergences.add(String.format("  %s: present only in %s path", comp, hasA ? "iterator" : "cursor"));
                     continue;
                 }
                 if (!hasA)
@@ -489,13 +484,11 @@ public abstract class DifferentialCompactionTester extends CQLTester
                 long firstDiff = firstFileDifference(a, b);
                 if (firstDiff < 0)
                     continue;
-                if (byteDiffAllowlist.contains(comp))
-                    continue; // logical equivalence still asserted
                 divergences.add(describeFileDiff(comp, a, b, firstDiff));
             }
             if (!divergences.isEmpty())
                 fail("BYTE divergence in output sstable " + i + " (iterator vs cursor):\n" + String.join("\n", divergences) +
-                     "\nIf a divergence is benign it must be added to the allowlist with a justifying comment next to the allowlist entry");
+                     "\nNothing is allowed to diverge: every divergence found to date has been a bug in one of the paths");
 
             if (digestMode)
                 assertEquals("logical dump digest divergence in output sstable " + i +

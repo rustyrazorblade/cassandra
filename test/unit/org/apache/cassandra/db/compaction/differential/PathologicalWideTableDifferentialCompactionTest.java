@@ -23,7 +23,6 @@ import java.math.BigInteger;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.Date;
-import java.util.Set;
 import java.util.UUID;
 
 import org.junit.Test;
@@ -64,7 +63,6 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  */
 public class PathologicalWideTableDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
 
     private static final int REGULARS = Integer.getInteger("cassandra.test.differential.wide.regulars", 1800);
     private static final int STATICS = Integer.getInteger("cassandra.test.differential.wide.statics", 200);
@@ -270,6 +268,6 @@ public class PathologicalWideTableDifferentialCompactionTest extends Differentia
 
         Thread.sleep(2000); // let the TTL-1 window expire well before the first run
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 }
