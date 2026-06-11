@@ -36,17 +36,35 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  * dump streams into a SHA-256 digest and byte comparison streams, so harness memory stays
  * flat. Two generations as everywhere; the BTI subclass covers the trie format.
  *
- * Runtime is minutes, dominated by the 2M inserts — run with a raised junit timeout:
- * ant testsome -Dtest.name=...BigVolumeDifferentialCompactionTest -Dtest.timeout=2400000
+ * All scale parameters are property-configurable (defaults reproduce the standard 2M-row /
+ * 20-sstable run). Properties must reach the forked test JVM via -Dtest.jvm.args:
+ *
+ *   ant testsome -Dtest.name=...BigVolumeDifferentialCompactionTest \
+ *       -Dtest.timeout=14400000 \
+ *       -Dtest.jvm.args="-Dcassandra.test.differential.bigvolume.rounds=40
+ *                        -Dcassandra.test.differential.bigvolume.partitions=10000
+ *                        -Dcassandra.test.differential.bigvolume.rows_per_round=100
+ *                        -Dcassandra.test.differential.bigvolume.value_padding=200"
+ *
+ *  - rounds          = number of input sstables (one flush per round)
+ *  - partitions      = partitions per round
+ *  - rows_per_round  = rows per partition per round (total rows = rounds x partitions x this)
+ *  - value_padding   = extra bytes appended to every text value (row size knob; default 0)
+ *
+ * Delete counts scale with the partition count; the clustering stride is derived so
+ * consecutive rounds always overlap by roughly half a window.
  */
 public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionTester
 {
     private static final Set<String> ALLOWLIST = Set.of();
 
-    private static final int ROUNDS = 20;
-    private static final int PARTITIONS = 2000;
-    private static final int ROWS_PER_ROUND = 50;
-    private static final int CK_STRIDE = 23; // < ROWS_PER_ROUND: consecutive rounds overlap by 27 cks
+    private static final int ROUNDS = Integer.getInteger("cassandra.test.differential.bigvolume.rounds", 20);
+    private static final int PARTITIONS = Integer.getInteger("cassandra.test.differential.bigvolume.partitions", 2000);
+    private static final int ROWS_PER_ROUND = Integer.getInteger("cassandra.test.differential.bigvolume.rows_per_round", 50);
+    private static final String VALUE_PADDING =
+        "p".repeat(Integer.getInteger("cassandra.test.differential.bigvolume.value_padding", 0));
+    /** < ROWS_PER_ROUND so consecutive rounds overlap by roughly half a window (50 -> 23, the original). */
+    private static final int CK_STRIDE = Math.max(1, ROWS_PER_ROUND / 2 - 2);
 
     @Override
     protected boolean scaleCapture()
@@ -62,6 +80,11 @@ public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionT
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
+        logger.info("big-volume parameters: rounds={} partitions={} rowsPerRound={} valuePadding={}B " +
+                    "ckStride={} -> {} total rows across {} input sstables",
+                    ROUNDS, PARTITIONS, ROWS_PER_ROUND, VALUE_PADDING.length(), CK_STRIDE,
+                    (long) ROUNDS * PARTITIONS * ROWS_PER_ROUND, ROUNDS);
+
         String insert = "INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)";
         String insertTtl = insert + " USING TTL 86400";
         String insertTs = insert + " USING TIMESTAMP 5000";
@@ -76,37 +99,38 @@ public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionT
                 {
                     long ck = ckBase + j;
                     long v1 = ck * 31 + round;
-                    String v2 = j % 31 == 30 ? null : "v" + round + "_" + ck;
+                    String v2 = j % 31 == 30 ? null : "v" + round + "_" + ck + VALUE_PADDING;
                     if (j % 20 == 5)
                         execute(insertMap, pk, ck, v1, v2, map("k" + (ck % 3), ck, "r", (long) round));
                     else if (j % 7 == 3)
                         execute(insertTtl, pk, ck, v1, v2);
                     else if (j % 13 == 7)
-                        execute(insertTs, pk, ck, v1, "tie" + round + "_" + ck);
+                        execute(insertTs, pk, ck, v1, "tie" + round + "_" + ck + VALUE_PADDING);
                     else
                         execute(insert, pk, ck, v1, v2);
                 }
             }
 
-            for (int i = 0; i < 100; i++)
+            // delete counts scale with the partition count (defaults: 100 / 30 / 20)
+            for (int i = 0; i < Math.max(1, PARTITIONS / 20); i++)
                 execute("DELETE FROM %s WHERE pk = ? AND ck = ?",
                         (long) ((round * 97 + i * 13) % PARTITIONS), ckBase + (i % ROWS_PER_ROUND));
-            for (int i = 0; i < 30; i++)
+            for (int i = 0; i < Math.max(1, PARTITIONS / 66); i++)
             {
                 long start = ckBase + (i % 40);
                 execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?",
                         (long) ((round * 53 + i * 29) % PARTITIONS), start, start + 4);
             }
-            for (int i = 0; i < 20; i++)
+            for (int i = 0; i < Math.max(1, PARTITIONS / 100); i++)
             {
                 long pk = (round * 41 + i * 17) % PARTITIONS;
                 if (i % 2 == 0)
-                    execute("DELETE FROM %s WHERE pk = ? AND ck >= ?", pk, ckBase + 25);
+                    execute("DELETE FROM %s WHERE pk = ? AND ck >= ?", pk, ckBase + ROWS_PER_ROUND / 2);
                 else
                     execute("DELETE FROM %s WHERE pk = ? AND ck <= ?", pk, ckBase + 5);
             }
             // cycling partition deletes over the same 5 partitions: tombstone + resurrection
-            execute("DELETE FROM %s WHERE pk = ?", (long) (1995 + round % 5));
+            execute("DELETE FROM %s WHERE pk = ?", (long) (Math.max(0, PARTITIONS - 5) + round % Math.min(5, PARTITIONS)));
 
             flush();
             logger.info("big-volume round {}/{} flushed", round + 1, ROUNDS);

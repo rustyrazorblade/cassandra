@@ -50,13 +50,24 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  *
  * Its own suite (not EdgeCase): the DDL and prepared statements are large and setup
  * dominates runtime. BTI variant via subclass; two generations as everywhere.
+ *
+ * Width is property-configurable (defaults reproduce the standard 1800+200 run); properties
+ * must reach the forked test JVM via -Dtest.jvm.args:
+ *
+ *   ant testsome -Dtest.name=...PathologicalWideTableDifferentialCompactionTest \
+ *       -Dtest.jvm.args="-Dcassandra.test.differential.wide.regulars=5000
+ *                        -Dcassandra.test.differential.wide.statics=500"
+ *
+ * Keep regulars >= 128 so the >64-column subset encodings and the present==half mode
+ * boundary stay exercised; everything else (boundary rows, windows, delete sets) derives
+ * from the configured width.
  */
 public class PathologicalWideTableDifferentialCompactionTest extends DifferentialCompactionTester
 {
     private static final Set<String> ALLOWLIST = Set.of();
 
-    private static final int REGULARS = 1800;
-    private static final int STATICS = 200;
+    private static final int REGULARS = Integer.getInteger("cassandra.test.differential.wide.regulars", 1800);
+    private static final int STATICS = Integer.getInteger("cassandra.test.differential.wide.statics", 200);
     private static final int PALETTE = 20;
 
     private String udt;
@@ -146,6 +157,7 @@ public class PathologicalWideTableDifferentialCompactionTest extends Differentia
     @Test
     public void thousandsOfColumns() throws Throwable
     {
+        logger.info("pathological-wide parameters: regulars={} statics={}", REGULARS, STATICS);
         udt = createType("CREATE TYPE %s (a int, b text)");
 
         StringBuilder ddl = new StringBuilder("CREATE TABLE %s (pk bigint, ck bigint");
