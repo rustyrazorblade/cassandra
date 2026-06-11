@@ -308,6 +308,104 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     /**
+     * Garbage-free property for RANGE-TOMBSTONE-dense workloads (task-15 M6): the marker
+     * read/merge/write path runs on the ReusableDeletionTime pool and open-marker tracking,
+     * which the row-centric gates barely touch. Each partition carries 300 bounded range
+     * tombstones per round, the second round's bounds shifted by one so every marker pair
+     * overlaps across sstables and forces real deletion reconciliation.
+     *
+     * Asserted per INPUT BYTE, not as a fixed delta: at marker-dense (sub-MB) scales the
+     * test-env residual (Ref$Debug stack captures, chunk-cache machinery) exceeds any fixed
+     * ceiling — the same calibration lesson as the complex-column gate. JFR attribution of
+     * the first run (recordRangeTombstoneAllocationProfile): ZERO cursor-owned sites; the
+     * profile is Ref$Debug + buffer-pool + per-compaction constants. Markers are ~25-35B on
+     * disk, so a leak of one small object per marker costs >1.5 B/B and trips the 1.0 B/B
+     * ceiling with wide margin.
+     */
+    @Test
+    public void allocationDoesNotScaleWithRangeTombstones() throws Exception
+    {
+        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
+        Assume.assumeTrue(threadMXBean != null);
+
+        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
+        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
+        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        try
+        {
+            long smallAlloc = measureRangeTombstones(threadMXBean, 12);
+            long smallBytes = lastInputBytes;
+            long bigAlloc = measureRangeTombstones(threadMXBean, 96);
+            long bigBytes = lastInputBytes;
+            long delta = bigAlloc - smallAlloc;
+            long extraBytes = bigBytes - smallBytes;
+            double perInputByte = (double) delta / extraBytes;
+            logger.info("RT-dense cursor compaction allocation: small={}B big={}B delta={}B " +
+                        "over {}B extra input = {} B/B (ceiling {} B/B)",
+                        smallAlloc, bigAlloc, delta, extraBytes,
+                        String.format("%.3f", perInputByte), rtPerInputByteCeiling());
+            assertTrue(String.format("RT-dense cursor compaction allocation scales with markers: " +
+                                     "%,dB -> %,dB, delta %,dB over %,dB extra input = %.3f B/B exceeds " +
+                                     "ceiling %.2f B/B. A per-marker allocation has been introduced on " +
+                                     "the cursor hot path.",
+                                     smallAlloc, bigAlloc, delta, extraBytes, perInputByte,
+                                     rtPerInputByteCeiling()),
+                       perInputByte <= rtPerInputByteCeiling());
+        }
+        finally
+        {
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
+            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
+        }
+    }
+
+    /** Calibrated from measured 0.684 B/B (BIG) — all test-env residual by JFR attribution
+     *  (Ref$Debug, buffer pool; zero cursor frames). Format variants override: BTI pays an
+     *  inherent per-partition index cost (trie nodes, key snapshots — the iterator pays it
+     *  too) that dominates on tiny marker-dense partitions. */
+    protected double rtPerInputByteCeiling()
+    {
+        return 1.0;
+    }
+
+    private long measureRangeTombstones(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH compression = {'enabled': 'false'} AND gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (int round = 0; round < 2; round++)
+        {
+            for (long pk = 0; pk < partitions; pk++)
+            {
+                // a few surviving rows well outside the tombstoned ck range
+                for (long r = 0; r < 5; r++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, 100_000L + r, "v" + r);
+                // 300 bounded RTs; round 1 shifts bounds by 1 so markers overlap across rounds
+                for (long t = 0; t < 300; t++)
+                    execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?",
+                            pk, t * 4 + round, t * 4 + round + 2);
+            }
+            flush();
+        }
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+        lastInputBytes = 0;
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            lastInputBytes += sstable.onDiskLength();
+        long best = Long.MAX_VALUE;
+        for (int i = 0; i < WARMUP_ITERATIONS + MEASURED_ITERATIONS; i++)
+        {
+            long allocated = compactOnceMeasured(threadMXBean, cfs, gcBefore);
+            if (i >= WARMUP_ITERATIONS)
+                best = Math.min(best, allocated);
+        }
+        return best;
+    }
+
+    /**
      * Garbage-free property for COMPLEX (multi-cell) columns through the full cursor
      * pipeline: read + per-(column,path) merge + marker/assembly write. Every row carries a
      * map and a set (plus a complex deletion from the collection-literal INSERT), and the
@@ -434,6 +532,62 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
                 recording.dump(java.nio.file.Path.of("/tmp/cursor-alloc.jfr"));
             }
             logger.info("allocation profile dumped to /tmp/cursor-alloc.jfr");
+        }
+        finally
+        {
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
+            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
+        }
+    }
+
+    /** Diagnostic, not a gate: JFR allocation profile over warmed cursor compactions of the
+     *  big RANGE-TOMBSTONE-dense table; dumps /tmp/cursor-alloc-rt.jfr for attribution. */
+    @Test
+    public void recordRangeTombstoneAllocationProfile() throws Exception
+    {
+        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
+        Assume.assumeTrue(threadMXBean != null);
+
+        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
+        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
+        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        try
+        {
+            createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                        "WITH compression = {'enabled': 'false'} AND gc_grace_seconds = 864000");
+            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            cfs.disableAutoCompaction();
+            int partitions = SMALL_PARTITIONS * SCALE;
+            for (int round = 0; round < 2; round++)
+            {
+                for (long pk = 0; pk < partitions; pk++)
+                {
+                    for (long r = 0; r < 5; r++)
+                        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, 100_000L + r, "v" + r);
+                    for (long t = 0; t < 150; t++)
+                        execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?",
+                                pk, t * 4 + round, t * 4 + round + 2);
+                }
+                flush();
+            }
+            long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+            assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+
+            for (int i = 0; i < WARMUP_ITERATIONS; i++)
+                compactOnceMeasured(threadMXBean, cfs, gcBefore);
+
+            try (jdk.jfr.Recording recording = new jdk.jfr.Recording())
+            {
+                recording.enable("jdk.ObjectAllocationInNewTLAB").withStackTrace();
+                recording.enable("jdk.ObjectAllocationOutsideTLAB").withStackTrace();
+                recording.start();
+                for (int i = 0; i < 30; i++)
+                    compactOnceMeasured(threadMXBean, cfs, gcBefore);
+                recording.stop();
+                recording.dump(java.nio.file.Path.of("/tmp/cursor-alloc-rt.jfr"));
+            }
+            logger.info("allocation profile dumped to /tmp/cursor-alloc-rt.jfr");
         }
         finally
         {
