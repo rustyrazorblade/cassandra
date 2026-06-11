@@ -443,4 +443,67 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
 
         assertCursorMatchesIterator(cfs, ALLOWLIST);
     }
+
+    /**
+     * Empty clustering values on a DESC (reversed) clustering column — finding #10, found by
+     * the widened randomized soak (seed 99303954147053). Every base type sorts empty before
+     * values, so a reversed column sorts empty AFTER values (ReversedType swaps operands
+     * around the base comparison). The cursor path's raw clustering comparison decided
+     * empty-vs-valued purely from the serialized flag bits, ignoring reversal:
+     *  - same-partition variant: rows with empty and valued clusterings for the SAME pk in
+     *    different sstables merge in the wrong order (Data.db divergence — corruption class);
+     *  - cross-partition variant: the global covered-clustering max picks the wrong row
+     *    (Statistics.db divergence — what the soak caught).
+     */
+    @Test
+    public void emptyClusteringValuesDescending() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
+                    "WITH CLUSTERING ORDER BY (ck DESC)");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // sstable 1: valued clusterings for pk 1 (same-partition variant) and pk 2 (the
+        // lexically-largest valued rows, cross-partition variant)
+        for (long ck = 1; ck <= 5; ck++)
+        {
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ck, "p1v" + ck);
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 2L, ck * 1000, "p2v" + ck);
+        }
+        flush();
+
+        // sstable 2: EMPTY clustering values — same partition as pk 1's valued rows (the
+        // merge must order empty AFTER values under DESC), plus an empty-only partition
+        // (the global max clustering must be the empty value, not pk 2's large bigints)
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ByteBufferUtil.EMPTY_BYTE_BUFFER, "p1empty");
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 3L, ByteBufferUtil.EMPTY_BYTE_BUFFER, "p3empty");
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, 3L, "p1v3-overwrite");
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
+
+    /** ASC counterpart of emptyClusteringValuesDescending: empty sorts BEFORE values on a
+     *  non-reversed column; pins the unflipped flag ordering. */
+    @Test
+    public void emptyClusteringValuesAscending() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 1; ck <= 5; ck++)
+        {
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ck, "p1v" + ck);
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 2L, -ck * 1000, "p2v" + ck);
+        }
+        flush();
+
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ByteBufferUtil.EMPTY_BYTE_BUFFER, "p1empty");
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 3L, ByteBufferUtil.EMPTY_BYTE_BUFFER, "p3empty");
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, 3L, "p1v3-overwrite");
+        flush();
+
+        assertCursorMatchesIterator(cfs, ALLOWLIST);
+    }
 }
