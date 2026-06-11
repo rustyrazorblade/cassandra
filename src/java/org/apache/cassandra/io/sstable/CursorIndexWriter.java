@@ -35,8 +35,12 @@ import org.apache.cassandra.db.DeletionTime;
 public abstract class CursorIndexWriter
 {
     protected long partitionStart;
-    // Offset within the current partition where the current index block begins.
-    protected int indexBlockStartOffset;
+    // Offset within the current partition where the current index block begins. MUST be a
+    // long, like the reference SortedTablePartitionWriter.indexBlockStartOffset: partitions
+    // can exceed 2GiB, and an int here wraps negative past Integer.MAX_VALUE — the block-cut
+    // arithmetic then cuts every row and the serialized offsets corrupt the promoted index
+    // (pinned by the giant-partition boundary run, ck_stride = rows_per_sstable).
+    protected long indexBlockStartOffset;
 
     public final void startPartition(long partitionStartPosition, long positionAfterHeader)
     {
@@ -51,14 +55,14 @@ public abstract class CursorIndexWriter
         notePosition(position);
     }
 
-    public final int indexBlockStartOffset()
+    public final long indexBlockStartOffset()
     {
         return indexBlockStartOffset;
     }
 
     protected final void notePosition(long endOfRowPosition)
     {
-        indexBlockStartOffset = (int) (endOfRowPosition - partitionStart);
+        indexBlockStartOffset = endOfRowPosition - partitionStart;
     }
 
     protected final long currentOffsetInPartition(long position)
