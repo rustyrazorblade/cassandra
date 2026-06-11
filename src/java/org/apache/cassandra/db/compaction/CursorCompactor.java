@@ -662,7 +662,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             // positioned at it (column-ordered streams; this column is the merge minimum,
             // and deletion-only positions sort ahead of its cells) — so the merged complex
             // deletion is computable up front, before any of the column's cells is written.
-            if (currentComplexColumn != cellCursor.cellColumn)
+            if (!sameColumn(currentComplexColumn, cellCursor.cellColumn))
             {
                 currentComplexColumn = cellCursor.cellColumn;
                 complexColumnStarted = false;
@@ -671,7 +671,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                 {
                     StatefulCursor c = sstableCursors[i];
                     if (c.state() != UNFILTERED_END && isState(c.state(), CELL_VALUE_START | CELL_END)
-                        && c.cellCursor().cellColumn == currentComplexColumn)
+                        && sameColumn(c.cellCursor().cellColumn, currentComplexColumn))
                     {
                         DeletionTime d = c.cellCursor().complexDeletion;
                         if (d.supersedes(mergedComplexDeletion))
@@ -881,6 +881,19 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         }
         return isRowDropped;
+    }
+
+    /**
+     * Same output column? Sources opened against different TableMetadata versions (a
+     * type-touching ALTER between flushes — the CASSANDRA-13776 shape) carry DIFFERENT
+     * ColumnMetadata instances for the same column in their open-time serialization
+     * headers, so reference identity alone is wrong across sources. Identity stays as the
+     * fast path (always true between cells of one source, and across sources when no
+     * schema change intervened); the fallback compares the name bytes — no allocation.
+     */
+    private static boolean sameColumn(ColumnMetadata a, ColumnMetadata b)
+    {
+        return a == b || (a != null && b != null && a.name.equals(b.name));
     }
 
     enum CellResolution

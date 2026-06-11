@@ -103,6 +103,76 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
+    /**
+     * Multi-cell columns merged across sstables whose serialization headers were resolved
+     * against DIFFERENT TableMetadata versions: a type-touching ALTER (ALTER TYPE ADD —
+     * the CASSANDRA-13776 shape) rebuilds the column via ColumnMetadata.withNewType, so an
+     * sstable flushed before the ALTER carries a different ColumnMetadata INSTANCE for the
+     * same column than one flushed after (SSTableReader.header is resolved once, at open).
+     * Column matching in the merge must therefore be by VALUE, not reference identity.
+     *
+     * NOT a differential scenario: the harness's restore re-opens every input against the
+     * CURRENT metadata, silently unifying the instances before the cursor leg runs — the
+     * skew only exists for the original readers, which is what production compacts. So this
+     * pins the production shape directly: assert the skew exists, commit a cursor compaction
+     * over the original readers, and assert ground truth through CQL (f2 is never rewritten
+     * by sstable 2, so ONLY the overwrite's complex deletion can remove it — a skipped
+     * deletion resurrects it, and timestamps cannot mask the loss).
+     */
+    @Test
+    public void complexColumnsAcrossTypeAlter() throws Exception
+    {
+        String udt = createType("CREATE TYPE %s (f1 text, f2 text)");
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, u " + udt + ", v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // sstable 1: header resolved against the pre-ALTER metadata; UDT cells only
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET u.f1 = ?, u.f2 = ?, v = ? WHERE pk = ? AND ck = ?",
+                    "old" + ck, "keepable" + ck, "x" + ck, 1L, ck);
+        flush();
+
+        // rebuilds ColumnMetadata for u (TableMetadata.withUpdatedUserType -> withNewType)
+        execute("ALTER TYPE " + KEYSPACE + "." + udt + " ADD f3 text");
+
+        // sstable 2: header resolved against the post-ALTER metadata. Full overwrites
+        // (complex deletion + fresh cells); a deletion-only row exercises the
+        // merged-deletion scan against the old instance.
+        for (long ck = 0; ck < 6; ck += 2)
+            execute("UPDATE %s USING TIMESTAMP 2000 SET u = {f1: ?, f3: ?} WHERE pk = ? AND ck = ?",
+                    "new" + ck, "three" + ck, 1L, ck);
+        execute("DELETE u FROM %s USING TIMESTAMP 2000 WHERE pk = 1 AND ck = 5");
+        flush();
+
+        // non-vacuousness: the two open readers must actually hold DIFFERENT
+        // ColumnMetadata instances for u, or this scenario tests nothing
+        java.util.List<org.apache.cassandra.schema.ColumnMetadata> uInstances = new java.util.ArrayList<>();
+        for (org.apache.cassandra.io.sstable.format.SSTableReader r : cfs.getLiveSSTables())
+            for (org.apache.cassandra.schema.ColumnMetadata c : r.header.columns(false))
+                if (c.name.toString().equals("u"))
+                    uInstances.add(c);
+        org.junit.Assert.assertEquals("expected one u column per input sstable", 2, uInstances.size());
+        org.junit.Assert.assertNotSame("ALTER TYPE no longer skews header instances — scenario is vacuous",
+                                       uInstances.get(0), uInstances.get(1));
+
+        // the production shape: cursor compaction over the ORIGINAL, instance-skewed readers
+        // (commitCompaction asserts the cursor path actually runs)
+        commitCompaction(cfs, cfs.getLiveSSTables(), true,
+                         cfs.getDefaultGcBefore(org.apache.cassandra.utils.FBUtilities.nowInSeconds()));
+
+        // ground truth: overwritten rows lost f2 to the overwrite deletion; untouched rows
+        // keep f1/f2; the deletion-only row lost u entirely
+        assertRows(execute("SELECT ck, u.f1, u.f2, u.f3, v FROM %s WHERE pk = 1"),
+                   row(0L, "new0", null, "three0", "x0"),
+                   row(1L, "old1", "keepable1", null, "x1"),
+                   row(2L, "new2", null, "three2", "x2"),
+                   row(3L, "old3", "keepable3", null, "x3"),
+                   row(4L, "new4", null, "three4", "x4"),
+                   row(5L, null, null, null, "x5"));
+    }
+
     /** The headline interaction: complex deletions interleaved with range tombstones —
      *  range deletes shadow whole rows including complex columns, complex deletions shadow
      *  cells within a column, both merging across sstables. */

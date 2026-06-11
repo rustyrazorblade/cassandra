@@ -397,8 +397,12 @@ public class SSTableCursorWriter implements AutoCloseable
     {
         if (cellColumn.isComplex())
         {
-            // subset advance + counting happened in startComplexColumn; just count the cell
-            if (lastCellColumn != cellColumn)
+            // subset advance + counting happened in startComplexColumn; just count the cell.
+            // Compare by NAME, not identity: the winning cell may come from a source whose
+            // open-time header holds a different ColumnMetadata instance for this column
+            // (sstables flushed across a type-touching ALTER — CASSANDRA-13776 shape).
+            if (lastCellColumn != cellColumn
+                && (lastCellColumn == null || !lastCellColumn.name.equals(cellColumn.name)))
                 throw new IllegalStateException("complex cell without startComplexColumn: " + cellColumn);
             markerCellCount[complexMarkerCount - 1]++;
         }
