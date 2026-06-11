@@ -76,10 +76,6 @@ public class SSTableCursorWriter implements AutoCloseable
     private final DeletionTime.Serializer deletionTimeSerializer;
     private final MetadataCollector metadataCollector;
     private final SerializationHeader serializationHeader;
-    /**
-     * See: {@link BloomFilter#reusableIndexes}
-     */
-    private final long[] reusableIndexes = new long[21];
     private final boolean hasStaticColumns;
 
     private long partitionStart;
@@ -117,14 +113,8 @@ public class SSTableCursorWriter implements AutoCloseable
     private ColumnMetadata[] columns; // points to static/regular
     private int columnsWrittenCount = 0;
     private int nextCellIndex = 0;
-    // Index info
-    private final DataOutputBuffer rowIndexEntries = new DataOutputBuffer();
-    private final IntArrayList rowIndexEntriesOffsets = new IntArrayList();
-    private final ClusteringDescriptor rowIndexEntryLastClustering;
-    private boolean hasDistinctLastClustering = false;
-    private int indexBlockStartOffset;
-    private int rowIndexEntryOffset;
-    private final int indexBlockThreshold;
+    // Format-specific index production (BIG: promoted blocks + Index.db; BTI: tries)
+    private final CursorIndexWriter cursorIndexWriter;
 
     private SSTableCursorWriter(
         Descriptor desc,
@@ -143,8 +133,9 @@ public class SSTableCursorWriter implements AutoCloseable
         hasStaticColumns = serializationHeader.hasStatic();
         staticColumns = hasStaticColumns ? serializationHeader.columns(true).toArray(EMPTY_COL_META) : EMPTY_COL_META;
         regularColumns = serializationHeader.columns(false).toArray(EMPTY_COL_META);
-        this.indexBlockThreshold = DatabaseDescriptor.getColumnIndexSize(BigFormatPartitionWriter.DEFAULT_GRANULARITY);
-        rowIndexEntryLastClustering = new ClusteringDescriptor(serializationHeader.clusteringTypes().toArray(AbstractType[]::new));
+        this.cursorIndexWriter = new BigCursorIndexWriter((BigTableWriter.IndexWriter) indexWriter,
+                                                           this.deletionTimeSerializer,
+                                                           new ClusteringDescriptor(serializationHeader.clusteringTypes().toArray(AbstractType[]::new)));
     }
 
     public SSTableCursorWriter(SortedTableWriter<?,?> ssTableWriter)
@@ -180,17 +171,13 @@ public class SSTableCursorWriter implements AutoCloseable
 
     public int writePartitionStart(byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime) throws IOException
     {
-        rowIndexEntries.clear();
-        rowIndexEntriesOffsets.clear();
-        rowIndexEntryOffset = 0;
         openMarker.resetLive();
-        hasDistinctLastClustering = false;
 
         partitionStart = dataWriter.position();
         previousRowStartOffset = 0;
         writePartitionHeader(partitionKey, partitionKeyLength, partitionDeletionTime);
-        updateIndexBlockStartOffset(dataWriter.position());
-        return indexBlockStartOffset;
+        cursorIndexWriter.startPartition(partitionStart, dataWriter.position());
+        return cursorIndexWriter.indexBlockStartOffset();
     }
 
     public void writePartitionEnd(byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime, int headerLength) throws IOException
@@ -210,82 +197,9 @@ public class SSTableCursorWriter implements AutoCloseable
          // this is implemented differently for BIG/BTI
          createRowIndexEntry(key, partitionLevelDeletion, partitionEnd - 1);
          */
-        appendBIGIndex(partitionKey, partitionKeyLength, partitionStart, headerLength, partitionDeletionTime, partitionEnd);
+        cursorIndexWriter.endPartition(partitionKey, partitionKeyLength, headerLength, partitionDeletionTime, partitionEnd);
     }
 
-    private void appendBIGIndex(byte[] key, int keyLength, long partitionStart, int headerLength, DeletionTime partitionDeletionTime, long partitionEnd) throws IOException
-    {
-        /**
-         * {@link BigTableWriter#createRowIndexEntry(DecoratedKey, DeletionTime, long)}
-         * {@link BigTableWriter.IndexWriter#append(DecoratedKey, RowIndexEntry, long, ByteBuffer)}
-         *
-         */
-        BigTableWriter.IndexWriter indexWriter = (BigTableWriter.IndexWriter) this.indexWriter;
-        SequentialWriter indexFileWriter = indexWriter.writer;
-        ((BloomFilter)indexWriter.bf).add(key, 0, keyLength, reusableIndexes);
-        long indexStart = indexFileWriter.position();
-        try
-        {
-            ByteArrayUtil.writeWithShortLength(key, 0, keyLength, indexFileWriter);
-
-            indexFileWriter.writeUnsignedVInt(partitionStart);
-
-            // The trailing block must be counted BEFORE deciding whether to promote the index:
-            // the iterator (BigFormatPartitionWriter.finish + RowIndexEntry.create) promotes when
-            // the total block count INCLUDING the tail is > 1. A tail size of exactly 1 means only
-            // the end-of-partition marker remains since the last cut (the iterator's
-            // firstClustering == null case) and no tail block exists.
-            // The tail width itself includes the end-of-partition marker byte, matching the
-            // iterator, which indexes the final block AFTER SortedTablePartitionWriter.finish()
-            // has written the marker.
-            long tailBlockSize = (partitionEnd - partitionStart) - indexBlockStartOffset;
-            boolean hasTailBlock = tailBlockSize > 1;
-            int totalBlocks = rowIndexEntriesOffsets.size() + (hasTailBlock ? 1 : 0);
-
-            /** See: {@link org.apache.cassandra.io.sstable.format.big.RowIndexEntry#create} */
-            if (totalBlocks <= 1)
-            {
-                /**
-                 * {@link RowIndexEntry#serialize(DataOutputPlus, ByteBuffer)}
-                 */
-                indexFileWriter.writeUnsignedVInt32(0); // size
-            }
-            else {
-                // add last block
-                if (hasTailBlock) {
-                    addIndexBlock(partitionEnd, tailBlockSize);
-                }
-                // if we have intermeddiate index info elements we also need to serialize the partitionDeletionTime
-                /** {@link RowIndexEntry.IndexedEntry#serialize(DataOutputPlus, ByteBuffer) */
-                // size up to the offsets?
-                int endOfEntries = rowIndexEntries.getLength();
-                // Write the headerLength, partitionDeletionTime and rowIndexEntriesOffsets.size() after the entries,
-                // just to calculate size.
-                rowIndexEntries.writeUnsignedVInt((long)headerLength);
-                deletionTimeSerializer.serialize(partitionDeletionTime, rowIndexEntries);
-
-                rowIndexEntries.writeUnsignedVInt32(rowIndexEntriesOffsets.size()); // number of entries
-
-                // bytes until offsets
-                int entriesAndOffsetsSize = rowIndexEntries.getLength() + rowIndexEntriesOffsets.size() * 4;
-                assert entriesAndOffsetsSize > 0;
-                indexFileWriter.writeUnsignedVInt32(entriesAndOffsetsSize); // size != 0
-                // copy the header elements
-                indexFileWriter.write(rowIndexEntries.getData(), endOfEntries, rowIndexEntries.getLength() - endOfEntries);
-                indexFileWriter.write(rowIndexEntries.getData(), 0, endOfEntries);
-                for (int i = 0; i < rowIndexEntriesOffsets.size(); i++)
-                {
-                    int offset = rowIndexEntriesOffsets.get(i);
-                    indexFileWriter.writeInt(offset);
-                }
-            }
-        }
-        catch (IOException e)
-        {
-            throw new FSWriteError(e, indexFileWriter.getPath());
-        }
-        indexWriter.summary.maybeAddEntry(key, 0, keyLength, indexStart);
-    }
 
     final long guardrailsPartitionSizeWarning = Guardrails.partitionSize.warnValue(null);
     final long guardrailsPartitionTombstonesWarning = Guardrails.partitionTombstones.warnValue(null);
@@ -343,7 +257,7 @@ public class SSTableCursorWriter implements AutoCloseable
         missingColumns.clear();
         writeRowEnd(null, false);
 
-        updateIndexBlockStartOffset(dataWriter.position());
+        cursorIndexWriter.staticRowWritten(dataWriter.position());
         return true;
     }
 
@@ -658,7 +572,7 @@ public class SSTableCursorWriter implements AutoCloseable
 
         if (isStatic)
         {
-            updateIndexBlockStartOffset(dataWriter.position());
+            cursorIndexWriter.staticRowWritten(dataWriter.position());
         }
         else
         {
@@ -726,22 +640,7 @@ public class SSTableCursorWriter implements AutoCloseable
                                              boolean updateClusteringMetadata) throws IOException
     {
         if (updateClusteringMetadata) updateClusteringMetadata(unfilteredDescriptor);
-        // write the first clustering into rowIndexEntries buffer (we will need it unless we never write the first entry)
-        if (currentOffsetInPartition(unfilteredStartPosition) == indexBlockStartOffset || (rowIndexEntryOffset == rowIndexEntries.position()))
-        {
-            writeClusteringToRowIndexEntries(unfilteredDescriptor);
-        }
-        else
-        {
-            rowIndexEntryLastClustering.copy(unfilteredDescriptor);
-            hasDistinctLastClustering = true;
-        }
-
-        /** {@link BigFormatPartitionWriter#addUnfiltered(Unfiltered)} */
-        // if we hit the index block size that we have to index after, go ahead and index it.
-        long indexBlockSize = currentOffsetInPartition(unfilteredEndPosition) - indexBlockStartOffset;
-        if (indexBlockSize >= this.indexBlockThreshold)
-            addIndexBlock(unfilteredEndPosition, indexBlockSize);
+        cursorIndexWriter.rowWritten(unfilteredDescriptor, unfilteredStartPosition, unfilteredEndPosition, openMarker);
     }
 
     public void updateClusteringMetadata(UnfilteredDescriptor unfilteredDescriptor)
@@ -749,61 +648,6 @@ public class SSTableCursorWriter implements AutoCloseable
         metadataCollector.updateClusteringValues(unfilteredDescriptor);
     }
 
-    /**
-     *  See:
-     *  {@link BigFormatPartitionWriter#addIndexBlock()}
-     *  - {@link org.apache.cassandra.io.sstable.IndexInfo.Serializer#serialize(org.apache.cassandra.io.sstable.IndexInfo, org.apache.cassandra.io.util.DataOutputPlus)}
-     */
-    private void addIndexBlock(long endOfRowPosition, long indexBlockSize) throws IOException
-    {
-        if (rowIndexEntriesOffsets.isEmpty() && rowIndexEntryOffset != 0) {
-            throw new IllegalStateException();
-        }
-
-        // serialize the index info
-        /** {@link org.apache.cassandra.io.sstable.IndexInfo.Serializer#serialize(org.apache.cassandra.io.sstable.IndexInfo, org.apache.cassandra.io.util.DataOutputPlus)}*/
-        rowIndexEntriesOffsets.addInt(rowIndexEntryOffset);
-
-        // first clustering is already in, write last entry
-        if (!hasDistinctLastClustering)
-        {
-            // first entry is the last entry, copy it
-            byte[] entriesData = rowIndexEntries.getData();
-            long endOfFirstEntry = rowIndexEntries.position();
-            rowIndexEntries.write(entriesData, rowIndexEntryOffset, (int) (endOfFirstEntry - rowIndexEntryOffset));
-        }
-        else
-        {
-            writeClusteringToRowIndexEntries(rowIndexEntryLastClustering);
-            rowIndexEntryLastClustering.resetClustering();
-        }
-        hasDistinctLastClustering = false;
-
-        rowIndexEntries.writeUnsignedVInt((long)indexBlockStartOffset);
-        rowIndexEntries.writeVInt(indexBlockSize - IndexInfo.Serializer.WIDTH_BASE);
-
-        boolean isDeleteTimePresent = !openMarker.isLive();
-        rowIndexEntries.writeBoolean(isDeleteTimePresent);
-        if (isDeleteTimePresent)
-            deletionTimeSerializer.serialize(openMarker, rowIndexEntries);
-        // next block starts
-        rowIndexEntryOffset = Ints.checkedCast(rowIndexEntries.position());
-        updateIndexBlockStartOffset(endOfRowPosition);
-    }
-
-    private void updateIndexBlockStartOffset(long endOfRowPosition)
-    {
-        indexBlockStartOffset = (int) (endOfRowPosition - partitionStart);
-    }
-
-    private void writeClusteringToRowIndexEntries(ClusteringDescriptor clustering) throws IOException
-    {
-        ClusteringPrefix.Kind kind = clustering.clusteringKind();
-        rowIndexEntries.writeByte(kind.ordinal());
-        if (kind != ClusteringPrefix.Kind.CLUSTERING)
-            rowIndexEntries.writeShort(clustering.clusteringColumnsBound());
-        rowIndexEntries.write(clustering.clusteringBytes(), 0, clustering.clusteringLength());
-    }
 
     private long currentOffsetInPartition(long position)
     {
