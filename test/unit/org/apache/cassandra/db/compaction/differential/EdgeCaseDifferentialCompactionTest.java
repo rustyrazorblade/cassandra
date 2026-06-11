@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
-import java.util.Set;
 
 import org.junit.Test;
 
@@ -37,7 +36,6 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
 
     /**
      * Static-column table where some partitions have NO static values: an empty static row is
@@ -65,7 +63,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Reversed clustering order changes on-disk ordering and bound comparisons. */
@@ -86,7 +84,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Multi-component clusterings: mixed types, shared prefixes, per-component bounds. */
@@ -113,7 +111,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Wide partition crossing column-index block boundaries (indexed RowIndexEntry path). */
@@ -135,7 +133,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -161,7 +159,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Overlapping range tombstones across sstables: boundary markers must merge identically. */
@@ -193,7 +191,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("DELETE FROM %s WHERE pk = 1 AND ck >= 20 AND ck < 30");
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Frozen collections and tuples are single cells and inside the supported surface. */
@@ -220,7 +218,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** TTLs: live expiring cells and already-expired cells (expiry far from run boundaries). */
@@ -247,7 +245,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
 
         Thread.sleep(2000); // let the short TTLs expire well before the first run
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Same-timestamp conflicting writes: reconciliation must tie-break identically. */
@@ -272,7 +270,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 2000", 1L, ck, "tie" + ck);
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Newer partition deletion shadowing older data across several sstables. */
@@ -297,7 +295,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 3L, 0L, "alive-again");
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Single-input compaction: pure rewrite, no merge. */
@@ -314,7 +312,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("DELETE FROM %s WHERE pk = 0 AND ck >= 2 AND ck < 6");
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Many inputs: 8-way merge exercises the merge heap harder than the usual 2-4. */
@@ -336,7 +334,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Disjoint inputs: no overlapping partitions, pure concatenation. */
@@ -355,7 +353,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Empty (zero-length) values are valid and distinct from null; both must survive merge. */
@@ -378,7 +376,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, null, null)", 1L, ck);
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -417,7 +415,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, 3L, "p1v3-overwrite");
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** ASC counterpart of emptyClusteringValuesDescending: empty sorts BEFORE values on a
@@ -441,7 +439,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, 3L, "p1v3-overwrite");
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -473,7 +471,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("DELETE v1, v2 FROM %s WHERE pk = ? AND ck = ?", 1L, 5L);
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -507,7 +505,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             execute("UPDATE %s USING TTL 50000 AND TIMESTAMP 5000 SET v2 = ? WHERE pk = ? AND ck = ?", "t2" + ck, 1L, ck);
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -537,7 +535,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 2L, ck, "zzz-live" + ck);
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** Vector and duration columns: fixed-dimension float vectors and the
@@ -563,7 +561,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("INSERT INTO %s (pk, ck, vec, dur) VALUES (?, ?, null, null)", 1L, 7L);
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -610,7 +608,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -647,7 +645,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 2L, 2L, "resurrected");
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /** DESC counterpart: single-sided bounds invert in on-disk clustering order, so the
@@ -671,7 +669,7 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, 27L, "resurrected");
         flush();
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
     /**
@@ -708,6 +706,6 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             flush();
         }
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 }

@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
-import java.util.Set;
 
 import org.junit.Test;
 
@@ -38,7 +37,6 @@ import static org.junit.Assert.assertTrue;
  */
 public class PurgeBoundaryDifferentialCompactionTest extends DifferentialCompactionTester
 {
-    private static final Set<String> ALLOWLIST = Set.of();
 
     private static String allJson(CapturedOutput out)
     {
@@ -79,12 +77,12 @@ public class PurgeBoundaryDifferentialCompactionTest extends DifferentialCompact
         assertTrue("scenario produced no tombstone deletion times", maxLdt > 0 && maxLdt < Long.MAX_VALUE);
 
         // boundary: ldt == gcBefore -> NOT purgeable (purge requires ldt < gcBefore)
-        CapturedOutput at = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), ALLOWLIST, DEFAULT_TASK, maxLdt);
+        CapturedOutput at = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, maxLdt);
         assertTrue("tombstones at exactly gcBefore must be retained",
                    allJson(at).contains("\"marked_deleted\":\"200\""));
 
         // one past: ldt < gcBefore -> purgeable, shadowed data and tombstones both gone
-        CapturedOutput past = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), ALLOWLIST, DEFAULT_TASK, maxLdt + 1);
+        CapturedOutput past = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, maxLdt + 1);
         assertFalse("tombstones strictly before gcBefore must purge",
                     allJson(past).contains("\"marked_deleted\":\"200\""));
     }
@@ -111,7 +109,7 @@ public class PurgeBoundaryDifferentialCompactionTest extends DifferentialCompact
         DatabaseDescriptor.setCompactionReadDiskAccessMode(DiskAccessMode.direct);
         try
         {
-            assertCursorMatchesIterator(cfs, ALLOWLIST);
+            assertCursorMatchesIterator(cfs);
         }
         finally
         {
@@ -139,7 +137,7 @@ public class PurgeBoundaryDifferentialCompactionTest extends DifferentialCompact
                 flush();
             }
 
-            assertCursorMatchesIterator(cfs, ALLOWLIST);
+            assertCursorMatchesIterator(cfs);
         }
     }
 }
