@@ -380,7 +380,14 @@ public abstract class DifferentialCompactionTester extends CQLTester
             JsonTransformer.toJsonLines(scanner, Util.iterToStream(scanner), true, false,
                                         sstable.metadata(), DUMP_NOW_SEC, baos);
         }
-        String json = baos.toString(StandardCharsets.UTF_8);
+        // JsonTransformer's "expired" fields are computed from WALL CLOCK
+        // (currentTimeMillis), ignoring the fixed nowInSec passed above — so byte-identical
+        // outputs can render differently when a localExpirationTime falls between the two
+        // paths' captures, which run seconds apart (materialized-view expired-liveness rows
+        // sit permanently on that boundary: their expiration IS the write second). The flag
+        // is derived from expires_at, which is still compared, so normalize it out.
+        String json = baos.toString(StandardCharsets.UTF_8)
+                          .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"");
 
         // 3. stats spot-check summary
         StatsMetadata stats = sstable.getSSTableMetadata();
