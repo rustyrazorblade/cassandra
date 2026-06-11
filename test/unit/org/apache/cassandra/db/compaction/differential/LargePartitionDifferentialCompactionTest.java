@@ -36,17 +36,22 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  *    resets after the monster.
  *
  * Parameters (defaults are CI-sane: ~1M rows, ~160MB partition, still ~40K index blocks at
- * the 4KiB test column_index_size). The 2GiB boundary run:
+ * the 4KiB test column_index_size). The MERGED partition size is what crosses boundaries:
+ * with the default half-window overlap, distinct rows = (sstables-1) * ck_stride +
+ * rows_per_sstable — NOT sstables * rows_per_sstable (an earlier "2.6GiB" boundary run
+ * conflated pre-merge input rows with merged output rows and only reached ~1.4GiB).
+ * The true 2GiB boundary run uses DISJOINT windows (ck_stride = rows_per_sstable):
  *
  *   ant testsome -Dtest.name=...LargePartitionDifferentialCompactionTest \
  *       -Dtest.timeout=14400000 \
  *       -Dtest.jvm.args="-Dcassandra.test.differential.largepartition.sstables=8
- *                        -Dcassandra.test.differential.largepartition.rows_per_sstable=1200000
- *                        -Dcassandra.test.differential.largepartition.value_padding=240"
+ *                        -Dcassandra.test.differential.largepartition.rows_per_sstable=1100000
+ *                        -Dcassandra.test.differential.largepartition.value_padding=240
+ *                        -Dcassandra.test.differential.largepartition.ck_stride=1100000"
  *
- * That is ~9.6M rows at ~280B/row: a ~2.6GiB single partition. Peak disk for the full
- * two-generation differential (inputs + live output + four captured output copies) is
- * roughly 7x the partition size. The memtable may auto-flush large rounds, so the sstables
+ * That is ~8.8M distinct rows at ~280B/row: a ~2.4GiB single MERGED partition. Peak disk for
+ * the full two-generation differential (inputs + live output + four captured output copies)
+ * is roughly 7x the partition size. The memtable may auto-flush large rounds, so the sstables
  * parameter is a minimum input count, which the differential does not care about.
  */
 public class LargePartitionDifferentialCompactionTest extends DifferentialCompactionTester
@@ -58,8 +63,13 @@ public class LargePartitionDifferentialCompactionTest extends DifferentialCompac
         Integer.getInteger("cassandra.test.differential.largepartition.rows_per_sstable", 250_000);
     private static final String VALUE_PADDING =
         "p".repeat(Integer.getInteger("cassandra.test.differential.largepartition.value_padding", 120));
-    /** Half-window overlap between rounds: every output row in the overlap merges from two inputs. */
-    private static final long CK_STRIDE = Math.max(1, ROWS_PER_SSTABLE / 2);
+    /**
+     * Window stride between rounds. Default: half-window overlap, so every output row in the
+     * overlap merges from two inputs. Set equal to rows_per_sstable for DISJOINT windows,
+     * which maximizes the merged partition size (the 2GiB boundary run).
+     */
+    private static final long CK_STRIDE = Math.max(1,
+        Integer.getInteger("cassandra.test.differential.largepartition.ck_stride", ROWS_PER_SSTABLE / 2));
 
     @Override
     protected boolean scaleCapture()
@@ -70,11 +80,12 @@ public class LargePartitionDifferentialCompactionTest extends DifferentialCompac
     @Test
     public void giantPartition() throws Throwable
     {
-        logger.info("large-partition parameters: sstables={} rowsPerSSTable={} valuePadding={}B " +
-                    "-> ~{} rows in one partition, ~{}MB serialized",
-                    SSTABLES, ROWS_PER_SSTABLE, VALUE_PADDING.length(),
-                    (long) SSTABLES * ROWS_PER_SSTABLE,
-                    (long) SSTABLES * ROWS_PER_SSTABLE * (40 + VALUE_PADDING.length()) / (1 << 20));
+        long distinctRows = (long) (SSTABLES - 1) * CK_STRIDE + ROWS_PER_SSTABLE;
+        logger.info("large-partition parameters: sstables={} rowsPerSSTable={} ckStride={} valuePadding={}B " +
+                    "-> ~{} distinct rows in one merged partition, ~{}MB serialized",
+                    SSTABLES, ROWS_PER_SSTABLE, CK_STRIDE, VALUE_PADDING.length(),
+                    distinctRows,
+                    distinctRows * (40 + VALUE_PADDING.length()) / (1 << 20));
 
         createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, m map<text, bigint>, " +
                     "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");

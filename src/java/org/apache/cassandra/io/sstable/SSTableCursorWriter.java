@@ -185,7 +185,8 @@ public class SSTableCursorWriter implements AutoCloseable
         previousRowStartOffset = 0;
         writePartitionHeader(partitionKey, partitionKeyLength, partitionDeletionTime);
         cursorIndexWriter.startPartition(partitionStart, dataWriter.position());
-        return cursorIndexWriter.indexBlockStartOffset();
+        // immediately after startPartition this is the partition header length — always small
+        return Math.toIntExact(cursorIndexWriter.indexBlockStartOffset());
     }
 
     public void writePartitionEnd(org.apache.cassandra.db.DecoratedKey decoratedKey, byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime, int headerLength) throws IOException
