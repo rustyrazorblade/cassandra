@@ -626,6 +626,12 @@ public class CursorCompactor extends CompactionInfo.Holder
     private ColumnMetadata currentComplexColumn;
     private boolean complexColumnStarted;
     private final DeletionTime.ReusableDeletionTime mergedComplexDeletion = DeletionTime.ReusableDeletionTime.live();
+    // The merged complex deletion in its SHADOW role (cell-drop decisions), kept separate from
+    // mergedComplexDeletion's OUTPUT role: a purgeable deletion is dropped from the output but
+    // must still delete the older cells it covers, exactly like the iterator, which applies the
+    // un-purged deletion at merge time (Row.Merger.ColumnDataReducer) and purges it only
+    // afterwards (ComplexColumnData.purge).
+    private final DeletionTime.ReusableDeletionTime shadowComplexDeletion = DeletionTime.ReusableDeletionTime.live();
 
     private DataOutputBuffer tempCellBuffer1 = new DataOutputBuffer();
     private DataOutputBuffer tempCellBuffer2 = new DataOutputBuffer();
@@ -676,7 +682,10 @@ public class CursorCompactor extends CompactionInfo.Holder
                 // it (ColumnDataReducer semantics): the active deletion already covers it
                 if (!activeDeletion.isLive() && activeDeletion.supersedes(mergedComplexDeletion))
                     mergedComplexDeletion.resetLive();
-                // the deletion itself purges like any tombstone
+                // the deletion itself purges like any tombstone — but only for OUTPUT: it must
+                // still shadow the column's older cells during this merge (see
+                // shadowComplexDeletion); purging before shadowing would resurrect them
+                shadowComplexDeletion.reset(mergedComplexDeletion);
                 if (!mergedComplexDeletion.isLive()
                     && purger.shouldPurge(mergedComplexDeletion.markedForDeleteAt(), mergedComplexDeletion.localDeletionTime()))
                     mergedComplexDeletion.resetLive();
@@ -695,8 +704,8 @@ public class CursorCompactor extends CompactionInfo.Holder
                     complexColumnStarted = true;
                 }
             }
-            if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(activeDeletion))
-                effectiveDeletion = mergedComplexDeletion;
+            if (!shadowComplexDeletion.isLive() && shadowComplexDeletion.supersedes(activeDeletion))
+                effectiveDeletion = shadowComplexDeletion;
 
             if (!cellCursor.producedCell)
             {
