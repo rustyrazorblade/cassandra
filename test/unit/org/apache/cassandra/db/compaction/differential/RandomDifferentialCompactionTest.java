@@ -21,8 +21,10 @@ package org.apache.cassandra.db.compaction.differential;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
@@ -30,6 +32,7 @@ import com.google.common.collect.ImmutableList;
 import org.junit.Test;
 
 import org.quicktheories.core.Gen;
+import org.quicktheories.generators.SourceDSL;
 import org.quicktheories.impl.JavaRandom;
 
 import org.apache.cassandra.config.CassandraRelevantProperties;
@@ -39,6 +42,7 @@ import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.AbstractTypeGenerators;
 import org.apache.cassandra.utils.AbstractTypeGenerators.TypeGenBuilder;
+import org.apache.cassandra.utils.AbstractTypeGenerators.ValueDomain;
 import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
 import org.apache.cassandra.utils.Generators;
@@ -51,11 +55,23 @@ import static org.apache.cassandra.utils.Generators.IDENTIFIER_GEN;
  * production uses), random multi-round workloads with overwrites and deletes flushed into
  * overlapping sstables, then byte+logical differential comparison of both compaction paths.
  *
- * Reproducing a failure: every failure message is wrapped in a seed; plug it into
- * {@code withFixedSeed} below.
+ * Workload space: INSERT / UPDATE (no row liveness) / primary-key-only INSERT (liveness, no
+ * cells) / INSERT USING TTL (long-lived, far from the expiry boundary) / explicit USING
+ * TIMESTAMP collisions from a small pool (same-timestamp tie-breaks); null values on
+ * non-key columns (cell tombstones on simple columns; mapped to empty buffers on clustering
+ * columns); row deletes, partition deletes, single-sided and prefix range deletes,
+ * multi-column cell deletes, static cell deletes. Composite partition keys (1-2 components).
  *
- * Known coverage gaps (deliberate): null/empty
- * value domains and range deletes are exercised by the deterministic corpus only.
+ * Example count is property-gated: -Dcassandra.test.differential.examples=N (default
+ * {@value #DEFAULT_EXAMPLES}; the pre-JIRA validation run uses thousands).
+ *
+ * Reproducing a failure: every failure message is wrapped in a seed; rerun with
+ * -Dcassandra.test.differential.seed=N (the failing seed becomes example 0), or plug it
+ * into {@code withFixedSeed} below.
+ *
+ * Known coverage gaps (deliberate, covered by the deterministic corpus): EMPTY_BYTES value
+ * domain (invalid CQL for some generated multi-cell shapes), collection-element deletes
+ * (DELETE m['k'] needs element values of the right type), expired TTLs (timing-dependent).
  */
 public class RandomDifferentialCompactionTest extends DifferentialCompactionTester
 {
@@ -66,7 +82,11 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     }
 
     private static final Set<String> ALLOWLIST = Set.of();
-    private static final int EXAMPLES = 10;
+    private static final int DEFAULT_EXAMPLES = 10;
+    private static final int EXAMPLES = Integer.getInteger("cassandra.test.differential.examples", DEFAULT_EXAMPLES);
+
+    /** Long enough that expiry can never fall between the two differential runs. */
+    private static final int SOAK_TTL_SECONDS = 30 * 24 * 60 * 60;
 
     @Test
     public void randomizedDifferential() throws Throwable
@@ -94,15 +114,14 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
                                                                  .withDefaultSetKey(safePrimary)
                                                                  .withoutTypeKinds(AbstractTypeGenerators.TypeKind.COUNTER)
                                                                  .withUDTNames(udtName))
-                       .withPartitionColumnsCount(1)
+                       .withPartitionColumnsBetween(1, 2)
                        .withPrimaryColumnTypeGen(new TypeGenBuilder(safePrimary).withMaxDepth(1))
                        .withClusteringColumnsBetween(0, 3)
                        .withRegularColumnsBetween(1, 5)
                        .withStaticColumnsBetween(0, 2)
                        .build(qtRandom);
         }
-        // Same filter production uses to route to the cursor pipeline. When increment 2 lands
-        // (multi-cell columns), this loop disappears and the generator space widens.
+        // Same filter production uses to route to the cursor pipeline.
         // Also rejects invalid CQL the generator can produce: static columns require
         // clustering columns.
         while (CursorCompactor.unsupportedMetadata(metadata)
@@ -117,12 +136,34 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         ColumnFamilyStore cfs = getColumnFamilyStore(KEYSPACE, metadata.name);
         cfs.disableAutoCompaction();
 
-        Gen<ByteBuffer[]> dataGen = CassandraGenerators.data(metadata, ignore -> AbstractTypeGenerators.ValueDomain.NORMAL);
+        // ~12% of non-key values are null: cell tombstones on simple columns. The data
+        // generator maps null to an empty buffer on clustering columns (null clustering is
+        // invalid; empty is legal and exercises the empty-vs-valued clustering comparison)
+        // and never applies the domain to partition keys.
+        Gen<ValueDomain> valueDomains = SourceDSL.integers().between(0, 99)
+                                                 .map(i -> i < 12 ? ValueDomain.NULL : ValueDomain.NORMAL);
+        Gen<ByteBuffer[]> dataGen = CassandraGenerators.data(metadata, valueDomains);
+
         int partitionColumnCount = metadata.partitionKeyColumns().size();
-        int primaryColumnCount = partitionColumnCount + metadata.clusteringColumns().size();
+        int clusteringColumnCount = metadata.clusteringColumns().size();
+        int primaryColumnCount = partitionColumnCount + clusteringColumnCount;
         String insertStmt = insertStmt(metadata);
         String deleteRowStmt = deleteStmt(metadata, primaryColumnCount);
         String deletePartitionStmt = deleteStmt(metadata, partitionColumnCount);
+
+        // select-order index of every column, for UPDATE/cell-delete binding
+        Map<String, Integer> selectOrderIndex = new HashMap<>();
+        {
+            Iterator<ColumnMetadata> it = metadata.allColumnsInSelectOrder();
+            for (int i = 0; it.hasNext(); i++)
+                selectOrderIndex.put(it.next().name.toString(), i);
+        }
+        List<ColumnMetadata> regularColumns = ImmutableList.copyOf(metadata.regularColumns());
+        List<ColumnMetadata> staticColumns = ImmutableList.copyOf(metadata.staticColumns());
+
+        // small explicit-timestamp pool: cross-sstable same-timestamp conflicts on
+        // overwritten primary keys exercise the reconciliation tie-break rules
+        long tiePoolBase = 1_000_000;
 
         List<ByteBuffer[]> rows = new ArrayList<>();
         int rounds = 2 + workload.nextInt(3); // 2-4 sstables
@@ -132,14 +173,43 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
             for (int i = 0; i < inserts; i++)
             {
                 ByteBuffer[] row = dataGen.generate(qtRandom);
-                if (!rows.isEmpty() && workload.nextInt(100) < 30)
+                boolean overwrite = !rows.isEmpty() && workload.nextInt(100) < 30;
+                if (overwrite)
                 {
                     // overwrite: keep a previously used primary key, fresh non-key values —
                     // this is what makes the merge actually reconcile rather than concatenate
                     ByteBuffer[] prev = rows.get(workload.nextInt(rows.size()));
                     System.arraycopy(prev, 0, row, 0, primaryColumnCount);
                 }
-                execute(insertStmt, (Object[]) row);
+
+                int mode = workload.nextInt(100);
+                if (overwrite && workload.nextInt(100) < 40)
+                {
+                    // explicit-timestamp collision candidate: two writes to the same primary
+                    // key with the same timestamp force the same-ts tie-break path
+                    long ts = tiePoolBase + workload.nextInt(3);
+                    execute(insertStmt + " USING TIMESTAMP " + ts, (Object[]) row);
+                }
+                else if (mode < 15 && !regularColumns.isEmpty())
+                {
+                    // UPDATE: writes cells without primary-key liveness (different row flags)
+                    execute(updateStmt(metadata, regularColumns),
+                            updateParams(row, regularColumns, selectOrderIndex, primaryColumnCount));
+                }
+                else if (mode < 22)
+                {
+                    // primary-key-only INSERT: row liveness with zero cells
+                    execute(pkOnlyInsertStmt(metadata), (Object[]) Arrays.copyOf(row, primaryColumnCount));
+                }
+                else if (mode < 30)
+                {
+                    // long TTL: liveness info with ttl + expiration far from the runs
+                    execute(insertStmt + " USING TTL " + SOAK_TTL_SECONDS, (Object[]) row);
+                }
+                else
+                {
+                    execute(insertStmt, (Object[]) row);
+                }
                 rows.add(row);
             }
 
@@ -149,6 +219,47 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
                 ByteBuffer[] victim = rows.get(workload.nextInt(rows.size()));
                 execute(deleteRowStmt, (Object[]) Arrays.copyOf(victim, primaryColumnCount));
             }
+
+            // range deletes (clustering tables only): single-sided slices and clustering-prefix
+            // deletes against known keys; single-sided bounds cannot produce inverted ranges
+            for (int i = 0; i < 2 && clusteringColumnCount > 0 && !rows.isEmpty(); i++)
+            {
+                ByteBuffer[] victim = rows.get(workload.nextInt(rows.size()));
+                if (clusteringColumnCount >= 2 && workload.nextBoolean())
+                {
+                    // prefix delete: equality on a strict prefix of the clustering columns
+                    int depth = 1 + workload.nextInt(clusteringColumnCount - 1);
+                    execute(deleteStmt(metadata, partitionColumnCount + depth),
+                            (Object[]) Arrays.copyOf(victim, partitionColumnCount + depth));
+                }
+                else
+                {
+                    int eqDepth = workload.nextInt(clusteringColumnCount);
+                    String op = new String[]{ ">=", ">", "<=", "<" }[workload.nextInt(4)];
+                    execute(rangeDeleteStmt(metadata, eqDepth, op),
+                            (Object[]) Arrays.copyOf(victim, partitionColumnCount + eqDepth + 1));
+                }
+            }
+
+            // cell deletes: random subset of regular columns at a known row; occasionally a
+            // static cell delete instead
+            for (int i = 0; i < 2 && !rows.isEmpty(); i++)
+            {
+                ByteBuffer[] victim = rows.get(workload.nextInt(rows.size()));
+                if (!staticColumns.isEmpty() && workload.nextInt(100) < 30)
+                {
+                    ColumnMetadata col = staticColumns.get(workload.nextInt(staticColumns.size()));
+                    execute(cellDeleteStmt(metadata, List.of(col), partitionColumnCount),
+                            (Object[]) Arrays.copyOf(victim, partitionColumnCount));
+                }
+                else
+                {
+                    List<ColumnMetadata> subset = randomSubset(regularColumns, workload);
+                    execute(cellDeleteStmt(metadata, subset, primaryColumnCount),
+                            (Object[]) Arrays.copyOf(victim, primaryColumnCount));
+                }
+            }
+
             // occasional partition delete
             if (workload.nextInt(100) < 40 && !rows.isEmpty())
             {
@@ -179,14 +290,113 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         return sb.append(')').toString();
     }
 
+    /** INSERT binding only the primary key columns: row liveness without any cells. */
+    private static String pkOnlyInsertStmt(TableMetadata metadata)
+    {
+        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
+        StringBuilder sb = new StringBuilder("INSERT INTO ").append(metadata).append(" (");
+        for (int i = 0; i < keys.size(); i++)
+        {
+            if (i > 0) sb.append(", ");
+            sb.append(keys.get(i).name.toCQLString());
+        }
+        sb.append(") VALUES (");
+        for (int i = 0; i < keys.size(); i++)
+        {
+            if (i > 0) sb.append(", ");
+            sb.append('?');
+        }
+        return sb.append(')').toString();
+    }
+
+    /** UPDATE setting every regular column: cells without primary-key liveness. */
+    private static String updateStmt(TableMetadata metadata, List<ColumnMetadata> regularColumns)
+    {
+        StringBuilder sb = new StringBuilder("UPDATE ").append(metadata).append(" SET ");
+        for (int i = 0; i < regularColumns.size(); i++)
+        {
+            if (i > 0) sb.append(", ");
+            sb.append(regularColumns.get(i).name.toCQLString()).append(" = ?");
+        }
+        sb.append(" WHERE ");
+        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
+        for (int i = 0; i < keys.size(); i++)
+        {
+            if (i > 0) sb.append(" AND ");
+            sb.append(keys.get(i).name.toCQLString()).append(" = ?");
+        }
+        return sb.toString();
+    }
+
+    private static Object[] updateParams(ByteBuffer[] row, List<ColumnMetadata> regularColumns,
+                                         Map<String, Integer> selectOrderIndex, int primaryColumnCount)
+    {
+        Object[] params = new Object[regularColumns.size() + primaryColumnCount];
+        for (int i = 0; i < regularColumns.size(); i++)
+            params[i] = row[selectOrderIndex.get(regularColumns.get(i).name.toString())];
+        for (int i = 0; i < primaryColumnCount; i++)
+            params[regularColumns.size() + i] = row[i];
+        return params;
+    }
+
+    /** DELETE col1, col2 FROM t WHERE first {@code keyColumnCount} primary key columns bound. */
+    private static String cellDeleteStmt(TableMetadata metadata, List<ColumnMetadata> columns, int keyColumnCount)
+    {
+        StringBuilder sb = new StringBuilder("DELETE ");
+        for (int i = 0; i < columns.size(); i++)
+        {
+            if (i > 0) sb.append(", ");
+            sb.append(columns.get(i).name.toCQLString());
+        }
+        sb.append(" FROM ").append(metadata).append(" WHERE ");
+        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
+        for (int i = 0; i < keyColumnCount; i++)
+        {
+            if (i > 0) sb.append(" AND ");
+            sb.append(keys.get(i).name.toCQLString()).append(" = ?");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * DELETE with equality on the partition key plus the first {@code eqDepth} clustering
+     * columns, and a single-sided {@code op} bound on clustering column {@code eqDepth}.
+     */
+    private static String rangeDeleteStmt(TableMetadata metadata, int eqDepth, String op)
+    {
+        StringBuilder sb = new StringBuilder("DELETE FROM ").append(metadata).append(" WHERE ");
+        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
+        int partitionColumnCount = metadata.partitionKeyColumns().size();
+        int bound = partitionColumnCount + eqDepth;
+        for (int i = 0; i < bound; i++)
+        {
+            if (i > 0) sb.append(" AND ");
+            sb.append(keys.get(i).name.toCQLString()).append(" = ?");
+        }
+        sb.append(" AND ").append(keys.get(bound).name.toCQLString()).append(' ').append(op).append(" ?");
+        return sb.toString();
+    }
+
+    private static List<ColumnMetadata> primaryKeyColumns(TableMetadata metadata)
+    {
+        return ImmutableList.<ColumnMetadata>builder()
+                            .addAll(metadata.partitionKeyColumns())
+                            .addAll(metadata.clusteringColumns())
+                            .build();
+    }
+
+    private static List<ColumnMetadata> randomSubset(List<ColumnMetadata> columns, Random workload)
+    {
+        List<ColumnMetadata> shuffled = new ArrayList<>(columns);
+        java.util.Collections.shuffle(shuffled, workload);
+        return shuffled.subList(0, 1 + workload.nextInt(shuffled.size()));
+    }
+
     /** DELETE with the first {@code keyColumnCount} primary key columns bound (partition or full row). */
     private static String deleteStmt(TableMetadata metadata, int keyColumnCount)
     {
         StringBuilder sb = new StringBuilder("DELETE FROM ").append(metadata).append(" WHERE ");
-        List<ColumnMetadata> keys = ImmutableList.<ColumnMetadata>builder()
-                                                 .addAll(metadata.partitionKeyColumns())
-                                                 .addAll(metadata.clusteringColumns())
-                                                 .build();
+        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
         for (int i = 0; i < keyColumnCount; i++)
         {
             if (i > 0) sb.append(" AND ");
@@ -202,7 +412,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         private static final long addend = 0xBL;
         private static final long mask = (1L << 48) - 1;
 
-        private long seed = System.currentTimeMillis();
+        private long seed = Long.getLong("cassandra.test.differential.seed", System.currentTimeMillis());
         private final int examples;
 
         SeedRunner(int examples)
