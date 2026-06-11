@@ -678,9 +678,13 @@ public class CursorCompactor extends CompactionInfo.Holder
                             mergedComplexDeletion.reset(d);
                     }
                 }
-                // a row/partition/range deletion that supersedes the column deletion deletes
-                // it (ColumnDataReducer semantics): the active deletion already covers it
-                if (!activeDeletion.isLive() && activeDeletion.supersedes(mergedComplexDeletion))
+                // the complex deletion survives only when it STRICTLY supersedes the active
+                // row/partition/range deletion (ColumnDataReducer keeps it only on
+                // complexDeletion.supersedes(activeDeletion), Row.java:916) — on EXACT
+                // equality (row delete + column delete, same USING TIMESTAMP, same second)
+                // the iterator drops it; dropping only when strictly superseded would write
+                // spurious HAS_COMPLEX_DELETION + deletion bytes
+                if (!activeDeletion.isLive() && !mergedComplexDeletion.supersedes(activeDeletion))
                     mergedComplexDeletion.resetLive();
                 // the deletion itself purges like any tombstone — but only for OUTPUT: it must
                 // still shadow the column's older cells during this merge (see

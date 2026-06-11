@@ -173,6 +173,64 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
                    row(5L, null, null, null, "x5"));
     }
 
+    /**
+     * EXACT EQUALITY between a row deletion and a collection deletion — same USING
+     * TIMESTAMP (markedForDeleteAt) and same local-deletion second: the iterator keeps a
+     * complex deletion only when it STRICTLY supersedes the active deletion
+     * (Row.Merger.ColumnDataReducer), so on equality it is dropped from the output; a
+     * merge that instead drops it only when strictly SUPERSEDED writes spurious
+     * HAS_COMPLEX_DELETION + deletion bytes. The two deletions live in DIFFERENT sstables
+     * so compaction, not the memtable, reconciles them. The local-deletion second is
+     * server time at execution; a readback-and-retry loop pins both statements to the
+     * same second so the scenario is deterministic.
+     */
+    @Test
+    public void rowAndComplexDeletionEqualityTies() throws Exception
+    {
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, v text, " +
+                        "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            cfs.disableAutoCompaction();
+
+            // flanking + shadowed data, its own sstable
+            for (long ck = 0; ck < 4; ck++)
+            {
+                execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 100", 0L, ck, "keep" + ck);
+                execute("UPDATE %s USING TIMESTAMP 100 SET m[?] = ?, v = ? WHERE pk = ? AND ck = ?",
+                        "k" + ck, ck, "old" + ck, 1L, ck);
+            }
+            flush();
+
+            // the collection deletion, alone in its sstable
+            for (long ck = 0; ck < 4; ck++)
+                execute("DELETE m FROM %s USING TIMESTAMP 10000 WHERE pk = ? AND ck = ?", 1L, ck);
+            flush();
+
+            // the row deletion, same USING TIMESTAMP, in a third sstable
+            for (long ck = 0; ck < 4; ck++)
+                execute("DELETE FROM %s USING TIMESTAMP 10000 WHERE pk = ? AND ck = ?", 1L, ck);
+            flush();
+
+            // equality holds only if both deletions landed in the same wall-clock second
+            java.util.Set<Long> ldts = new java.util.HashSet<>();
+            for (org.apache.cassandra.io.sstable.format.SSTableReader r : cfs.getLiveSSTables())
+            {
+                long ldt = r.getSSTableMetadata().maxLocalDeletionTime;
+                if (ldt != Long.MAX_VALUE)
+                    ldts.add(ldt);
+            }
+            if (ldts.size() == 1)
+            {
+                assertCursorMatchesIteratorAcrossGenerations(cfs);
+                return;
+            }
+            // second boundary crossed between the two deletes — rebuild and retry
+        }
+        org.junit.Assert.fail("could not land both deletions in the same second after 8 attempts");
+    }
+
     /** The headline interaction: complex deletions interleaved with range tombstones —
      *  range deletes shadow whole rows including complex columns, complex deletions shadow
      *  cells within a column, both merging across sstables. */
