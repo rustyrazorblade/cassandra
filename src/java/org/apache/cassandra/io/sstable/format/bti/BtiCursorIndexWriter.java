@@ -39,14 +39,14 @@ import org.apache.cassandra.io.sstable.format.bti.RowIndexReader.IndexInfo;
  * single-block partitions skip the row trie entirely (entry position -1).
  *
  * Boundary clusterings are captured at row time into two reusable descriptors (the
- * descriptors passed to rowWritten are transient) and exposed to the trie through reusable
- * {@link ClusteringDescriptorPrefixView}s. The open-marker snapshot per block allocates only
- * when a range tombstone is actually open at the block start.
+ * descriptors passed to rowWritten are transient) and handed to the trie as
+ * {@link ClusteringDescriptorPrefixView#snapshotOf} COPIES — RowIndexWriter retains the
+ * prefixes lazily across add() calls, so reusable views must not escape into it. The
+ * per-block snapshot (and the open-marker snapshot when a range tombstone is open at the
+ * block start) is the accepted per-~16KB-block allocation of this format.
  */
 public class BtiCursorIndexWriter extends CursorIndexWriter
 {
-    private static final int DEFAULT_GRANULARITY = 16 * 1024; // BtiFormatPartitionWriter.DEFAULT_GRANULARITY
-
     private final BtiTableWriter.IndexWriter indexWriter;
     private final org.apache.cassandra.dht.IPartitioner partitioner;
     private final RowIndexWriter rowTrie;
@@ -66,7 +66,7 @@ public class BtiCursorIndexWriter extends CursorIndexWriter
         this.indexWriter = (BtiTableWriter.IndexWriter) writer.indexWriter;
         this.partitioner = writer.metadata().partitioner;
         this.rowTrie = new RowIndexWriter(comparator, indexWriter.rowIndexWriter, writer.descriptor.version);
-        this.rowIndexBlockSize = DatabaseDescriptor.getColumnIndexSize(DEFAULT_GRANULARITY);
+        this.rowIndexBlockSize = DatabaseDescriptor.getColumnIndexSize(BtiFormatPartitionWriter.DEFAULT_GRANULARITY);
         this.firstClustering = new ClusteringDescriptor(clusteringTypes);
         this.lastClustering = new ClusteringDescriptor(clusteringTypes);
         this.clusteringTypes = clusteringTypes;
@@ -134,6 +134,14 @@ public class BtiCursorIndexWriter extends CursorIndexWriter
         // place per partition, see ReusableDecoratedKey.recalculateToken), so both the bytes
         // and the token must be fresh
         java.nio.ByteBuffer keyCopy = org.apache.cassandra.utils.ByteBufferUtil.clone(key.getKey());
-        indexWriter.append(new org.apache.cassandra.db.BufferDecoratedKey(partitioner.getToken(keyCopy), keyCopy), entry);
+        indexWriter.append(partitioner.decorateKey(keyCopy), entry);
+    }
+
+    @Override
+    public void close()
+    {
+        // mirrors BtiFormatPartitionWriter.close(): clears the trie builder's in-heap
+        // stack/prev state; the Rows.db SequentialWriter belongs to BtiTableWriter
+        rowTrie.close();
     }
 }

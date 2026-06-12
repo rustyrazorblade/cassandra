@@ -91,6 +91,12 @@ public abstract class DifferentialCompactionTester extends CQLTester
 {
     /** Fixed "now" used for JSON dumps so rendering cannot depend on wall clock. */
     private static final long DUMP_NOW_SEC = 0;
+    // sstabledump's "expired" fields come from WALL CLOCK, not the fixed nowInSec above
+    // (JsonTransformer), so the two paths' captures can render them differently; the flag is
+    // derived from expires_at, which is still compared. Compiled once: the streaming digest
+    // applies this per dump line.
+    private static final java.util.regex.Pattern EXPIRED_FLAG =
+        java.util.regex.Pattern.compile("\"expired\"\\s*:\\s*(true|false)");
 
     /**
      * Scale mode for very large scenarios (millions of rows): the logical dump is streamed
@@ -170,26 +176,23 @@ public abstract class DifferentialCompactionTester extends CQLTester
     {
         Path scratch = Files.createTempDirectory("differential-compaction");
 
-        // Early open must be off for keepOriginals to actually keep originals:
         // Early open stays ENABLED here deliberately: keepOriginals=true with early open used
         // to delete the originals (SSTableRewriter.moveStarts obsoleted fully-covered inputs
         // unconditionally — now fixed and guarded by the flag), and this harness depends on
         // the originals surviving, so every differential run doubles as the regression test.
-        {
-            CapturedOutput iterator = compactPath(cfs, inputs, false, gcBefore, scratch.resolve("iterator"), taskFactory);
-            // the input INSTANCES were replaced during restore; re-resolve the subset by descriptor
-            Set<Descriptor> inputDescs = new HashSet<>();
-            for (SSTableReader in : inputs)
-                inputDescs.add(in.descriptor);
-            Set<SSTableReader> reResolved = new HashSet<>();
-            for (SSTableReader live : cfs.getLiveSSTables())
-                if (inputDescs.contains(live.descriptor))
-                    reResolved.add(live);
-            assertEquals("input subset lost across restore", inputs.size(), reResolved.size());
-            CapturedOutput cursor = compactPath(cfs, reResolved, true, gcBefore, scratch.resolve("cursor"), taskFactory);
-            assertEquivalentOutputs(iterator, cursor);
-            return iterator;
-        }
+        CapturedOutput iterator = compactPath(cfs, inputs, false, gcBefore, scratch.resolve("iterator"), taskFactory);
+        // the input INSTANCES were replaced during restore; re-resolve the subset by descriptor
+        Set<Descriptor> inputDescs = new HashSet<>();
+        for (SSTableReader in : inputs)
+            inputDescs.add(in.descriptor);
+        Set<SSTableReader> reResolved = new HashSet<>();
+        for (SSTableReader live : cfs.getLiveSSTables())
+            if (inputDescs.contains(live.descriptor))
+                reResolved.add(live);
+        assertEquals("input subset lost across restore", inputs.size(), reResolved.size());
+        CapturedOutput cursor = compactPath(cfs, reResolved, true, gcBefore, scratch.resolve("cursor"), taskFactory);
+        assertEquivalentOutputs(iterator, cursor);
+        return iterator;
     }
 
     /**
@@ -422,7 +425,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
                                             sstable.metadata(), DUMP_NOW_SEC, baos);
             }
             json = baos.toString(StandardCharsets.UTF_8)
-                       .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"");
+                       .transform(s -> EXPIRED_FLAG.matcher(s).replaceAll("\"expired\":\"normalized\""));
         }
 
         // 3. stats spot-check summary
@@ -637,7 +640,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
         private void update(byte[] bytes, int length)
         {
             byte[] normalized = new String(bytes, 0, length, StandardCharsets.UTF_8)
-                                .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"")
+                                .transform(s -> EXPIRED_FLAG.matcher(s).replaceAll("\"expired\":\"normalized\""))
                                 .getBytes(StandardCharsets.UTF_8);
             digest.update(normalized);
             bytesSeen += normalized.length;

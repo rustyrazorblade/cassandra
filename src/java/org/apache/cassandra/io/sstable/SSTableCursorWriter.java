@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.primitives.Ints;
 
 import org.agrona.collections.IntArrayList;
 
@@ -44,19 +43,15 @@ import org.apache.cassandra.db.rows.SerializationHelper;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter;
 import org.apache.cassandra.io.sstable.format.big.BigTableWriter;
-import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.utils.BloomFilter;
-import org.apache.cassandra.utils.ByteArrayUtil;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.concurrent.Ref;
 
@@ -167,6 +162,7 @@ public class SSTableCursorWriter implements AutoCloseable
     @Override
     public void close()
     {
+        cursorIndexWriter.close();
         SSTableReader finish = ssTableWriter.finish(false);
         if (finish != null) {
             Ref<SSTableReader> ref = finish.ref();
@@ -691,11 +687,6 @@ public class SSTableCursorWriter implements AutoCloseable
         metadataCollector.updateClusteringValues(unfilteredDescriptor);
     }
 
-
-    private long currentOffsetInPartition(long position)
-    {
-        return position - partitionStart;
-    }
 
     /**
      * Garbage-free equivalent of {@link org.apache.cassandra.db.Columns.Serializer}'s

@@ -90,4 +90,13 @@ public abstract class CursorIndexWriter
     public abstract void endPartition(org.apache.cassandra.db.DecoratedKey key, byte[] keyBytes, int keyLength,
                                       int headerLength, DeletionTime partitionDeletionTime,
                                       long partitionEnd) throws IOException;
+
+    /**
+     * Release per-instance state when the owning writer closes — the iterator path's
+     * partition-writer lifecycle analogue (e.g. BtiFormatPartitionWriter.close() closes its
+     * row trie). The underlying file writers belong to the table writer, not to this seam.
+     */
+    public void close()
+    {
+    }
 }
