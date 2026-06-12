@@ -189,15 +189,8 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private static boolean unsupportedSchema(TableMetadata metadata)
     {
-        // Cell value merge limitations
-        for (ColumnMetadata column : metadata.regularAndStaticColumns())
-        {
-            if (column.isCounterColumn())
-            {
-                if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Counter columns are not supported. column=" + column);
-                return true;
-            }
-        }
+        // No remaining schema-shape gates: complex columns landed in increment 2, counters
+        // in increment 5 (mergeCounterCells / CursorCounterContexts).
         return false;
     }
 
@@ -641,6 +634,15 @@ public class CursorCompactor extends CompactionInfo.Holder
     private DataOutputBuffer tempCellBuffer2 = new DataOutputBuffer();
     private final byte[] copyColumnValueBuffer = new byte[4096]; // used to copy cell contents (maybe piecemeal if very large, since we don't have a direct read option)
 
+    // Counter merge state (increment 5): garbage-free CounterContext operations plus the
+    // fold/staging buffers and the output cell's liveness. fold/temp swap on
+    // RIGHT_SUPERSET, hence non-final.
+    private final CursorCounterContexts counterContexts = new CursorCounterContexts();
+    private DataOutputBuffer counterFoldBuffer = new DataOutputBuffer();
+    private DataOutputBuffer counterTempBuffer = new DataOutputBuffer();
+    private final DataOutputBuffer counterWireBuffer = new DataOutputBuffer();
+    private final ReusableLivenessInfo counterLiveness = new ReusableLivenessInfo();
+
     /**
      * {@link Row.Merger.ColumnDataReducer#getReduced()} <-- applied the delete before reconcile, should not make a difference?
      * {@link Cells#reconcile(Cell, Cell)}
@@ -650,14 +652,13 @@ public class CursorCompactor extends CompactionInfo.Holder
         cellMergeCounters[cellMergeLimit - 1]++;
         // Nothing to sort, we basically need to pick the correct data to copy.
         // -> the latest data.
-        // TODO: handle counter cells
         StatefulCursor cellSource = sstableCursors[0];
         SSTableCursorReader.CellCursor cellCursor = cellSource.cellCursor();
         ReusableLivenessInfo cellLiveness = cellCursor.cellLiveness;
         DataOutputBuffer tempCellBuffer = null;
 
         if (cellCursor.cellColumn.isCounterColumn())
-            throw new UnsupportedOperationException("TODO: Not ready for counter cells.");
+            return mergeCounterCells(cellMergeLimit, activeDeletion, rowLiveness, isRowDropped, isStatic);
 
         DeletionTime effectiveDeletion = activeDeletion;
         if (cellCursor.cellColumn.isComplex())
@@ -889,6 +890,153 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         }
         return isRowDropped;
+    }
+
+    /**
+     * Counter cell merge — mirrors the iterator's decision table exactly:
+     * {@link org.apache.cassandra.db.rows.Cells#reconcile} routes to resolveCounter when
+     * either cell is a LIVE counter cell (counter tombstones reconcile as regular cells),
+     * and resolveCounter implements:
+     * <ul>
+     *   <li>a tombstone beats a live counter cell REGARDLESS of timestamps
+     *       (CASSANDRA-7346);</li>
+     *   <li>live + live MERGE their contexts (CounterContext.merge — here the pinned
+     *       garbage-free mirror {@link CursorCounterContexts}); the resulting timestamp is
+     *       the max of the contributors; ttl and localDeletionTime are NONE.</li>
+     * </ul>
+     * Two iterator behaviors that are invisible for regular cells are load-bearing here:
+     * <ul>
+     *   <li>every INPUT cell is tested against the active deletion BEFORE reconciliation
+     *       (Row.Merger.CellReducer) — a shadowed cell's shards must not pollute the merged
+     *       context, and a shadowed tombstone must not exercise 7346 supremacy;</li>
+     *   <li>counter values are deserialized with Flag.LOCAL, which clears marked local
+     *       shards (DeserializationHelper.maybeClearCounterValue) — so every counter value,
+     *       merged or passed through, runs the clear transform.</li>
+     * </ul>
+     */
+    private boolean mergeCounterCells(int cellMergeLimit, DeletionTime activeDeletion, LivenessInfo rowLiveness,
+                                      boolean isRowDropped, boolean isStatic) throws IOException
+    {
+        ColumnMetadata column = sstableCursors[0].cellCursor().cellColumn;
+        // tombstone fold: the surviving-tombstone winner's liveness/flags (references into
+        // the owning cursor's reusables — stable until that cursor reads its next cell)
+        ReusableLivenessInfo tombstoneLiveness = null;
+        int tombstoneFlags = 0;
+        // live fold: merged raw context (no vint) accumulates in counterFoldBuffer
+        boolean haveLive = false;
+        long liveTimestamp = Long.MIN_VALUE;
+
+        for (int i = 0; i < cellMergeLimit; i++)
+        {
+            StatefulCursor source = sstableCursors[i];
+            SSTableCursorReader.CellCursor cc = source.cellCursor();
+            ReusableLivenessInfo liveness = cc.cellLiveness;
+
+            if (activeDeletion.deletes(liveness))
+            {
+                if (source.state() == CELL_VALUE_START) source.skipCellValue();
+                continue;
+            }
+
+            if (liveness.isTombstone())
+            {
+                if (source.state() == CELL_VALUE_START) source.skipCellValue(); // tombstones carry no value
+                // multiple tombstones resolve like regular cells (higher ts, then the
+                // greater-localDeletionTime tie-break); COMPARE means equal — keep left
+                if (tombstoneLiveness == null || resolveRegular(tombstoneLiveness, liveness) == RIGHT)
+                {
+                    tombstoneLiveness = liveness;
+                    tombstoneFlags = cc.cellFlags;
+                }
+                continue;
+            }
+
+            if (!haveLive)
+            {
+                copyCounterContext(source, counterFoldBuffer);
+                haveLive = true;
+                liveTimestamp = liveness.timestamp();
+            }
+            else
+            {
+                copyCounterContext(source, counterTempBuffer);
+                CursorCounterContexts.MergeResult result =
+                    counterContexts.merge(counterFoldBuffer.getData(), 0, counterFoldBuffer.getLength(),
+                                          counterTempBuffer.getData(), 0, counterTempBuffer.getLength());
+                if (result == CursorCounterContexts.MergeResult.RIGHT_SUPERSET)
+                {
+                    DataOutputBuffer swap = counterFoldBuffer;
+                    counterFoldBuffer = counterTempBuffer;
+                    counterTempBuffer = swap;
+                }
+                else if (result == CursorCounterContexts.MergeResult.MERGED)
+                {
+                    counterFoldBuffer.clear();
+                    counterFoldBuffer.write(counterContexts.scratchBuffer(), 0, counterContexts.scratchLength());
+                }
+                // LEFT_SUPERSET: the fold buffer already holds the result
+                liveTimestamp = Math.max(liveTimestamp, liveness.timestamp());
+            }
+        }
+
+        if (tombstoneLiveness != null)
+        {
+            // 7346 supremacy: any surviving tombstone wins; merged live shards are discarded
+            if (purger.shouldPurge(tombstoneLiveness, nowInSec))
+                return isRowDropped;
+            if (isRowDropped)
+            {
+                isRowDropped = false;
+                lateStartRow(isStatic);
+            }
+            boolean useRowTimestamp = !rowLiveness.isEmpty() && tombstoneLiveness.timestamp() == rowLiveness.timestamp();
+            int cellFlags = (tombstoneFlags & Cell.Serializer.HAS_EMPTY_VALUE_MASK) | Cell.Serializer.IS_DELETED_MASK;
+            if (useRowTimestamp) cellFlags |= Cell.Serializer.USE_ROW_TIMESTAMP_MASK;
+            ssTableCursorWriter.writeCellHeader(cellFlags, tombstoneLiveness, column);
+            return isRowDropped;
+        }
+
+        if (!haveLive)
+            return isRowDropped; // every input was shadowed by the active deletion
+
+        if (isRowDropped)
+        {
+            isRowDropped = false;
+            lateStartRow(isStatic);
+        }
+        // Cells.resolveCounter: ts = max of contributors, no ttl, no deletion time
+        counterLiveness.reset(liveTimestamp, LivenessInfo.NO_TTL, LivenessInfo.NO_EXPIRATION_TIME);
+        boolean useRowTimestamp = !rowLiveness.isEmpty() && liveTimestamp == rowLiveness.timestamp();
+        int cellFlags = useRowTimestamp ? Cell.Serializer.USE_ROW_TIMESTAMP_MASK : 0;
+        ssTableCursorWriter.writeCellHeader(cellFlags, counterLiveness, column);
+        ssTableCursorWriter.writeCellValue(counterFoldBuffer.getData(), 0, counterFoldBuffer.getLength());
+        // Cells.collectStats parity: updateHasLegacyCounterShards per live output counter cell
+        ssTableCursorWriter.updateCounterShardStats(
+            CursorCounterContexts.hasLegacyShards(counterFoldBuffer.getData(), 0, counterFoldBuffer.getLength()));
+        return isRowDropped;
+    }
+
+    /**
+     * Copies the source's counter value (wire form: vint length + context bytes) into dst
+     * as RAW context bytes (no vint), applying the deserialization-time marked-local clear
+     * the iterator path gets from Flag.LOCAL.
+     */
+    private void copyCounterContext(StatefulCursor source, DataOutputBuffer dst) throws IOException
+    {
+        counterWireBuffer.clear();
+        source.copyCellValue(counterWireBuffer, copyColumnValueBuffer);
+        byte[] wire = counterWireBuffer.getData();
+        // one leading vint: non-negative first byte = single-byte vint (VIntCoding's own
+        // callers guard the same way before consulting numberOfExtraBytesToRead)
+        int vintSize = wire[0] >= 0 ? 1
+                       : 1 + org.apache.cassandra.utils.vint.VIntCoding.numberOfExtraBytesToRead(wire[0]);
+        int contextLength = counterWireBuffer.getLength() - vintSize;
+        dst.clear();
+        int cleared = counterContexts.clearMarkedLocal(wire, vintSize, contextLength);
+        if (cleared >= 0)
+            dst.write(counterContexts.scratchBuffer(), 0, cleared);
+        else
+            dst.write(wire, vintSize, contextLength);
     }
 
     /**

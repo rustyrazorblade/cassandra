@@ -138,11 +138,12 @@ public class CursorSupportMatrixTest extends CQLTester
                         "PRIMARY KEY (pk, ck))");
     }
 
-    /** Increment 5 flips this to supported. */
+    /** Flipped by increment 5: counter tables compact through the cursor. */
     @Test
-    public void countersUnsupported()
+    public void countersSupported()
     {
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, s counter static, PRIMARY KEY (pk, ck))");
     }
 
     /** Out of scope for the current plan: indexes keep the iterator path. */
