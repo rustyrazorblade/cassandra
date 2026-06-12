@@ -133,6 +133,33 @@ public class BasicDifferentialCompactionTest extends DifferentialCompactionTeste
         assertCursorMatchesIterator(cfs);
     }
 
+    /**
+     * bloom_filter_fp_chance = 1.0 is the documented way to disable bloom filters: FilterFactory
+     * returns the AlwaysPresentFilter singleton, which is an IFilter but NOT a BloomFilter. The
+     * BIG cursor index writer must not assume the concrete class (the iterator path goes through
+     * the IFilter interface, where add() is a no-op).
+     */
+    @Test
+    public void bloomFilterDisabled() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, PRIMARY KEY (pk, ck)) " +
+                    "WITH bloom_filter_fp_chance = 1.0");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 10; pk++)
+            for (long ck = 0; ck < 10; ck++)
+                execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", pk, ck, ck);
+        flush();
+
+        for (long pk = 5; pk < 15; pk++)
+            for (long ck = 0; ck < 10; ck++)
+                execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", pk, ck, ck + 100);
+        flush();
+
+        assertCursorMatchesIterator(cfs);
+    }
+
     @Test
     public void staticRows() throws Exception
     {
