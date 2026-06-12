@@ -263,7 +263,14 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         this.controller = controller;
         this.type = type;
-        this.nowInSec = nowInSec;
+        // mirror CompactionIterator.purger(): accord-enabled (and accord-migrating) tables
+        // purge and expire relative to gcBefore — derived from accord's durability bounds by
+        // CompactionTask.getCompactionController — retaining data accord may still read at
+        // earlier timestamps; every nowInSec use below is a purge/expiry decision
+        TableMetadata tableMetadata = controller.cfs.metadata();
+        this.nowInSec = tableMetadata.isAccordEnabled() || tableMetadata.migratingFromAccord()
+                        ? controller.gcBefore
+                        : nowInSec;
         this.compactionId = compactionId;
 
         long inputBytes = 0;
