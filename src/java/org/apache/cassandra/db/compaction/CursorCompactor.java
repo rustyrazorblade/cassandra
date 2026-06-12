@@ -773,8 +773,21 @@ public class CursorCompactor extends CompactionInfo.Holder
 
                     // Matches Cells.resolveRegular: left (the current winner) wins ties, the
                     // challenger only wins with a strictly greater value
-                    // (compareValues(left, right) >= 0 ? left : right).
-                    int compare = Arrays.compareUnsigned(tempCellBuffer1.getData(), 0, tempCellBuffer1.getLength(), tempCellBuffer2.getData(), 0, tempCellBuffer2.getLength());
+                    // (compareValues(left, right) >= 0 ? left : right). The reference
+                    // comparison is over the RAW value bytes (ValueAccessor.compare, plain
+                    // unsigned lexicographic): these buffers hold the WIRE form, which for
+                    // variable-length types carries a leading length vint — comparing that
+                    // prefix orders by LENGTH first (the vint's leading byte encodes it) and
+                    // picks the wrong winner for ties between different-length values
+                    // (finding #21). Fixed-length types carry no vint (and equal lengths).
+                    int skip1 = 0, skip2 = 0;
+                    if (cellCursor.cellType.valueLengthIfFixed() < 0)
+                    {
+                        skip1 = tempCellBuffer1.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer1.getData()[0]);
+                        skip2 = tempCellBuffer2.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer2.getData()[0]);
+                    }
+                    int compare = Arrays.compareUnsigned(tempCellBuffer1.getData(), skip1, tempCellBuffer1.getLength(),
+                                                         tempCellBuffer2.getData(), skip2, tempCellBuffer2.getLength());
                     if (compare < 0) {
                         // challenger wins: swap buffers so tempCellBuffer1 holds the winner's value
                         tempCellBuffer = tempCellBuffer1;
@@ -940,13 +953,24 @@ public class CursorCompactor extends CompactionInfo.Holder
 
             if (liveness.isTombstone())
             {
-                if (source.state() == CELL_VALUE_START) source.skipCellValue(); // tombstones carry no value
                 // multiple tombstones resolve like regular cells (higher ts, then the
                 // greater-localDeletionTime tie-break); COMPARE means equal — keep left
-                if (tombstoneLiveness == null || resolveRegular(tombstoneLiveness, liveness) == RIGHT)
+                boolean wins = tombstoneLiveness == null || resolveRegular(tombstoneLiveness, liveness) == RIGHT;
+                if (wins)
                 {
                     tombstoneLiveness = liveness;
                     tombstoneFlags = cc.cellFlags;
+                    // counter tombstones normally carry no value, but the serializers
+                    // preserve one faithfully when present (hasValue is recomputed from the
+                    // bytes, Cell.Serializer.serialize) — dropping it while the flags still
+                    // claim it corrupts the row; keep the winner's wire value (vint + bytes)
+                    tempCellBuffer1.clear();
+                    if (source.state() == CELL_VALUE_START)
+                        source.copyCellValue(tempCellBuffer1, copyColumnValueBuffer);
+                }
+                else if (source.state() == CELL_VALUE_START)
+                {
+                    source.skipCellValue();
                 }
                 continue;
             }
@@ -993,6 +1017,8 @@ public class CursorCompactor extends CompactionInfo.Holder
             int cellFlags = (tombstoneFlags & Cell.Serializer.HAS_EMPTY_VALUE_MASK) | Cell.Serializer.IS_DELETED_MASK;
             if (useRowTimestamp) cellFlags |= Cell.Serializer.USE_ROW_TIMESTAMP_MASK;
             ssTableCursorWriter.writeCellHeader(cellFlags, tombstoneLiveness, column);
+            if (Cell.Serializer.hasValue(cellFlags))
+                ssTableCursorWriter.writeCellValue(tempCellBuffer1);
             return isRowDropped;
         }
 
@@ -1026,10 +1052,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         counterWireBuffer.clear();
         source.copyCellValue(counterWireBuffer, copyColumnValueBuffer);
         byte[] wire = counterWireBuffer.getData();
-        // one leading vint: non-negative first byte = single-byte vint (VIntCoding's own
-        // callers guard the same way before consulting numberOfExtraBytesToRead)
-        int vintSize = wire[0] >= 0 ? 1
-                       : 1 + org.apache.cassandra.utils.vint.VIntCoding.numberOfExtraBytesToRead(wire[0]);
+        int vintSize = wireVintSize(wire[0]);
         int contextLength = counterWireBuffer.getLength() - vintSize;
         dst.clear();
         int cleared = counterContexts.clearMarkedLocal(wire, vintSize, contextLength);
@@ -1037,6 +1060,17 @@ public class CursorCompactor extends CompactionInfo.Holder
             dst.write(counterContexts.scratchBuffer(), 0, cleared);
         else
             dst.write(wire, vintSize, contextLength);
+    }
+
+    /**
+     * Byte length of the leading unsigned vint in a wire-form variable-length value:
+     * non-negative first byte = single-byte vint (VIntCoding's own callers guard the same
+     * way before consulting numberOfExtraBytesToRead, which expects the SIGNED byte).
+     */
+    private static int wireVintSize(byte firstByte)
+    {
+        return firstByte >= 0 ? 1
+               : 1 + org.apache.cassandra.utils.vint.VIntCoding.numberOfExtraBytesToRead(firstByte);
     }
 
     /**

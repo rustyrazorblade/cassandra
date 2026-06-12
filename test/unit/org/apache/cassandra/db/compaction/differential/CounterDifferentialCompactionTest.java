@@ -18,9 +18,23 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
+import java.nio.ByteBuffer;
+
 import org.junit.Test;
 
+import org.apache.cassandra.db.BufferClustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.context.CounterContext;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.rows.BTreeRow;
+import org.apache.cassandra.db.rows.BufferCell;
+import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CounterId;
 
 /**
  * Differential coverage for COUNTER tables (increment 5, H9 corpus). Counter merge differs
@@ -143,6 +157,104 @@ public class CounterDifferentialCompactionTest extends DifferentialCompactionTes
         }
 
         assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /**
+     * Counter cell shapes CQL cannot produce but replication/streaming legitimately writes,
+     * applied as RAW mutations (the streaming/repair path, bypassing CounterMutation):
+     *
+     *  - MULTI-SHARD contexts (global + remote shards from several CounterIds) — single-JVM
+     *    CQL only ever makes one-shard global contexts, so this is the only differential
+     *    coverage of real shard-level merge folds;
+     *  - MARKED local-shard contexts (markLocalToBeCleared, the streamed-sstable shape) —
+     *    pins the deserialization-time clear transform end-to-end, both paths;
+     *  - a counter TOMBSTONE carrying a value: serializers preserve the value faithfully.
+     *
+     * NOT covered, with proof of unreachability: EMPTY-VALUE live counter cells (the
+     * #10657/#11726 read-path artifact) cannot exist in an sstable — memtable flush itself
+     * dies in Cells.collectStats -> CounterContext.hasLegacyShards (IndexOutOfBounds on the
+     * 0-length context) before one can be written, so they can never be compaction inputs.
+     */
+    @Test
+    public void exoticCounterCellShapes() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000 AND compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        TableMetadata metadata = cfs.metadata();
+        ColumnMetadata c1 = metadata.getColumn(ByteBufferUtil.bytes("c1"));
+        ColumnMetadata c2 = metadata.getColumn(ByteBufferUtil.bytes("c2"));
+
+        // sstable 1
+        applyCounterCell(metadata, 1L, 0L, BufferCell.live(c1, 1000, context(global(1, 5, 100), remote(2, 3, 7))));
+        applyCounterCell(metadata, 1L, 1L, BufferCell.live(c1, 1000, marked(context(local(3, 2, 11), global(4, 1, 5)))));
+        applyCounterCell(metadata, 1L, 2L, BufferCell.live(c1, 1000, context(remote(8, 1, 4))));
+        // a RETAINED tombstone (recent ldt — an epoch-old one purges in both paths and the
+        // write path is never exercised: vacuous-green) that carries a VALUE
+        applyCounterCell(metadata, 1L, 3L, new BufferCell(c1, 1000, Cell.NO_TTL,
+                                                          org.apache.cassandra.utils.FBUtilities.nowInSeconds() - 60,
+                                                          context(global(9, 1, 1)), null));
+        applyCounterCell(metadata, 1L, 4L, BufferCell.live(c2, 1000, context(remote(5, -2, 42))));
+        flush();
+
+        // sstable 2: overlapping shapes that force every reconciliation rule — same-id
+        // global clock races, disjoint-id real merges, marked-context clears, 7346
+        applyCounterCell(metadata, 1L, 0L, BufferCell.live(c1, 2000, context(global(1, 7, 200), remote(6, 1, 1))));
+        applyCounterCell(metadata, 1L, 1L, BufferCell.live(c1, 1500, context(remote(3, 4, 13))));
+        applyCounterCell(metadata, 1L, 2L, BufferCell.live(c1, 3000, context(global(7, 2, 9)))); // disjoint ids: true merge
+        applyCounterCell(metadata, 1L, 3L, BufferCell.live(c1, 4000, context(global(9, 2, 2)))); // loses to the tombstone (7346)
+        applyCounterCell(metadata, 1L, 4L, BufferCell.live(c2, 900, context(remote(5, -1, 50)))); // higher clock wins
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    private static void applyCounterCell(TableMetadata metadata, long pk, long ck, Cell<?> cell)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(new BufferClustering(ByteBufferUtil.bytes(ck)));
+        builder.addCell(cell);
+        PartitionUpdate update = PartitionUpdate.singleRowUpdate(
+            metadata, metadata.partitioner.decorateKey(ByteBufferUtil.bytes(pk)), builder.build());
+        new Mutation(update).apply();
+    }
+
+    private static ByteBuffer context(ShardSpec... shards)
+    {
+        int globals = 0, locals = 0, remotes = 0;
+        for (ShardSpec s : shards)
+        {
+            if (s.kind == 0) globals++;
+            else if (s.kind == 1) locals++;
+            else remotes++;
+        }
+        CounterContext.ContextState state = CounterContext.ContextState.allocate(globals, locals, remotes);
+        for (ShardSpec s : shards)
+        {
+            if (s.kind == 0) state.writeGlobal(CounterId.fromInt(s.id), s.clock, s.count);
+            else if (s.kind == 1) state.writeLocal(CounterId.fromInt(s.id), s.clock, s.count);
+            else state.writeRemote(CounterId.fromInt(s.id), s.clock, s.count);
+        }
+        return state.context;
+    }
+
+    private static ByteBuffer marked(ByteBuffer context)
+    {
+        return CounterContext.instance().markLocalToBeCleared(context);
+    }
+
+    private static ShardSpec global(int id, long clock, long count) { return new ShardSpec(0, id, clock, count); }
+    private static ShardSpec local(int id, long clock, long count)  { return new ShardSpec(1, id, clock, count); }
+    private static ShardSpec remote(int id, long clock, long count) { return new ShardSpec(2, id, clock, count); }
+
+    private static final class ShardSpec
+    {
+        final int kind; final int id; final long clock; final long count;
+        ShardSpec(int kind, int id, long clock, long count)
+        {
+            this.kind = kind; this.id = id; this.clock = clock; this.count = count;
+        }
     }
 
     /** Purge boundary for counter tombstones: explicit gcBefore at and past the deletion second. */
