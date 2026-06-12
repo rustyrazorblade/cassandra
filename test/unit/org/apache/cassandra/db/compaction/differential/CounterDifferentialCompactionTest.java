@@ -210,6 +210,51 @@ public class CounterDifferentialCompactionTest extends DifferentialCompactionTes
         assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
+    /**
+     * Counter TOMBSTONES tied on BOTH timestamp and localDeletionTime resolve by their raw
+     * value bytes: a counter tombstone is not a counter cell (AbstractCell.isCounterCell),
+     * so the iterator routes the pair through Cells.resolveRegular, whose final tie-break is
+     * compareValues(left, right) >= 0 ? left : right — unsigned lexicographic over the RAW
+     * value bytes, greater wins. Value-carrying tombstones (the shape exoticCounterCellShapes
+     * makes legal) with differing bytes therefore pick a winner independent of source order.
+     * Pins both encounter orders plus a valued-vs-valued tie.
+     */
+    @Test
+    public void counterTombstoneValueTieBreak() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000 AND compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        TableMetadata metadata = cfs.metadata();
+        ColumnMetadata c1 = metadata.getColumn(ByteBufferUtil.bytes("c1"));
+
+        // recent ldt so the tied tombstones are retained (an epoch-old pair purges in both
+        // paths and the tie-break is never exercised), identical across both sstables
+        long ldt = org.apache.cassandra.utils.FBUtilities.nowInSeconds() - 60;
+        long ts = 1000;
+
+        // sstable 1: ck=0 empty-value first, ck=1 valued first, ck=2 valued (smaller bytes)
+        applyCounterCell(metadata, 1L, 0L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
+        applyCounterCell(metadata, 1L, 1L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(9, 1, 1)), null));
+        applyCounterCell(metadata, 1L, 2L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(5, 1, 1)), null));
+        flush();
+
+        // sstable 2: the opposite shapes at identical (ts, ldt)
+        applyCounterCell(metadata, 1L, 0L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(9, 1, 1)), null));
+        applyCounterCell(metadata, 1L, 1L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
+        applyCounterCell(metadata, 1L, 2L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(7, 2, 2)), null));
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
     private static void applyCounterCell(TableMetadata metadata, long pk, long ck, Cell<?> cell)
     {
         Row.Builder builder = BTreeRow.unsortedBuilder();

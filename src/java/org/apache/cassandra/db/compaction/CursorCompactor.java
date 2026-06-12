@@ -967,10 +967,13 @@ public class CursorCompactor extends CompactionInfo.Holder
 
             if (liveness.isTombstone())
             {
-                // multiple tombstones resolve like regular cells (higher ts, then the
-                // greater-localDeletionTime tie-break); COMPARE means equal — keep left
-                boolean wins = tombstoneLiveness == null || resolveRegular(tombstoneLiveness, liveness) == RIGHT;
-                if (wins)
+                // multiple tombstones resolve like regular cells: a counter tombstone is not
+                // a counter cell (AbstractCell.isCounterCell), so the iterator routes the
+                // pair through Cells.resolveRegular — higher ts, the greater-ldt tie-break,
+                // and on a full tie the greater RAW value bytes (compareValues tail)
+                CellResolution resolution = tombstoneLiveness == null
+                                            ? RIGHT : resolveRegular(tombstoneLiveness, liveness);
+                if (resolution == RIGHT)
                 {
                     tombstoneLiveness = liveness;
                     tombstoneFlags = cc.cellFlags;
@@ -981,6 +984,30 @@ public class CursorCompactor extends CompactionInfo.Holder
                     tempCellBuffer1.clear();
                     if (source.state() == CELL_VALUE_START)
                         source.copyCellValue(tempCellBuffer1, copyColumnValueBuffer);
+                }
+                else if (resolution == COMPARE)
+                {
+                    // full (ts, ldt) tie: Cells.resolveRegular ends at
+                    // compareValues(left, right) >= 0 ? left : right over the RAW value
+                    // bytes. tempCellBuffer1 holds the current winner's WIRE value; counter
+                    // values are variable-length, so skip the leading length vint on both
+                    // sides (finding #21's rule — comparing it orders by length first)
+                    tempCellBuffer2.clear();
+                    if (source.state() == CELL_VALUE_START)
+                        source.copyCellValue(tempCellBuffer2, copyColumnValueBuffer);
+                    int skip1 = tempCellBuffer1.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer1.getData()[0]);
+                    int skip2 = tempCellBuffer2.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer2.getData()[0]);
+                    int compare = Arrays.compareUnsigned(tempCellBuffer1.getData(), skip1, tempCellBuffer1.getLength(),
+                                                         tempCellBuffer2.getData(), skip2, tempCellBuffer2.getLength());
+                    if (compare < 0)
+                    {
+                        // challenger wins: its wire value is already in tempCellBuffer2 — swap
+                        DataOutputBuffer swap = tempCellBuffer1;
+                        tempCellBuffer1 = tempCellBuffer2;
+                        tempCellBuffer2 = swap;
+                        tombstoneLiveness = liveness;
+                        tombstoneFlags = cc.cellFlags;
+                    }
                 }
                 else if (source.state() == CELL_VALUE_START)
                 {
