@@ -344,6 +344,23 @@ public class SSTableCursorWriter implements AutoCloseable
     }
 
     /**
+     * Size of {@link SerializationHeader#writeDeletionTime} as actually WRITTEN.
+     * SerializationHeader.deletionTimeSerializedSize sizes the localDeletionTime field from the
+     * long-domain delta, but writeLocalDeletionTime casts the delta to int and
+     * writeUnsignedVInt32 sign-extends it back to a long (VIntCoding) — for a delta in
+     * [2^31, 2^32) the long-domain size says 5 bytes while the wire carries the 9-byte
+     * sign-extended form (reachable: localDeletionTime is unsigned-encoded up to ~year 2106,
+     * and INVALID-classified deletions sit at 2^32-2). The row-size vint must account for the
+     * bytes the write emits, so size with the same cast.
+     */
+    private long deletionTimeWrittenSize(DeletionTime deletionTime)
+    {
+        long localDeletionTimeDelta = (int) (deletionTime.localDeletionTime() - serializationHeader.stats().minLocalDeletionTime);
+        return serializationHeader.timestampSerializedSize(deletionTime.markedForDeleteAt())
+             + TypeSizes.sizeofUnsignedVInt(localDeletionTimeDelta);
+    }
+
+    /**
      * Opens a complex (multi-cell) column for the current row with its merged column-level
      * deletion. Must precede any of the column's writeCellHeader calls; may also stand alone
      * for a deletion-only column with zero surviving cells.
@@ -500,7 +517,7 @@ public class SSTableCursorWriter implements AutoCloseable
                 if (hasComplexDeletion)
                 {
                     reusableMarkerDeletion.reset(markerDeletionMfda[i], markerDeletionLdt[i]);
-                    cellSectionLength += serializationHeader.deletionTimeSerializedSize(reusableMarkerDeletion);
+                    cellSectionLength += deletionTimeWrittenSize(reusableMarkerDeletion);
                 }
                 cellSectionLength += TypeSizes.sizeofUnsignedVInt(markerCellCount[i]);
             }
