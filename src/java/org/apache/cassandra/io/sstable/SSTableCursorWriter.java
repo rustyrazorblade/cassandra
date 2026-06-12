@@ -21,6 +21,7 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.Ints;
 
 import org.agrona.collections.IntArrayList;
@@ -507,17 +508,7 @@ public class SSTableCursorWriter implements AutoCloseable
             for (; nextCellIndex < columnsLength; nextCellIndex++)
                 missingColumns.addInt(nextCellIndex);
 
-            if (columnsLength < 64) {
-                // set a bit for every missing column
-                long mask = 0;
-                for (int missingIndex : missingColumns) {
-                    mask |= (1L << missingIndex);
-                }
-                rowHeaderBuffer.writeUnsignedVInt(mask);
-            }
-            else {
-                encodeLargeColumnsSubset();
-            }
+            encodeColumnsSubset(missingColumns, columnsLength, rowHeaderBuffer);
         }
         long unfilteredStartPosition = dataWriter.position();
         /** See: {@link UnfilteredSerializer#serialize} */
@@ -684,16 +675,39 @@ public class SSTableCursorWriter implements AutoCloseable
         return position - partitionStart;
     }
 
-    private void encodeLargeColumnsSubset() throws IOException
+    /**
+     * Garbage-free equivalent of {@link org.apache.cassandra.db.Columns.Serializer}'s
+     * serializeSubset for a PARTIAL subset (not all-present, not all-missing — callers
+     * handle those fast paths): the < 64 missing-bitmap form, or the large-subset form
+     * (delta vint + present- or missing-index vints). Hand-mirrored because the upstream
+     * serializer requires a materialized Columns + iterator per call — a per-row allocation
+     * this path must not make. The mirror has already drifted once (finding #12, two
+     * corruption bugs); {@code CursorColumnsSubsetEncodingTest} pins it byte-for-byte
+     * against the upstream serializer across sizes, shapes, and both mode boundaries.
+     *
+     * @param missingColumns ascending superset positions of the columns ABSENT from the row
+     */
+    @VisibleForTesting
+    static void encodeColumnsSubset(IntArrayList missingColumns, int supersetCount, DataOutputBuffer out) throws IOException
     {
-        rowHeaderBuffer.writeUnsignedVInt32(missingColumns.size());
+        if (supersetCount < 64)
+        {
+            // set a bit for every missing column (Columns.Serializer.encodeBitmap)
+            long mask = 0;
+            for (int i = 0; i < missingColumns.size(); i++)
+                mask |= 1L << missingColumns.getInt(i);
+            out.writeUnsignedVInt(mask);
+            return;
+        }
+
+        out.writeUnsignedVInt32(missingColumns.size());
         // Mode selection must mirror Columns.Serializer.serializeLargeSubset AND its
         // deserializer exactly: present-index mode iff presentCount < supersetCount / 2.
         // The previous condition (missing > supersetCount / 2) agreed for even superset
         // sizes but flipped the mode for odd sizes at missing == supersetCount/2 + 1,
         // which the deserializer then read in the WRONG mode — corrupted output.
-        int presentCount = columns.length - missingColumns.size();
-        if (presentCount < columns.length / 2)
+        int presentCount = supersetCount - missingColumns.size();
+        if (presentCount < supersetCount / 2)
         {
             // write present column indices: the gaps between missing indices, INCLUDING the
             // tail after the last missing index — the previous tail loop's bound was the
@@ -703,20 +717,19 @@ public class SSTableCursorWriter implements AutoCloseable
             int presentIndex = 0;
             for (int i = 0; i < missingColumns.size(); i++)
             {
-                int missingIndex = missingColumns.get(i);
+                int missingIndex = missingColumns.getInt(i);
                 for (; presentIndex < missingIndex; presentIndex++)
-                    rowHeaderBuffer.writeUnsignedVInt32(presentIndex);
+                    out.writeUnsignedVInt32(presentIndex);
                 presentIndex = missingIndex + 1;
             }
-            for (; presentIndex < columns.length; presentIndex++)
-                rowHeaderBuffer.writeUnsignedVInt32(presentIndex);
+            for (; presentIndex < supersetCount; presentIndex++)
+                out.writeUnsignedVInt32(presentIndex);
         }
         else
         {
-            // write missing columns
-            for (int missingIndex : missingColumns) {
-                rowHeaderBuffer.writeUnsignedVInt32(missingIndex);
-            }
+            // write missing columns (indexed loop: agrona's for-each would box per element)
+            for (int i = 0; i < missingColumns.size(); i++)
+                out.writeUnsignedVInt32(missingColumns.getInt(i));
         }
     }
 
