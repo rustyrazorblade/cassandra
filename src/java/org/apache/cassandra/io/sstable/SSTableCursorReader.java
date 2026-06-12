@@ -98,7 +98,6 @@ public class SSTableCursorReader implements AutoCloseable
         public Columns columns;
 
         public int columnsSize;
-        public int columnsIndex;
         public int cellFlags;
         public final ReusableLivenessInfo cellLiveness = new ReusableLivenessInfo();
         public CellPath cellPath;
@@ -109,12 +108,17 @@ public class SSTableCursorReader implements AutoCloseable
 
         // Remaining PRESENT columns of this row as a bitmask over columnsArray indices.
         // Garbage-free sparse-row iteration: rows that do not contain every header column
-        // pass the missing-columns mask instead of a freshly allocated Columns subset, so
-        // the identity cache below only rebuilds on a genuine superset change (stable per
-        // reader) or in the >= 64 column fallback.
+        // pass the missing-columns mask (or, for >= 64-column supersets, present-mask
+        // words) instead of a freshly allocated Columns subset, so the identity cache
+        // below only rebuilds on a genuine superset change (stable per reader).
         private long presentMask;
+        // >= 64-column supersets: present-mask words (bit i of word i/64 = superset column
+        // i present), walked word by word. Grow-once scratch, consumed destructively.
+        private long[] presentWords;
+        private int presentWordsCount;
+        private int presentWordIndex;
 
-        void init (Columns columns, long missingColumnsMask, ReusableLivenessInfo rowLiveness)
+        void init (Columns columns, long missingColumnsMask, long[] presentColumnsWords, ReusableLivenessInfo rowLiveness)
         {
             if (this.columns != columns)
             {
@@ -129,20 +133,39 @@ public class SSTableCursorReader implements AutoCloseable
                 }
                 columnsSize = columns.size();
             }
-            // Build the present-columns bitmask from the wire's MISSING-columns mask:
-            //   -1L >>> (64 - n)   is the "n low ones" template (e.g. n=3 -> 0b111): all 64
-            //                      bits set, then shifted so exactly the n column bits remain.
-            //                      n == 0 must be special-cased because Java shifts are mod 64
-            //                      (>>> 64 is a no-op, NOT zero).
-            //   ~missingColumnsMask flips missing->present but also sets every bit ABOVE the
-            //                      column range, so it is ANDed with the template to trim them.
-            // For >= 64 columns the wire uses a structurally different "large subset" format
-            // and `columns` was already replaced with the exact subset: walk it fully.
-            presentMask = columnsSize >= 64
-                          ? -1L
-                          : ~missingColumnsMask & (columnsSize == 0 ? 0 : (-1L >>> (64 - columnsSize)));
+            if (columnsSize >= 64)
+            {
+                // word-mask walk over the superset; the descriptor decoded the large-subset
+                // wire format into presentColumnsWords (null = all columns present)
+                int nWords = (columnsSize + 63) >>> 6;
+                if (presentWords == null || presentWords.length < nWords)
+                    presentWords = new long[nWords]; // grow-once, amortized zero
+                presentWordsCount = nWords;
+                presentWordIndex = 0;
+                if (presentColumnsWords != null)
+                {
+                    System.arraycopy(presentColumnsWords, 0, presentWords, 0, nWords);
+                }
+                else
+                {
+                    java.util.Arrays.fill(presentWords, 0, nWords, -1L);
+                    if ((columnsSize & 63) != 0)
+                        presentWords[nWords - 1] = -1L >>> (64 - (columnsSize & 63));
+                }
+                presentMask = 0;
+            }
+            else
+            {
+                // Build the present-columns bitmask from the wire's MISSING-columns mask:
+                //   -1L >>> (64 - n)   is the "n low ones" template (e.g. n=3 -> 0b111): all 64
+                //                      bits set, then shifted so exactly the n column bits remain.
+                //                      n == 0 must be special-cased because Java shifts are mod 64
+                //                      (>>> 64 is a no-op, NOT zero).
+                //   ~missingColumnsMask flips missing->present but also sets every bit ABOVE the
+                //                      column range, so it is ANDed with the template to trim them.
+                presentMask = ~missingColumnsMask & (columnsSize == 0 ? 0 : (-1L >>> (64 - columnsSize)));
+            }
             this.rowLiveness = rowLiveness;
-            columnsIndex = 0;
             cellFlags = 0;
             cellPath = null;
             cellType = null;
@@ -150,7 +173,19 @@ public class SSTableCursorReader implements AutoCloseable
 
         public boolean hasNext()
         {
-            return columnsSize >= 64 ? columnsIndex < columnsSize : presentMask != 0;
+            return columnsSize >= 64 ? columnsRemain() : presentMask != 0;
+        }
+
+        private boolean columnsRemain()
+        {
+            // advance to the next non-empty word; position is retained across calls
+            while (presentWordIndex < presentWordsCount)
+            {
+                if (presentWords[presentWordIndex] != 0)
+                    return true;
+                presentWordIndex++;
+            }
+            return false;
         }
 
         /**
@@ -166,7 +201,11 @@ public class SSTableCursorReader implements AutoCloseable
             int currIndex;
             if (columnsSize >= 64)
             {
-                currIndex = columnsIndex++;
+                // columnsRemain() (via hasNext() above) parked presentWordIndex on a
+                // non-empty word; same low-to-high bit walk as the single-mask path below
+                long word = presentWords[presentWordIndex];
+                currIndex = (presentWordIndex << 6) + Long.numberOfTrailingZeros(word);
+                presentWords[presentWordIndex] = word & (word - 1);
             }
             else
             {
@@ -179,7 +218,6 @@ public class SSTableCursorReader implements AutoCloseable
                 //                           through the trailing zeros; the AND kills both)
                 currIndex = Long.numberOfTrailingZeros(presentMask);
                 presentMask &= presentMask - 1;
-                columnsIndex++;
             }
             cellColumn = columnsArray[currIndex];
             cellType = cellTypeArray[currIndex];
@@ -371,7 +409,8 @@ public class SSTableCursorReader implements AutoCloseable
             return corruptSSTable(e);
         }
 
-        staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(), unfilteredDescriptor.livenessInfo());
+        staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
+                                 unfilteredDescriptor.presentColumnsWords(), unfilteredDescriptor.livenessInfo());
         cellCursor = staticRowCellCursor;
         if (!staticRowCellCursor.hasNext())
         {
@@ -483,7 +522,8 @@ public class SSTableCursorReader implements AutoCloseable
         {
             unfilteredDescriptor.loadRow(dataReader, serializationHeader, deserializationHelper, basicUnfilteredFlags);
 
-            rowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(), unfilteredDescriptor.livenessInfo());
+            rowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
+                               unfilteredDescriptor.presentColumnsWords(), unfilteredDescriptor.livenessInfo());
             cellCursor = rowCellCursor;
             if (!rowCellCursor.hasNext())
             {
