@@ -18,6 +18,7 @@
 package org.apache.cassandra.db.compaction;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -26,6 +27,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.function.LongPredicate;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 
 import org.slf4j.Logger;
@@ -43,6 +45,7 @@ import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
@@ -1507,21 +1510,35 @@ public class CursorCompactor extends CompactionInfo.Holder
         // column's deletion contributors group ahead of its cells
         if (!cc1.producedCell || !cc2.producedCell)
             return Boolean.compare(cc1.producedCell, cc2.producedCell);
-        // type-aware path order (map keys/set elements/list timeuuids compare by their type,
-        // not raw bytes); UDT field indexes are fixed-width unsigned and compare bytewise
-        AbstractType<?> pathType = pathType(cc1.cellColumn);
-        if (pathType == null)
-            return ByteBufferUtil.compareUnsigned(cc1.cellPathWindow(), cc2.cellPathWindow());
-        return pathType.compare(cc1.cellPathWindow(), cc2.cellPathWindow());
+        return comparePaths(cc1.cellColumn, cc1.cellPathWindow(), cc2.cellPathWindow());
     }
 
-    /** Path comparison type: collections expose it as nameComparator; UDT paths (field
-     *  indexes, fixed 2-byte unsigned) compare bytewise (null). */
+    /**
+     * Cell-path order within a complex column — must match the reference
+     * {@link ColumnMetadata#cellPathComparator()} exactly (it dictates both the on-disk
+     * cell order written by flush and the iterator's merge grouping).
+     */
+    @VisibleForTesting
+    static int comparePaths(ColumnMetadata column, ByteBuffer p1, ByteBuffer p2)
+    {
+        // type-aware path order (map keys/set elements/list timeuuids compare by their
+        // type, not raw bytes)
+        AbstractType<?> pathType = pathType(column);
+        if (pathType == null)
+            return ByteBufferUtil.compareUnsigned(p1, p2);
+        return pathType.compare(p1, p2);
+    }
+
+    /** Path comparison type: collections and UDTs both expose it as nameComparator (UDT
+     *  paths are 2-byte field indexes compared as SIGNED shorts by ShortType — bytewise
+     *  unsigned order diverges at field index 32768). */
     private static AbstractType<?> pathType(ColumnMetadata column)
     {
         AbstractType<?> type = column.type;
         if (type instanceof CollectionType)
             return ((CollectionType<?>) type).nameComparator();
+        if (type instanceof UserType)
+            return ((UserType) type).nameComparator();
         return null;
     }
 
