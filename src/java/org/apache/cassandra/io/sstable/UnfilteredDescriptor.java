@@ -45,9 +45,15 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
     private long prevUnfilteredSize;
     Columns rowColumns;
     // For supersets of < 64 columns: bit i set means the i-th column of rowColumns (in
-    // iteration order) is ABSENT from this row; 0 means all present. Always 0 when
-    // rowColumns is already an exact subset (>= 64 column fallback) or for markers.
+    // iteration order) is ABSENT from this row; 0 means all present. Always 0 for markers,
+    // all-columns rows, and >= 64-column supersets (which use the words below).
     private long missingColumnsMask;
+    // For supersets of >= 64 columns: PRESENT-column mask words over superset iteration
+    // order (bit i of word i/64 set means superset column i is present in this row).
+    // Reusable grow-once scratch; valid only when useColumnsWords is set (a row that took
+    // the large-subset decode), consumed by CellCursor within the same row.
+    private long[] presentColumnsWords;
+    private boolean useColumnsWords;
 
     public UnfilteredDescriptor(AbstractType<?>[] clusteringTypes)
     {
@@ -61,6 +67,7 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         this.flags = flags;
         this.extendedFlags = 0;
         rowColumns = null;
+        useColumnsWords = false;
         byte clusteringKind = dataReader.readByte();
         if (clusteringKind == STATIC_CLUSTERING_KIND || clusteringKind == ROW_CLUSTERING_KIND) {
             // STATIC_CLUSTERING or CLUSTERING -> no deletion info, should not happen
@@ -147,6 +154,7 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         {
             deletionTime.resetLive();
         }
+        useColumnsWords = false;
         if (!UnfilteredSerializer.hasAllColumns(flags))
         {
             if (rowColumns.size() < 64)
@@ -165,10 +173,51 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
             }
             else
             {
-                // Rare shape (>= 64 columns in the header superset): keep the allocating path.
-                // The large-subset wire format is structural, not a single mask; accepted
-                // allocation, documented trade-off.
-                rowColumns = Columns.serializer.deserializeSubset(rowColumns, dataReader);
+                // >= 64-column superset: LARGE-subset wire format (Columns.Serializer
+                // .serializeLargeSubset) — vint delta = supersetCount - presentCount, then
+                // either the present indices (presentCount < supersetCount/2) or the missing
+                // indices, each an unsigned vint superset position. Decoded garbage-free
+                // into reusable present-mask words; rowColumns stays the superset so
+                // CellCursor's identity cache never rebuilds per row (the < 64 mask path's
+                // design — finding #9 — extended to words).
+                long encoded = dataReader.readUnsignedVInt();
+                int supersetCount = rowColumns.size();
+                if (encoded > supersetCount)
+                    throw new IOException("Invalid large Columns subset: missing count " + encoded + " of " + supersetCount);
+                int delta = (int) encoded;
+                int columnCount = supersetCount - delta;
+                int nWords = (supersetCount + 63) >>> 6;
+                if (presentColumnsWords == null || presentColumnsWords.length < nWords)
+                    presentColumnsWords = new long[nWords]; // grow-once, amortized zero
+                if (columnCount < supersetCount / 2)
+                {
+                    // present-mode: start all-absent, set each present index
+                    java.util.Arrays.fill(presentColumnsWords, 0, nWords, 0L);
+                    for (int i = 0; i < columnCount; i++)
+                    {
+                        int idx = dataReader.readUnsignedVInt32();
+                        if (idx < 0 || idx >= supersetCount)
+                            throw new IOException("Invalid large Columns subset: present index " + idx + " of " + supersetCount);
+                        presentColumnsWords[idx >>> 6] |= 1L << (idx & 63);
+                    }
+                }
+                else
+                {
+                    // missing-mode: start all-present (last word trimmed to the column
+                    // range), clear each missing index. delta == 0 degenerates to
+                    // all-present, matching deserializeSubset's encoded == 0 case.
+                    java.util.Arrays.fill(presentColumnsWords, 0, nWords, -1L);
+                    if ((supersetCount & 63) != 0)
+                        presentColumnsWords[nWords - 1] = -1L >>> (64 - (supersetCount & 63));
+                    for (int i = 0; i < delta; i++)
+                    {
+                        int idx = dataReader.readUnsignedVInt32();
+                        if (idx < 0 || idx >= supersetCount)
+                            throw new IOException("Invalid large Columns subset: missing index " + idx + " of " + supersetCount);
+                        presentColumnsWords[idx >>> 6] &= ~(1L << (idx & 63));
+                    }
+                }
+                useColumnsWords = true;
                 missingColumnsMask = 0;
             }
         }
@@ -189,6 +238,7 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         prevUnfilteredSize = 0;
         rowColumns = null;
         missingColumnsMask = 0;
+        useColumnsWords = false;
     }
 
     public long position()
@@ -240,6 +290,17 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
     public long missingColumnsMask()
     {
         return missingColumnsMask;
+    }
+
+    /**
+     * See {@link #presentColumnsWords}: present-column mask words for this row when the
+     * superset has >= 64 columns and the row carried a subset encoding; null otherwise
+     * (all columns present, or the < 64 mask path applies). The array is per-row scratch —
+     * the consumer may mutate it but must finish before the next unfiltered is loaded.
+     */
+    public long[] presentColumnsWords()
+    {
+        return useColumnsWords ? presentColumnsWords : null;
     }
 
     @Override

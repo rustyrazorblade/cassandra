@@ -308,6 +308,116 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     /**
+     * Sparse rows in a >= 64-column superset: the column subset uses the LARGE-subset wire
+     * format (index vints, present- or missing-mode), which the reader historically decoded
+     * by materializing a fresh Columns per row — cascading through CellCursor.init's
+     * identity cache into a per-row toArray + AbstractType[] rebuild + O(columns) getType
+     * lookups. The small-superset gate (allocationDoesNotScaleWithSparseRows) cannot see
+     * this: its mask fast path only covers < 64 columns. Rows alternate present-mode
+     * (3 of 70 set) and missing-mode (67 of 70 set) so both wire modes are exercised.
+     */
+    @Test
+    public void allocationDoesNotScaleWithWideSchemaSparseRows() throws Exception
+    {
+        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
+        Assume.assumeTrue(threadMXBean != null);
+
+        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
+        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
+        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        try
+        {
+            long smallAlloc = measureWideSparse(threadMXBean, SMALL_PARTITIONS);
+            long smallBytes = lastInputBytes;
+            long bigAlloc = measureWideSparse(threadMXBean, SMALL_PARTITIONS * SCALE);
+            long bigBytes = lastInputBytes;
+            long delta = bigAlloc - smallAlloc;
+            long extraBytes = bigBytes - smallBytes;
+            double perInputByte = (double) delta / extraBytes;
+            logger.info("wide-schema sparse-row cursor compaction allocation: small={}B big={}B delta={}B " +
+                        "over {}B extra input = {} B/B",
+                        smallAlloc, bigAlloc, delta, extraBytes, String.format("%.3f", perInputByte));
+            // Per INPUT BYTE, the complex/RT gates' calibration: the mixed 3-of-70 and
+            // 67-of-70 rows make multi-MB inputs whose volume-proportional test-env residual
+            // (Ref$Debug, chunk cache) dwarfs any fixed ceiling. Measured post-fix: ~0.37 B/B
+            // (BIG). The pre-fix per-row cascade (fresh Columns + CellCursor rebuild per
+            // sparse row) measured ~3.8 B/B; a leak of one small object per row costs
+            // ~+0.2 B/B at this row size and trips the ceiling with margin.
+            assertTrue(String.format("wide-schema (>=64 col) sparse-row cursor allocation per input byte too high: " +
+                                     "%.3f B/B (delta %,dB over %,dB extra input)",
+                                     perInputByte, delta, extraBytes),
+                       perInputByte <= 0.6);
+        }
+        finally
+        {
+            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
+            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
+        }
+    }
+
+    private long measureWideSparse(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        int cols = 70;
+        StringBuilder schema = new StringBuilder("CREATE TABLE %s (pk bigint, ck bigint");
+        for (int c = 0; c < cols; c++)
+            schema.append(", c").append(c).append(" bigint");
+        schema.append(", PRIMARY KEY (pk, ck)) WITH compression = {'enabled': 'false'}");
+        createTable(schema.toString());
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // missing-mode insert: 67 of 70 columns (3 missing -> missing-index encoding)
+        StringBuilder wide = new StringBuilder("INSERT INTO %s (pk, ck");
+        StringBuilder marks = new StringBuilder("?, ?");
+        for (int c = 0; c < cols - 3; c++)
+        {
+            wide.append(", c").append(c);
+            marks.append(", ?");
+        }
+        String wideInsert = wide.append(") VALUES (").append(marks).append(")").toString();
+        Object[] wideArgs = new Object[2 + cols - 3];
+        for (int c = 0; c < cols - 3; c++)
+            wideArgs[2 + c] = (long) c;
+
+        for (int round = 0; round < 2; round++)
+        {
+            for (long pk = 0; pk < partitions; pk++)
+                for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                {
+                    if (ck % 2 == 0)
+                    {
+                        // present-mode: rotating 3-column window
+                        int base = (int) ((ck * 3) % (cols - 2));
+                        execute("INSERT INTO %s (pk, ck, c" + base + ", c" + (base + 1) + ", c" + (base + 2) +
+                                ") VALUES (?, ?, ?, ?, ?)", pk, ck, ck, ck + 1, ck + 2);
+                    }
+                    else
+                    {
+                        wideArgs[0] = pk;
+                        wideArgs[1] = ck;
+                        execute(wideInsert, wideArgs);
+                    }
+                }
+            flush();
+        }
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+        lastInputBytes = 0;
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            lastInputBytes += sstable.onDiskLength();
+        long best = Long.MAX_VALUE;
+        for (int i = 0; i < WARMUP_ITERATIONS + MEASURED_ITERATIONS; i++)
+        {
+            long allocated = compactOnceMeasured(threadMXBean, cfs, gcBefore);
+            if (i >= WARMUP_ITERATIONS)
+                best = Math.min(best, allocated);
+        }
+        return best;
+    }
+
+    /**
      * Garbage-free property for RANGE-TOMBSTONE-dense workloads (task-15 M6): the marker
      * read/merge/write path runs on the ReusableDeletionTime pool and open-marker tracking,
      * which the row-centric gates barely touch. Each partition carries 300 bounded range
