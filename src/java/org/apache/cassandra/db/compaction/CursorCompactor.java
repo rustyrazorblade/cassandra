@@ -113,7 +113,8 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  *       only purgable tombstones in the row cache.</li>
  *   <li>Keep tracks of the compaction progress.</li>
  * </ul>
- * This compaction implementation does not support 2ndary indexes or trie indexes at this time.
+ * This compaction implementation supports BIG and BTI output formats (see the
+ * CursorIndexWriter seam); it does not support 2ndary indexes at this time.
  * <p>
 *     This compaction implmentation avoids garbage creation per partition/row/cell by utilizing reader/writer code
 *     which supports reusable copies of sstable entry components. The implementation consolidates and duplicates code

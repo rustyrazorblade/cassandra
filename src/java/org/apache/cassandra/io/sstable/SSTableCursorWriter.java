@@ -141,10 +141,17 @@ public class SSTableCursorWriter implements AutoCloseable
                 serializationHeader.clusteringTypes().isEmpty() ? new org.apache.cassandra.db.ClusteringComparator()
                                                                 : new org.apache.cassandra.db.ClusteringComparator(serializationHeader.clusteringTypes()),
                 clusteringTypes);
-        else
+        else if (indexWriter instanceof BigTableWriter.IndexWriter)
             this.cursorIndexWriter = new BigCursorIndexWriter((BigTableWriter.IndexWriter) indexWriter,
                                                               this.deletionTimeSerializer,
                                                               new ClusteringDescriptor(clusteringTypes));
+        else
+            // the support gate (CursorCompactor.isSupported: BigFormat || BtiFormat) must
+            // reject any other format before a writer is ever constructed; reaching here
+            // means the gate and this dispatch have drifted apart
+            throw new IllegalStateException("cursor compaction has no index writer for format of " +
+                                            ssTableWriter.getClass().getName() +
+                                            "; CursorCompactor.isSupported is out of sync with this dispatch");
     }
 
     public SSTableCursorWriter(SortedTableWriter<?,?> ssTableWriter)
