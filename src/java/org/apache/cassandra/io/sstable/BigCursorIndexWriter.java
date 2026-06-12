@@ -45,6 +45,11 @@ public class BigCursorIndexWriter extends CursorIndexWriter
 {
     private final BigTableWriter.IndexWriter indexWriter;
     private final DeletionTime.Serializer deletionTimeSerializer;
+    // The garbage-free add() overload exists only on the concrete BloomFilter. With
+    // bloom_filter_fp_chance = 1.0 FilterFactory hands out the AlwaysPresentFilter instead,
+    // whose interface add() is a no-op (the iterator path calls it through IFilter) — null
+    // here means "nothing to add to".
+    private final BloomFilter bloomFilter;
     /**
      * See: {@link BloomFilter#reusableIndexes}
      */
@@ -65,6 +70,7 @@ public class BigCursorIndexWriter extends CursorIndexWriter
         this.deletionTimeSerializer = deletionTimeSerializer;
         this.rowIndexEntryLastClustering = rowIndexEntryLastClustering;
         this.indexBlockThreshold = DatabaseDescriptor.getColumnIndexSize(BigFormatPartitionWriter.DEFAULT_GRANULARITY);
+        this.bloomFilter = indexWriter.bf instanceof BloomFilter ? (BloomFilter) indexWriter.bf : null;
     }
 
     @Override
@@ -164,7 +170,8 @@ public class BigCursorIndexWriter extends CursorIndexWriter
          *
          */
         SequentialWriter indexFileWriter = indexWriter.writer;
-        ((BloomFilter)indexWriter.bf).add(key, 0, keyLength, reusableIndexes);
+        if (bloomFilter != null)
+            bloomFilter.add(key, 0, keyLength, reusableIndexes);
         long indexStart = indexFileWriter.position();
         try
         {
