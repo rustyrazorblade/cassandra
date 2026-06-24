@@ -22,8 +22,11 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
+import java.nio.file.OpenOption;
 import java.util.Optional;
 import java.util.zip.CRC32;
+
+import javax.annotation.Nullable;
 
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
@@ -42,55 +45,66 @@ import static org.apache.cassandra.utils.Throwables.merge;
 
 public class CompressedSequentialWriter extends SequentialWriter
 {
-    private final ChecksumWriter crcMetadata;
+    protected final ChecksumWriter crcMetadata;
 
     // holds offset in the file where current chunk should be written
     // changed only by flush() method where data buffer gets compressed and stored to the file
-    private long chunkOffset = 0;
+    protected long chunkOffset = 0;
 
     // index file writer (random I/O)
-    private final CompressionMetadata.Writer metadataWriter;
+    protected final CompressionMetadata.Writer metadataWriter;
     private final ICompressor compressor;
 
     // used to store compressed data
     private ByteBuffer compressed;
 
     // holds a number of already written chunks
-    private int chunkCount = 0;
+    protected int chunkCount = 0;
 
-    private long uncompressedSize = 0, compressedSize = 0;
+    protected long uncompressedSize = 0;
+    protected long compressedSize = 0;
 
-    private final MetadataCollector sstableMetadataCollector;
+    protected final MetadataCollector sstableMetadataCollector;
 
     private final ByteBuffer crcCheckBuffer = ByteBuffer.allocate(4);
-    private final Optional<File> digestFile;
+    protected final Optional<File> digestFile;
 
     private final int maxCompressedLength;
 
+    private static ByteBuffer allocateBuffer(CompressionParams parameters)
+    {
+        return parameters.getSstableCompressor().preferredBufferType().allocate(parameters.chunkLength());
+    }
+
+    private static SequentialWriterOption buildOption(SequentialWriterOption option, CompressionParams parameters)
+    {
+        return SequentialWriterOption.newBuilder()
+                                     .bufferSize(parameters.chunkLength())
+                                     .bufferType(parameters.getSstableCompressor().preferredBufferType())
+                                     .finishOnClose(option.finishOnClose())
+                                     .build();
+    }
+
     /**
-     * Create CompressedSequentialWriter without digest file.
+     * Create CompressedSequentialWriter with optional channel options.
      *
      * @param file File to write
      * @param offsetsFile File to write compression metadata
-     * @param digestFile File to write digest
+     * @param digestFile File to write digest, or null if not needed
      * @param option Write option (buffer size and type will be set the same as compression params)
      * @param parameters Compression mparameters
      * @param sstableMetadataCollector Metadata collector
+     * @param extraOpenOptions additional options to pass to FileChannel.open (e.g., ExtendedOpenOption.DIRECT)
      */
     public CompressedSequentialWriter(File file,
                                       File offsetsFile,
-                                      File digestFile,
+                                      @Nullable File digestFile,
                                       SequentialWriterOption option,
                                       CompressionParams parameters,
-                                      MetadataCollector sstableMetadataCollector)
+                                      MetadataCollector sstableMetadataCollector,
+                                      OpenOption... extraOpenOptions)
     {
-        super(file, SequentialWriterOption.newBuilder()
-                            .bufferSize(option.bufferSize())
-                            .bufferType(option.bufferType())
-                            .bufferSize(parameters.chunkLength())
-                            .bufferType(parameters.getSstableCompressor().preferredBufferType())
-                            .finishOnClose(option.finishOnClose())
-                            .build());
+        super(file, allocateBuffer(parameters), buildOption(option, parameters), true, extraOpenOptions);
         this.compressor = parameters.getSstableCompressor();
         this.digestFile = Optional.ofNullable(digestFile);
 
@@ -103,7 +117,16 @@ public class CompressedSequentialWriter extends SequentialWriter
         metadataWriter = CompressionMetadata.Writer.open(parameters, offsetsFile);
 
         this.sstableMetadataCollector = sstableMetadataCollector;
-        crcMetadata = new ChecksumWriter(new DataOutputStream(Channels.newOutputStream(channel)));
+        crcMetadata = createChecksumWriter();
+    }
+
+    /**
+     * Creates the {@link ChecksumWriter} for the chunk and full-file checksums. Invoked from the constructor,
+     * so overrides must not read subclass fields.
+     */
+    protected ChecksumWriter createChecksumWriter()
+    {
+        return new ChecksumWriter(new DataOutputStream(Channels.newOutputStream(channel)));
     }
 
     @Override
@@ -139,7 +162,9 @@ public class CompressedSequentialWriter extends SequentialWriter
     @Override
     protected void flushData()
     {
-        seekToChunkStart(); // why is this necessary? seems like it should always be at chunk start in normal operation
+        // resetAndTruncate leaves fchannel.position() past EOF after its verification reads + truncate;
+        // re-seek so the next chunk lands at chunkOffset. No-op under linear writes.
+        seekToChunkStart();
 
         try
         {
@@ -177,25 +202,15 @@ public class CompressedSequentialWriter extends SequentialWriter
         }
         compressedSize += compressedLength;
 
-        try
-        {
-            // write an offset of the newly written chunk to the index file
-            metadataWriter.addOffset(chunkOffset);
-            chunkCount++;
+        // write an offset of the newly written chunk to the index file
+        metadataWriter.addOffset(chunkOffset);
+        chunkCount++;
 
-            // write out the compressed data
-            toWrite.flip();
-            channel.write(toWrite);
+        // write out the compressed data and checksum
+        toWrite.flip();
+        writeChunk(toWrite);
+        lastFlushOffset = uncompressedSize;
 
-            // write corresponding checksum
-            toWrite.rewind();
-            crcMetadata.appendDirect(toWrite, true);
-            lastFlushOffset = uncompressedSize;
-        }
-        catch (IOException e)
-        {
-            throw new FSWriteError(e, getPath());
-        }
         if (toWrite == buffer)
             buffer.position(uncompressedLength);
 
@@ -203,6 +218,20 @@ public class CompressedSequentialWriter extends SequentialWriter
         chunkOffset += compressedLength + 4;
         if (runPostFlush != null)
             runPostFlush.accept(getLastFlushOffset());
+    }
+
+    protected void writeChunk(ByteBuffer toWrite)
+    {
+        try
+        {
+            channel.write(toWrite);
+            toWrite.rewind();
+            crcMetadata.appendDirect(toWrite, true);
+        }
+        catch (IOException e)
+        {
+            throw new FSWriteError(e, getPath());
+        }
     }
 
     public CompressionMetadata open(long overrideLength)
@@ -319,10 +348,16 @@ public class CompressedSequentialWriter extends SequentialWriter
         }
     }
 
+    protected void writeDigestFile()
+    {
+        digestFile.ifPresent(crcMetadata::writeFullChecksum);
+    }
+
     /**
      * Seek to the offset where next compressed data chunk should be stored.
+     * Subclasses may override if they manage their own channel.
      */
-    private void seekToChunkStart()
+    protected void seekToChunkStart()
     {
         if (getOnDiskFilePointer() != chunkOffset)
         {
@@ -390,7 +425,7 @@ public class CompressedSequentialWriter extends SequentialWriter
         protected void doPrepare()
         {
             syncInternal();
-            digestFile.ifPresent(crcMetadata::writeFullChecksum);
+            writeDigestFile();
             sstableMetadataCollector.addCompressionRatio(compressedSize, uncompressedSize);
             metadataWriter.finalizeLength(current(), chunkCount).prepareToCommit();
         }

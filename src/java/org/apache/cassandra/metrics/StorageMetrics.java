@@ -48,6 +48,9 @@ public class StorageMetrics
     public static final Counter totalOpsForInvalidToken = Metrics.counter(factory.createMetricName("TotalOpsForInvalidToken"));
     public static final Counter startupOpsForInvalidToken = Metrics.counter(factory.createMetricName("StartupOpsForInvalidToken"));
 
+    public static final Counter directWriteBufferBytes = Metrics.counter(factory.createMetricName("DirectWriteBufferBytes"));
+    public static final Meter directWriteBuffersAllocated = Metrics.meter(factory.createMetricName("DirectWriteBuffersAllocated"));
+
     private static Gauge<Long> createSummingGauge(String name, ToLongFunction<KeyspaceMetrics> extractor)
     {
         return Metrics.register(factory.createMetricName(name),

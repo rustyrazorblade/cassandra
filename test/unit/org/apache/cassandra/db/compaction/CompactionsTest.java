@@ -18,20 +18,31 @@
 */
 package org.apache.cassandra.db.compaction;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
+import org.junit.After;
+import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Ignore;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.Config.DiskAccessMode;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -45,10 +56,16 @@ import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
+import org.apache.cassandra.db.compaction.writers.MaxSSTableSizeWriter;
 import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
+import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.marshal.AsciiType;
+import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.ValueAccessors;
 import org.apache.cassandra.db.partitions.FilteredPartition;
 import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
@@ -69,6 +86,7 @@ import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.schema.CompactionParams;
+import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.SchemaTestUtil;
 import org.apache.cassandra.schema.TableMetadata;
@@ -80,6 +98,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+@RunWith(Parameterized.class)
 public class CompactionsTest
 {
     private static final String KEYSPACE1 = "Keyspace1";
@@ -88,6 +107,42 @@ public class CompactionsTest
     private static final String CF_STANDARD2 = "Standard2";
     private static final String CF_STANDARD3 = "Standard3";
     private static final String CF_STANDARD4 = "Standard4";
+    private static final String CF_COMPRESSED_STANDARD1 = "CF_COMPRESSED_STANDARD1";
+
+    @Parameterized.Parameter(0)
+    public DiskAccessMode compactionReadDiskAccessMode;
+
+    @Parameterized.Parameter(1)
+    public DiskAccessMode backgroundWriteDiskAccessMode;
+
+    @Parameterized.Parameters(name = "diskAccessMode={0},backgroundWriteMode={1}")
+    public static Collection<Object[]> params()
+    {
+        // One direct-write cell instead of cross-multiplying: uncompressed CFs ignore the write mode.
+        return Arrays.asList(new Object[]{ DiskAccessMode.standard, DiskAccessMode.standard },
+                             new Object[]{ DiskAccessMode.direct, DiskAccessMode.standard },
+                             new Object[]{ DiskAccessMode.standard, DiskAccessMode.direct });
+    }
+
+    private DiskAccessMode originalDiskAccessMode;
+    private DiskAccessMode originalBackgroundWriteDiskAccessMode;
+
+    @Before
+    public void setCompactionParams()
+    {
+        originalDiskAccessMode = DatabaseDescriptor.getCompactionReadDiskAccessMode();
+        originalBackgroundWriteDiskAccessMode = DatabaseDescriptor.getBackgroundWriteDiskAccessMode();
+        DatabaseDescriptor.setCompactionReadDiskAccessMode(compactionReadDiskAccessMode);
+        DatabaseDescriptor.setBackgroundWriteDiskAccessMode(backgroundWriteDiskAccessMode);
+    }
+
+    @After
+    public void restoreCompactionParams()
+    {
+        DatabaseDescriptor.setCompactionReadDiskAccessMode(originalDiskAccessMode);
+        DatabaseDescriptor.setBackgroundWriteDiskAccessMode(originalBackgroundWriteDiskAccessMode);
+    }
+
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
     {
@@ -105,7 +160,10 @@ public class CompactionsTest
                                                 .compaction(CompactionParams.stcs(compactionOptions)),
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD2),
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD3),
-                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD4));
+                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD4),
+                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_COMPRESSED_STANDARD1,
+                                                              0, AsciiType.instance, BytesType.instance, AsciiType.instance)
+                                                .compression(CompressionParams.lz4()));
     }
 
     public static long populate(String ks, String cf, int startRowKey, int endRowKey, int ttl)
@@ -375,6 +433,75 @@ public class CompactionsTest
         }
 
         assertEquals(keys, k);
+    }
+
+    @Test
+    public void testCompactionWithSizeLimitedRewriter() throws Exception
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_COMPRESSED_STANDARD1);
+        cfs.clearUnsafe();
+        cfs.disableAutoCompaction();
+
+        assertTrue("CF_COMPRESSED_STANDARD1 must be compressed for DIO to engage",
+                   cfs.metadata().params.compression.isEnabled());
+        assertEquals(backgroundWriteDiskAccessMode, DatabaseDescriptor.getBackgroundWriteDiskAccessMode());
+
+        // ~800 KiB of incompressible random data across 200 partitions -> >=2 output sstables at 64 KiB cap.
+        int valSize = 4096;
+        byte[] val = new byte[valSize];
+        new Random(42).nextBytes(val);
+        TableMetadata table = cfs.metadata();
+        long timestamp = System.currentTimeMillis();
+        for (int i = 0; i < 200; i++)
+        {
+            DecoratedKey key = Util.dk(String.format("%05d", i));
+            new RowUpdateBuilder(table, timestamp, key.getKey())
+                .clustering("0")
+                .add("val", ByteBuffer.wrap(val))
+                .build()
+                .applyUnsafe();
+        }
+        Util.flush(cfs);
+        assertEquals(1, cfs.getLiveSSTables().size());
+
+        Set<SSTableReader> originals = new HashSet<>(cfs.getLiveSSTables());
+        long maxSSTableSize = 64L * 1024;
+
+        LifecycleTransaction txn = cfs.getTracker().tryModify(originals, OperationType.COMPACTION);
+        CompactionTask task = new CompactionTask(cfs, txn, FBUtilities.nowInSeconds())
+        {
+            @Override
+            public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs,
+                                                                  Directories directories,
+                                                                  ILifecycleTransaction transaction,
+                                                                  Set<SSTableReader> nonExpiredSSTables)
+            {
+                return new MaxSSTableSizeWriter(cfs, directories, transaction, nonExpiredSSTables, maxSSTableSize, 0);
+            }
+        };
+        task.execute(CompactionManager.instance.active);
+
+        Set<SSTableReader> result = cfs.getLiveSSTables();
+        assertTrue("expected segment rotation to produce >= 2 SSTables, got " + result.size(), result.size() >= 2);
+
+        int partitionsRead = 0;
+        for (SSTableReader sstable : result)
+        {
+            try (ISSTableScanner scanner = sstable.getScanner())
+            {
+                while (scanner.hasNext())
+                {
+                    try (UnfilteredRowIterator it = scanner.next())
+                    {
+                        while (it.hasNext())
+                            it.next();
+                        partitionsRead++;
+                    }
+                }
+            }
+        }
+        assertEquals(200, partitionsRead);
     }
 
     private void testDontPurgeAccidentally(String k, String cfname) throws InterruptedException
