@@ -113,10 +113,15 @@ public class CassandraStreamWriter
                     session.progress(filename, ProgressInfo.Direction.OUT, progress, delta, totalSize);
                     transferOffset = 0;
                 }
-
-                // make sure that current section is sent
-                out.flush();
             }
+
+            // Flush once after all sections rather than draining the channel at every section boundary.
+            // A per-section out.flush() blocks the sender until the channel has fully drained, which on a
+            // high-latency link empties the pipe and costs a full round-trip per section. Each chunk is
+            // already writeAndFlush'd to the channel inside write(...), and the send window bounds the
+            // bytes in flight, so a single flush here preserves ordering and the end-of-file contract
+            // while keeping the pipe full across section boundaries.
+            out.flush();
             logger.debug("[Stream #{}] Finished streaming file {} to {}, bytesTransferred = {}, totalSize = {}",
                          session.planId(), sstable.getFilename(), session.peer, FBUtilities.prettyPrintMemory(progress), FBUtilities.prettyPrintMemory(totalSize));
         }
