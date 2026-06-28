@@ -175,6 +175,13 @@ public class Config
     @Replaces(oldName = "streaming_keep_alive_period_in_secs", converter = Converters.SECONDS_DURATION, deprecated = true)
     public DurationSpec.IntSecondsBound streaming_keep_alive_period = new DurationSpec.IntSecondsBound("300s");
 
+    // Maximum number of bytes the non-zero-copy ("legacy") streaming path keeps in flight before the
+    // sender blocks for the network to drain. This is the send window for partial-section transfers
+    // (sub-range repair/bootstrap, or SSTables that are not streamed whole). It must cover the
+    // bandwidth-delay product to keep high-latency links saturated; the historical 64 KiB Netty
+    // channel default made throughput latency-bound. Zero-copy transfers already use a 2 MiB window.
+    public volatile DataStorageSpec.IntBytesBound stream_send_window = new DataStorageSpec.IntBytesBound("2MiB");
+
     @Replaces(oldName = "cross_node_timeout", converter = Converters.IDENTITY, deprecated = true)
     public boolean internode_timeout = true;
 

@@ -119,6 +119,57 @@ public class AsyncStreamingOutputPlusTest
     }
 
     @Test
+    public void testLegacyStreamingUsesConfiguredSendWindow() throws IOException
+    {
+        // A TestChannel uses Netty's default WriteBufferWaterMark (64 KiB high), which historically
+        // capped the legacy streaming send window and made throughput latency-bound. The legacy path
+        // must instead honor the configurable stream_send_window, while never dropping below the
+        // channel's own high water mark.
+        int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        try
+        {
+            int window = 2 << 20; // 2 MiB
+            DatabaseDescriptor.setStreamSendWindowInBytes(window);
+
+            EmbeddedChannel channel = new TestChannel(4);
+            try (AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
+            {
+                assertEquals(window, out.streamingSendWindowHighWaterMark);
+                assertEquals(window / 2, out.streamingSendWindowLowWaterMark);
+                // proves we are no longer bounded by the small Netty channel default
+                assertTrue("send window should exceed the channel default high water mark",
+                           out.streamingSendWindowHighWaterMark > out.defaultHighWaterMark);
+            }
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+        }
+    }
+
+    @Test
+    public void testSendWindowNeverBelowChannelDefault() throws IOException
+    {
+        // If an operator configures a tiny window, we must not regress below the channel's own
+        // high water mark, otherwise a single chunk could exceed the window.
+        int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        try
+        {
+            DatabaseDescriptor.setStreamSendWindowInBytes(1024); // 1 KiB, smaller than the 64 KiB default
+
+            EmbeddedChannel channel = new TestChannel(4);
+            try (AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
+            {
+                assertEquals(out.defaultHighWaterMark, out.streamingSendWindowHighWaterMark);
+            }
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+        }
+    }
+
+    @Test
     public void testWriteFileToChannelEntireSSTableNoThrottling() throws IOException
     {
         // Disable throttling by setting entire SSTable throughput and entire SSTable inter-DC throughput to 0

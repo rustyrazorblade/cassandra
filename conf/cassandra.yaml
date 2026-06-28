@@ -1462,6 +1462,15 @@ slow_query_log_timeout: 500ms
 # bound (for example a few nodes with big files).
 # streaming_connections_per_host: 1
 
+# Maximum number of bytes kept in flight by the non-zero-copy ("legacy") streaming path before the
+# sender blocks waiting for the network to drain. This is the send window used for partial-section
+# transfers (sub-range repair/bootstrap, or SSTables that cannot be streamed whole). It should cover
+# the bandwidth-delay product of your inter-node links; too small a window leaves high-latency links
+# latency-bound rather than bandwidth-bound. The value is never applied below the channel's own write
+# buffer high water mark. Whole-SSTable (zero-copy) transfers are unaffected.
+# Min unit: B
+# stream_send_window: 2MiB
+
 # Settings for stream stats tracking; used by system_views.streaming table
 # How long before a stream is evicted from tracking; this impacts both historic and currently running
 # streams.
