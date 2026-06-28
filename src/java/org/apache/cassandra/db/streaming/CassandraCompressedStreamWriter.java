@@ -26,6 +26,7 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -40,7 +41,6 @@ import org.apache.cassandra.utils.FBUtilities;
  */
 public class CassandraCompressedStreamWriter extends CassandraStreamWriter
 {
-    private static final int CHUNK_SIZE = 1 << 16;
     private static final int CRC_LENGTH = 4;
 
     private static final Logger logger = LoggerFactory.getLogger(CassandraCompressedStreamWriter.class);
@@ -64,6 +64,7 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
         try (ChannelProxy fc = sstable.getDataChannel().newChannel())
         {
             long progress = 0L;
+            int chunkSize = DatabaseDescriptor.getStreamChunkSizeInBytes();
 
             // we want to send continuous chunks together to minimise reads from disk and network writes
             List<Section> sections = fuseAdjacentChunks(compressionInfo.chunks());
@@ -83,7 +84,7 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
                 long bytesTransferred = 0;
                 while (bytesTransferred < length)
                 {
-                    int toTransfer = (int) Math.min(CHUNK_SIZE, length - bytesTransferred);
+                    int toTransfer = (int) Math.min(chunkSize, length - bytesTransferred);
                     long position = section.start + bytesTransferred;
 
                     out.writeToChannel(bufferSupplier -> {

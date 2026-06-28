@@ -4663,6 +4663,16 @@ public class DatabaseDescriptor
         conf.stream_send_window = new DataStorageSpec.IntBytesBound(sendWindowInBytes);
     }
 
+    public static int getStreamChunkSizeInBytes()
+    {
+        return conf.stream_chunk_size.toBytes();
+    }
+
+    public static void setStreamChunkSizeInBytes(int chunkSizeInBytes)
+    {
+        conf.stream_chunk_size = new DataStorageSpec.IntBytesBound(chunkSizeInBytes);
+    }
+
     public static boolean getSkipStreamDiskSpaceCheck()
     {
         return conf.skip_stream_disk_space_check;
