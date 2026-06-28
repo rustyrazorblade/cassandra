@@ -1471,6 +1471,15 @@ slow_query_log_timeout: 500ms
 # Min unit: B
 # stream_send_window: 2MiB
 
+# Size of each buffer the non-zero-copy ("legacy") streaming path reads from disk and writes to the
+# network at a time. Larger values mean fewer syscalls, network frames and compression calls. The
+# default (128KiB) matches the largest buffer still served from the networking buffer pool; larger
+# values are allocated outside the pool. This applies to both the compressed and uncompressed legacy
+# writers (the latter only when the SSTable has no CRC component, in which case the CRC chunk size is
+# used instead). It does not change the on-wire framing format, so it is safe in mixed-version clusters.
+# Min unit: B
+# stream_chunk_size: 128KiB
+
 # Settings for stream stats tracking; used by system_views.streaming table
 # How long before a stream is evicted from tracking; this impacts both historic and currently running
 # streams.
