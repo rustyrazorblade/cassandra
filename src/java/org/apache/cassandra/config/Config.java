@@ -182,6 +182,14 @@ public class Config
     // channel default made throughput latency-bound. Zero-copy transfers already use a 2 MiB window.
     public volatile DataStorageSpec.IntBytesBound stream_send_window = new DataStorageSpec.IntBytesBound("2MiB");
 
+    // Size of each buffer the non-zero-copy ("legacy") streaming path reads from disk and writes to the
+    // network at a time. A larger value means fewer syscalls, network frames and compression calls. The
+    // default matches BufferPool.NORMAL_CHUNK_SIZE (128 KiB), the largest size still served from the
+    // networking buffer pool; larger values are allocated outside the pool. Applies to both the
+    // compressed and uncompressed legacy writers (the latter only when the SSTable has no CRC component,
+    // otherwise the CRC chunk size is used). It does not change the on-wire framing format.
+    public volatile DataStorageSpec.IntBytesBound stream_chunk_size = new DataStorageSpec.IntBytesBound("128KiB");
+
     @Replaces(oldName = "cross_node_timeout", converter = Converters.IDENTITY, deprecated = true)
     public boolean internode_timeout = true;
 

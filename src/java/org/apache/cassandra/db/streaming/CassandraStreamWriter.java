@@ -27,6 +27,7 @@ import net.jpountz.lz4.LZ4Factory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -48,8 +49,6 @@ import static org.apache.cassandra.net.MessagingService.current_version;
  */
 public class CassandraStreamWriter
 {
-    private static final int DEFAULT_CHUNK_SIZE = 64 * 1024;
-
     private static final Logger logger = LoggerFactory.getLogger(CassandraStreamWriter.class);
 
     protected final SSTableReader sstable;
@@ -83,7 +82,7 @@ public class CassandraStreamWriter
         try(ChannelProxy proxy = sstable.getDataChannel().newChannel();
             ChecksumValidator validator = sstable.maybeGetChecksumValidator())
         {
-            int bufferSize = validator == null ? DEFAULT_CHUNK_SIZE: validator.chunkSize;
+            int bufferSize = validator == null ? DatabaseDescriptor.getStreamChunkSizeInBytes() : validator.chunkSize;
 
             // setting up data compression stream
             long progress = 0L;

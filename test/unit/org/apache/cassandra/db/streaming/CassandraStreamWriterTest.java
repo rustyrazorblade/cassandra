@@ -18,17 +18,21 @@
 package org.apache.cassandra.db.streaming;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import com.google.common.util.concurrent.RateLimiter;
+
 import io.netty.channel.Channel;
-import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
@@ -46,6 +50,7 @@ import org.apache.cassandra.streaming.StreamEventHandler;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
+import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -58,9 +63,10 @@ public class CassandraStreamWriterTest
 {
     public static final String KEYSPACE = "CassandraStreamWriterTest";
     public static final String CF_STANDARD = "Standard1";
+    public static final String CF_COMPRESSED = "Compressed1";
 
     private static SSTableReader sstable;
-    private static ColumnFamilyStore store;
+    private static SSTableReader compressedSstable;
 
     @BeforeClass
     public static void defineSchemaAndPrepareSSTable()
@@ -71,24 +77,35 @@ public class CassandraStreamWriterTest
                                     // no compression so the legacy (uncompressed) CassandraStreamWriter
                                     // streams the data file directly and sections are plain byte ranges
                                     SchemaLoader.standardCFMD(KEYSPACE, CF_STANDARD)
-                                                .compression(CompressionParams.noCompression()));
-
-        Keyspace keyspace = Keyspace.open(KEYSPACE);
-        store = keyspace.getColumnFamilyStore(CF_STANDARD);
+                                                .compression(CompressionParams.noCompression()),
+                                    // compressed so the common CassandraCompressedStreamWriter path is exercised
+                                    SchemaLoader.standardCFMD(KEYSPACE, CF_COMPRESSED)
+                                                .compression(CompressionParams.lz4()));
 
         CompactionManager.instance.disableAutoCompaction();
-        for (int j = 0; j < 1000; j++)
+        sstable = writeSStable(CF_STANDARD, ByteBufferUtil.EMPTY_BYTE_BUFFER, 1000);
+
+        // high-entropy values so the compressed data file is comfortably larger than the chunk sizes under test
+        Random random = new Random(0);
+        byte[] value = new byte[512];
+        random.nextBytes(value);
+        compressedSstable = writeSStable(CF_COMPRESSED, ByteBuffer.wrap(value), 4000);
+    }
+
+    private static SSTableReader writeSStable(String cf, ByteBuffer value, int rows)
+    {
+        ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(cf);
+        for (int j = 0; j < rows; j++)
         {
             new RowUpdateBuilder(store.metadata(), j, String.valueOf(j))
             .clustering("0")
-            .add("val", ByteBufferUtil.EMPTY_BYTE_BUFFER)
+            .add("val", value)
             .build()
             .applyUnsafe();
         }
         Util.flush(store);
         CompactionManager.instance.performMaximal(store);
-
-        sstable = store.getLiveSSTables().iterator().next();
+        return store.getLiveSSTables().iterator().next();
     }
 
     /**
@@ -118,15 +135,69 @@ public class CassandraStreamWriterTest
                                  .withTableId(sstable.metadata().id)
                                  .build();
 
-        FlushCountingOutputPlus out = new FlushCountingOutputPlus(new TestChannel(Integer.MAX_VALUE));
+        CountingOutputPlus out = new CountingOutputPlus(new TestChannel(Integer.MAX_VALUE));
         try
         {
-            CassandraStreamWriter writer = new CassandraStreamWriter(sstable, header, session);
-            writer.write(out);
+            new CassandraStreamWriter(sstable, header, session).write(out);
 
             assertEquals("legacy writer should flush exactly once regardless of the section count (was "
                          + sections.size() + " sections)", 1, out.flushCount);
             assertTrue("data should have been streamed to the channel", out.flushedToNetwork() > 0);
+        }
+        finally
+        {
+            out.discard();
+        }
+    }
+
+    /**
+     * The compressed legacy writer must slice each section into stream_chunk_size network writes, so a
+     * smaller configured chunk size produces strictly more writes for the same SSTable.
+     */
+    @Test
+    public void testCompressedWriterHonorsConfiguredChunkSize() throws IOException
+    {
+        int original = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        try
+        {
+            long compressedLength = compressedSstable.getCompressionMetadata().compressedFileLength;
+
+            DatabaseDescriptor.setStreamChunkSizeInBytes((int) compressedLength + (1 << 20)); // one write per section
+            int writesWithLargeChunk = countCompressedWrites();
+
+            DatabaseDescriptor.setStreamChunkSizeInBytes(4 << 10); // 4 KiB, many writes
+            int writesWithSmallChunk = countCompressedWrites();
+
+            assertTrue("a smaller chunk size must produce more network writes (large=" + writesWithLargeChunk
+                       + ", small=" + writesWithSmallChunk + ")", writesWithSmallChunk > writesWithLargeChunk);
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamChunkSizeInBytes(original);
+        }
+    }
+
+    private int countCompressedWrites() throws IOException
+    {
+        StreamSession session = setupStreamingSessionForTest();
+        List<SSTableReader.PartitionPositionBounds> sections =
+            Collections.singletonList(new SSTableReader.PartitionPositionBounds(0, compressedSstable.getCompressionMetadata().dataLength));
+        CassandraStreamHeader header =
+            CassandraStreamHeader.builder()
+                                 .withSSTableVersion(compressedSstable.descriptor.version)
+                                 .withSSTableLevel(0)
+                                 .withEstimatedKeys(compressedSstable.estimatedKeys())
+                                 .withSections(sections)
+                                 .withCompressionInfo(CompressionInfo.newLazyInstance(compressedSstable.getCompressionMetadata(), sections))
+                                 .withSerializationHeader(compressedSstable.header.toComponent())
+                                 .withTableId(compressedSstable.metadata().id)
+                                 .build();
+
+        CountingOutputPlus out = new CountingOutputPlus(new TestChannel(Integer.MAX_VALUE));
+        try
+        {
+            new CassandraCompressedStreamWriter(compressedSstable, header, session).write(out);
+            return out.writeToChannelCount;
         }
         finally
         {
@@ -150,11 +221,12 @@ public class CassandraStreamWriterTest
         return sections;
     }
 
-    private static class FlushCountingOutputPlus extends AsyncStreamingOutputPlus
+    private static class CountingOutputPlus extends AsyncStreamingOutputPlus
     {
         int flushCount;
+        int writeToChannelCount;
 
-        FlushCountingOutputPlus(Channel channel)
+        CountingOutputPlus(Channel channel)
         {
             super(channel);
         }
@@ -164,6 +236,13 @@ public class CassandraStreamWriterTest
         {
             flushCount++;
             super.flush();
+        }
+
+        @Override
+        public int writeToChannel(StreamingDataOutputPlus.Write write, RateLimiter limiter) throws IOException
+        {
+            writeToChannelCount++;
+            return super.writeToChannel(write, limiter);
         }
     }
 
