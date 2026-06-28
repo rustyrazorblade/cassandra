@@ -28,6 +28,7 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.net.SharedDefaultFileRegion.SharedFileChannel;
@@ -62,12 +63,21 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
     final int defaultLowWaterMark;
     final int defaultHighWaterMark;
 
+    // Send window for the non-zero-copy ("legacy") streaming path. The Netty channel default
+    // (64 KiB high) is too small to cover the bandwidth-delay product of high-latency links, which
+    // left the legacy path latency-bound. We size the window from stream_send_window, but never drop
+    // below the channel's own high water mark. See DatabaseDescriptor#getStreamSendWindowInBytes.
+    final int streamingSendWindowLowWaterMark;
+    final int streamingSendWindowHighWaterMark;
+
     public AsyncStreamingOutputPlus(Channel channel)
     {
         super(channel);
         WriteBufferWaterMark waterMark = channel.config().getWriteBufferWaterMark();
         this.defaultLowWaterMark = waterMark.low();
         this.defaultHighWaterMark = waterMark.high();
+        this.streamingSendWindowHighWaterMark = Math.max(DatabaseDescriptor.getStreamSendWindowInBytes(), defaultHighWaterMark);
+        this.streamingSendWindowLowWaterMark = Math.max(streamingSendWindowHighWaterMark / 2, defaultLowWaterMark);
         allocateBuffer();
     }
 
@@ -123,7 +133,7 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
                 if (holder.buffer != null)
                     throw new IllegalStateException("Can only allocate one ByteBuffer");
                 limiter.acquire(size);
-                holder.promise = beginFlush(size, defaultLowWaterMark, defaultHighWaterMark);
+                holder.promise = beginFlush(size, streamingSendWindowLowWaterMark, streamingSendWindowHighWaterMark);
                 holder.buffer = bufferPool.get(size, BufferType.OFF_HEAP);
                 return holder.buffer;
             });

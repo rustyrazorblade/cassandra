@@ -4653,6 +4653,16 @@ public class DatabaseDescriptor
         return conf.stream_transfer_task_timeout;
     }
 
+    public static int getStreamSendWindowInBytes()
+    {
+        return conf.stream_send_window.toBytes();
+    }
+
+    public static void setStreamSendWindowInBytes(int sendWindowInBytes)
+    {
+        conf.stream_send_window = new DataStorageSpec.IntBytesBound(sendWindowInBytes);
+    }
+
     public static boolean getSkipStreamDiskSpaceCheck()
     {
         return conf.skip_stream_disk_space_check;
