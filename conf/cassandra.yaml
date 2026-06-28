@@ -1475,8 +1475,8 @@ slow_query_log_timeout: 500ms
 # network at a time. Larger values mean fewer syscalls, network frames and compression calls. The
 # default (128KiB) matches the largest buffer still served from the networking buffer pool; larger
 # values are allocated outside the pool. This applies to both the compressed and uncompressed legacy
-# writers (the latter only when the SSTable has no CRC component, in which case the CRC chunk size is
-# used instead). It does not change the on-wire framing format, so it is safe in mixed-version clusters.
+# writers (the latter only when the SSTable has no CRC component, otherwise the CRC chunk size is used).
+# It does not change the on-wire framing format, so it is safe in mixed-version clusters.
 # Min unit: B
 # stream_chunk_size: 128KiB
 

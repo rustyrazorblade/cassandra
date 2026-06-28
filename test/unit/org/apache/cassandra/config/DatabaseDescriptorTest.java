@@ -361,6 +361,36 @@ public class DatabaseDescriptorTest
     }
 
     @Test
+    public void testStreamChunkSizeMustBePositive()
+    {
+        // a non-positive stream_chunk_size would make the legacy streaming writers spin forever
+        // (toTransfer = min(0, remaining) = 0 never advances the loop), so it must be rejected.
+        int original = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        try
+        {
+            try
+            {
+                DatabaseDescriptor.setStreamChunkSizeInBytes(0);
+                fail("Should have received an IllegalArgumentException for stream_chunk_size = 0");
+            }
+            catch (IllegalArgumentException ignored) { }
+            Assert.assertEquals(original, DatabaseDescriptor.getStreamChunkSizeInBytes());
+
+            try
+            {
+                DatabaseDescriptor.setStreamChunkSizeInBytes(-1);
+                fail("Should have received an IllegalArgumentException for stream_chunk_size = -1");
+            }
+            catch (IllegalArgumentException ignored) { }
+            Assert.assertEquals(original, DatabaseDescriptor.getStreamChunkSizeInBytes());
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamChunkSizeInBytes(original);
+        }
+    }
+
+    @Test
     public void testWidenToLongInBytes() throws ConfigurationException
     {
         Config conf = DatabaseDescriptor.getRawConfig();

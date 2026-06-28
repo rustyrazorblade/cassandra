@@ -775,6 +775,9 @@ public class DatabaseDescriptor
                                              false);
         }
 
+        if (conf.stream_chunk_size.toBytes() <= 0)
+            throw new ConfigurationException("stream_chunk_size must be positive, but was " + conf.stream_chunk_size, false);
+
         if (conf.column_index_size != null)
             checkValidForByteConversion(conf.column_index_size, "column_index_size");
         checkValidForByteConversion(conf.column_index_cache_size, "column_index_cache_size");
@@ -4670,6 +4673,8 @@ public class DatabaseDescriptor
 
     public static void setStreamChunkSizeInBytes(int chunkSizeInBytes)
     {
+        if (chunkSizeInBytes <= 0)
+            throw new IllegalArgumentException("stream_chunk_size must be positive, but was " + chunkSizeInBytes);
         conf.stream_chunk_size = new DataStorageSpec.IntBytesBound(chunkSizeInBytes);
     }
 
