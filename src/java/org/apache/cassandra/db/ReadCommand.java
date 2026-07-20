@@ -133,11 +133,18 @@ public abstract class ReadCommand extends AbstractReadQuery
         SINGLE_PARTITION (SinglePartitionReadCommand.selectionDeserializer),
         PARTITION_RANGE  (PartitionRangeReadCommand.selectionDeserializer);
 
+        private static final Kind[] VALUES = values();
+
         private final SelectionDeserializer selectionDeserializer;
 
         Kind(SelectionDeserializer selectionDeserializer)
         {
             this.selectionDeserializer = selectionDeserializer;
+        }
+
+        public static Kind fromOrdinal(int ordinal)
+        {
+            return VALUES[ordinal];
         }
     }
 
@@ -1156,7 +1163,7 @@ public abstract class ReadCommand extends AbstractReadQuery
 
         public ReadCommand deserialize(DataInputPlus in, int version) throws IOException
         {
-            Kind kind = Kind.values()[in.readByte()];
+            Kind kind = Kind.fromOrdinal(in.readByte());
             int flags = in.readByte();
             boolean isDigest = isDigest(flags);
             boolean acceptsTransient = acceptsTransient(flags);
