@@ -445,9 +445,28 @@ public class SSTableCursorReader implements AutoCloseable
 
     private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef, DiskAccessMode diskAccessMode)
     {
-        ssTableReader = reader;
-        ssTableReaderRef = readerRef;
-        Version version = reader.descriptor.version;
+        this(reader, readerRef, reader.openDataReaderForScan(diskAccessMode), reader.header, metadata, reader.descriptor.version, metadata.droppedColumns);
+    }
+
+    /**
+     * The actual five inputs a cursor read needs, decomposed out of {@link SSTableReader}: pure
+     * decomposition, no behavior change. {@code ssTableReader}/{@code ssTableReaderRef} are along
+     * for the ride here only because Java forbids a constructor that delegates via
+     * {@code this(...)} from also assigning blank finals itself — they exist for
+     * lifecycle/identity ({@link #close()}, {@link #ssTableReader()}), not for what a cursor
+     * read itself needs.
+     */
+    private SSTableCursorReader(SSTableReader ssTableReader,
+                               Ref<SSTableReader> ssTableReaderRef,
+                               RandomAccessReader dataReader,
+                               SerializationHeader serializationHeader,
+                               TableMetadata metadata,
+                               Version version,
+                               Map<ByteBuffer, DroppedColumn> droppedColumns)
+    {
+        this.ssTableReader = ssTableReader;
+        this.ssTableReaderRef = ssTableReaderRef;
+        this.dataReader = dataReader;
         deletionTimeSerializer = DeletionTime.getSerializer(version);
         ImmutableList<ColumnMetadata> clusteringColumns = metadata.clusteringColumns();
         int clusteringColumnCount = clusteringColumns.size();
@@ -457,11 +476,10 @@ public class SSTableCursorReader implements AutoCloseable
             clusteringColumnTypes[i] = clusteringColumns.get(i).type;
         }
         deserializationHelper = new DeserializationHelper(metadata, version.correspondingMessagingVersion(), DeserializationHelper.Flag.LOCAL, null);
-        serializationHeader = reader.header;
-        droppedColumns = metadata.droppedColumns;
+        this.serializationHeader = serializationHeader;
+        this.droppedColumns = droppedColumns;
         hasDroppedColumns = !droppedColumns.isEmpty();
 
-        dataReader = reader.openDataReaderForScan(diskAccessMode);
         // the HEADER decides whether this sstable can contain static rows: after
         // ALTER TABLE ... DROP of the last static column, current metadata has no static
         // columns but older sstables legitimately still carry static rows
@@ -1132,6 +1150,23 @@ public class SSTableCursorReader implements AutoCloseable
 
     public boolean isEOF() {
         return state == DONE || dataReader.isEOF();
+    }
+
+    /**
+     * True end-of-file of the underlying data file — as opposed to {@link #isEOF()}, which is
+     * also true when {@link #forceDone()} has put this cursor in {@code DONE} early because a
+     * caller-supplied upper bound was passed (see {@code StatefulCursor.positionAt}), with the
+     * file itself not actually exhausted.
+     */
+    public boolean isFileEOF()
+    {
+        return dataReader.isEOF();
+    }
+
+    /** Forces {@code DONE} without consuming further input — see {@link #isFileEOF()}. */
+    protected int forceDone()
+    {
+        return state = DONE;
     }
 
     public int state()

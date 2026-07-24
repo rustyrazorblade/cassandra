@@ -18,11 +18,19 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
+import java.util.Collections;
+import java.util.Set;
+
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CursorCompactor;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -154,5 +162,50 @@ public class CursorSupportMatrixTest extends CQLTester
         createIndex("CREATE INDEX ON %s (v)");
         assertTrue("expected index to disqualify cursor compaction",
                    CursorCompactor.unsupportedMetadata(getCurrentColumnFamilyStore().metadata()));
+    }
+
+    /**
+     * The read and write gates are independent: an index disqualifies WRITING new sstables
+     * through the cursor (the writer cannot build index components), but says nothing about
+     * whether EXISTING sstables of this table could be cursor-READ (e.g. by a future scan-only
+     * consumer) — that capability has nothing to do with secondary indexes.
+     */
+    @Test
+    public void secondaryIndexFailsWriteGateOnlyNotReadGate() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        createIndex("CREATE INDEX ON %s (v)");
+        TableMetadata metadata = getCurrentColumnFamilyStore().metadata();
+
+        assertTrue("indexed table is expected to pass the read-only gate",
+                   CursorCompactor.isCursorReadSupported(Collections.emptyList(), metadata));
+
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        try (CompactionController controller = new CompactionController(cfs, Collections.emptySet(), gcBefore))
+        {
+            assertFalse("indexed table is expected to still fail the write gate",
+                        CursorCompactor.isCursorWriteSupported(metadata, controller));
+        }
+    }
+
+    /** Garbage-skipping (non-NONE tombstoneOption) is a write-time concern only. */
+    @Test
+    public void tombstoneOptionFailsWriteGateOnlyNotReadGate() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        TableMetadata metadata = getCurrentColumnFamilyStore().metadata();
+
+        assertTrue("plain table is expected to pass the read-only gate",
+                   CursorCompactor.isCursorReadSupported(Collections.emptyList(), metadata));
+
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        Set<SSTableReader> noSSTables = Collections.emptySet();
+        try (CompactionController controller = new CompactionController(cfs, noSSTables, gcBefore, null, CompactionParams.TombstoneOption.ROW))
+        {
+            assertFalse("garbage-skipping tombstoneOption is expected to fail the write gate",
+                        CursorCompactor.isCursorWriteSupported(metadata, controller));
+        }
     }
 }

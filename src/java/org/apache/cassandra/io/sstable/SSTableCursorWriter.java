@@ -62,7 +62,7 @@ import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_TTL;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.IS_MARKER;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.isExtended;
 
-public class SSTableCursorWriter implements AutoCloseable
+public class SSTableCursorWriter implements CursorMergeConsumer, AutoCloseable
 {
     private static final UnfilteredSerializer SERIALIZER = UnfilteredSerializer.serializer;
     private static final ColumnMetadata[] EMPTY_COL_META = new ColumnMetadata[0];
@@ -75,6 +75,11 @@ public class SSTableCursorWriter implements AutoCloseable
     private final boolean hasStaticColumns;
 
     private long partitionStart;
+    // Header length of the current partition (key + partition deletion, plus any static row),
+    // tracked at the same points CursorIndexWriter.indexBlockStartOffset is still equal to it:
+    // right after writePartitionStart, and right after any static row is written. Consumed by
+    // writePartitionEnd.
+    private int partitionHeaderLength;
     // Offset within the current partition of the previous non-static unfiltered's first byte.
     // Used to write the previousUnfilteredSize field exactly as the iterator path does
     // (see SortedTablePartitionWriter.addUnfiltered): rows/markers write the distance from the
@@ -141,12 +146,12 @@ public class SSTableCursorWriter implements AutoCloseable
                                                               this.deletionTimeSerializer,
                                                               new ClusteringDescriptor(clusteringTypes));
         else
-            // the support gate (CursorCompactor.isSupported: BigFormat || BtiFormat) must
-            // reject any other format before a writer is ever constructed; reaching here
+            // the write-support gate (CursorCompactor.isCursorWriteSupported: BigFormat || BtiFormat)
+            // must reject any other format before a writer is ever constructed; reaching here
             // means the gate and this dispatch have drifted apart
             throw new IllegalStateException("cursor compaction has no index writer for format of " +
                                             ssTableWriter.getClass().getName() +
-                                            "; CursorCompactor.isSupported is out of sync with this dispatch");
+                                            "; CursorCompactor.isCursorWriteSupported is out of sync with this dispatch");
     }
 
     public SSTableCursorWriter(SortedTableWriter<?,?> ssTableWriter)
@@ -181,7 +186,8 @@ public class SSTableCursorWriter implements AutoCloseable
         return dataWriter.position();
     }
 
-    public int writePartitionStart(byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime) throws IOException
+    @Override
+    public void startPartition(byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime) throws IOException
     {
         openMarker.resetLive();
 
@@ -190,10 +196,11 @@ public class SSTableCursorWriter implements AutoCloseable
         writePartitionHeader(partitionKey, partitionKeyLength, partitionDeletionTime);
         cursorIndexWriter.startPartition(partitionStart, dataWriter.position());
         // immediately after startPartition this is the partition header length — always small
-        return Math.toIntExact(cursorIndexWriter.indexBlockStartOffset());
+        partitionHeaderLength = Math.toIntExact(cursorIndexWriter.indexBlockStartOffset());
     }
 
-    public void writePartitionEnd(org.apache.cassandra.db.DecoratedKey decoratedKey, byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime, int headerLength) throws IOException
+    @Override
+    public void endPartition(org.apache.cassandra.db.DecoratedKey decoratedKey, byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime) throws IOException
     {
         SERIALIZER.writeEndOfPartition(dataWriter);
         long partitionEnd = dataWriter.position();
@@ -210,7 +217,7 @@ public class SSTableCursorWriter implements AutoCloseable
          // this is implemented differently for BIG/BTI
          createRowIndexEntry(key, partitionLevelDeletion, partitionEnd - 1);
          */
-        cursorIndexWriter.endPartition(decoratedKey, partitionKey, partitionKeyLength, headerLength, partitionDeletionTime, partitionEnd);
+        cursorIndexWriter.endPartition(decoratedKey, partitionKey, partitionKeyLength, partitionHeaderLength, partitionDeletionTime, partitionEnd);
     }
 
 
@@ -254,6 +261,7 @@ public class SSTableCursorWriter implements AutoCloseable
         deletionTimeSerializer.serialize(partitionDeletionTime, dataWriter);
     }
 
+    @Override
     public boolean writeEmptyStaticRow() throws IOException
     {
         if (!hasStaticColumns)
@@ -268,14 +276,17 @@ public class SSTableCursorWriter implements AutoCloseable
         lastCellColumn = null;
         columnsWrittenCount = 0;
         missingColumns.clear();
-        writeRowEnd(null, false);
+        endRow(null, false);
 
         cursorIndexWriter.staticRowWritten(dataWriter.position());
         return true;
     }
 
-    public void writeRowStart(LivenessInfo livenessInfo, DeletionTime deletionTime, boolean isStatic) throws IOException
+    @Override
+    public void startRow(UnfilteredDescriptor clustering, LivenessInfo livenessInfo, DeletionTime deletionTime, boolean isStatic) throws IOException
     {
+        // clustering is unused here: SSTableCursorWriter only needs the clustering bytes at
+        // writeRowEnd/lateStart time (see endRow), where the caller passes the descriptor
         if (isStatic) {
             rowFlags = UnfilteredSerializer.EXTENSION_FLAG;
             rowExtendedFlags = UnfilteredSerializer.IS_STATIC;
@@ -365,6 +376,7 @@ public class SSTableCursorWriter implements AutoCloseable
      * deletion. Must precede any of the column's writeCellHeader calls; may also stand alone
      * for a deletion-only column with zero surviving cells.
      */
+    @Override
     public void startComplexColumn(ColumnMetadata column, DeletionTime mergedDeletion) throws IOException
     {
         closeOpenComplexMarker();
@@ -409,12 +421,14 @@ public class SSTableCursorWriter implements AutoCloseable
     }
 
     /** Appends the current complex cell's path (vint length + bytes) to the cell stream. */
+    @Override
     public void writeCellPath(byte[] pathBuffer, int pathLength) throws IOException
     {
         rowBuffer.writeUnsignedVInt32(pathLength);
         rowBuffer.write(pathBuffer, 0, pathLength);
     }
 
+    @Override
     public void writeCellHeader(int cellFlags, ReusableLivenessInfo cellLiveness, ColumnMetadata cellColumn) throws IOException
     {
         if (cellColumn.isComplex())
@@ -462,11 +476,13 @@ public class SSTableCursorWriter implements AutoCloseable
         metadataCollector.updateCellLiveness(cellLiveness);
     }
 
+    @Override
     public int writeCellValue(SSTableCursorReader cursor, byte[] copyColumnValueBuffer) throws IOException
     {
         return cursor.copyCellValue(rowBuffer, copyColumnValueBuffer);
     }
 
+    @Override
     public void writeCellValue(DataOutputBuffer tempCellBuffer) throws IOException
     {
         rowBuffer.write(tempCellBuffer.getData(), 0, tempCellBuffer.getLength());
@@ -474,6 +490,7 @@ public class SSTableCursorWriter implements AutoCloseable
 
     /** Appends a variable-length cell value supplied as a raw window: vint length + bytes
      *  (the wire form for variable-length types — counter contexts use this). */
+    @Override
     public void writeCellValue(byte[] value, int offset, int length) throws IOException
     {
         rowBuffer.writeUnsignedVInt32(length);
@@ -482,12 +499,14 @@ public class SSTableCursorWriter implements AutoCloseable
 
     /** {@link org.apache.cassandra.db.rows.Cells#collectStats} parity: called once per
      *  live counter cell in the output row. */
+    @Override
     public void updateCounterShardStats(boolean hasLegacyShards)
     {
         metadataCollector.updateHasLegacyCounterShards(hasLegacyShards);
     }
 
-    public void writeRowEnd(UnfilteredDescriptor rHeader, boolean updateClusteringMetadata) throws IOException
+    @Override
+    public void endRow(UnfilteredDescriptor rHeader, boolean updateClusteringMetadata) throws IOException
     {
         boolean isExtended = isExtended(rowFlags);
         boolean isStatic = isExtended && UnfilteredSerializer.isStatic(rowExtendedFlags);
@@ -629,6 +648,8 @@ public class SSTableCursorWriter implements AutoCloseable
         if (isStatic)
         {
             cursorIndexWriter.staticRowWritten(dataWriter.position());
+            // still equal to the partition header length at this point, see the field's javadoc
+            partitionHeaderLength = (int) (dataWriter.position() - partitionStart);
         }
         else
         {
@@ -639,6 +660,7 @@ public class SSTableCursorWriter implements AutoCloseable
     /**
      * See: {@link org.apache.cassandra.io.sstable.format.SortedTableWriter#addRangeTomstoneMarker}
      */
+    @Override
     public void writeRangeTombstone(UnfilteredDescriptor rangeTombstone, boolean updateClusteringMetadata) throws IOException
     {
         int tombstoneKind = rangeTombstone.clusteringKindEncoded();
@@ -699,6 +721,7 @@ public class SSTableCursorWriter implements AutoCloseable
         cursorIndexWriter.rowWritten(unfilteredDescriptor, unfilteredStartPosition, unfilteredEndPosition, openMarker);
     }
 
+    @Override
     public void updateClusteringMetadata(UnfilteredDescriptor unfilteredDescriptor)
     {
         metadataCollector.updateClusteringValues(unfilteredDescriptor);

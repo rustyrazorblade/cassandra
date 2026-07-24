@@ -75,7 +75,7 @@ public class SSTableCursorPipeUtil
         final int keyLength = pHeader.keyLength();
         final DeletionTime pDeletionTime = pHeader.deletionTime();
 
-        int headerLength = writer.writePartitionStart(keyBytes, keyLength, pDeletionTime);
+        writer.startPartition(keyBytes, keyLength, pDeletionTime);
         int unfilteredCounter = 0;
         while (readerState != PARTITION_END)
         {
@@ -83,7 +83,6 @@ public class SSTableCursorPipeUtil
             {
                 case STATIC_ROW_START:
                     readerState = copyStaticRow(reader, writer, unfilteredDescriptor);
-                    headerLength = (int) (writer.getPosition() - writer.getPartitionStart());
                     break;
                 case ROW_START:
                     readerState = copyRow(reader, writer, unfilteredDescriptor, unfilteredCounter++);
@@ -92,7 +91,7 @@ public class SSTableCursorPipeUtil
                     readerState = copyRangeTombstone(reader, writer, unfilteredDescriptor, unfilteredCounter++);
             }
         }
-        writer.writePartitionEnd(keyBytes, keyLength, pDeletionTime, headerLength);
+        writer.endPartition(pHeader.key(), keyBytes, keyLength, pDeletionTime);
         if (unfilteredCounter > 1) {
             writer.updateClusteringMetadata(unfilteredDescriptor);
         }
@@ -122,7 +121,7 @@ public class SSTableCursorPipeUtil
 
     public static int copyRowAfterDescriptor(SSTableCursorReader reader, SSTableCursorWriter writer, UnfilteredDescriptor unfilteredDescriptor, int readerState, boolean isStatic, boolean updateClusteringMetadata) throws IOException
     {
-        writer.writeRowStart(unfilteredDescriptor.livenessInfo(), unfilteredDescriptor.deletionTime(), isStatic);
+        writer.startRow(unfilteredDescriptor, unfilteredDescriptor.livenessInfo(), unfilteredDescriptor.deletionTime(), isStatic);
 
         // Copy cells
         while (readerState != UNFILTERED_END)
@@ -152,7 +151,7 @@ public class SSTableCursorPipeUtil
             readerState = reader.continueReading();
         }
 
-        writer.writeRowEnd(unfilteredDescriptor, updateClusteringMetadata);
+        writer.endRow(unfilteredDescriptor, updateClusteringMetadata);
 
         return reader.continueReading();
     }

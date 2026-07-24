@@ -22,6 +22,7 @@ import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.UnfilteredValidation;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -35,6 +36,7 @@ import static org.apache.cassandra.db.rows.Cell.NO_DELETION_TIME;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_VALUE_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
 
 // Cursor state
@@ -56,6 +58,11 @@ class StatefulCursor extends SSTableCursorReader
 
     private boolean isOpenRangeTombstonePresent = false;
 
+    // Partition-boundary-aligned upper bound (inclusive): once a partition header is read whose
+    // key compares greater than this, the cursor reports DONE without reading any further into
+    // that partition. Null (the default) means unbounded. See positionAt/setEndBound.
+    private PartitionPosition endBound;
+
     public StatefulCursor(SSTableReader reader, DiskAccessMode diskAccessMode)
     {
         super(reader, diskAccessMode);
@@ -73,7 +80,42 @@ class StatefulCursor extends SSTableCursorReader
             corruptSSTableKeysOOO();
         if (corruptedTombstoneValidationEnabled)
             validateInvalidPartitionDeletion();
+        // logical end-of-range: this partition is past the caller-supplied bound (see
+        // positionAt/setEndBound) — report DONE without reading any further into it. The header
+        // itself has already been consumed (its key is what we're comparing), but no row/marker
+        // of this out-of-bound partition is read.
+        if (endBound != null && state != DONE && currentKey().compareTo(endBound) > 0)
+            return forceDone();
         return state;
+    }
+
+    /**
+     * Resolves {@code startBound} to a file position via the sstable's index (the same lookup
+     * the iterator path uses for a partial-range scanner) and seeks there. If there is no
+     * partition at or after the bound (it is past the end of the file), the cursor ends up in
+     * its DONE state, exactly as at true end-of-file.
+     * <p>
+     * Partition-boundary-aligned only: this does not support splitting mid-partition (range
+     * tombstone state can't be carried across such a split, and nothing needs it to). Wraparound
+     * token ranges are the caller's responsibility — split into non-wrapping sub-ranges before
+     * calling.
+     */
+    public int positionAt(PartitionPosition startBound)
+    {
+        long position = ssTableReader().getPosition(startBound, SSTableReader.Operator.GE);
+        if (position < 0)
+            return forceDone();
+        return seekPartition(position);
+    }
+
+    /**
+     * Sets a partition-boundary-aligned, INCLUSIVE upper bound: once a partition header is read
+     * whose key compares greater than {@code endBound}, {@link #readPartitionHeader()} reports
+     * DONE without reading further into it. Null (the default) means unbounded.
+     */
+    public void setEndBound(PartitionPosition endBound)
+    {
+        this.endBound = endBound;
     }
 
     private int corruptSSTableKeysOOO()
@@ -151,7 +193,11 @@ class StatefulCursor extends SSTableCursorReader
 
     public long bytesReadSinceSnapshot()
     {
-        long latestByteReadPosition = isEOF() ? uncompressedLength() : position();
+        // isFileEOF(), NOT isEOF(): a cursor stopped early by an endBound (positionAt) reports
+        // DONE via isEOF() well before the file's actual end — using uncompressedLength() there
+        // would over-report this cursor's remaining/total bytes. isFileEOF() distinguishes true
+        // end-of-file from that logical, bound-triggered DONE.
+        long latestByteReadPosition = isFileEOF() ? uncompressedLength() : position();
         long cursorBytesRead = latestByteReadPosition - bytesReadPositionSnapshot;
         bytesReadPositionSnapshot = latestByteReadPosition;
         return cursorBytesRead;

@@ -26,6 +26,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.LongPredicate;
+import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
@@ -60,6 +61,7 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.dht.ReusableDecoratedKey;
+import org.apache.cassandra.io.sstable.CursorMergeConsumer;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.PartitionDescriptor;
 import org.apache.cassandra.io.sstable.SSTableCursorReader;
@@ -126,7 +128,6 @@ public class CursorCompactor extends CompactionInfo.Holder
     public static boolean isSupported(AbstractCompactionStrategy.ScannerList scanners, AbstractCompactionController controller)
     {
         TableMetadata metadata = controller.cfs.metadata();
-        if (unsupportedMetadata(metadata)) return false;
 
         for (ISSTableScanner scanner : scanners.scanners)
         {
@@ -136,16 +137,57 @@ public class CursorCompactor extends CompactionInfo.Holder
                 if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Partial scanners are not supported.");
                 return false;
             }
+        }
 
-            for (SSTableReader reader : scanner.getBackingSSTables()) {
-                Version version = reader.descriptor.version;
-                if (!version.isLatestVersion())
-                {
-                    if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Older sstable versions are not supported. version=" + version);
-                    return false;
-                }
+        Collection<SSTableReader> sstables = scanners.scanners.stream()
+                                                               .map(ISSTableScanner::getBackingSSTables)
+                                                               .flatMap(Collection::stream)
+                                                               .collect(Collectors.toSet());
+        if (!isCursorReadSupported(sstables, metadata))
+            return false;
+
+        if (!isCursorWriteSupported(metadata, controller))
+            return false;
+
+        if (LOGGER.isDebugEnabled()) LOGGER.debug("Cursor compaction for table: " + metadata.name + " keyspace: " + metadata.keyspace + " is supported.");
+
+        return true;
+    }
+
+    /**
+     * Reader-side support gate: relevant to ANY cursor consumer, including a future read-only
+     * scan that never produces output sstables (no {@link AbstractCompactionController}
+     * involved).
+     */
+    public static boolean isCursorReadSupported(Iterable<SSTableReader> sstables, TableMetadata metadata)
+    {
+        if (unsupportedReadMetadata(metadata))
+            return false;
+
+        for (SSTableReader reader : sstables)
+        {
+            Version version = reader.descriptor.version;
+            if (!version.isLatestVersion())
+            {
+                if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Older sstable versions are not supported. version=" + version);
+                return false;
             }
         }
+        return true;
+    }
+
+    /**
+     * Writer-side support gate: relevant only when cursor compaction will produce new output
+     * sstables. Colocated here (rather than on {@link org.apache.cassandra.io.sstable.SSTableCursorWriter})
+     * is deliberate: {@link org.apache.cassandra.io.sstable.SSTableCursorWriter}'s constructor
+     * throws if asked to dispatch to a format this gate should already have rejected — see its
+     * "gate and dispatch drift" defensive exception. Keep the two in sync.
+     */
+    public static boolean isCursorWriteSupported(TableMetadata metadata, AbstractCompactionController controller)
+    {
+        if (unsupportedWriteMetadata(metadata))
+            return false;
+
         // BIG and BTI have cursor index writers (BigCursorIndexWriter / BtiCursorIndexWriter);
         // any other (future) output format falls back to the iterator path
         if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat
@@ -160,21 +202,28 @@ public class CursorCompactor extends CompactionInfo.Holder
             if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Garbage skipping not implemented. controller.tombstoneOption=" + controller.tombstoneOption);
             return false;
         }
-        if (LOGGER.isDebugEnabled()) LOGGER.debug("Cursor compaction for table: " + metadata.name + " keyspace: " + metadata.keyspace + " is supported.");
-
         return true;
     }
 
     public static boolean unsupportedMetadata(TableMetadata metadata)
     {
-        if (metadata.keyspace.equals(SchemaConstants.ACCORD_KEYSPACE_NAME))
-            return true;
+        return unsupportedReadMetadata(metadata) || unsupportedWriteMetadata(metadata);
+    }
 
+    private static boolean unsupportedReadMetadata(TableMetadata metadata)
+    {
         if (!metadata.partitioner.supportsReusableKeys())
         {
             if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Incompatible partitioner, does not support reusable keys:" + metadata.partitioner.getClass().getSimpleName());
             return true;
         }
+        return false;
+    }
+
+    private static boolean unsupportedWriteMetadata(TableMetadata metadata)
+    {
+        if (metadata.keyspace.equals(SchemaConstants.ACCORD_KEYSPACE_NAME))
+            return true;
 
         if (metadata.indexes.size() != 0)
         {
@@ -217,6 +266,13 @@ public class CursorCompactor extends CompactionInfo.Holder
     // Keep targetDirectory for compactions, needed for `nodetool compactionstats`
     private volatile String targetDirectory;
 
+    // Merge-semantic sink for all output events (partition/row/cell writes) — the only field
+    // the merge logic below touches. SSTableCursorWriter is the only production implementation,
+    // but nothing above this seam is writer-specific.
+    private CursorMergeConsumer output;
+    // Concrete writer, non-null only when actually producing sstables. Used EXCLUSIVELY by
+    // writer-rollover code (maybeSwitchWriter/writerRollover) for writer-only bookkeeping
+    // (setFirst/setLast/getPosition) that has no place on CursorMergeConsumer.
     private SSTableCursorWriter ssTableCursorWriter;
     private boolean finished = false;
 
@@ -245,8 +301,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     // Partition state. Writes can be delayed if the deletion is purged, or live and partition is empty -> LIVE deletion.
     PartitionDescriptor partitionDescriptor;
 
-    // This will be 0 if we haven't written partition header.
-    int partitionHeaderLength = 0;
+    boolean partitionStarted = false;
     private CompactionAwareWriter compactionAwareWriter;
 
     public CursorCompactor(OperationType type, List<ISSTableScanner> scanners, AbstractCompactionController controller, long nowInSec, TimeUUID compactionId)
@@ -299,6 +354,8 @@ public class CursorCompactor extends CompactionInfo.Holder
         // header, SerializationHeader.make, is their union): after ALTER TABLE ... DROP of the
         // last static column, current metadata has no static columns but older sstables
         // legitimately still carry static rows
+        // (derived purely from sstable headers today: a future non-sstable source must
+        // contribute to this union too)
         boolean anyStaticColumns = false;
         for (SSTableReader sstable : this.sstables)
             anyStaticColumns |= sstable.header.hasStatic();
@@ -326,11 +383,98 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /**
+     * Scan-shaped entry point: drives a merge over {@code sstables} straight into {@code output},
+     * with no {@link CompactionAwareWriter} and no writer-rollover machinery — e.g. a read-only
+     * cursor scan that never produces new sstables. Pair with the no-arg {@link #writeNextPartition()}.
+     * Byte totals come from {@link SSTableReader#uncompressedLength()}/{@link SSTableReader#onDiskLength()}
+     * directly (no {@link ISSTableScanner} is opened for this path).
+     */
+    public CursorCompactor(OperationType type,
+                          Collection<SSTableReader> sstables,
+                          CursorMergeConsumer output,
+                          AbstractCompactionController controller,
+                          long nowInSec,
+                          TimeUUID compactionId)
+    {
+        this(type, sstables, output, controller, nowInSec, compactionId, ActiveCompactionsTracker.NOOP);
+    }
+
+    private CursorCompactor(OperationType type,
+                           Collection<SSTableReader> sstables,
+                           CursorMergeConsumer output,
+                           AbstractCompactionController controller,
+                           long nowInSec,
+                           TimeUUID compactionId,
+                           ActiveCompactionsTracker activeCompactions)
+    {
+        this.controller = controller;
+        this.type = type;
+        // see the scanner-based constructor for why nowInSec is overridden here
+        TableMetadata tableMetadata = controller.cfs.metadata();
+        this.nowInSec = tableMetadata.isAccordEnabled() || tableMetadata.migratingFromAccord()
+                        ? controller.gcBefore
+                        : nowInSec;
+        this.compactionId = compactionId;
+
+        long inputBytes = 0;
+        long compressedInputBytes = 0;
+        for (SSTableReader sstable : sstables)
+        {
+            inputBytes += sstable.uncompressedLength();
+            compressedInputBytes += sstable.onDiskLength();
+        }
+        this.totalInputBytes = inputBytes;
+        this.totalCompressedInputBytes = compressedInputBytes;
+        this.partitionMergeCounters = new long[sstables.size()];
+        this.staticRowMergeCounters = new long[partitionMergeCounters.length];
+        this.rowMergeCounters = new long[partitionMergeCounters.length];
+        this.rangeTombstonesMergeCounters = new long[partitionMergeCounters.length];
+        this.cellMergeCounters = new long[partitionMergeCounters.length];
+        this.sstables = ImmutableSet.copyOf(sstables);
+        this.activeCompactions = activeCompactions == null ? ActiveCompactionsTracker.NOOP : activeCompactions;
+        this.activeCompactions.beginCompaction(this);
+
+        TableMetadata metadata = metadata();
+        // derived purely from sstable headers today: a future non-sstable source (e.g. an
+        // Arrow-side input) driven through this constructor must contribute to this union too
+        boolean anyStaticColumns = false;
+        for (SSTableReader sstable : this.sstables)
+            anyStaticColumns |= sstable.header.hasStatic();
+        this.hasStaticColumns = anyStaticColumns;
+
+        this.sstableCursors = buildCursorsFromReaders(this.sstables, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+        this.sstableCursorsEqualsNext = new boolean[this.sstables.size()];
+        this.enforceStrictLiveness = controller.cfs.metadata.get().enforceStrictLiveness();
+
+        purger = new Purger(type, controller, nowInSec);
+
+        detachedLastWrittenKey = metadata.partitioner.createReusableKey(128);
+
+        this.output = output;
+    }
+
+    /**
      * @return false if finished, true if partition is written (which might require multiple partition reads)
      */
     public boolean writeNextPartition(CompactionAwareWriter compactionAwareWriter) throws IOException {
         while (!finished) {
             if (tryWriteNextPartition(compactionAwareWriter)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Scan-shaped variant of {@link #writeNextPartition(CompactionAwareWriter)}: drives the merge
+     * into the pre-set {@code output} consumer directly. Only valid for a {@link CursorCompactor}
+     * built via the {@code (type, sstables, output, controller, ...)} constructor.
+     *
+     * @return false if finished, true if partition is written (which might require multiple partition reads)
+     */
+    public boolean writeNextPartition() throws IOException {
+        while (!finished) {
+            if (tryWriteNextPartition(null)) {
                 return true;
             }
         }
@@ -386,7 +530,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             lastSource = currSource;
             partitionDescriptor = null;
-            partitionHeaderLength = 0;
+            partitionStarted = false;
         }
     }
 
@@ -419,8 +563,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             }
             if (isPartitionStarted())
             {
-                if (staticRowMergeLimit == 0) ssTableCursorWriter.writeEmptyStaticRow();
-                partitionHeaderLength = (int) (ssTableCursorWriter.getPosition() - ssTableCursorWriter.getPartitionStart());
+                if (staticRowMergeLimit == 0) output.writeEmptyStaticRow();
             }
         }
 
@@ -469,10 +612,10 @@ public class CursorCompactor extends CompactionInfo.Holder
         boolean partitionWritten = isPartitionStarted();
         if (partitionWritten)
         {
-            ssTableCursorWriter.writePartitionEnd(partitionDescriptor.key(), partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength);
+            output.endPartition(partitionDescriptor.key(), partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion);
             // update metadata tracking of min/max clustering on last unfiltered
             if (unfilteredCount > 1) {
-                ssTableCursorWriter.updateClusteringMetadata(lastClustering);
+                output.updateClusteringMetadata(lastClustering);
             }
         }
         // move along
@@ -482,11 +625,15 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private void startPartition(DeletionTime toWritePartitionDeletion) throws IOException
     {
-        maybeSwitchWriter(compactionAwareWriter);
-        partitionHeaderLength = ssTableCursorWriter.writePartitionStart(
+        // null only for the scan-shaped entry point (writeNextPartition()): output is pre-set
+        // and fixed for the lifetime of the compactor, so there is no writer to roll over.
+        if (compactionAwareWriter != null)
+            maybeSwitchWriter(compactionAwareWriter);
+        output.startPartition(
                                     partitionDescriptor.keyBytes(),
                                     partitionDescriptor.keyLength(),
                                     toWritePartitionDeletion);
+        partitionStarted = true;
     }
 
     private DeletionTime maybePurgedOutputDeletion(DeletionTime mergedDeletion) throws IOException
@@ -577,7 +724,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         if (!isRowDropped)
         {
-            lateStartRow(mergedRowInfo, mergedRowDeletion, isStatic);
+            lateStartRow(sstableCursors[0].unfiltered(), mergedRowInfo, mergedRowDeletion, isStatic);
         }
 
         if (isRowDropped && enforceStrictLiveness)
@@ -609,13 +756,13 @@ public class CursorCompactor extends CompactionInfo.Holder
                 continueReadingAfterMerge(cellMergeLimit, CELL_END);
             }
             if (!isRowDropped)
-                ssTableCursorWriter.writeRowEnd(sstableCursors[0].unfiltered(), isFirstUnfiltered);
+                output.endRow(sstableCursors[0].unfiltered(), isFirstUnfiltered);
         }
         if (isRowDropped && isStatic &&
             isPartitionStarted())
             // if the partition write has not started, keep delaying it, might be an empty partition (purged+no data)
         {
-            ssTableCursorWriter.writeEmptyStaticRow();
+            output.writeEmptyStaticRow();
         }
         return !isRowDropped;
     }
@@ -723,7 +870,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                         isRowDropped = false;
                         lateStartRow(isStatic);
                     }
-                    ssTableCursorWriter.startComplexColumn(currentComplexColumn, mergedComplexDeletion);
+                    output.startComplexColumn(currentComplexColumn, mergedComplexDeletion);
                     complexColumnStarted = true;
                 }
             }
@@ -876,7 +1023,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             }
             if (cellSource.cellCursor().cellColumn.isComplex() && !complexColumnStarted)
             {
-                ssTableCursorWriter.startComplexColumn(currentComplexColumn, mergedComplexDeletion);
+                output.startComplexColumn(currentComplexColumn, mergedComplexDeletion);
                 complexColumnStarted = true;
             }
             /** {@link org.apache.cassandra.db.rows.Cell.Serializer#serialize(Cell, ColumnMetadata, DataOutputPlus, LivenessInfo, SerializationHeader)} */
@@ -896,18 +1043,18 @@ public class CursorCompactor extends CompactionInfo.Holder
             else if (isExpiring) cellFlags |= Cell.Serializer.IS_EXPIRING_MASK;
             if (useRowTimestamp) cellFlags |= Cell.Serializer.USE_ROW_TIMESTAMP_MASK;
             if (useRowTTL) cellFlags |= Cell.Serializer.USE_ROW_TTL_MASK;
-            ssTableCursorWriter.writeCellHeader(cellFlags, cellLiveness, cellSource.cellCursor().cellColumn);
+            output.writeCellHeader(cellFlags, cellLiveness, cellSource.cellCursor().cellColumn);
             if (cellSource.cellCursor().cellColumn.isComplex())
-                ssTableCursorWriter.writeCellPath(cellSource.cellCursor().cellPathBuffer, cellSource.cellCursor().cellPathLength);
+                output.writeCellPath(cellSource.cellCursor().cellPathBuffer, cellSource.cellCursor().cellPathLength);
             if (Cell.Serializer.hasValue(cellFlags)) {
                 if (cellSource.state() == CELL_VALUE_START)
                 {
                     if (tempCellBuffer != null) throw new IllegalStateException("Either copied buffer or ready to copy reader, not both.");
-                    ssTableCursorWriter.writeCellValue(cellSource, copyColumnValueBuffer);
+                    output.writeCellValue(cellSource, copyColumnValueBuffer);
                 }
                 else if (tempCellBuffer != null)
                 {
-                    ssTableCursorWriter.writeCellValue(tempCellBuffer);
+                    output.writeCellValue(tempCellBuffer);
                 }
                 else
                 {
@@ -1057,9 +1204,9 @@ public class CursorCompactor extends CompactionInfo.Holder
             boolean useRowTimestamp = !rowLiveness.isEmpty() && tombstoneLiveness.timestamp() == rowLiveness.timestamp();
             int cellFlags = (tombstoneFlags & Cell.Serializer.HAS_EMPTY_VALUE_MASK) | Cell.Serializer.IS_DELETED_MASK;
             if (useRowTimestamp) cellFlags |= Cell.Serializer.USE_ROW_TIMESTAMP_MASK;
-            ssTableCursorWriter.writeCellHeader(cellFlags, tombstoneLiveness, column);
+            output.writeCellHeader(cellFlags, tombstoneLiveness, column);
             if (Cell.Serializer.hasValue(cellFlags))
-                ssTableCursorWriter.writeCellValue(tempCellBuffer1);
+                output.writeCellValue(tempCellBuffer1);
             return isRowDropped;
         }
 
@@ -1075,10 +1222,10 @@ public class CursorCompactor extends CompactionInfo.Holder
         counterLiveness.reset(liveTimestamp, LivenessInfo.NO_TTL, LivenessInfo.NO_EXPIRATION_TIME);
         boolean useRowTimestamp = !rowLiveness.isEmpty() && liveTimestamp == rowLiveness.timestamp();
         int cellFlags = useRowTimestamp ? Cell.Serializer.USE_ROW_TIMESTAMP_MASK : 0;
-        ssTableCursorWriter.writeCellHeader(cellFlags, counterLiveness, column);
-        ssTableCursorWriter.writeCellValue(counterFoldBuffer.getData(), 0, counterFoldBuffer.getLength());
+        output.writeCellHeader(cellFlags, counterLiveness, column);
+        output.writeCellValue(counterFoldBuffer.getData(), 0, counterFoldBuffer.getLength());
         // Cells.collectStats parity: updateHasLegacyCounterShards per live output counter cell
-        ssTableCursorWriter.updateCounterShardStats(
+        output.updateCounterShardStats(
             CursorCounterContexts.hasLegacyShards(counterFoldBuffer.getData(), 0, counterFoldBuffer.getLength()));
         return isRowDropped;
     }
@@ -1277,10 +1424,10 @@ public class CursorCompactor extends CompactionInfo.Holder
             if (isPartitionStartDelayed())
             {
                 lateStartPartition(false);
-                ssTableCursorWriter.writeRangeTombstone(rangeTombstone, true);
+                output.writeRangeTombstone(rangeTombstone, true);
             }
             else {
-                ssTableCursorWriter.writeRangeTombstone(rangeTombstone, isFirstUnfiltered);
+                output.writeRangeTombstone(rangeTombstone, isFirstUnfiltered);
             }
             return true;
         }
@@ -1414,7 +1561,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private boolean isPartitionStarted()
     {
-        return partitionHeaderLength != 0;
+        return partitionStarted;
     }
 
     private boolean isPartitionStartDelayed()
@@ -1434,16 +1581,16 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private void lateStartRow(boolean isStatic) throws IOException
     {
-        lateStartRow(LivenessInfo.EMPTY, DeletionTime.LIVE, isStatic);
+        lateStartRow(sstableCursors[0].unfiltered(), LivenessInfo.EMPTY, DeletionTime.LIVE, isStatic);
     }
 
-    private void lateStartRow(LivenessInfo livenessInfo, DeletionTime deletionTime, boolean isStatic) throws IOException
+    private void lateStartRow(UnfilteredDescriptor clustering, LivenessInfo livenessInfo, DeletionTime deletionTime, boolean isStatic) throws IOException
     {
         if (isPartitionStartDelayed())
         {
             lateStartPartition(isStatic);
         }
-        ssTableCursorWriter.writeRowStart(livenessInfo, deletionTime, isStatic);
+        output.startRow(clustering, livenessInfo, deletionTime, isStatic);
     }
 
     private void lateStartPartition(boolean isStatic) throws IOException
@@ -1452,8 +1599,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         // Did we miss writing an empty static row?
         if (!isStatic)
         {
-            if(ssTableCursorWriter.writeEmptyStaticRow())
-                partitionHeaderLength = (int) (ssTableCursorWriter.getPosition() - ssTableCursorWriter.getPartitionStart());
+            output.writeEmptyStaticRow();
         }
     }
 
@@ -1478,6 +1624,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
             ssTableCursorWriter = new SSTableCursorWriter((SortedTableWriter) newWriter);
             ssTableCursorWriter.setFirst(partitionDescriptor.keyBuffer());
+            output = ssTableCursorWriter;
         }
         assert ssTableCursorWriter != null;
     }
@@ -1954,6 +2101,16 @@ public class CursorCompactor extends CompactionInfo.Holder
         for (ISSTableScanner scanner : scanners)
             scanner.close();
 
+        return buildCursorsFromReaders(sstables, diskAccessMode);
+    }
+
+    /**
+     * Builds one {@link StatefulCursor} per sstable directly — the scan-shaped entry point's
+     * equivalent of {@link #convertScannersToCursors}, minus the scanner-closing step (there are
+     * no scanners in that path).
+     */
+    private static StatefulCursor[] buildCursorsFromReaders(Collection<SSTableReader> sstables, DiskAccessMode diskAccessMode)
+    {
         StatefulCursor[] cursors = new StatefulCursor[sstables.size()];
         int i = 0;
         try
