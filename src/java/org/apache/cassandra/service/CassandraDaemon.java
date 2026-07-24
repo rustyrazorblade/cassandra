@@ -152,6 +152,12 @@ public class CassandraDaemon
         return nativeTransportService;
     }
 
+    @VisibleForTesting
+    public org.apache.cassandra.arrow.ArrowFlightService arrowFlightService()
+    {
+        return arrowFlightService;
+    }
+
     static {
         // Need to register metrics before instrumented appender is created(first access to LoggerFactory).
         SharedMetricRegistries.getOrCreate("logback-metrics").addListener(new MetricRegistryListener.Base()
@@ -219,6 +225,7 @@ public class CassandraDaemon
     static final CassandraDaemon instance = new CassandraDaemon();
 
     private volatile NativeTransportService nativeTransportService;
+    private volatile org.apache.cassandra.arrow.ArrowFlightService arrowFlightService;
     private JMXConnectorServer jmxServer;
 
     private final boolean runManaged;
@@ -671,6 +678,17 @@ public class CassandraDaemon
         // Native transport
         if (nativeTransportService == null)
             nativeTransportService = new NativeTransportService();
+
+        // Arrow Flight (PoC, disabled by default - see ArrowFlightService's class javadoc).
+        // Construction only here - actually starting it (opening the port) is deferred to
+        // startClientTransports(), alongside native transport's own start, so it is gated by the
+        // same validateTransportsCanStart() bootstrap/write-survey-mode readiness check native
+        // transport uses (see ARROW-FLIGHT bug tracker task #12). initializeClientTransports() runs
+        // much earlier (during setup()), with no such gate, so starting it here could open the
+        // Flight port on a node that isn't ready to serve reads yet (e.g. mid-bootstrap, or started
+        // with -Dcassandra.join_ring=false).
+        if (arrowFlightService == null && DatabaseDescriptor.startArrowFlight())
+            arrowFlightService = new org.apache.cassandra.arrow.ArrowFlightService();
     }
 
     /*
@@ -781,6 +799,12 @@ public class CassandraDaemon
         }
         else
             logger.info("Not starting native transport as requested. Use JMX (StorageService->startNativeTransport()) or nodetool (enablebinary) to start it");
+
+        // Arrow Flight's actual start() (opening the port) happens here, alongside native
+        // transport's own start: start() is only reached from CassandraDaemon#start() after
+        // validateTransportsCanStart() has already passed (see initializeClientTransports()).
+        if (arrowFlightService != null && !arrowFlightService.isRunning())
+            arrowFlightService.start();
     }
 
     /**
@@ -815,6 +839,8 @@ public class CassandraDaemon
         stopNativeTransport();
         if (nativeTransportService != null)
             nativeTransportService.destroy();
+        if (arrowFlightService != null)
+            arrowFlightService.stop();
     }
 
     /**

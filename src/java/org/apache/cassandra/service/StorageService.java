@@ -669,6 +669,13 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
     {
         setRpcReady(false);
         stopNativeTransport();
+        // Arrow Flight (PoC) is otherwise only stopped on full daemon shutdown
+        // (CassandraDaemon#destroyClientTransports); without this, `nodetool drain` and
+        // decommission (both of which call this method) would leave its unauthenticated,
+        // full-table-scan-capable port open, directly contradicting drain's intent - see
+        // ARROW-FLIGHT bug tracker task #11.
+        if (daemon != null && daemon.arrowFlightService() != null)
+            daemon.arrowFlightService().stop();
     }
 
     public void stopClient()

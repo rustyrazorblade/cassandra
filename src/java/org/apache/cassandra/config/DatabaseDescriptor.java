@@ -3592,6 +3592,17 @@ public class DatabaseDescriptor
         return conf.start_native_transport;
     }
 
+    /** See {@code org.apache.cassandra.arrow.ArrowFlightService}: development/PoC-only, no auth. */
+    public static boolean startArrowFlight()
+    {
+        return conf.start_arrow_flight;
+    }
+
+    public static int getArrowFlightPort()
+    {
+        return conf.arrow_flight_port;
+    }
+
     /**
      * This is the port used with RPC address for the native protocol to communicate with clients. Now that thrift RPC
      * is no longer in use there is no RPC port.

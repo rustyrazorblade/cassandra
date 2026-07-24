@@ -1037,6 +1037,14 @@ start_native_transport: true
 # port for the CQL native transport to listen for clients on
 # For security reasons, you should not expose this port to the internet.  Firewall it if needed.
 native_transport_port: 9042
+# Whether to start the embedded Arrow Flight service (see ARROW-FLIGHT.md and
+# org.apache.cassandra.arrow.ArrowFlightService). This is a development/PoC-only interface with
+# NO AUTHENTICATION OR AUTHORIZATION: anyone who can reach arrow_flight_port can read every row of
+# every user table. Do NOT enable this on a node reachable from an untrusted network.
+start_arrow_flight: false
+# port for the Arrow Flight service to listen for clients on, when start_arrow_flight is true.
+# Bound on the same address as native_transport_port (rpc_address). See the warning above.
+arrow_flight_port: 9143
 # The maximum threads for handling requests (note that idle threads are stopped
 # after 30 seconds so there is not corresponding minimum setting).
 # native_transport_max_threads: 128

@@ -243,6 +243,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         OWNED_RANGES_CHANGE,
         ACCORD,
         ACCORD_TXN_GC,
+        ARROW_FLIGHT_SCAN, // flush-then-scan memtable-freshness strategy ahead of an Arrow Flight full-table scan
         UNIT_TESTS // explicitly requested flush needed for a test
     }
 

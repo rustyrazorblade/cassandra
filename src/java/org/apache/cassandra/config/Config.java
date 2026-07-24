@@ -300,6 +300,15 @@ public class Config
     @Replaces(oldName = "internode_streaming_tcp_user_timeout_in_ms", converter = Converters.MILLIS_DURATION_INT, deprecated = true)
     public volatile DurationSpec.IntMillisecondsBound internode_streaming_tcp_user_timeout = new DurationSpec.IntMillisecondsBound("300s"); // 5 minutes
 
+    /**
+     * Enables the embedded Arrow Flight service (see {@code org.apache.cassandra.arrow.ArrowFlightService}
+     * and {@code ARROW-FLIGHT.md}). This is a development/PoC-only interface with NO authentication
+     * or authorization: anyone who can reach {@code arrow_flight_port} can read every row of every
+     * user table. Do not enable this on a node reachable from an untrusted network.
+     */
+    public boolean start_arrow_flight = false;
+    public int arrow_flight_port = 9143;
+
     public boolean start_native_transport = true;
     public int native_transport_port = 9042;
     public int native_transport_max_threads = 128;

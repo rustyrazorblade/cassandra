@@ -41,6 +41,8 @@
     <netty.version>4.1.130.Final</netty.version>
     <ohc.version>0.5.1</ohc.version>
     <async-profiler.version>4.2</async-profiler.version>
+    <arrow.version>19.0.0</arrow.version>
+    <grpc.version>1.79.0</grpc.version>
 
     <!-- These are referenced in build.xml, so need to be propagated from there -->
     <asm.version>@asm.version@</asm.version>
@@ -1315,6 +1317,83 @@
         <groupId>org.passay</groupId>
         <artifactId>passay</artifactId>
         <version>1.6.4</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-vector</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-format</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-memory-core</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <!-- garbage-free-off-heap allocator with no Netty dependency: avoids pulling arrow-memory-netty's
+             newer Netty version in below flight-core (see the flight-core entry's exclusion and the
+             io.netty overrides further down) -->
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-memory-unsafe</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <!-- Arrow Flight's own parent POM pins Netty 4.2.x for the raw io.netty dependencies below (Netty
+             itself is unrelated to gRPC transport selection); Cassandra is on Netty 4.1.x (netty.version above),
+             so those artifacts are forced back down via the io.netty dependencyManagement entries further below.
+             io.grpc:grpc-netty (FlightServer/FlightClient's actual gRPC transport, required directly - Arrow's
+             FlightServer.Builder calls io.grpc.netty.NettyServerBuilder directly, so grpc-netty-shaded's relocated
+             classes will not satisfy it) already targets Netty 4.1.130.Final on its own, so it needs no override.
+             arrow-memory-netty is excluded in favor of arrow-memory-unsafe above, for the same Netty version reason. -->
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>flight-core</artifactId>
+        <version>${arrow.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>arrow-memory-netty</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-buffer</artifactId>
+        <version>${netty.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-handler</artifactId>
+        <version>${netty.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-transport</artifactId>
+        <version>${netty.version}</version>
+      </dependency>
+      <dependency>
+        <!-- runtime-scoped transitive dependency of grpc-protobuf; this build's dependency
+             resolution does not pull in "runtime"-scope-only transitive edges (see the compile/
+             provided/test scope filters in build-resolver.xml), so it must be declared explicitly,
+             same as jna-platform/jffi/jnr-constants above -->
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-protobuf-lite</artifactId>
+        <version>${grpc.version}</version>
+      </dependency>
+      <dependency>
+        <!-- runtime-scoped transitive dependency of grpc-netty/grpc-core; see grpc-protobuf-lite above -->
+        <groupId>io.grpc</groupId>
+        <artifactId>grpc-util</artifactId>
+        <version>${grpc.version}</version>
+      </dependency>
+      <dependency>
+        <!-- runtime-scoped transitive dependency of grpc-core; see grpc-protobuf-lite above -->
+        <groupId>io.perfmark</groupId>
+        <artifactId>perfmark-api</artifactId>
+        <version>0.27.0</version>
       </dependency>
     </dependencies>
   </dependencyManagement>
