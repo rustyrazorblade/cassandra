@@ -45,6 +45,20 @@ sed -i \
 
 mkdir -p /var/lib/cassandra/data /var/lib/cassandra/commitlog /var/lib/cassandra/saved_caches /var/lib/cassandra/hints
 
+# Enable remote JMX (needed by the cassandra-sidecar service, which runs as a separate process -
+# LOCAL_JMX=yes's default -Dcassandra.jmx.local.port is not reachable cross-process even when
+# sidecar shares this container's network namespace). LOCAL_JMX=no is set via this service's
+# environment in docker-compose.yml, which conf/cassandra-env.sh reads directly; it already adds
+# -Dcom.sun.management.jmxremote.authenticate=true in that branch, which this patches to false
+# (dev-only, no auth - matches this whole stack's posture), and adds ssl=false (the JVM defaults
+# jmxremote.ssl to true when unset, which cassandra-env.sh's remote-JMX branch never overrides)
+# plus the rmi.server.hostname RMI's second handshake phase needs to call back on.
+if [ "${LOCAL_JMX:-yes}" = "no" ]; then
+    sed -i \
+        -e "s|JVM_OPTS=\"\\\$JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=true\"|JVM_OPTS=\"\\\$JVM_OPTS -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Djava.rmi.server.hostname=${CASSANDRA_LISTEN_ADDRESS:-cassandra}\"|" \
+        "$CONF_DIR/cassandra-env.sh"
+fi
+
 export CASSANDRA_CONF="$CONF_DIR"
 # -R: this container runs as root (no dedicated non-root user is configured for this disposable
 # local test stack), which bin/cassandra otherwise refuses to start under by default.

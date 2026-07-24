@@ -17,6 +17,11 @@
 # TRINO_PORT, defaults shown below) - useful if the standard ports are already taken by another
 # Cassandra/Trino instance on your machine, e.g.:
 #     CASSANDRA_CQL_PORT=19042 docker compose up --build
+#
+# The "sidecar" service requires cassandra-sidecar to be checked out as a SIBLING directory to
+# this repo (../../cassandra-sidecar relative to this file, i.e. next to, not inside, this repo)
+# and its distribution built on the host first:
+#     cd ../../cassandra-sidecar && ./gradlew installDist -x test
 
 services:
   cassandra:
@@ -25,6 +30,9 @@ services:
     hostname: cassandra
     environment:
       CASSANDRA_HOME: /cassandra
+      # Remote JMX (see cassandra-entrypoint.sh) - required for the sidecar service below to
+      # connect; LOCAL_JMX's default local-only JMX port isn't reachable cross-process.
+      LOCAL_JMX: "no"
     volumes:
       - ..:/cassandra
       - cassandra-data:/var/lib/cassandra
@@ -33,12 +41,45 @@ services:
       - "${CASSANDRA_CQL_PORT:-9042}:9042"           # CQL native transport
       - "${CASSANDRA_ARROW_FLIGHT_PORT:-9143}:9143"  # Arrow Flight
       - "${CASSANDRA_JMX_PORT:-7199}:7199"           # JMX (nodetool, useful for debugging from the host)
+      # Sidecar's port, published here (not on the "sidecar" service) since it uses
+      # network_mode: "service:cassandra" and so has no ports of its own - other services reach
+      # it at cassandra:9043 (sidecar shares this container's network identity entirely).
+      - "${SIDECAR_PORT:-9043}:9043"
     healthcheck:
       test: ["CMD-SHELL", "/cassandra/bin/nodetool status 2>/dev/null | grep -q '^UN' || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 30
       start_period: 60s
+
+  # Ring/topology discovery for the Trino connector's cluster-aware split planning (see
+  # ARROW-FLIGHT.md and trino's ArrowFlightMetadata). Shares cassandra's network namespace so JMX
+  # (127.0.0.1:7199) and CQL (127.0.0.1:9042) are both directly reachable without extra networking
+  # config - matches cassandra-sidecar's own docker/cdc-demo/docker-compose.yml pattern.
+  sidecar:
+    build:
+      context: ../../cassandra-sidecar
+      dockerfile_inline: |
+        FROM eclipse-temurin:11-jre-jammy
+        WORKDIR /app
+        COPY build/install/apache-cassandra-sidecar/ ./
+        EXPOSE 9043
+        ENTRYPOINT ["/app/bin/cassandra-sidecar"]
+    container_name: arrow-flight-sidecar
+    network_mode: "service:cassandra"
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      # Bind-mounted (not baked into the image) so editing it doesn't require a rebuild - matches
+      # cassandra-sidecar's own cdc-demo compose file.
+      - ./docker/sidecar.yaml:/app/conf/sidecar.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9043/api/v1/__health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   trino:
     build:

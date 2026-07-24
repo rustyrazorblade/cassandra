@@ -8,24 +8,27 @@ Trino's existing CQL-based Cassandra connector.
 **This directory is a separate, self-contained Gradle project.** It does not touch, depend on,
 or get built by Cassandra's own Ant build; nothing outside `trino/` was changed to produce it.
 
-## Scope (PoC, matches the server)
+## Scope
 
-The Cassandra-side service this connector talks to is an explicit proof-of-concept:
+The Cassandra-side service this connector talks to is still a proof-of-concept in some respects,
+but cluster-aware, distributed reads and predicate/aggregation pushdown are real, in-scope
+requirements, not deferred/future work - see `../ARROW-FLIGHT.md` and the in-progress work
+tracked against this connector:
 
-- **No authentication.** Anyone who can open a TCP connection to the Flight port can read every
-  row of every user table. Do not point this at a Cassandra node reachable from an untrusted
-  network.
-- **No filter/limit/aggregation pushdown.** Every scan reads the whole table; Trino applies
-  `WHERE`/`LIMIT`/aggregation client-side, which is correct, just not as fast as server-side
-  pushdown would be.
-- **No token-range splitting.** `GetFlightInfo` always returns exactly one Flight endpoint
-  covering a table's entire local range, so this connector emits exactly one split per table -
-  no read parallelism yet. When the server gains real splitting, `ArrowFlightSplitManager` is
-  the seam to extend.
-- **Full-table scan only.** No point-read API.
-
-This connector is a faithful, equally-scoped PoC client for that service - it does not
-implement anything the server doesn't yet support.
+- **No authentication yet.** Anyone who can open a TCP connection to the Flight port can read
+  every row of every user table. Do not point this at a Cassandra node reachable from an
+  untrusted network until this lands.
+- **Cluster-aware, token-range-split reads** (in progress): ring topology discovery via
+  `cassandra-sidecar`'s client, split planning ported from `cassandra-analytics`
+  (`CassandraRing`/`TokenPartitioner`/`RangeUtils`), and per-split routing to the owning
+  replica's Arrow Flight port - mirroring how the Spark analytics connector already does
+  distributed reads via the sidecar, adapted for live query-time reads instead of
+  Spark's offline bulk SSTable transfer.
+- **Filter and aggregation pushdown** (in progress): predicates and `GROUP BY`/aggregate
+  functions pushed down to the server, evaluated after the cursor-merge reconciles each row
+  (correctness requires this - a predicate can only be evaluated once shadowing/reconciliation
+  has resolved a column to its true value), not applied client-side over an unfiltered scan.
+- **Full-table scan only** for now. No point-read API yet.
 
 ## Versions targeted
 
