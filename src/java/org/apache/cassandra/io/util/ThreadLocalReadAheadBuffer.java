@@ -89,9 +89,20 @@ public class ThreadLocalReadAheadBuffer implements Closeable
         {
             block.buffer = bufferSupplier.get();
             block.buffer.clear();
-            if (bufferSize == -1)
-                bufferSize = block.buffer.capacity();
         }
+        // Deliberately outside the `block.buffer == null` branch above: `block` comes from a
+        // STATIC, per-thread cache keyed only by file path (see block()/blockMap), so this
+        // instance can be handed an already-populated block created by a DIFFERENT
+        // ThreadLocalReadAheadBuffer instance for the same path on this thread (e.g. one that was
+        // never close()'d - close() is what removes the entry from blockMap). `bufferSize` is
+        // this instance's own field, so it must always be synced from whatever buffer is actually
+        // in hand rather than only on first-allocation - otherwise a fresh instance that inherits
+        // a stale block leaves its own bufferSize at -1 forever, and fill()'s arithmetic
+        // (Math.min(remaining, bufferSize) with bufferSize == -1) computes a negative buffer
+        // limit and crashes with IllegalArgumentException/CorruptSSTableException instead of
+        // reading correctly.
+        if (bufferSize == -1)
+            bufferSize = block.buffer.capacity();
         return block;
     }
 

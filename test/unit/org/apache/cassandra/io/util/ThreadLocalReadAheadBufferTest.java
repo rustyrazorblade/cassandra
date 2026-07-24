@@ -93,6 +93,50 @@ public class ThreadLocalReadAheadBufferTest implements WithQuickTheories
             .checkAssert(this::testReads);
     }
 
+    /**
+     * Regression test: {@code block()} caches its {@link Block} in a STATIC, per-thread map keyed
+     * only by file path - shared across every {@link ThreadLocalReadAheadBuffer} instance on this
+     * thread, not scoped to the instance that created it. If a caller never calls {@code close()}
+     * on one instance (which is what removes its entry from that map), a brand new instance
+     * created afterward for the SAME file path inherits that stale, already-populated
+     * {@link Block} - and, before this test's fix, would leave its own {@code bufferSize} field
+     * at -1 forever (since {@code bufferSize} was only synced the first time a block's buffer was
+     * lazily allocated), corrupting {@link #fill(long)}'s arithmetic into a negative buffer limit.
+     * This reproduces exactly that: leak a first instance for a file, then read the same file via
+     * a second, never-related instance, and confirm it still reads correctly instead of throwing.
+     */
+    @Test
+    public void testStaleBlockFromUnclosedInstanceIsStillReadCorrectly() throws IOException
+    {
+        File file = files[0];
+        int blockSize = new DataStorageSpec.IntKibibytesBound("256KiB").toBytes();
+
+        // Deliberately never closed - simulates the leaked CursorCompactor/reader scenario this
+        // test exists to guard against (see CassandraTableScanner.scanViaCursor).
+        ChannelProxy leakedChannel = new ChannelProxy(file);
+        ThreadLocalReadAheadBuffer leaked = new ThreadLocalReadAheadBuffer(leakedChannel, blockSize, BufferType.OFF_HEAP);
+        leaked.fill(0);
+        Assert.assertTrue("expected the leaked instance to have actually allocated a block", leaked.hasBuffer());
+
+        try (ChannelProxy channel = new ChannelProxy(file);
+             ThreadLocalReadAheadBuffer tlrab = new ThreadLocalReadAheadBuffer(channel, blockSize, BufferType.OFF_HEAP))
+        {
+            int readSize = Math.min(64, (int) channel.size());
+            ByteBuffer expected = ByteBuffer.allocate(readSize);
+            channel.read(expected, 0);
+
+            ByteBuffer actual = ByteBuffer.allocate(readSize);
+            tlrab.fill(0);
+            tlrab.read(actual, readSize);
+
+            Assert.assertEquals(expected, actual);
+        }
+        finally
+        {
+            leakedChannel.close();
+        }
+    }
+
     protected void testReads(InputData propertyInputs)
     {
         try (ChannelProxy channel = new ChannelProxy(propertyInputs.file);
