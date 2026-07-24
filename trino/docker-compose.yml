@@ -1,0 +1,85 @@
+# Local end-to-end test stack for the Arrow Flight PoC: this branch's Cassandra build (with the
+# Arrow Flight service enabled) + Trino with the Arrow Flight connector installed +
+# cassandra-easy-stress for loading sample data. See README.md for full usage.
+#
+# Prerequisite: build Cassandra on the HOST first. This compose file bind-mounts the built
+# checkout rather than re-running Cassandra's full Ant/ivy build inside Docker (which would be
+# far slower to iterate on and would re-resolve dependencies on every change):
+#
+#     cd .. && .build/sh/ai-build
+#
+# Then, from this directory:
+#
+#     docker compose up --build                       # Cassandra + Trino
+#     docker compose --profile stress run --rm easy-stress   # load sample data (see below)
+#
+# Host port overrides (CASSANDRA_CQL_PORT/CASSANDRA_ARROW_FLIGHT_PORT/CASSANDRA_JMX_PORT/
+# TRINO_PORT, defaults shown below) - useful if the standard ports are already taken by another
+# Cassandra/Trino instance on your machine, e.g.:
+#     CASSANDRA_CQL_PORT=19042 docker compose up --build
+
+services:
+  cassandra:
+    image: eclipse-temurin:21-jre-jammy
+    container_name: arrow-flight-cassandra
+    hostname: cassandra
+    environment:
+      CASSANDRA_HOME: /cassandra
+    volumes:
+      - ..:/cassandra
+      - cassandra-data:/var/lib/cassandra
+    entrypoint: ["/cassandra/trino/docker/cassandra-entrypoint.sh"]
+    ports:
+      - "${CASSANDRA_CQL_PORT:-9042}:9042"           # CQL native transport
+      - "${CASSANDRA_ARROW_FLIGHT_PORT:-9143}:9143"  # Arrow Flight
+      - "${CASSANDRA_JMX_PORT:-7199}:7199"           # JMX (nodetool, useful for debugging from the host)
+    healthcheck:
+      test: ["CMD-SHELL", "/cassandra/bin/nodetool status 2>/dev/null | grep -q '^UN' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  trino:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: arrow-flight-trino
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      # Docker-specific catalog config (points at the "cassandra" service, not 127.0.0.1) -
+      # bind-mounted rather than baked into the image, so changing host/port only needs a
+      # container restart, not a rebuild. See docker/catalog/arrow_flight.properties.
+      - ./docker/catalog:/etc/trino/catalog:ro
+    ports:
+      - "${TRINO_PORT:-8080}:8080"
+
+  # One-shot data loader, not part of the default `docker compose up`. Run explicitly:
+  #     docker compose --profile stress run --rm easy-stress
+  # This command is best-effort, based on cassandra-easy-stress's documented CLI
+  # (https://apache.github.io/cassandra-easy-stress/) - its containerized entrypoint isn't
+  # documented upstream. If the image's entrypoint doesn't match, check it directly:
+  #     docker compose --profile stress run --rm --entrypoint sh easy-stress -c 'cassandra-easy-stress --help || bin/cassandra-easy-stress --help'
+  easy-stress:
+    image: ghcr.io/apache/cassandra-easy-stress:latest
+    container_name: arrow-flight-easy-stress
+    profiles: ["stress"]
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    command:
+      - run
+      - KeyValue
+      - --host
+      - cassandra
+      - --port
+      - "9042"
+      - -i
+      - "100000"
+      - --replication
+      - "{'class': 'SimpleStrategy', 'replication_factor':1}"
+
+volumes:
+  cassandra-data:
