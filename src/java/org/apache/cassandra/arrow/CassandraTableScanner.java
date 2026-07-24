@@ -125,9 +125,29 @@ public final class CassandraTableScanner
         {
             CursorCompactor compactor = new CursorCompactor(OperationType.VALIDATION, sstables, assembler, controller, nowInSec,
                                                              nextTimeUUID(), DiskAccessMode.direct);
-            while (compactor.writeNextPartition())
+            try
             {
-                // driven entirely by side effects on `assembler`
+                while (compactor.writeNextPartition())
+                {
+                    // driven entirely by side effects on `assembler`
+                }
+            }
+            finally
+            {
+                // CursorCompactor is not itself AutoCloseable (no `implements Closeable`), so it
+                // can't sit in the try-with-resources above - but close() MUST still run: it's
+                // what releases every SSTableCursorReader (CursorCompactor.close() -> reader.close()
+                // per cursor), which for a compressed sstable read under direct I/O owns a
+                // ThreadLocalReadAheadBuffer. That class caches its read-ahead block in a STATIC,
+                // per-thread map keyed only by file path (io/util/ThreadLocalReadAheadBuffer.java)
+                // - leaving it unclosed here left a stale block in that map for the next scan of
+                // the same file (same thread) to inherit with its own bufferSize field never
+                // re-initialized (stuck at -1), corrupting that scan's read-ahead arithmetic into
+                // requesting a negative buffer limit and crashing with CorruptSSTableException.
+                // Confirmed via a live docker-compose smoke test against a real compressed table
+                // on Linux (the only environment where direct I/O actually engages) - see
+                // ARROW-FLIGHT.md / trino/docker-compose.yml.
+                compactor.close();
             }
         }
         catch (IOException e)
