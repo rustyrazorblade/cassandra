@@ -26,6 +26,7 @@ import java.util.Set;
 
 import org.junit.Test;
 
+import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -156,6 +157,61 @@ public class ScanShapedCursorCompactorTest extends CQLTester
                                                              controller,
                                                              FBUtilities.nowInSeconds(),
                                                              nextTimeUUID());
+            try
+            {
+                //noinspection StatementWithEmptyBody
+                while (compactor.writeNextPartition())
+                {
+                    // drains every partition into the consumer
+                }
+            }
+            finally
+            {
+                compactor.close();
+            }
+        }
+
+        assertEquals(10, consumer.partitionKeys.size());
+        assertEquals(10, consumer.rowsStarted);
+    }
+
+    /**
+     * The scan-shaped constructor overload that takes an explicit {@link DiskAccessMode} (added for
+     * {@code org.apache.cassandra.arrow.CassandraTableScanner}, which forces {@code direct} so its
+     * scans don't pollute the page cache real background compaction/reads rely on, independent of
+     * the node-wide {@code compaction_read_disk_access_mode} setting). {@code direct} is requested
+     * here too, on purpose: this table is uncompressed, and direct I/O requires a compressed sstable
+     * ({@link org.apache.cassandra.io.util.FileHandle#supportsDirectIO()}) as well as a Linux host -
+     * neither holds for this test on most dev/CI machines, so this exercises the documented
+     * graceful-fallback behavior (silently keep the existing disk access mode) rather than real
+     * O_DIRECT reads, and confirms requesting an unavailable mode never breaks the merge.
+     */
+    @Test
+    public void scanShapedConstructorWithExplicitDiskAccessModeProducesSameMerge() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        for (long pk = 0; pk < 5; pk++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, 1L, "v" + pk);
+        flush();
+        for (long pk = 5; pk < 10; pk++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, 1L, "v" + pk);
+        flush();
+
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        Set<SSTableReader> sstables = cfs.getLiveSSTables();
+        assertTrue("expected at least 2 flushed sstables", sstables.size() >= 2);
+
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        RecordingConsumer consumer = new RecordingConsumer();
+        try (CompactionController controller = new CompactionController(cfs, sstables, gcBefore))
+        {
+            CursorCompactor compactor = new CursorCompactor(OperationType.COMPACTION,
+                                                             sstables,
+                                                             consumer,
+                                                             controller,
+                                                             FBUtilities.nowInSeconds(),
+                                                             nextTimeUUID(),
+                                                             DiskAccessMode.direct);
             try
             {
                 //noinspection StatementWithEmptyBody

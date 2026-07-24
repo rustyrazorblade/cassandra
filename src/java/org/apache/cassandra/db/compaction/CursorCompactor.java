@@ -396,7 +396,29 @@ public class CursorCompactor extends CompactionInfo.Holder
                           long nowInSec,
                           TimeUUID compactionId)
     {
-        this(type, sstables, output, controller, nowInSec, compactionId, ActiveCompactionsTracker.NOOP);
+        this(type, sstables, output, controller, nowInSec, compactionId, DatabaseDescriptor.getCompactionReadDiskAccessMode(), ActiveCompactionsTracker.NOOP);
+    }
+
+    /**
+     * As above, but overrides the disk access mode used to read {@code sstables} instead of
+     * deferring to {@link DatabaseDescriptor#getCompactionReadDiskAccessMode()} - e.g. a caller
+     * (such as the Arrow Flight scan, see {@code org.apache.cassandra.arrow.CassandraTableScanner})
+     * that wants to force a specific mode (direct I/O) for its own reads without changing the
+     * node-wide compaction disk access mode setting real background compaction uses. Follows the
+     * same graceful-fallback behavior as the rest of the codebase when the requested mode isn't
+     * actually available for a given sstable (e.g. direct I/O requires a compressed sstable and a
+     * Linux host - see {@link org.apache.cassandra.io.util.FileHandle#supportsDirectIO()}) - it is
+     * not an error to request a mode that ends up not being honored for some/all of {@code sstables}.
+     */
+    public CursorCompactor(OperationType type,
+                          Collection<SSTableReader> sstables,
+                          CursorMergeConsumer output,
+                          AbstractCompactionController controller,
+                          long nowInSec,
+                          TimeUUID compactionId,
+                          DiskAccessMode diskAccessMode)
+    {
+        this(type, sstables, output, controller, nowInSec, compactionId, diskAccessMode, ActiveCompactionsTracker.NOOP);
     }
 
     private CursorCompactor(OperationType type,
@@ -405,6 +427,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                            AbstractCompactionController controller,
                            long nowInSec,
                            TimeUUID compactionId,
+                           DiskAccessMode diskAccessMode,
                            ActiveCompactionsTracker activeCompactions)
     {
         this.controller = controller;
@@ -442,7 +465,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             anyStaticColumns |= sstable.header.hasStatic();
         this.hasStaticColumns = anyStaticColumns;
 
-        this.sstableCursors = buildCursorsFromReaders(this.sstables, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+        this.sstableCursors = buildCursorsFromReaders(this.sstables, diskAccessMode);
         this.sstableCursorsEqualsNext = new boolean[this.sstables.size()];
         this.enforceStrictLiveness = controller.cfs.metadata.get().enforceStrictLiveness();
 
