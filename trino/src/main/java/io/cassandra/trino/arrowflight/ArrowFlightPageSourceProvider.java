@@ -13,11 +13,14 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 
+import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
+
 /**
- * PoC scope: no filter/projection pushdown (matches the server, see
- * {@code CassandraFlightProducer#getStream}) - every requested column is read and every row
- * of the table is streamed; Trino applies any {@code WHERE}/{@code LIMIT} client-side, which
- * is correct (if not as fast as server-side pushdown would be).
+ * Builds the per-split Flight ticket - {@code keyspace}/{@code table} plus the split's own
+ * {@code tokenRange} and the table handle's pushed-down {@code filter}/{@code aggregation} (see
+ * {@code ArrowFlightMetadata#applyFilter}/{@code #applyAggregation}) - and streams it via
+ * {@link ArrowFlightPageSource}. Every requested (projected) column is read; Trino applies any
+ * part of the query this connector didn't push down.
  */
 public class ArrowFlightPageSourceProvider implements ConnectorPageSourceProvider
 {
@@ -38,9 +41,19 @@ public class ArrowFlightPageSourceProvider implements ConnectorPageSourceProvide
         List<ColumnHandle> columns,
         DynamicFilter dynamicFilter)
     {
+        ArrowFlightSplit arrowSplit = (ArrowFlightSplit) split;
+        ArrowFlightTableHandle tableHandle = (ArrowFlightTableHandle) table;
+
+        ArrowFlightTicket ticket = ArrowFlightTicket.of(arrowSplit.keyspace(), arrowSplit.table())
+                                                     .withTokenRange(arrowSplit.tokenRange());
+        if (tableHandle.filter().isPresent())
+            ticket = ticket.withFilter(tableHandle.filter().get());
+        if (tableHandle.aggregation().isPresent())
+            ticket = ticket.withAggregation(tableHandle.aggregation().get());
+
         List<ArrowFlightColumnHandle> projected = columns.stream()
                                                           .map(ArrowFlightColumnHandle.class::cast)
                                                           .toList();
-        return new ArrowFlightPageSource(client, (ArrowFlightSplit) split, projected);
+        return new ArrowFlightPageSource(client, ticket, arrowSplit.replicas(), projected);
     }
 }

@@ -10,25 +10,31 @@ or get built by Cassandra's own Ant build; nothing outside `trino/` was changed 
 
 ## Scope
 
-The Cassandra-side service this connector talks to is still a proof-of-concept in some respects,
-but cluster-aware, distributed reads and predicate/aggregation pushdown are real, in-scope
-requirements, not deferred/future work - see `../ARROW-FLIGHT.md` and the in-progress work
-tracked against this connector:
+The Cassandra-side service this connector talks to is still a proof-of-concept in some respects
+(no authentication, see below), but cluster-aware, distributed reads and predicate/aggregation
+pushdown are implemented - see `../ARROW-FLIGHT.md`:
 
 - **No authentication yet.** Anyone who can open a TCP connection to the Flight port can read
   every row of every user table. Do not point this at a Cassandra node reachable from an
   untrusted network until this lands.
-- **Cluster-aware, token-range-split reads** (in progress): ring topology discovery via
-  `cassandra-sidecar`'s client, split planning ported from `cassandra-analytics`
-  (`CassandraRing`/`TokenPartitioner`/`RangeUtils`), and per-split routing to the owning
-  replica's Arrow Flight port - mirroring how the Spark analytics connector already does
-  distributed reads via the sidecar, adapted for live query-time reads instead of
-  Spark's offline bulk SSTable transfer.
-- **Filter and aggregation pushdown** (in progress): predicates and `GROUP BY`/aggregate
-  functions pushed down to the server, evaluated after the cursor-merge reconciles each row
-  (correctness requires this - a predicate can only be evaluated once shadowing/reconciliation
-  has resolved a column to its true value), not applied client-side over an unfiltered scan.
-- **Full-table scan only** for now. No point-read API yet.
+- **Cluster-aware, token-range-split reads**: ring topology discovery via `cassandra-sidecar`'s
+  client, split planning via `cassandra-analytics-common`'s `CassandraRing`/`TokenPartitioner`,
+  and per-split routing directly to the owning replica(s)' Arrow Flight port - see
+  [Cluster-aware reads](#cluster-aware-reads) below for the full design, including the
+  replica-selection simplification versus the Spark analytics connector.
+- **Filter and aggregation pushdown**: `WHERE` predicates and `GROUP BY`/aggregate functions are
+  translated into the Flight ticket's `filter`/`aggregation` clauses and pushed to the server,
+  evaluated after the cursor-merge reconciles each row (correctness requires this - a predicate
+  can only be evaluated once shadowing/reconciliation has resolved a column to its true value).
+  See [Filter and aggregation pushdown](#filter-and-aggregation-pushdown) below for exact
+  coverage and fallback behavior.
+- **Full-table scan only** (split by token range). No point-read API yet.
+- The Cassandra-side Arrow Flight service's support for `tokenRange`/`filter`/`aggregation` in
+  the ticket protocol was being implemented in parallel with this connector and had not landed
+  yet as of this writing - this connector is written against the documented wire contract (see
+  `../ARROW-FLIGHT.md`) but the full pushdown path has not been run end-to-end against a live,
+  finished server. Ring discovery and split planning *have* been verified against a real running
+  `cassandra`+`sidecar` stack - see [Tests](#tests).
 
 ## Versions targeted
 
@@ -46,7 +52,34 @@ tracked against this connector:
   static-init failure on the very first `RootAllocator`); `flight-core:19.0.0`'s transitive Netty
   requests land on 4.1.130.Final under Maven's nearest-wins, but Gradle's module-metadata
   resolution can float several Netty modules up to 4.2.x, so this is pinned explicitly rather
-  than left to chance.
+  than left to chance. `sidecar-vertx-client`'s Vert.x 4.5.23 also requests plain Netty 4.1.130.Final
+  directly, so it doesn't disturb this pin.
+- **`org.apache.cassandra:sidecar-client:0.4.0`** + **`sidecar-vertx-client:0.4.0`** - the
+  sidecar REST client used for ring/topology discovery. `sidecar-client` ships only the
+  transport-agnostic `HttpClient` interface (no concrete implementation, and no shaded fat jar is
+  published for plain consumption) - `sidecar-vertx-client` supplies the actual Vert.x-based
+  `HttpClient`/`RequestExecutor` implementation; both are required together (see
+  `topology/SidecarClients.java`'s javadoc for how this was discovered/verified, since neither
+  artifact publishes a sources/javadoc jar).
+- **`org.apache.cassandra:cassandra-analytics-common:0.4.0`** - `CassandraRing`/
+  `TokenPartitioner`/`RangeUtils` ring/split math, confirmed to have zero Spark dependencies.
+  Two undeclared runtime requirements were discovered by testing against it (see the comment
+  block above `cassandra-analytics-common` in `build.gradle.kts`) and pinned explicitly rather
+  than left to accident:
+  - **Guava** (`33.5.0-jre`) - `CassandraRing`/`TokenPartitioner`/`RangeUtils` use Guava
+    `Range`/`RangeMap` at the API level, but the artifact declares no Guava dependency of its own;
+    it only compiles/links today because Guava rides in transitively from `flight-core`'s
+    `grpc-netty` dependency.
+  - **Kryo** (`com.esotericsoftware:kryo:5.6.2`) - `CassandraRing`/`TokenPartitioner`/
+    `CassandraInstance`/`ReplicationFactor` each declare a `SERIALIZER` static field whose type
+    extends `com.esotericsoftware.kryo.Serializer`, so merely *loading* any of those classes
+    (not using Kryo serialization at all) fails with `NoClassDefFoundError` without Kryo on the
+    classpath - not declared as a dependency of `cassandra-analytics-common`'s own POM (Spark's
+    bulk-reader environment normally supplies its own Kryo).
+- **`com.fasterxml.jackson.core:jackson-databind:2.21.0`** - builds/serializes the Flight ticket
+  JSON (`tokenRange`/`filter`/`aggregation`); already present transitively (`arrow-vector` and
+  `sidecar-client` both pull it in), declared explicitly rather than left to whichever version
+  those happen to request.
 
 The build auto-provisions a JDK 25 toolchain via the `foojay-resolver-convention` Gradle plugin
 (`settings.gradle.kts`), so `./gradlew` works even if your shell's default JDK is older (Cassandra
@@ -89,9 +122,12 @@ docker exec -it trino-arrow-flight trino
 
 If your Cassandra node isn't reachable at `127.0.0.1` from inside the container (it usually
 isn't - the container has its own network namespace), edit
-`catalog/arrow_flight.properties` first: set `arrow-flight.host` to an address the container can
-reach (e.g. the host's LAN IP, or `host.docker.internal` on Docker Desktop), or run the container
-with `--network host` on Linux.
+`catalog/arrow_flight.properties` first: set `arrow-flight.host` (schema-discovery bootstrap) and
+`sidecar.contact-points` (ring/topology discovery) to an address the container can reach (e.g.
+the host's LAN IP, or `host.docker.internal` on Docker Desktop), or run the container with
+`--network host` on Linux. Every replica address returned by ring discovery must also be reachable
+from wherever Trino workers run - not just the bootstrap/contact-point hosts - since scans connect
+directly to each split's owning replica(s).
 
 ### Option B: a manual Trino server install
 
@@ -103,7 +139,9 @@ with `--network host` on Linux.
    `build/plugin/cassandra_arrow_flight/` directory to
    `<TRINO_HOME>/plugin/cassandra_arrow_flight/`.
 3. Copy `catalog/arrow_flight.properties` to `<TRINO_HOME>/etc/catalog/arrow_flight.properties`,
-   editing `arrow-flight.host`/`arrow-flight.port` to point at your Cassandra node.
+   editing `arrow-flight.host`/`arrow-flight.port` (schema-discovery bootstrap) and
+   `sidecar.contact-points` (ring/topology discovery, `host:port`, comma-separated) to point at
+   your cluster. See [Cluster-aware reads](#cluster-aware-reads) for what each property does.
 4. Start the server (`bin/launcher start` or `run`), then connect with the Trino CLI or any
    JDBC/ODBC client.
 
@@ -119,6 +157,69 @@ arrow_flight_port: 9143   # default; change if you also change arrow-flight.port
 **This is a development/PoC-only service with no authentication** (see
 `src/java/org/apache/cassandra/arrow/ArrowFlightService.java`) - do not enable it on a node
 reachable from an untrusted network.
+
+## Cluster-aware reads
+
+Ring topology is discovered per query via `cassandra-sidecar`'s async Java client
+(`org.apache.cassandra:sidecar-client`/`sidecar-vertx-client`, wired up in
+`topology/SidecarClients.java`): `ring(keyspace)`, `nodeSettings()` (for the cluster's
+partitioner), and `schema(keyspace)` (whose `CREATE KEYSPACE` DDL text embeds the replication
+factor - parsed by `topology/ReplicationFactorParser.java`, since sidecar has no structured RF
+field). That feeds `cassandra-analytics-common`'s `CassandraRing`/`TokenPartitioner` (the same
+ring-math library the Spark bulk-reader/writer use) to compute a token-range split plan
+(`topology/SplitPlanner.java`), targeting `arrow-flight.splits-per-node` splits per node.
+
+Each `ArrowFlightSplit` carries its resolved `(start, end]` token range and an ordered list of
+candidate replica Arrow Flight addresses directly - unlike the Spark analytics connector's
+bare-int `InputPartition`, which resolves a partition ID back into a token range/replica set via
+broadcast state shared across executors. Trino has no equivalent shared-state mechanism (splits
+serialize independently to separate workers), so this connector's splits are self-contained.
+
+**Replica-selection simplification**: this connector does not reproduce
+`cassandra-analytics`'s `PartitionedDataLayer`/`AvailabilityHint`/consistency-level machinery.
+Trino's SPI has no consistency-level concept at all, so the contract here is deliberately
+simpler: a split's replicas are tried in order, and the first one that accepts the `DoGet`
+request wins (see `ArrowFlightPageSource`). This is closer to a CQL driver at consistency level
+`ONE` with a fixed replica preference order than to any stronger guarantee - there is no retry
+budget, no speculative execution, and no cross-replica reconciliation. It is a reasonable v1
+given the existing CQL-based Cassandra connector for Trino makes essentially the same trust
+assumption at `ONE`/`LOCAL_ONE`.
+
+Each replica's Arrow Flight port is *not* discoverable via sidecar (`arrow_flight_port` is a
+custom addition on this branch, not a stock Cassandra/sidecar concept) - it is assumed uniform
+across the cluster and taken from `arrow-flight.port`, combined with each replica's address from
+the ring response.
+
+## Filter and aggregation pushdown
+
+`ConnectorMetadata#applyFilter`/`#applyAggregation` translate Trino's predicate/aggregation
+pushdown representations into the Flight ticket's `filter`/`aggregation` clauses (see
+`../ARROW-FLIGHT.md` §7 and the `pushdown` package); `ArrowFlightPageSourceProvider` embeds the
+result, plus the split's own token range, directly into each split's `DoGet` ticket.
+
+**Predicate pushdown** (`pushdown/PredicatePushdown.java`) translates `Constraint#getSummary()`
+(a `TupleDomain<ColumnHandle>`) - single values to `cmp EQ`, discrete sets to `in`, ranges to
+`cmp`/`and`/`or` trees, nullability to `isNull`/`isNotNull`, with `OR ... IS NULL` for nullable
+domains. Translation is all-or-nothing *per column*: a column either translates completely or is
+left untouched in the returned `remainingFilter` for Trino to still apply - so a query mixing
+pushable and non-pushable predicates still gets partial pushdown. Value encoding
+(`pushdown/FilterValueEncoder.java`) is a documented, explicit design choice for every type this
+connector supports (numbers as JSON numbers, timestamps/dates/times as ISO-8601 strings, UUIDs as
+canonical strings, `varbinary` as base64) since the wire contract only specifies `"value": <JSON
+literal>` generically, not a per-type encoding. **Not translated**: `Constraint#getExpression()`
+(arbitrary `ConnectorExpression`s - casts, multi-column comparisons, function calls) is always
+left for Trino, matching most JDBC-style Trino connectors' v1 scope; `decimal`-typed columns are
+never pushed down (the server's fixed 76-digit precision means this connector never actually
+produces a Trino `DECIMAL`-typed column today - see `ArrowTypeMapping`); `array`/`map`/`row`
+columns are never pushed down.
+
+**Aggregation pushdown** (`pushdown/AggregationPushdown.java`) supports `COUNT(*)`, `COUNT(col)`,
+`SUM(col)`, `MIN(col)`, `MAX(col)`, `AVG(col)` over a single grouping set (plain `GROUP BY` or a
+global aggregation) with a bare column argument - no `DISTINCT`, no `FILTER (WHERE ...)`, no
+`ORDER BY` within the aggregate, no `GROUPING SETS`/`CUBE`/`ROLLUP`, no expression arguments. Per
+the `applyAggregation` SPI contract there is **no partial pushdown**: if any single aggregate in
+the query is unsupported, the *entire* aggregation is left for Trino to compute itself - this
+connector never silently drops or mishandles part of a pushed-down aggregation.
 
 ## Example query
 
@@ -162,8 +263,10 @@ lossy below).
 
 Every Arrow field also carries `cassandra.kind` (`partition_key`/`clustering`/`static`/`regular`)
 and, for key columns, `cassandra.position` metadata (see `ArrowTypeMapping.kindOf`/`positionOf`).
-This connector reads it but doesn't yet act on it (no pushdown in this PoC) - it's there for a
-future filter/split-pushdown extension to use without a second schema round-trip.
+This connector reads it but the current predicate/aggregation pushdown (see
+[Filter and aggregation pushdown](#filter-and-aggregation-pushdown)) doesn't yet key any decision
+off column kind (e.g. preferring partition-key equality predicates) - it's there for a future,
+more targeted pushdown strategy to use without a second schema round-trip.
 
 ## Tests
 
@@ -176,32 +279,67 @@ Cassandra's own Ant-based test tooling:
 - `ArrowPageBuilderTest` - builds real Arrow vectors (via `VectorSchemaRoot`/`RootAllocator`) for
   every type family and asserts the resulting Trino `Page`/`Block` values, including null
   handling, nested array/map/row value extraction, and the missing-projected-column failure path.
+- `ticket.ArrowFlightTicketTest` - pure JSON serialization of the ticket/filter/aggregation
+  model: every filter comparison operator, `and`/`or`/`not` nesting (including deeply nested
+  trees), `in`/`isNull`/`isNotNull`, every aggregate function, `COUNT(*)`'s null column, and the
+  full documented example ticket shape from `../ARROW-FLIGHT.md`.
+- `topology.SplitPlannerTest` - ring-topology &rarr; split-plan computation against synthetic
+  `RingResponse`/`NodeSettings`/`SchemaResponse` data (real `cassandra-analytics-common` classes,
+  no live sidecar): single- and multi-node rings, `SimpleStrategy` vs `NetworkTopologyStrategy`
+  (including a fully-qualified `org.apache.cassandra.locator.*` class name, as real schema dumps
+  use), RF 1 vs RF 2 replica-set sizing, no-gaps/no-overlaps coverage of the full token space,
+  split count scaling with `splitsPerNode`, and error handling for an empty ring/malformed schema.
+- `pushdown.PredicatePushdownTest` - real Trino `TupleDomain`/`Domain`/`ValueSet`/`Range` shapes:
+  single values, discrete sets, open/closed/unbounded ranges, disjoint multi-range `OR`,
+  nullability (`onlyNull`/`notNull`/nullable value sets), every supported type's value encoding
+  (including `uuid`/`varbinary`/`date`), and a mixed supported/unsupported-column case verifying
+  partial pushdown (one column pushed, the other left in `remainingFilter`).
+- `pushdown.AggregationPushdownTest` - real Trino `AggregateFunction`/grouping-set shapes: every
+  supported function, `COUNT(*)` vs `COUNT(col)`, `GROUP BY` column propagation, projection/
+  assignment ordering and typing, and every unsupported shape (`DISTINCT`, `FILTER`, multiple
+  grouping sets, non-`Variable` arguments, unknown function names, one bad aggregate among
+  several) correctly falling back to `Optional.empty()`.
 
-Both suites are pure unit tests with no network, no Cassandra, and no Trino server involved - they
-exercise `ArrowTypeMapping`/`ArrowPageBuilder` directly against hand-built Arrow data.
+All of the above are pure unit tests with no network, no Cassandra, and no Trino server involved.
 
-### What is *not* covered by an automated test here
+### Live-verified against a real sidecar
 
-An end-to-end test (real `ArrowFlightService` + real Trino `Connector`/`ConnectorMetadata`/
-`ConnectorPageSourceProvider` wired together via `io.trino:trino-testing`) was scoped as a
-stretch goal and was **not** built, to keep this PoC's scope bounded - per the task's own
-guidance, clear manual verification steps are an acceptable substitute here. Concretely, the
-following still need a real end-to-end run once a Cassandra node is available with
-`start_arrow_flight: true`:
+`ArrowFlightTopologyService`/`SidecarClients` (the actual Vert.x-based `SidecarClient` wiring -
+see [Versions targeted](#versions-targeted) for why two separate artifacts are needed) was run
+against the real, running `cassandra` + `sidecar` services from `../docker-compose.yml`
+(`docker compose up -d cassandra sidecar` from `trino/`) - not just the synthetic-data unit
+tests above. This confirmed, against a live server: real HTTP connectivity and error handling
+(a genuine `403 Forbidden` for a sidecar-restricted system keyspace was correctly surfaced through
+`RetriesExhaustedException`), and a full successful ring-discovery-to-split-plan round trip
+against a real user keyspace (`ring()`/`nodeSettings()`/`schema()` calls, `ReplicationFactor`
+parsing of real DDL text using a fully-qualified strategy class name, ring vnode-token coverage,
+and correct application of the configured Arrow Flight port) - 17 splits computed correctly
+covering the full token ring for a real single-node/16-vnode/RF=1 keyspace.
 
-- `listSchemaNames`/`listTables`/`getTableHandle` actually round-tripping through a live
-  `ListFlights`/`GetFlightInfo` call (unit-tested only via the type-mapping/page-building logic
-  they call into, not the gRPC/Flight wire calls themselves).
-- The single-split-per-table path (`ArrowFlightSplitManager`/`ArrowFlightPageSourceProvider`)
-  actually opening a `DoGet` stream against a running service and paging through real batches.
+### What is *not* covered by an automated or live test here
+
+- **The pushdown wire protocol end-to-end**: the Cassandra-side Arrow Flight service's support
+  for `tokenRange`/`filter`/`aggregation` in the ticket protocol was being implemented in
+  parallel with this connector and had not landed as of this writing, so `ArrowFlightPageSource`
+  actually opening a `DoGet` stream with a real filter/aggregation/token-range ticket and
+  receiving correctly-filtered/aggregated/range-scoped Arrow batches back has not been run
+  end-to-end. The ticket JSON this connector produces is unit-tested against the documented wire
+  contract (`ticket.ArrowFlightTicketTest`), and the translation logic that produces it is
+  unit-tested against real Trino SPI types (`pushdown.*Test`), but the two halves have not been
+  connected end-to-end.
+- `listSchemaNames`/`listTables`/`getTableHandle`/schema resolution actually round-tripping
+  through a live `ListFlights`/`GetFlightInfo` call (unit-tested only via the type-mapping/
+  page-building logic they call into, not the gRPC/Flight wire calls themselves).
+- A full `ConnectorMetadata`/`ConnectorSplitManager`/`ConnectorPageSourceProvider` wired
+  together via `io.trino:trino-testing` against a real Trino engine - out of scope, as before.
 - Behavior against Cassandra's actual per-batch flush/memtable-freshness semantics (see
-  `ARROW-FLIGHT.md` §3) - the unit tests here build synthetic Arrow batches directly and never
-  touch Cassandra's read path.
-- Any data-correctness bug on the Cassandra side that the parallel bug-fixing pass on
-  `src/java/org/apache/cassandra/arrow/` is actively addressing - this connector was written
-  against the documented wire contract (ticket format, descriptor format, schema field metadata),
-  which that pass is not changing, but has not been run against a live, fixed server.
+  `ARROW-FLIGHT.md` §3).
+- Any data-correctness bug on the Cassandra side that a parallel bug-fixing pass on
+  `src/java/org/apache/cassandra/arrow/` may be addressing - this connector was written against
+  the documented wire contract, which that pass is not changing, but has not been run against a
+  live, finished server.
 
-To perform that manual verification once a Cassandra node is up: follow
-[Installing into a Trino server](#installing-into-a-trino-server) above, then run the
-[example query](#example-query) against a real keyspace/table.
+To perform manual verification once a Cassandra node with a finished Arrow Flight service is up:
+follow [Installing into a Trino server](#installing-into-a-trino-server) above, then run the
+[example query](#example-query) against a real keyspace/table, including `WHERE`/`GROUP BY`
+queries to exercise pushdown.

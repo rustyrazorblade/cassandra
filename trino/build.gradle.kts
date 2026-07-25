@@ -61,6 +61,47 @@ dependencies {
     }
     implementation("org.apache.arrow:flight-core:$arrowVersion")
 
+    // Used to build/serialize the Flight ticket JSON (tokenRange/filter/aggregation - see
+    // ARROW-FLIGHT.md and ArrowFlightTicket). Already present transitively (arrow-vector and
+    // sidecar-client both pull it in), declared explicitly so the version isn't left to whatever
+    // those other libraries happen to request.
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.21.0")
+
+    // Sidecar ring/topology discovery. sidecar-client is transport-agnostic (ships only the
+    // HttpClient interface); sidecar-vertx-client supplies the actual Vert.x-based HttpClient
+    // implementation (VertxHttpClient/VertxRequestExecutor) - without it SidecarClient has no
+    // concrete way to make an HTTP call. Both confirmed present on Maven Central as separate
+    // artifacts (there is no fat/shaded "sidecar-client-all" published for plain consumption;
+    // cassandra-analytics' own Sidecar.java wiring - read from cassandra-analytics-sidecar-client's
+    // sources jar - was used as the template for how these two are wired together, since
+    // sidecar-client's own javadoc/sources jars are not published).
+    implementation("org.apache.cassandra:sidecar-client:0.4.0")
+    implementation("org.apache.cassandra:sidecar-vertx-client:0.4.0")
+
+    // Ring/split math (CassandraRing, TokenPartitioner, RangeUtils) - confirmed to have zero
+    // Spark dependencies. Note: despite CassandraRing/TokenPartitioner/RangeUtils importing
+    // com.google.common.collect.Range/RangeMap/etc. at the source level, this artifact declares
+    // NO Guava dependency of its own (verified: its Gradle module metadata lists only slf4j-api;
+    // Guava is not shaded into the jar either). It compiles/links today only because Guava
+    // happens to ride in transitively from flight-core's grpc-netty dependency below - which is
+    // an accident of the current dependency graph, not a guarantee. Pin Guava explicitly so this
+    // keeps working even if that transitive path ever changes; -jre (not -android) since this is
+    // a plain JVM Trino plugin.
+    implementation("org.apache.cassandra:cassandra-analytics-common:0.4.0")
+    implementation("com.google.guava:guava:33.5.0-jre")
+
+    // cassandra-analytics-common's own Serializable classes (CassandraRing, TokenPartitioner,
+    // CassandraInstance, ReplicationFactor) each declare a
+    // "public static final Serializer SERIALIZER = new Serializer()" field whose nested
+    // Serializer extends com.esotericsoftware.kryo.Serializer - so merely *loading* any of those
+    // classes (not calling anything Kryo-specific) eagerly constructs that nested class in a
+    // static initializer, which fails with NoClassDefFoundError without Kryo on the classpath.
+    // Confirmed at test time (ReplicationFactor.<clinit> failing under SplitPlannerTest); not
+    // declared as a dependency of cassandra-analytics-common's own POM/module metadata at all
+    // (Spark's bulk-reader environment normally supplies its own Kryo), so it must be added here
+    // explicitly even though this connector never uses Kryo serialization itself.
+    implementation("com.esotericsoftware:kryo:5.6.2")
+
     testImplementation("io.trino:trino-spi:$trinoVersion")
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")

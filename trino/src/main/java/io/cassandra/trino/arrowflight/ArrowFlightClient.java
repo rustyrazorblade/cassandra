@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.arrow.flight.FlightClient;
+import org.apache.arrow.flight.FlightDescriptor;
 import org.apache.arrow.flight.FlightInfo;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Location;
@@ -12,6 +13,8 @@ import org.apache.arrow.memory.BufferAllocator;
 
 import io.trino.spi.connector.SchemaTableName;
 
+import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
+
 /**
  * Thin wrapper over the Arrow Flight Java client for talking to the Cassandra Arrow Flight
  * service (see {@code org.apache.cassandra.arrow.CassandraFlightProducer} and {@code
@@ -19,8 +22,7 @@ import io.trino.spi.connector.SchemaTableName;
  * the client-side usage pattern this mirrors).
  *
  * <p>Every call opens and closes its own short-lived {@link FlightClient} (matching the PoC's
- * one-endpoint-per-table, no-connection-pooling scope); a production connector would pool
- * these per host.
+ * no-connection-pooling scope); a production connector would pool these per host.
  */
 public final class ArrowFlightClient
 {
@@ -34,6 +36,8 @@ public final class ArrowFlightClient
     /**
      * Every {@code keyspace.table} the service exposes, via {@code ListFlights}. The server
      * enumerates every user keyspace's tables (see {@code CassandraFlightProducer#listFlights}).
+     * Unaffected by the ticket-JSON protocol below - {@code ListFlights} descriptors are still
+     * plain {@code [keyspace, table]} paths.
      */
     public List<SchemaTableName> listTables(String host, int port)
     {
@@ -56,15 +60,18 @@ public final class ArrowFlightClient
     }
 
     /**
-     * Resolves a table's {@link FlightInfo} - its Arrow schema plus its (single, PoC-scope)
-     * {@link org.apache.arrow.flight.FlightEndpoint} - via {@code GetFlightInfo}.
+     * Resolves a table's {@link FlightInfo} - its Arrow schema plus its per-token-range
+     * {@link org.apache.arrow.flight.FlightEndpoint}s - via {@code GetFlightInfo}, using the same
+     * ticket JSON shape as {@code DoGet} carried in the descriptor's {@code command} bytes (see
+     * {@code ARROW-FLIGHT.md}: {@code tokenRange}/{@code filter} are accepted but ignored for
+     * schema-resolution purposes there; only {@code aggregation} changes the returned schema).
      */
-    public FlightInfo getFlightInfo(String host, int port, String keyspace, String table)
+    public FlightInfo getFlightInfo(String host, int port, ArrowFlightTicket ticket)
     {
         FlightClient client = connect(host, port);
         try
         {
-            return client.getInfo(org.apache.arrow.flight.FlightDescriptor.path(keyspace, table));
+            return client.getInfo(FlightDescriptor.command(ticket.toJsonBytes()));
         }
         finally
         {

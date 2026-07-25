@@ -10,6 +10,8 @@ import org.apache.arrow.flight.FlightInfo;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -17,15 +19,27 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
+import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
+
+import io.cassandra.trino.arrowflight.pushdown.AggregationPushdown;
+import io.cassandra.trino.arrowflight.pushdown.PredicatePushdown;
+import io.cassandra.trino.arrowflight.ticket.AggregationSpec;
+import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
+import io.cassandra.trino.arrowflight.ticket.FilterExpression;
 
 /**
  * Schema/table discovery over the Cassandra Arrow Flight service's {@code ListFlights}/
  * {@code GetFlightInfo} descriptors (see {@code CassandraFlightProducer}), and Arrow-schema
- * &rarr; Trino column mapping via {@link ArrowTypeMapping}.
+ * &rarr; Trino column mapping via {@link ArrowTypeMapping}; plus predicate ({@link #applyFilter})
+ * and aggregation ({@link #applyAggregation}) pushdown into the Flight ticket's {@code filter}/
+ * {@code aggregation} clauses (see {@code ARROW-FLIGHT.md} and the {@code pushdown} package).
  *
- * <p><b>PoC scope</b>: no filter/limit/aggregation pushdown (matches the server, which always
- * streams the full unfiltered table - see {@code trino/README.md}).
+ * <p>{@code arrow-flight.host}/{@code arrow-flight.port} remain the bootstrap contact point for
+ * schema discovery only (the schema is uniform cluster-wide); actual scan routing goes through
+ * per-split replica addresses computed by {@link io.cassandra.trino.arrowflight.topology.ArrowFlightTopologyService}
+ * (see {@link ArrowFlightSplitManager}), not this class.
  */
 public class ArrowFlightMetadata implements ConnectorMetadata
 {
@@ -72,7 +86,7 @@ public class ArrowFlightMetadata implements ConnectorMetadata
         {
             // GetFlightInfo returns NOT_FOUND (surfaced as a FlightRuntimeException) for an
             // unknown keyspace/table; a null return tells Trino the table does not exist.
-            flight.getFlightInfo(config.host(), config.port(), tableName.getSchemaName(), tableName.getTableName());
+            flight.getFlightInfo(config.host(), config.port(), ArrowFlightTicket.of(tableName.getSchemaName(), tableName.getTableName()));
         }
         catch (org.apache.arrow.flight.FlightRuntimeException e)
         {
@@ -80,7 +94,7 @@ public class ArrowFlightMetadata implements ConnectorMetadata
                 return null;
             throw e;
         }
-        return new ArrowFlightTableHandle(tableName.getSchemaName(), tableName.getTableName());
+        return ArrowFlightTableHandle.of(tableName.getSchemaName(), tableName.getTableName());
     }
 
     @Override
@@ -109,9 +123,75 @@ public class ArrowFlightMetadata implements ConnectorMetadata
         return new ConnectorTableMetadata(handle.schemaTableName(), columns);
     }
 
+    /**
+     * Translates {@code constraint.getSummary()} (a {@code TupleDomain<ColumnHandle>}) into the
+     * ticket's {@code filter} clause (see {@link PredicatePushdown}). Only the summary domain is
+     * handled - {@code constraint.getExpression()} (arbitrary {@code ConnectorExpression}s) is
+     * left untouched for Trino to evaluate itself, matching most JDBC-style connectors' v1 scope.
+     * Per-column translation is all-or-nothing (see {@link PredicatePushdown}), so this can push
+     * down part of the constraint and correctly leave the rest in the returned
+     * {@code remainingFilter} for Trino to still apply.
+     */
+    @Override
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
+        ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
+    {
+        ArrowFlightTableHandle handle = (ArrowFlightTableHandle) table;
+        PredicatePushdown.Result result = PredicatePushdown.translate(constraint.getSummary());
+
+        if (result.pushedDown().isEmpty())
+            return Optional.empty();
+
+        FilterExpression newFilter = handle.filter().isPresent()
+                                      ? new FilterExpression.And(List.of(handle.filter().get(), result.pushedDown().get()))
+                                      : result.pushedDown().get();
+
+        ArrowFlightTableHandle newHandle = handle.withFilter(newFilter);
+        return Optional.of(new ConstraintApplicationResult<>(newHandle, result.remaining(), constraint.getExpression(), false));
+    }
+
+    /**
+     * Translates the requested aggregation into the ticket's {@code aggregation} clause (see
+     * {@link AggregationPushdown}) - all-or-nothing per the {@code applyAggregation} SPI
+     * contract: either every aggregate/the single grouping set is supported and the whole
+     * aggregation is pushed down, or {@link Optional#empty()} and Trino computes it itself.
+     */
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+        ConnectorSession session,
+        ConnectorTableHandle table,
+        List<AggregateFunction> aggregates,
+        Map<String, ColumnHandle> assignments,
+        List<List<ColumnHandle>> groupingSets)
+    {
+        ArrowFlightTableHandle handle = (ArrowFlightTableHandle) table;
+        if (handle.aggregation().isPresent())
+            // Already aggregated by an earlier call - Trino shouldn't stack aggregations on an
+            // aggregated handle, but decline rather than silently misbuild the ticket if it does.
+            return Optional.empty();
+
+        Optional<AggregationPushdown.Result> translated = AggregationPushdown.translate(aggregates, groupingSets);
+        if (translated.isEmpty())
+            return Optional.empty();
+
+        AggregationSpec spec = translated.get().spec();
+        ArrowFlightTableHandle newHandle = handle.withAggregation(spec);
+
+        return Optional.of(new AggregationApplicationResult<>(
+            newHandle,
+            translated.get().projections(),
+            translated.get().assignments(),
+            Map.of(),
+            false));
+    }
+
     private Schema arrowSchema(ArrowFlightTableHandle handle)
     {
-        FlightInfo info = flight.getFlightInfo(config.host(), config.port(), handle.keyspace(), handle.table());
+        ArrowFlightTicket ticket = ArrowFlightTicket.of(handle.keyspace(), handle.table());
+        if (handle.aggregation().isPresent())
+            ticket = ticket.withAggregation(handle.aggregation().get());
+
+        FlightInfo info = flight.getFlightInfo(config.host(), config.port(), ticket);
         return info.getSchemaOptional()
                    .orElseThrow(() -> new IllegalStateException(
                        "Cassandra Arrow Flight service returned no schema for "

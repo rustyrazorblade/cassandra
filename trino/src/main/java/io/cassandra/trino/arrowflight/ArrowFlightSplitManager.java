@@ -1,5 +1,7 @@
 package io.cassandra.trino.arrowflight;
 
+import java.util.List;
+
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
@@ -9,19 +11,25 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 
+import io.cassandra.trino.arrowflight.topology.ArrowFlightTopologyService;
+import io.cassandra.trino.arrowflight.topology.SplitPlan;
+
 /**
- * PoC scope (matches the Cassandra-side server, see {@code CassandraFlightProducer} and
- * {@code trino/README.md}): exactly one split per table, since {@code getFlightInfo} always
- * returns exactly one {@link org.apache.arrow.flight.FlightEndpoint} covering the whole table -
- * no token-range splitting, no parallelism yet.
+ * Cluster-aware split planning: one split per token subrange computed by
+ * {@link ArrowFlightTopologyService} (ring discovery via cassandra-sidecar + split math via
+ * cassandra-analytics-common's {@code TokenPartitioner} - see that class's javadoc), each
+ * targeting its owning replica(s) directly.
+ *
+ * <p>Split planning does one synchronous (blocking) round trip to sidecar per {@code getSplits}
+ * call - acceptable here since this runs once per query at planning time, not per row/batch.
  */
 public class ArrowFlightSplitManager implements ConnectorSplitManager
 {
-    private final ArrowFlightConfig config;
+    private final ArrowFlightTopologyService topology;
 
-    public ArrowFlightSplitManager(ArrowFlightConfig config)
+    public ArrowFlightSplitManager(ArrowFlightTopologyService topology)
     {
-        this.config = config;
+        this.topology = topology;
     }
 
     @Override
@@ -33,7 +41,11 @@ public class ArrowFlightSplitManager implements ConnectorSplitManager
         Constraint constraint)
     {
         ArrowFlightTableHandle handle = (ArrowFlightTableHandle) table;
-        ArrowFlightSplit split = new ArrowFlightSplit(handle.keyspace(), handle.table(), config.host(), config.port());
-        return new FixedSplitSource(split);
+        List<SplitPlan> plans = topology.splitPlan(handle.keyspace()).join();
+
+        List<ArrowFlightSplit> splits = plans.stream()
+                                              .map(plan -> new ArrowFlightSplit(handle.keyspace(), handle.table(), plan.tokenRange(), plan.replicas()))
+                                              .toList();
+        return new FixedSplitSource(splits);
     }
 }

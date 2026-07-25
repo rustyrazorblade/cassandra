@@ -2,19 +2,29 @@ package io.cassandra.trino.arrowflight;
 
 import java.util.List;
 
-import org.apache.arrow.flight.FlightInfo;
+import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.vector.VectorSchemaRoot;
 
+import io.trino.spi.HostAddress;
 import io.trino.spi.Page;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.Type;
 
+import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
+
 /**
- * Streams the split's single Flight {@code DoGet}, converting each Arrow batch
+ * Streams the split's Flight {@code DoGet} for its resolved token range (plus any pushed-down
+ * filter/aggregation from the table handle), converting each Arrow batch
  * ({@link VectorSchemaRoot}) into a Trino {@link Page} via {@link ArrowPageBuilder}.
+ *
+ * <p>Calls {@code DoGet} directly against the ticket bytes - no {@code GetFlightInfo} round trip
+ * per split (that only happens once, at schema-resolution time - see
+ * {@code ArrowFlightMetadata#arrowSchema}). Tries the split's candidate replicas in order,
+ * opening the stream against the first one that accepts the connection/request (see
+ * {@code ArrowFlightSplit}'s javadoc for the replica-selection simplification this implements).
  */
 public class ArrowFlightPageSource implements ConnectorPageSource
 {
@@ -26,18 +36,38 @@ public class ArrowFlightPageSource implements ConnectorPageSource
 
     public ArrowFlightPageSource(
         ArrowFlightClient client,
-        ArrowFlightSplit split,
+        ArrowFlightTicket ticket,
+        List<HostAddress> replicas,
         List<ArrowFlightColumnHandle> columns)
     {
         this.columnNames = columns.stream().map(ArrowFlightColumnHandle::name).toList();
         this.columnTypes = columns.stream().map(ArrowFlightColumnHandle::type).toList();
 
-        FlightInfo info = client.getFlightInfo(split.host(), split.port(), split.keyspace(), split.table());
-        if (info.getEndpoints().isEmpty())
+        if (replicas.isEmpty())
             throw new IllegalStateException(
-                "Cassandra Arrow Flight service returned no endpoint for " + split.keyspace() + "." + split.table());
-        Ticket ticket = info.getEndpoints().get(0).getTicket();
-        this.streamHandle = client.openStream(split.host(), split.port(), ticket);
+                "Split for " + ticket.keyspace() + "." + ticket.table() + " has no candidate replicas");
+
+        Ticket flightTicket = new Ticket(ticket.toJsonBytes());
+        this.streamHandle = openFirstAvailable(client, replicas, flightTicket);
+    }
+
+    /** Tries each replica in order; the first that accepts {@code DoGet} wins. */
+    private static ArrowFlightClient.StreamHandle openFirstAvailable(
+        ArrowFlightClient client, List<HostAddress> replicas, Ticket ticket)
+    {
+        RuntimeException lastFailure = null;
+        for (HostAddress replica : replicas)
+        {
+            try
+            {
+                return client.openStream(replica.getHostText(), replica.getPort(), ticket);
+            }
+            catch (FlightRuntimeException | IllegalStateException e)
+            {
+                lastFailure = e;
+            }
+        }
+        throw lastFailure;
     }
 
     @Override

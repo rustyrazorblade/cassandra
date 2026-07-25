@@ -11,17 +11,21 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
 
+import io.cassandra.trino.arrowflight.topology.ArrowFlightTopologyService;
+
 public class ArrowFlightConnector implements Connector
 {
     private final ArrowFlightConfig config;
     private final BufferAllocator allocator;
     private final ArrowFlightClient client;
+    private final ArrowFlightTopologyService topology;
 
     public ArrowFlightConnector(ArrowFlightConfig config)
     {
         this.config = config;
         this.allocator = new RootAllocator();
         this.client = new ArrowFlightClient(allocator);
+        this.topology = new ArrowFlightTopologyService(config);
     }
 
     @Override
@@ -39,7 +43,7 @@ public class ArrowFlightConnector implements Connector
     @Override
     public ConnectorSplitManager getSplitManager()
     {
-        return new ArrowFlightSplitManager(config);
+        return new ArrowFlightSplitManager(topology);
     }
 
     @Override
@@ -51,6 +55,7 @@ public class ArrowFlightConnector implements Connector
     @Override
     public void shutdown()
     {
+        topology.close();
         allocator.close();
     }
 }
