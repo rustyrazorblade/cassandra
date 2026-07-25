@@ -1041,7 +1041,7 @@ native_transport_port: 9042
 # org.apache.cassandra.arrow.ArrowFlightService). This is a development/PoC-only interface with
 # NO AUTHENTICATION OR AUTHORIZATION: anyone who can reach arrow_flight_port can read every row of
 # every user table. Do NOT enable this on a node reachable from an untrusted network.
-start_arrow_flight: false
+start_arrow_flight: true
 # port for the Arrow Flight service to listen for clients on, when start_arrow_flight is true.
 # Bound on the same address as native_transport_port (rpc_address). See the warning above.
 arrow_flight_port: 9143

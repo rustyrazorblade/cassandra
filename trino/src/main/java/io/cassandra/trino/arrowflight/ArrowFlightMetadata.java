@@ -22,6 +22,7 @@ import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.predicate.TupleDomain;
 
 import io.cassandra.trino.arrowflight.pushdown.AggregationPushdown;
 import io.cassandra.trino.arrowflight.pushdown.PredicatePushdown;
@@ -131,22 +132,42 @@ public class ArrowFlightMetadata implements ConnectorMetadata
      * Per-column translation is all-or-nothing (see {@link PredicatePushdown}), so this can push
      * down part of the constraint and correctly leave the rest in the returned
      * {@code remainingFilter} for Trino to still apply.
+     *
+     * <p><b>Idempotency (bug fixed here):</b> the Trino SPI contract allows - and in practice
+     * does - invoke {@code applyFilter} again on the same table handle with a constraint that
+     * includes what was already pushed down (e.g. across successive optimizer passes); a
+     * connector is required to recognize that and return {@link Optional#empty()} once nothing
+     * new is being added, rather than treating every call as incremental. This used to
+     * unconditionally wrap {@code handle.filter()} (the previous call's translated tree) around a
+     * fresh translation of whatever constraint arrived this time - for a plan requiring several
+     * {@code applyFilter} passes over an unchanged constraint (observed with a Trino-rewritten
+     * {@code LIKE 'prefix%'} range, though nothing here is specific to {@code LIKE}), that grew
+     * the filter tree by one nesting level per call until it failed to serialize. Fixed by
+     * tracking the raw, already-enforced {@link TupleDomain} (see
+     * {@link ArrowFlightTableHandle#enforcedConstraint()}), short-circuiting when intersecting it
+     * with the incoming constraint changes nothing, and otherwise re-translating the FULL
+     * accumulated domain from scratch each time (replacing, not wrapping, the previous filter) -
+     * both correct regardless of how many times Trino calls this for the same effective
+     * constraint, and simpler than combining two already-translated trees.
      */
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
         ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
     {
         ArrowFlightTableHandle handle = (ArrowFlightTableHandle) table;
-        PredicatePushdown.Result result = PredicatePushdown.translate(constraint.getSummary());
+        TupleDomain<ColumnHandle> newConstraint = handle.enforcedConstraint().intersect(constraint.getSummary());
 
+        if (newConstraint.equals(handle.enforcedConstraint()))
+            // Nothing new beyond what's already enforced - must not re-translate/re-wrap, or a
+            // plan that revisits this table handle several times would grow the filter tree by
+            // one nesting level per visit (see javadoc above).
+            return Optional.empty();
+
+        PredicatePushdown.Result result = PredicatePushdown.translate(newConstraint);
         if (result.pushedDown().isEmpty())
             return Optional.empty();
 
-        FilterExpression newFilter = handle.filter().isPresent()
-                                      ? new FilterExpression.And(List.of(handle.filter().get(), result.pushedDown().get()))
-                                      : result.pushedDown().get();
-
-        ArrowFlightTableHandle newHandle = handle.withFilter(newFilter);
+        ArrowFlightTableHandle newHandle = handle.withFilter(newConstraint, result.pushedDown().get());
         return Optional.of(new ConstraintApplicationResult<>(newHandle, result.remaining(), constraint.getExpression(), false));
     }
 
