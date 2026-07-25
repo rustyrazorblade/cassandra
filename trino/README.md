@@ -158,6 +158,60 @@ arrow_flight_port: 9143   # default; change if you also change arrow-flight.port
 `src/java/org/apache/cassandra/arrow/ArrowFlightService.java`) - do not enable it on a node
 reachable from an untrusted network.
 
+## Loading test data and querying end-to-end
+
+The full local stack (`../docker-compose.yml`, run from `trino/`) wires together this branch's
+Cassandra build with the Flight service enabled, `cassandra-sidecar` for topology discovery, and
+Trino with this connector installed. This section documents a verified round trip: bring the
+stack up, load real data, and query it through Trino - not just each piece in isolation.
+
+```bash
+cd trino
+docker compose up -d cassandra sidecar trino   # build + start; see docker-compose.yml's header
+                                                 # comment for the on-host Cassandra build prerequisite
+docker compose --profile stress run --rm easy-stress   # loads 10M rows via RandomPartitionAccess
+```
+
+Verified against a real run of this exact stack: 10,000,000 write operations via
+`RandomPartitionAccess` (single thread, `-i 10000000`, `--readrate 0 --deleterate 0` - see the
+`easy-stress` service definition in `../docker-compose.yml` for why iteration count is per-thread,
+not a total) landed 9,875,527 distinct rows in `cassandra_easy_stress.random_access` (the random
+partition/row-id generator produces a small number of overwritten duplicates at this fill ratio -
+expected, not a bug). Querying it via Trino afterward:
+
+```bash
+docker exec -it arrow-flight-trino trino
+```
+
+```sql
+SELECT count(*) FROM arrow_flight.cassandra_easy_stress.random_access;
+SELECT * FROM arrow_flight.cassandra_easy_stress.random_access LIMIT 5;
+```
+
+returned the same row count and real data, confirming the full path: cursor-merge scan ->
+`ArrowRowAssembler` -> Arrow Flight `DoGet` -> this connector's `ArrowFlightPageSource` -> Trino.
+This specifically verifies the **plain-scan path** (no `WHERE`/`GROUP BY` pushdown exercised) -
+see [Tests](#tests) below for what filter/aggregation pushdown still lacks live verification.
+
+For monitoring query history/cluster state, Trino's own Web UI is at
+`http://localhost:${TRINO_PORT:-8080}` (`http://localhost:18080` if you've overridden
+`TRINO_PORT`, as in a setup running alongside another local Trino/Cassandra) - it is not a SQL
+editor; use the `trino` CLI above (or any JDBC/ODBC client against the same port) to actually run
+queries.
+
+**Operational gotcha confirmed by this run**: `sidecar` shares `cassandra`'s network namespace
+(`network_mode: "service:cassandra"`) to reach its JMX/CQL ports directly. Restarting only the
+`cassandra` service (e.g. `docker compose restart cassandra`, needed after any config or jar
+change) leaves `sidecar` holding a dead JMX RMI connection - it stays reporting healthy (its own
+HTTP health check doesn't probe JMX) but every ring/topology-dependent Trino query then fails
+with `RetriesExhaustedException` on `/api/v1/cassandra/settings`. Always restart `sidecar`
+immediately after restarting `cassandra`:
+
+```bash
+docker compose restart cassandra
+docker compose restart sidecar
+```
+
 ## Cluster-aware reads
 
 Ring topology is discovered per query via `cassandra-sidecar`'s async Java client
@@ -316,20 +370,36 @@ parsing of real DDL text using a fully-qualified strategy class name, ring vnode
 and correct application of the configured Arrow Flight port) - 17 splits computed correctly
 covering the full token ring for a real single-node/16-vnode/RF=1 keyspace.
 
+### Now live-verified: the plain-scan path end-to-end
+
+Update: the gap below describing an unverified `DoGet` round trip is now partly closed. Following
+[Loading test data and querying end-to-end](#loading-test-data-and-querying-end-to-end), a real
+`docker compose` stack (Cassandra with the Flight service enabled, `sidecar`, this Trino
+connector) served a real 10M-row table (`cassandra_easy_stress.random_access`, loaded via
+`cassandra-easy-stress`'s `RandomPartitionAccess`) through `SELECT count(*)` and `SELECT * ...
+LIMIT 5` via Trino, with results matching a direct `pyarrow.flight` client against the same
+ticket. This confirms, for real: `listSchemaNames`/`listTables`/`getTableHandle` resolving through
+a live `ListFlights`/`GetFlightInfo` call, and `ArrowFlightPageSource` opening a real `DoGet` and
+receiving correctly-typed Arrow batches back for a plain (no `tokenRange`/`filter`/`aggregation`)
+ticket.
+
+**Still not covered** (this run did not exercise them): a `WHERE`/`GROUP BY` query that actually
+exercises `filter`/`aggregation` pushdown end-to-end - the ticket JSON this connector produces for
+those is unit-tested against the documented wire contract (`ticket.ArrowFlightTicketTest`) and the
+translation logic is unit-tested against real Trino SPI types (`pushdown.*Test`), but the two
+halves plus the server's actual filter/aggregation evaluation have not been connected end-to-end
+against a live server. Multi-split (`tokenRange`-bounded) scans were also not exercised by this
+single-node run - see [Cluster-aware reads](#cluster-aware-reads) for that separately-verified
+ring/split-planning logic. Confirm with a query like `SELECT count(*) FROM ... WHERE value >
+'M'` or `SELECT partition_id, count(*) FROM ... GROUP BY partition_id` against the same table to
+close this remaining gap.
+
 ### What is *not* covered by an automated or live test here
 
-- **The pushdown wire protocol end-to-end**: the Cassandra-side Arrow Flight service's support
-  for `tokenRange`/`filter`/`aggregation` in the ticket protocol was being implemented in
-  parallel with this connector and had not landed as of this writing, so `ArrowFlightPageSource`
-  actually opening a `DoGet` stream with a real filter/aggregation/token-range ticket and
-  receiving correctly-filtered/aggregated/range-scoped Arrow batches back has not been run
-  end-to-end. The ticket JSON this connector produces is unit-tested against the documented wire
-  contract (`ticket.ArrowFlightTicketTest`), and the translation logic that produces it is
-  unit-tested against real Trino SPI types (`pushdown.*Test`), but the two halves have not been
-  connected end-to-end.
 - `listSchemaNames`/`listTables`/`getTableHandle`/schema resolution actually round-tripping
   through a live `ListFlights`/`GetFlightInfo` call (unit-tested only via the type-mapping/
-  page-building logic they call into, not the gRPC/Flight wire calls themselves).
+  page-building logic they call into, not the gRPC/Flight wire calls themselves) - **now live-
+  verified for the plain-scan path**, see above.
 - A full `ConnectorMetadata`/`ConnectorSplitManager`/`ConnectorPageSourceProvider` wired
   together via `io.trino:trino-testing` against a real Trino engine - out of scope, as before.
 - Behavior against Cassandra's actual per-batch flush/memtable-freshness semantics (see

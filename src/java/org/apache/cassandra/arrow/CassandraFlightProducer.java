@@ -18,10 +18,12 @@
 
 package org.apache.cassandra.arrow;
 
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.locks.LockSupport;
 
+import com.sun.management.ThreadMXBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,6 +79,23 @@ import org.apache.cassandra.schema.TableMetadata;
 public class CassandraFlightProducer implements FlightProducer
 {
     private static final Logger logger = LoggerFactory.getLogger(CassandraFlightProducer.class);
+
+    /**
+     * Measurement-only instrumentation (not part of the read path's design; see the "garbage-free
+     * reads" investigation in {@code ARROW-FLIGHT.md}): reports, per {@link #getStream} call, the
+     * heap bytes allocated by the thread handling that call, from ticket-parse through the final
+     * batch's {@code putNext()}. {@link com.sun.management.ThreadMXBean#getThreadAllocatedBytes} is a
+     * monotonically-increasing per-thread counter, so a before/after delta on the single thread that
+     * runs this (synchronous, single-threaded per the class javadoc) call is exact - no sampling, no
+     * safepoint bias, unlike heap-dump diffing or GC-log inference.
+     */
+    private static final ThreadMXBean THREAD_MX_BEAN = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+
+    static
+    {
+        if (THREAD_MX_BEAN.isThreadAllocatedMemorySupported() && !THREAD_MX_BEAN.isThreadAllocatedMemoryEnabled())
+            THREAD_MX_BEAN.setThreadAllocatedMemoryEnabled(true);
+    }
 
     private final BufferAllocator allocator;
     private final long targetBatchBytes;
@@ -180,6 +199,10 @@ public class CassandraFlightProducer implements FlightProducer
     @Override
     public void getStream(CallContext context, Ticket ticket, ServerStreamListener listener)
     {
+        long threadId = Thread.currentThread().getId();
+        boolean measuring = THREAD_MX_BEAN.isThreadAllocatedMemorySupported() && THREAD_MX_BEAN.isThreadAllocatedMemoryEnabled();
+        long startAllocatedBytes = measuring ? THREAD_MX_BEAN.getThreadAllocatedBytes(threadId) : -1;
+        long[] rowsScanned = { 0 };
         try
         {
             FlightTicket parsed = FlightTicket.parse(ticket.getBytes());
@@ -212,6 +235,7 @@ public class CassandraFlightProducer implements FlightProducer
                         if (listener.isCancelled())
                             throw new CancellationSignal();
 
+                        rowsScanned[0] += batch.getRowCount();
                         VectorUnloader unloader = new VectorUnloader(batch);
                         try (ArrowRecordBatch recordBatch = unloader.getRecordBatch())
                         {
@@ -245,6 +269,16 @@ public class CassandraFlightProducer implements FlightProducer
         {
             logger.warn("Arrow Flight scan of ticket {} failed", new String(ticket.getBytes(), StandardCharsets.UTF_8), e);
             listener.error(CallStatus.INTERNAL.withCause(e).toRuntimeException());
+        }
+        finally
+        {
+            if (measuring)
+            {
+                long allocatedBytes = THREAD_MX_BEAN.getThreadAllocatedBytes(threadId) - startAllocatedBytes;
+                long rows = rowsScanned[0];
+                logger.info("arrow-flight-allocation rows={} bytesAllocated={} bytesPerRow={}",
+                            rows, allocatedBytes, rows == 0 ? 0 : (allocatedBytes / rows));
+            }
         }
     }
 

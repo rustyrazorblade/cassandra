@@ -99,9 +99,20 @@ services:
 
   # One-shot data loader, not part of the default `docker compose up`. Run explicitly:
   #     docker compose --profile stress run --rm easy-stress
-  # This command is best-effort, based on cassandra-easy-stress's documented CLI
-  # (https://apache.github.io/cassandra-easy-stress/) - its containerized entrypoint isn't
-  # documented upstream. If the image's entrypoint doesn't match, check it directly:
+  # RandomPartitionAccess writes single-column-family rows (partition_id text, row_id int,
+  # value text) - a good stand-in for "one large partition per key" analytical-scan testing.
+  # IMPORTANT: --iterations is a PER-THREAD count, not a total (see
+  # WorkloadRunner/commands/Run.kt#createRunners - each of --threads workers runs the full
+  # --iterations count independently). With --threads left at its default of 1, -i 10000000
+  # below is exactly 10,000,000 total write operations - verified against a real run (see
+  # README.md's "Loading test data" section). If you raise --threads, divide --iterations by
+  # the thread count to keep the same total, or you will write threads*iterations rows.
+  # --readrate/--deleterate 0 makes every operation an insert (RandomPartitionAccess otherwise
+  # defaults to a small nonzero read rate).
+  # This command itself (host/port/args shape) is verified against the LOCAL build
+  # (~/dev/cassandra-easy-stress or equivalent checkout run directly against the host-mapped
+  # CQL port) - the containerized image's own entrypoint was not independently re-verified. If
+  # this container's entrypoint doesn't accept the same arguments, check it directly:
   #     docker compose --profile stress run --rm --entrypoint sh easy-stress -c 'cassandra-easy-stress --help || bin/cassandra-easy-stress --help'
   easy-stress:
     image: ghcr.io/apache/cassandra-easy-stress:latest
@@ -112,13 +123,17 @@ services:
         condition: service_healthy
     command:
       - run
-      - KeyValue
+      - RandomPartitionAccess
       - --host
       - cassandra
       - --port
       - "9042"
       - -i
-      - "100000"
+      - "10000000"
+      - --readrate
+      - "0"
+      - --deleterate
+      - "0"
       - --replication
       - "{'class': 'SimpleStrategy', 'replication_factor':1}"
 

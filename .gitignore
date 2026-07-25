@@ -98,3 +98,5 @@ cassandra-builds/
 cassandra-dtest/
 
 conf/triggers/trigger-example.jar
+# roborev snapshots
+/.roborev/
