@@ -6,6 +6,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
 
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Ticket;
@@ -38,7 +41,12 @@ import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
  * eagerly in the constructor (matching {@code ArrowFlightPageSource}'s own precedent of opening
  * its Flight stream(s) eagerly in its constructor) - reasonable given a pushed-down aggregation's
  * result set is, by definition, reduced/grouped and expected to be small relative to the scanned
- * data.
+ * data. Every subrange's fetch is a blocking Flight {@code DoGet} round trip; collapsing every
+ * subrange into this one split (see {@link ArrowFlightSplitManager}) would otherwise serialize
+ * all of that network I/O onto a single thread, so the fetches are fanned out onto the supplied
+ * {@code executor} and joined before merging - this is the only place aggregated queries lose the
+ * inter-split parallelism plain scans/filters keep, and even that loss is now confined to the
+ * merge step, not the network fetch itself.
  *
  * <p><b>Known scope gap</b>: a global aggregation (no {@code GROUP BY}) over a table with zero
  * matching rows in <em>every</em> subrange produces zero output rows here, whereas standard SQL
@@ -58,6 +66,7 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
 
     public ArrowFlightAggregatingPageSource(
         ArrowFlightClient client,
+        ExecutorService executor,
         ArrowFlightSplit split,
         ArrowFlightTableHandle tableHandle,
         List<ArrowFlightColumnHandle> columns)
@@ -76,9 +85,27 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
 
         WireSchema wireSchema = buildWireSchema(groupByNames, groupByTypes, mergePlan, outputTypeByName);
 
+        // Dispatch every subrange's fetch concurrently; each produces its own independent group
+        // map (no shared mutable state, no locking needed), then fold them together sequentially
+        // as each completes - the folding itself is pure in-memory work, cheap relative to the
+        // network fetch it's waiting on.
+        List<CompletableFuture<Map<List<Object>, Object[]>>> futures = split.subRanges().stream()
+            .map(subRange -> CompletableFuture.supplyAsync(
+                () -> fetchSubRange(client, split, tableHandle, subRange, wireSchema), executor))
+            .toList();
+
         Map<List<Object>, Object[]> mergedByGroup = new LinkedHashMap<>();
-        for (ArrowFlightSplit.SubRange subRange : split.subRanges())
-            fetchAndMergeSubRange(client, split, tableHandle, subRange, wireSchema, mergedByGroup);
+        try
+        {
+            for (CompletableFuture<Map<List<Object>, Object[]>> future : futures)
+                mergeGroupMaps(wireSchema, mergedByGroup, future.join());
+        }
+        catch (CompletionException e)
+        {
+            if (e.getCause() instanceof RuntimeException runtimeException)
+                throw runtimeException;
+            throw e;
+        }
 
         this.outputTypes = columns.stream().map(ArrowFlightColumnHandle::type).toList();
         List<String> outputNames = columns.stream().map(ArrowFlightColumnHandle::name).toList();
@@ -120,13 +147,13 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
         return new WireSchema(names, types, mergeOps, groupByNames.size());
     }
 
-    private static void fetchAndMergeSubRange(
+    /** Fetches one subrange and returns its own independent group map - safe to build concurrently with other subranges. */
+    private static Map<List<Object>, Object[]> fetchSubRange(
         ArrowFlightClient client,
         ArrowFlightSplit split,
         ArrowFlightTableHandle tableHandle,
         ArrowFlightSplit.SubRange subRange,
-        WireSchema wireSchema,
-        Map<List<Object>, Object[]> mergedByGroup)
+        WireSchema wireSchema)
     {
         ArrowFlightTicket ticket = ArrowFlightTicket.of(split.keyspace(), split.table())
                                                      .withTokenRange(subRange.tokenRange());
@@ -134,15 +161,17 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
             ticket = ticket.withFilter(tableHandle.filter().get());
         ticket = ticket.withAggregation(tableHandle.aggregation().get());
 
+        Map<List<Object>, Object[]> bySubRangeGroup = new LinkedHashMap<>();
         try (ArrowFlightClient.StreamHandle streamHandle = client.openFirstAvailable(subRange.replicas(), new Ticket(ticket.toJsonBytes())))
         {
             FlightStream stream = streamHandle.stream();
             while (stream.next())
             {
                 Page page = ArrowPageBuilder.toPage(stream.getRoot(), wireSchema.columnNames(), wireSchema.columnTypes());
-                mergePage(page, wireSchema, mergedByGroup);
+                mergePage(page, wireSchema, bySubRangeGroup);
             }
         }
+        return bySubRangeGroup;
     }
 
     private static void mergePage(Page page, WireSchema wireSchema, Map<List<Object>, Object[]> mergedByGroup)
@@ -161,6 +190,28 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
                 Type type = wireSchema.columnTypes().get(groupByCount + i);
                 Object value = readValue(type, page.getBlock(groupByCount + i), position);
                 merged[i] = combine(wireSchema.aggMergeOps().get(groupByCount + i), merged[i], value, type);
+            }
+        }
+    }
+
+    /** Folds one subrange's group map into the running total, applying each aggregate column's merge op. */
+    private static void mergeGroupMaps(WireSchema wireSchema, Map<List<Object>, Object[]> target, Map<List<Object>, Object[]> source)
+    {
+        int groupByCount = wireSchema.groupByCount();
+        int aggColumnCount = wireSchema.columnNames().size() - groupByCount;
+        for (Map.Entry<List<Object>, Object[]> entry : source.entrySet())
+        {
+            Object[] existing = target.get(entry.getKey());
+            if (existing == null)
+            {
+                target.put(entry.getKey(), entry.getValue());
+                continue;
+            }
+            Object[] incoming = entry.getValue();
+            for (int i = 0; i < aggColumnCount; i++)
+            {
+                Type type = wireSchema.columnTypes().get(groupByCount + i);
+                existing[i] = combine(wireSchema.aggMergeOps().get(groupByCount + i), existing[i], incoming[i], type);
             }
         }
     }

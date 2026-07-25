@@ -2,6 +2,7 @@ package io.cassandra.trino.arrowflight;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
 
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -31,10 +32,12 @@ import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
 public class ArrowFlightPageSourceProvider implements ConnectorPageSourceProvider
 {
     private final ArrowFlightClient client;
+    private final ExecutorService aggregationExecutor;
 
-    public ArrowFlightPageSourceProvider(ArrowFlightClient client)
+    public ArrowFlightPageSourceProvider(ArrowFlightClient client, ExecutorService aggregationExecutor)
     {
         this.client = client;
+        this.aggregationExecutor = aggregationExecutor;
     }
 
     @Override
@@ -55,7 +58,7 @@ public class ArrowFlightPageSourceProvider implements ConnectorPageSourceProvide
                                                           .toList();
 
         if (tableHandle.aggregation().isPresent())
-            return new ArrowFlightAggregatingPageSource(client, arrowSplit, tableHandle, projected);
+            return new ArrowFlightAggregatingPageSource(client, aggregationExecutor, arrowSplit, tableHandle, projected);
 
         ArrowFlightTicket ticket = ArrowFlightTicket.of(arrowSplit.keyspace(), arrowSplit.table())
                                                      .withTokenRange(arrowSplit.tokenRange());

@@ -1,5 +1,8 @@
 package io.cassandra.trino.arrowflight;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 
@@ -19,6 +22,13 @@ public class ArrowFlightConnector implements Connector
     private final BufferAllocator allocator;
     private final ArrowFlightClient client;
     private final ArrowFlightTopologyService topology;
+    // Shared across every aggregated split's page source, so fetching each subrange (token range
+    // x replica) that a pushed-down aggregation collapses into one split (see
+    // ArrowFlightSplitManager) can run concurrently instead of serially - see
+    // ArrowFlightAggregatingPageSource's javadoc. Cached: aggregated queries are the only caller,
+    // and their subrange-count-driven concurrency is bursty rather than steady, so threads are
+    // reclaimed between queries instead of held idle.
+    private final ExecutorService aggregationExecutor;
 
     public ArrowFlightConnector(ArrowFlightConfig config)
     {
@@ -26,6 +36,7 @@ public class ArrowFlightConnector implements Connector
         this.allocator = new RootAllocator();
         this.client = new ArrowFlightClient(allocator);
         this.topology = new ArrowFlightTopologyService(config);
+        this.aggregationExecutor = Executors.newCachedThreadPool();
     }
 
     @Override
@@ -49,7 +60,7 @@ public class ArrowFlightConnector implements Connector
     @Override
     public ConnectorPageSourceProvider getPageSourceProvider()
     {
-        return new ArrowFlightPageSourceProvider(client);
+        return new ArrowFlightPageSourceProvider(client, aggregationExecutor);
     }
 
     @Override
@@ -57,5 +68,6 @@ public class ArrowFlightConnector implements Connector
     {
         topology.close();
         allocator.close();
+        aggregationExecutor.shutdown();
     }
 }
