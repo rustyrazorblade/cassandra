@@ -2,7 +2,6 @@ package io.cassandra.trino.arrowflight;
 
 import java.util.List;
 
-import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -48,26 +47,7 @@ public class ArrowFlightPageSource implements ConnectorPageSource
                 "Split for " + ticket.keyspace() + "." + ticket.table() + " has no candidate replicas");
 
         Ticket flightTicket = new Ticket(ticket.toJsonBytes());
-        this.streamHandle = openFirstAvailable(client, replicas, flightTicket);
-    }
-
-    /** Tries each replica in order; the first that accepts {@code DoGet} wins. */
-    private static ArrowFlightClient.StreamHandle openFirstAvailable(
-        ArrowFlightClient client, List<HostAddress> replicas, Ticket ticket)
-    {
-        RuntimeException lastFailure = null;
-        for (HostAddress replica : replicas)
-        {
-            try
-            {
-                return client.openStream(replica.getHostText(), replica.getPort(), ticket);
-            }
-            catch (FlightRuntimeException | IllegalStateException e)
-            {
-                lastFailure = e;
-            }
-        }
-        throw lastFailure;
+        this.streamHandle = client.openFirstAvailable(replicas, flightTicket);
     }
 
     @Override

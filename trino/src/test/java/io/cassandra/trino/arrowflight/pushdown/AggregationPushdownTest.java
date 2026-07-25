@@ -15,6 +15,7 @@ import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.VarcharType;
 
+import io.cassandra.trino.arrowflight.AggregationMergePlan;
 import io.cassandra.trino.arrowflight.ArrowFlightColumnHandle;
 import io.cassandra.trino.arrowflight.ticket.AggregationSpec;
 
@@ -72,12 +73,71 @@ class AggregationPushdownTest
         Optional<AggregationPushdown.Result> result = AggregationPushdown.translate(aggregates, List.of(List.of()));
 
         assertThat(result).isPresent();
+        // AVG is decomposed into wire SUM+COUNT (never a wire AVG) so cross-subrange merging can
+        // correctly weight each subrange's contribution - see AggregationMergePlan.Average.
         List<AggregationSpec.Function> functions = result.get().spec().aggregates().stream()
                                                            .map(AggregationSpec.Aggregate::function)
                                                            .toList();
         assertThat(functions).containsExactly(
             AggregationSpec.Function.SUM, AggregationSpec.Function.MIN,
-            AggregationSpec.Function.MAX, AggregationSpec.Function.AVG);
+            AggregationSpec.Function.MAX, AggregationSpec.Function.SUM, AggregationSpec.Function.COUNT);
+    }
+
+    @Test
+    void avgDecomposesIntoSumAndCountWireAggregatesWithAverageMergePlan()
+    {
+        AggregateFunction avg = simpleAggregate("avg", DoubleType.DOUBLE, new Variable("amount", IntegerType.INTEGER));
+
+        Optional<AggregationPushdown.Result> result = AggregationPushdown.translate(List.of(avg), List.of(List.of()));
+
+        assertThat(result).isPresent();
+        assertThat(result.get().spec().aggregates()).hasSize(2);
+        assertThat(result.get().spec().aggregates().get(0).function()).isEqualTo(AggregationSpec.Function.SUM);
+        assertThat(result.get().spec().aggregates().get(0).column()).contains("amount");
+        assertThat(result.get().spec().aggregates().get(1).function()).isEqualTo(AggregationSpec.Function.COUNT);
+        assertThat(result.get().spec().aggregates().get(1).column()).contains("amount");
+
+        assertThat(result.get().mergePlan()).hasSize(1);
+        AggregationMergePlan derivation = result.get().mergePlan().get(0);
+        assertThat(derivation).isInstanceOf(AggregationMergePlan.Average.class);
+        AggregationMergePlan.Average average = (AggregationMergePlan.Average) derivation;
+        assertThat(average.outputName()).isEqualTo("agg_0");
+        assertThat(average.sumWireColumn()).isEqualTo(result.get().spec().aggregates().get(0).outputName());
+        assertThat(average.countWireColumn()).isEqualTo(result.get().spec().aggregates().get(1).outputName());
+        assertThat(average.sumDomain()).isEqualTo(AggregationMergePlan.NumericDomain.INTEGRAL);
+    }
+
+    @Test
+    void avgOverFloatingColumnUsesFloatingDomain()
+    {
+        AggregateFunction avg = simpleAggregate("avg", DoubleType.DOUBLE, new Variable("amount", DoubleType.DOUBLE));
+
+        Optional<AggregationPushdown.Result> result = AggregationPushdown.translate(List.of(avg), List.of(List.of()));
+
+        assertThat(result).isPresent();
+        AggregationMergePlan.Average average = (AggregationMergePlan.Average) result.get().mergePlan().get(0);
+        assertThat(average.sumDomain()).isEqualTo(AggregationMergePlan.NumericDomain.FLOATING);
+    }
+
+    @Test
+    void countSumMinMaxProduceDirectMergePlansWithSumMergeOpForCount()
+    {
+        List<AggregateFunction> aggregates = List.of(
+            simpleAggregate("count", BigintType.BIGINT),
+            simpleAggregate("sum", BigintType.BIGINT, new Variable("amount", IntegerType.INTEGER)),
+            simpleAggregate("min", IntegerType.INTEGER, new Variable("amount", IntegerType.INTEGER)),
+            simpleAggregate("max", IntegerType.INTEGER, new Variable("amount", IntegerType.INTEGER)));
+
+        Optional<AggregationPushdown.Result> result = AggregationPushdown.translate(aggregates, List.of(List.of()));
+
+        assertThat(result).isPresent();
+        List<AggregationMergePlan> mergePlan = result.get().mergePlan();
+        assertThat(mergePlan).hasSize(4);
+        assertThat(mergePlan).allMatch(AggregationMergePlan.Direct.class::isInstance);
+        assertThat(mergePlan.stream().map(m -> ((AggregationMergePlan.Direct) m).mergeOp()).toList())
+            .containsExactly(
+                AggregationMergePlan.MergeOp.SUM, AggregationMergePlan.MergeOp.SUM,
+                AggregationMergePlan.MergeOp.MIN, AggregationMergePlan.MergeOp.MAX);
     }
 
     @Test

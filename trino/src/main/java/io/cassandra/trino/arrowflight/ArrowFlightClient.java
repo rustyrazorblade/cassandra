@@ -6,11 +6,13 @@ import java.util.List;
 import org.apache.arrow.flight.FlightClient;
 import org.apache.arrow.flight.FlightDescriptor;
 import org.apache.arrow.flight.FlightInfo;
+import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.Ticket;
 import org.apache.arrow.memory.BufferAllocator;
 
+import io.trino.spi.HostAddress;
 import io.trino.spi.connector.SchemaTableName;
 
 import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
@@ -121,6 +123,33 @@ public final class ArrowFlightClient
     private FlightClient connect(String host, int port)
     {
         return FlightClient.builder(allocator, Location.forGrpcInsecure(host, port)).build();
+    }
+
+    /**
+     * Tries each replica in order, opening a {@code DoGet} stream against the first one that
+     * accepts it - see {@code ArrowFlightSplit}'s javadoc for the replica-selection simplification
+     * this implements. Shared by {@link ArrowFlightPageSource} (one subrange per split) and
+     * {@link ArrowFlightAggregatingPageSource} (every pushed-down aggregation's subrange, fetched
+     * and merged within one split).
+     */
+    public StreamHandle openFirstAvailable(List<HostAddress> replicas, Ticket ticket)
+    {
+        if (replicas.isEmpty())
+            throw new IllegalStateException("No candidate replicas for subrange");
+
+        RuntimeException lastFailure = null;
+        for (HostAddress replica : replicas)
+        {
+            try
+            {
+                return openStream(replica.getHostText(), replica.getPort(), ticket);
+            }
+            catch (FlightRuntimeException | IllegalStateException e)
+            {
+                lastFailure = e;
+            }
+        }
+        throw lastFailure;
     }
 
     /** An open Flight stream paired with the client that owns it; {@link #close} releases both. */

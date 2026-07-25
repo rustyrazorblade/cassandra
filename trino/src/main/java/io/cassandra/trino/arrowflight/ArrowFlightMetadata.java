@@ -175,7 +175,7 @@ public class ArrowFlightMetadata implements ConnectorMetadata
             return Optional.empty();
 
         AggregationSpec spec = translated.get().spec();
-        ArrowFlightTableHandle newHandle = handle.withAggregation(spec);
+        ArrowFlightTableHandle newHandle = handle.withAggregation(spec, translated.get().mergePlan());
 
         return Optional.of(new AggregationApplicationResult<>(
             newHandle,

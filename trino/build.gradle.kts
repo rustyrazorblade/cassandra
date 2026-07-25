@@ -107,6 +107,12 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("org.assertj:assertj-core:3.26.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    // Trino's own internal coordinator/worker JSON codec (io.airlift:json's ObjectMapperProvider)
+    // registers this module by default, which is why ArrowFlightTableHandle's Optional<...>
+    // fields serialize fine in a live cluster; a plain `new ObjectMapper()` in a unit test does
+    // not have it unless added explicitly. See ArrowFlightTableHandleSerializationTest.
+    testImplementation("com.fasterxml.jackson.datatype:jackson-datatype-jdk8:2.21.0")
 }
 
 tasks.test {

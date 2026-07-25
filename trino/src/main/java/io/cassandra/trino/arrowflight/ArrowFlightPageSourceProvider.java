@@ -21,6 +21,12 @@ import io.cassandra.trino.arrowflight.ticket.ArrowFlightTicket;
  * {@code ArrowFlightMetadata#applyFilter}/{@code #applyAggregation}) - and streams it via
  * {@link ArrowFlightPageSource}. Every requested (projected) column is read; Trino applies any
  * part of the query this connector didn't push down.
+ *
+ * <p>When an aggregation is pushed down, {@link ArrowFlightSplitManager} instead hands back a
+ * single split carrying every subrange, and this dispatches to {@link
+ * ArrowFlightAggregatingPageSource} to fetch and merge them (see {@link AggregationMergePlan}) -
+ * that page source builds its own per-subrange tickets internally, so no ticket is built here in
+ * that case.
  */
 public class ArrowFlightPageSourceProvider implements ConnectorPageSourceProvider
 {
@@ -44,16 +50,18 @@ public class ArrowFlightPageSourceProvider implements ConnectorPageSourceProvide
         ArrowFlightSplit arrowSplit = (ArrowFlightSplit) split;
         ArrowFlightTableHandle tableHandle = (ArrowFlightTableHandle) table;
 
+        List<ArrowFlightColumnHandle> projected = columns.stream()
+                                                          .map(ArrowFlightColumnHandle.class::cast)
+                                                          .toList();
+
+        if (tableHandle.aggregation().isPresent())
+            return new ArrowFlightAggregatingPageSource(client, arrowSplit, tableHandle, projected);
+
         ArrowFlightTicket ticket = ArrowFlightTicket.of(arrowSplit.keyspace(), arrowSplit.table())
                                                      .withTokenRange(arrowSplit.tokenRange());
         if (tableHandle.filter().isPresent())
             ticket = ticket.withFilter(tableHandle.filter().get());
-        if (tableHandle.aggregation().isPresent())
-            ticket = ticket.withAggregation(tableHandle.aggregation().get());
 
-        List<ArrowFlightColumnHandle> projected = columns.stream()
-                                                          .map(ArrowFlightColumnHandle.class::cast)
-                                                          .toList();
         return new ArrowFlightPageSource(client, ticket, arrowSplit.replicas(), projected);
     }
 }

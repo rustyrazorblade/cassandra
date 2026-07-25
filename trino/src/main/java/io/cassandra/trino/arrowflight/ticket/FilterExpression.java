@@ -14,11 +14,59 @@ import java.util.Map;
  * a boxed numeric primitive, a {@link Boolean}, or {@code null}) - converting a Trino/Cassandra
  * native value into that form is the pushdown translator's job (see {@code PredicatePushdown}),
  * not this class's; this class only knows how to serialize an already-built tree.
+ *
+ * <p><b>No Jackson polymorphism annotations here</b> - a sealed interface embedded directly as a
+ * {@code ConnectorTableHandle} field cannot round-trip through Trino's internal coordinator/worker
+ * JSON codec via {@code @JsonTypeInfo}/{@code @JsonSubTypes}: Trino's {@code ObjectMapperProvider}
+ * disables {@code MapperFeature.AUTO_DETECT_CREATORS}/{@code AUTO_DETECT_GETTERS}/{@code
+ * AUTO_DETECT_FIELDS} (relying only on Java records' built-in structural introspection, not
+ * Jackson's annotation-driven mechanisms), which silently drops the type-discriminator property
+ * on serialization - confirmed by decompiling {@code io.airlift.json.BaseJacksonProvider} and by a
+ * live query failing with "missing type id property" despite the annotations being present in the
+ * deployed bytecode. Instead, {@link ArrowFlightTableHandle} stores this tree pre-serialized as a
+ * JSON string (via {@link #toJson()} + {@link #fromJson(Map)}), sidestepping Jackson's polymorphic
+ * dispatch entirely - see that class's javadoc.
  */
 public sealed interface FilterExpression
 {
     /** Builds this node's {@code {"and": [...]}} / {@code {"cmp": {...}}} / etc. JSON representation. */
     Map<String, Object> toJson();
+
+    /** Reconstructs a {@link FilterExpression} tree from the {@code Map} shape {@link #toJson()} produces. */
+    @SuppressWarnings("unchecked")
+    static FilterExpression fromJson(Map<String, Object> json)
+    {
+        if (json.containsKey("and"))
+            return new And(childrenFromJson((List<Object>) json.get("and")));
+        if (json.containsKey("or"))
+            return new Or(childrenFromJson((List<Object>) json.get("or")));
+        if (json.containsKey("not"))
+            return new Not(fromJson((Map<String, Object>) json.get("not")));
+        if (json.containsKey("cmp"))
+        {
+            Map<String, Object> cmp = (Map<String, Object>) json.get("cmp");
+            return new Cmp((String) cmp.get("column"), Op.valueOf((String) cmp.get("op")), cmp.get("value"));
+        }
+        if (json.containsKey("isNull"))
+            return new IsNull((String) ((Map<String, Object>) json.get("isNull")).get("column"));
+        if (json.containsKey("isNotNull"))
+            return new IsNotNull((String) ((Map<String, Object>) json.get("isNotNull")).get("column"));
+        if (json.containsKey("in"))
+        {
+            Map<String, Object> in = (Map<String, Object>) json.get("in");
+            return new In((String) in.get("column"), (List<Object>) in.get("values"));
+        }
+        throw new IllegalArgumentException("Unrecognized filter JSON shape: " + json.keySet());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<FilterExpression> childrenFromJson(List<Object> children)
+    {
+        List<FilterExpression> result = new ArrayList<>(children.size());
+        for (Object child : children)
+            result.add(fromJson((Map<String, Object>) child));
+        return result;
+    }
 
     record And(List<FilterExpression> children) implements FilterExpression
     {
