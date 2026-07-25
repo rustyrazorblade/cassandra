@@ -44,6 +44,7 @@ import org.apache.cassandra.db.DeletionPurger;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
+import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.UserType;
@@ -419,6 +420,44 @@ public class CursorCompactor extends CompactionInfo.Holder
                           DiskAccessMode diskAccessMode)
     {
         this(type, sstables, output, controller, nowInSec, compactionId, diskAccessMode, ActiveCompactionsTracker.NOOP);
+    }
+
+    /**
+     * As above, but additionally seeds every built {@link StatefulCursor} to a partition-boundary-
+     * aligned token subrange via {@link StatefulCursor#positionAt}/{@link StatefulCursor#setEndBound}
+     * before the merge runs - either bound may be {@code null} to leave that side unbounded (matching
+     * the no-bound constructors' whole-local-range behavior exactly). Added for the Arrow Flight
+     * token-range-bounded scan ({@code org.apache.cassandra.arrow.CassandraTableScanner}), the only
+     * caller of this overload: the positioning primitive itself predates this constructor
+     * ({@code StatefulCursor#positionAt}/{@code #setEndBound}) but had never been wired into an
+     * actual merge until now, since {@link #buildCursorsFromReaders} - where every {@link
+     * StatefulCursor} for this scan-shaped entry point is built - has no other seam a caller can use
+     * to reach the cursors it creates.
+     * <p>
+     * Bound semantics match {@link StatefulCursor#positionAt}/{@link StatefulCursor#setEndBound}
+     * exactly: partition-boundary-aligned only, caller-supplied bounds must not wrap around the ring.
+     */
+    public CursorCompactor(OperationType type,
+                          Collection<SSTableReader> sstables,
+                          CursorMergeConsumer output,
+                          AbstractCompactionController controller,
+                          long nowInSec,
+                          TimeUUID compactionId,
+                          DiskAccessMode diskAccessMode,
+                          PartitionPosition startBound,
+                          PartitionPosition endBound)
+    {
+        this(type, sstables, output, controller, nowInSec, compactionId, diskAccessMode, ActiveCompactionsTracker.NOOP);
+        if (startBound != null || endBound != null)
+        {
+            for (StatefulCursor cursor : sstableCursors)
+            {
+                if (startBound != null)
+                    cursor.positionAt(startBound);
+                if (endBound != null)
+                    cursor.setEndBound(endBound);
+            }
+        }
     }
 
     private CursorCompactor(OperationType type,
