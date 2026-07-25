@@ -102,6 +102,11 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
         }
         catch (CompletionException e)
         {
+            // Best-effort: a future already running its blocking DoGet won't observe this
+            // interrupt, but any future still queued on the bounded executor (see
+            // ArrowFlightConnector.AGGREGATION_FETCH_CONCURRENCY) is cancelled before it starts,
+            // instead of doing wasted work against the cluster after we've already given up.
+            futures.forEach(future -> future.cancel(true));
             if (e.getCause() instanceof RuntimeException runtimeException)
                 throw runtimeException;
             throw e;
@@ -112,8 +117,13 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
         this.pages = buildOutputPages(outputNames, outputTypes, groupByNames, mergePlan, wireSchema, mergedByGroup);
     }
 
-    /** The wire fetch schema: groupBy columns (as-is) followed by every wire aggregate column, flattened. */
-    private record WireSchema(List<String> columnNames, List<Type> columnTypes, List<MergeOp> aggMergeOps, int groupByCount)
+    /**
+     * The wire fetch schema: groupBy columns (as-is) followed by every wire aggregate column,
+     * flattened. Package-private (not {@code private}) so the merge arithmetic below - {@link
+     * #combine}/{@link #mergeGroupMaps} - can be exercised directly with synthetic data in tests,
+     * without needing a live Flight server.
+     */
+    record WireSchema(List<String> columnNames, List<Type> columnTypes, List<MergeOp> aggMergeOps, int groupByCount)
     {
     }
 
@@ -195,7 +205,7 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
     }
 
     /** Folds one subrange's group map into the running total, applying each aggregate column's merge op. */
-    private static void mergeGroupMaps(WireSchema wireSchema, Map<List<Object>, Object[]> target, Map<List<Object>, Object[]> source)
+    static void mergeGroupMaps(WireSchema wireSchema, Map<List<Object>, Object[]> target, Map<List<Object>, Object[]> source)
     {
         int groupByCount = wireSchema.groupByCount();
         int aggColumnCount = wireSchema.columnNames().size() - groupByCount;
@@ -216,7 +226,7 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
         }
     }
 
-    private static Object combine(MergeOp op, Object a, Object b, Type type)
+    static Object combine(MergeOp op, Object a, Object b, Type type)
     {
         if (a == null)
             return b;
@@ -366,7 +376,7 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
     }
 
     /** {@code AVG = SUM / COUNT}; null if there was no non-null contribution or the count is zero. */
-    private static Object averageOf(Object sum, Object count)
+    static Object averageOf(Object sum, Object count)
     {
         if (sum == null || count == null)
             return null;

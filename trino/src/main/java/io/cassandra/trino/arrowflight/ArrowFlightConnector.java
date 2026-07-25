@@ -2,6 +2,7 @@ package io.cassandra.trino.arrowflight;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -25,9 +26,14 @@ public class ArrowFlightConnector implements Connector
     // Shared across every aggregated split's page source, so fetching each subrange (token range
     // x replica) that a pushed-down aggregation collapses into one split (see
     // ArrowFlightSplitManager) can run concurrently instead of serially - see
-    // ArrowFlightAggregatingPageSource's javadoc. Cached: aggregated queries are the only caller,
-    // and their subrange-count-driven concurrency is bursty rather than steady, so threads are
-    // reclaimed between queries instead of held idle.
+    // ArrowFlightAggregatingPageSource's javadoc. Fixed-size and bounded, not cached/unbounded: a
+    // real cluster can have thousands of subranges (nodes x vnodes) for a single aggregation
+    // query, and an unbounded pool would open that many simultaneous Flight connections at once -
+    // a thread/connection storm against the cluster. This bound caps concurrent in-flight fetches
+    // per query (and across every concurrently-running aggregation query sharing this connector
+    // instance); excess subrange fetches simply queue for a free thread instead of all firing at
+    // once.
+    private static final int AGGREGATION_FETCH_CONCURRENCY = 64;
     private final ExecutorService aggregationExecutor;
 
     public ArrowFlightConnector(ArrowFlightConfig config)
@@ -36,7 +42,7 @@ public class ArrowFlightConnector implements Connector
         this.allocator = new RootAllocator();
         this.client = new ArrowFlightClient(allocator);
         this.topology = new ArrowFlightTopologyService(config);
-        this.aggregationExecutor = Executors.newCachedThreadPool();
+        this.aggregationExecutor = Executors.newFixedThreadPool(AGGREGATION_FETCH_CONCURRENCY);
     }
 
     @Override
@@ -66,8 +72,20 @@ public class ArrowFlightConnector implements Connector
     @Override
     public void shutdown()
     {
+        aggregationExecutor.shutdown();
+        try
+        {
+            // Bounded wait for in-flight subrange fetches before tearing down the allocator/client
+            // they read from - otherwise a still-running merge could race against allocator.close().
+            if (!aggregationExecutor.awaitTermination(10, TimeUnit.SECONDS))
+                aggregationExecutor.shutdownNow();
+        }
+        catch (InterruptedException e)
+        {
+            aggregationExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         topology.close();
         allocator.close();
-        aggregationExecutor.shutdown();
     }
 }
