@@ -119,7 +119,8 @@ public final class CassandraArrowTypeMapping
     public static final int DECIMAL_SCALE = 38;
     /** Max decimal digits a 256-bit Arrow decimal can hold; see {@link #DECIMAL_SCALE}. */
     public static final int DECIMAL_PRECISION = 76;
-    private static final int DECIMAL_BIT_WIDTH = 256;
+    /** Bit width backing every {@link ArrowType.Decimal} this mapping produces; see {@link #DECIMAL_PRECISION}. */
+    public static final int DECIMAL_BIT_WIDTH = 256;
     // 2^255 - 1: largest magnitude that fits in a signed 256-bit two's-complement integer.
     private static final BigInteger DECIMAL_MAX_UNSCALED = BigInteger.ONE.shiftLeft(DECIMAL_BIT_WIDTH - 1).subtract(BigInteger.ONE);
     private static final BigInteger DECIMAL_MIN_UNSCALED = DECIMAL_MAX_UNSCALED.negate().subtract(BigInteger.ONE);

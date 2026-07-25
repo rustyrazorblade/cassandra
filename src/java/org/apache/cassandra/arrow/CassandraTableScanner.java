@@ -33,11 +33,16 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DataRange;
+import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.PartitionRangeReadCommand;
 import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.db.compaction.OperationType;
+import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.filter.DataLimits;
+import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
@@ -46,6 +51,8 @@ import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -62,13 +69,17 @@ import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
  * <p>
  * Producer selection: the cursor-merge path ({@link CursorCompactor}) is used when
  * {@link CursorCompactor#isCursorReadSupported} allows it; otherwise this falls back to the normal
- * iterator-based read path ({@link PartitionRangeReadCommand#allDataRead}). Both producers feed the
- * same {@link ArrowRowAssembler}, so output is identical regardless of which one ran.
+ * iterator-based read path (a token-range-restricted {@link PartitionRangeReadCommand}, or
+ * {@link PartitionRangeReadCommand#allDataRead} when no range was requested). Both producers feed
+ * the same {@link ArrowRowAssembler}, so output is identical regardless of which one ran.
  * <p>
- * <b>PoC limitation:</b> this always scans the table's entire local primary range in one pass - no
- * token-range splitting (the {@code StatefulCursor.positionAt}/{@code setEndBound} primitive this
- * would use already exists, from the prep branch, but is intentionally not wired in here) and no
- * server-side filter pushdown; see {@code ARROW-FLIGHT.md} for the full production design.
+ * <b>Token-range bounding:</b> an optional {@code tokenRange} restricts either producer to a
+ * partition-boundary-aligned {@code (start, end]} token subrange - the cursor path via
+ * {@code StatefulCursor#positionAt}/{@code #setEndBound} (through the {@link CursorCompactor}
+ * overload added for this), the iterator path via a {@link DataRange#forKeyRange}-restricted
+ * {@link PartitionRangeReadCommand}. {@code null} (the default, via the 4-arg {@link #scan}/
+ * {@link #scanViaIteratorForTesting} overloads) reproduces the original whole-local-range behavior
+ * exactly on both paths.
  * <p>
  * <b>Disk access mode:</b> the cursor-merge producer always requests {@link DiskAccessMode#direct}
  * for its own reads (via a {@code CursorCompactor} overload added specifically for this - see that
@@ -98,22 +109,38 @@ public final class CassandraTableScanner
      */
     public static void scan(ColumnFamilyStore cfs, BufferAllocator allocator, long targetBatchBytes, Consumer<VectorSchemaRoot> onBatch)
     {
+        scan(cfs, allocator, targetBatchBytes, onBatch, null, null, null);
+    }
+
+    /**
+     * As {@link #scan(ColumnFamilyStore, BufferAllocator, long, Consumer)}, additionally supporting
+     * (independently optional - any/all may be {@code null}) token-range bounding, post-merge filter
+     * evaluation, and server-side aggregation - see {@code ARROW-FLIGHT.md} and
+     * {@link ArrowRowAssembler}'s class javadoc for how the three compose. {@code tokenRange} is a
+     * (start, end] Cassandra-convention token range (exclusive start, inclusive end - see
+     * {@link org.apache.cassandra.dht.Range#makeRowRange}); {@code null} scans the table's entire
+     * local range, exactly as {@link #scan(ColumnFamilyStore, BufferAllocator, long, Consumer)} does.
+     */
+    public static void scan(ColumnFamilyStore cfs, BufferAllocator allocator, long targetBatchBytes, Consumer<VectorSchemaRoot> onBatch,
+                             Range<Token> tokenRange, FilterExpression filter, CompiledAggregation aggregation)
+    {
         cfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.ARROW_FLIGHT_SCAN);
 
         try (ColumnFamilyStore.RefViewFragment view = cfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
         {
             TableMetadata metadata = cfs.metadata();
-            try (ArrowRowAssembler assembler = new ArrowRowAssembler(metadata, allocator, targetBatchBytes, onBatch))
+            Range<PartitionPosition> keyRange = tokenRange == null ? null : Range.makeRowRange(tokenRange);
+            try (ArrowRowAssembler assembler = new ArrowRowAssembler(metadata, allocator, targetBatchBytes, onBatch, filter, aggregation))
             {
                 if (CursorCompactor.isCursorReadSupported(view.sstables, metadata))
-                    scanViaCursor(cfs, view.sstables, assembler);
+                    scanViaCursor(cfs, view.sstables, assembler, keyRange);
                 else
-                    scanViaIterator(cfs, metadata, assembler);
+                    scanViaIterator(cfs, metadata, assembler, keyRange);
             }
         }
     }
 
-    private static void scanViaCursor(ColumnFamilyStore cfs, List<SSTableReader> sstables, ArrowRowAssembler assembler)
+    private static void scanViaCursor(ColumnFamilyStore cfs, List<SSTableReader> sstables, ArrowRowAssembler assembler, Range<PartitionPosition> keyRange)
     {
         if (sstables.isEmpty())
             return;
@@ -123,8 +150,10 @@ public final class CassandraTableScanner
                      "where unsupported - see the class javadoc)", cfs.keyspace.getName(), cfs.name, sstables.size());
         try (CompactionController controller = new CompactionController(cfs, ImmutableSet.copyOf(sstables), cfs.gcBefore(nowInSec)))
         {
+            PartitionPosition startBound = keyRange == null ? null : keyRange.left;
+            PartitionPosition endBound = keyRange == null ? null : keyRange.right;
             CursorCompactor compactor = new CursorCompactor(OperationType.VALIDATION, sstables, assembler, controller, nowInSec,
-                                                             nextTimeUUID(), DiskAccessMode.direct);
+                                                             nextTimeUUID(), DiskAccessMode.direct, startBound, endBound);
             try
             {
                 while (compactor.writeNextPartition())
@@ -156,11 +185,17 @@ public final class CassandraTableScanner
         }
     }
 
-    private static void scanViaIterator(ColumnFamilyStore cfs, TableMetadata metadata, ArrowRowAssembler assembler)
+    private static void scanViaIterator(ColumnFamilyStore cfs, TableMetadata metadata, ArrowRowAssembler assembler, Range<PartitionPosition> keyRange)
     {
         long nowInSec = assembler.nowInSec();
         boolean enforceStrictLiveness = metadata.enforceStrictLiveness();
-        PartitionRangeReadCommand command = PartitionRangeReadCommand.allDataRead(metadata, nowInSec);
+        // A bounded keyRange restricts this to exactly the token subrange a real CQL token-range
+        // query would use under the hood (see DataRange#forTokenRange/PartitionRangeReadCommand)
+        // instead of PartitionRangeReadCommand#allDataRead's always-whole-range DataRange.allData -
+        // null reproduces that original whole-range behavior exactly.
+        DataRange dataRange = keyRange == null ? DataRange.allData(metadata.partitioner) : DataRange.forKeyRange(keyRange);
+        PartitionRangeReadCommand command = PartitionRangeReadCommand.create(metadata, nowInSec, ColumnFilter.all(metadata),
+                                                                              RowFilter.none(), DataLimits.NONE, dataRange);
         try (ReadExecutionController controller = command.executionController();
              UnfilteredPartitionIterator partitions = command.executeLocally(controller))
         {
@@ -219,13 +254,22 @@ public final class CassandraTableScanner
     @VisibleForTesting
     public static void scanViaIteratorForTesting(ColumnFamilyStore cfs, BufferAllocator allocator, long targetBatchBytes, Consumer<VectorSchemaRoot> onBatch)
     {
+        scanViaIteratorForTesting(cfs, allocator, targetBatchBytes, onBatch, null, null, null);
+    }
+
+    /** As above, additionally accepting the same optional tokenRange/filter/aggregation {@link #scan} does. */
+    @VisibleForTesting
+    public static void scanViaIteratorForTesting(ColumnFamilyStore cfs, BufferAllocator allocator, long targetBatchBytes, Consumer<VectorSchemaRoot> onBatch,
+                                                  Range<Token> tokenRange, FilterExpression filter, CompiledAggregation aggregation)
+    {
         cfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.ARROW_FLIGHT_SCAN);
         try (ColumnFamilyStore.RefViewFragment ignored = cfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
         {
             TableMetadata metadata = cfs.metadata();
-            try (ArrowRowAssembler assembler = new ArrowRowAssembler(metadata, allocator, targetBatchBytes, onBatch))
+            Range<PartitionPosition> keyRange = tokenRange == null ? null : Range.makeRowRange(tokenRange);
+            try (ArrowRowAssembler assembler = new ArrowRowAssembler(metadata, allocator, targetBatchBytes, onBatch, filter, aggregation))
             {
-                scanViaIterator(cfs, metadata, assembler);
+                scanViaIterator(cfs, metadata, assembler, keyRange);
             }
         }
     }

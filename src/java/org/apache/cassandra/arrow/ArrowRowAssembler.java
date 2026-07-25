@@ -112,14 +112,29 @@ import org.apache.cassandra.utils.vint.VIntCoding;
  * Static columns are cached once per partition (as already-decoded Java values) and replayed onto
  * every subsequent row of that partition, matching Trino's relational (denormalized) expectation
  * that a static column reads the same on every row of its partition.
+ * <p>
+ * <b>How filter/aggregation compose with static replication and dead-row discard:</b> a filter
+ * (see {@link FilterExpression}) or {@code GROUP BY}/aggregate (see {@link RowAggregator}) is
+ * evaluated in {@link #endRow()}, which is reached ONLY for a row {@link #endRow(UnfilteredDescriptor,
+ * boolean)}/the iterator path already determined has live data - so a tombstone/expired-liveness
+ * row (handled by {@link #discardDeadRow()} directly, bypassing {@link #endRow()} entirely) is never
+ * filtered or aggregated; it was never a real row to begin with. By the time {@link #endRow()} runs,
+ * static-column replication has already happened (a partition's static row - if any - is always
+ * read before any of its real rows), so a filter/{@code GROUP BY} referencing a static column sees
+ * the same replicated value real CQL would. A row that fails the filter, or that the aggregator has
+ * consumed, is rolled back exactly like a dead row (see {@link #discardDeadRow()}) - {@code rowIndex}
+ * is never advanced, so it is invisible in any output batch and the next row silently overwrites its
+ * slot.
  */
-public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
+public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, RowValues
 {
     private final TableMetadata table;
     private final BufferAllocator allocator;
     private final long targetBatchBytes;
     private final Consumer<VectorSchemaRoot> onBatch;
     private final long nowInSec;
+    private final FilterExpression filter;
+    private final RowAggregator aggregator;
 
     private final Schema schema;
     private final List<ColumnMetadata> partitionKeyColumns;
@@ -136,6 +151,11 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
     // current-partition key replication cache: a partition key is written once per partition on
     // disk, not once per row, so (like static columns) it must be replayed onto every row
     private final Map<ColumnMetadata, Object> partitionKeyValues = new HashMap<>();
+    // current-ROW (clustering + regular) decoded value cache, cleared at the start of every real
+    // row - see startRow(boolean, ClusteringPrefix)/emitStaticOnlyRow. Backs the RowValues view
+    // (see #get) that FilterExpression/RowAggregator evaluate against; kept separate from
+    // staticValues/partitionKeyValues (which are partition-scoped, not row-scoped).
+    private final Map<ColumnMetadata, Object> currentRowValues = new HashMap<>();
     // number of real (non-static) output rows emitted for the current partition so far; used to
     // detect a static-only partition (see endPartition/emitStaticOnlyRow)
     private int rowsInCurrentPartition;
@@ -163,17 +183,50 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
 
     public ArrowRowAssembler(TableMetadata table, BufferAllocator allocator, long targetBatchBytes, Consumer<VectorSchemaRoot> onBatch)
     {
+        this(table, allocator, targetBatchBytes, onBatch, null, null);
+    }
+
+    /**
+     * @param filter      post-merge filter to apply to every fully-assembled row, or {@code null} for
+     *                    no filtering - see the class javadoc and {@link FilterExpression}.
+     * @param aggregation server-side {@code GROUP BY}/aggregate spec, or {@code null} for plain
+     *                    (unaggregated) row output - see {@link RowAggregator}. When non-null, no raw
+     *                    row is ever written to an output batch; {@link #close()} emits exactly one
+     *                    aggregated batch instead (or none, if {@code aggregation} has a non-empty
+     *                    {@code groupBy} and no row ever matched - see {@link RowAggregator}).
+     */
+    public ArrowRowAssembler(TableMetadata table, BufferAllocator allocator, long targetBatchBytes, Consumer<VectorSchemaRoot> onBatch,
+                              FilterExpression filter, CompiledAggregation aggregation)
+    {
         this.table = table;
         this.allocator = allocator;
         this.targetBatchBytes = targetBatchBytes;
         this.onBatch = onBatch;
         this.nowInSec = FBUtilities.nowInSeconds();
+        this.filter = filter;
+        this.aggregator = aggregation == null ? null : new RowAggregator(aggregation);
         this.schema = CassandraArrowTypeMapping.toArrowSchema(table);
         this.partitionKeyColumns = table.partitionKeyColumns();
         this.clusteringColumns = table.clusteringColumns();
         this.partitionKeyType = table.partitionKeyType;
         this.hasStaticColumns = !table.regularAndStaticColumns().statics.isEmpty();
         newBatch();
+    }
+
+    /**
+     * {@link RowValues} view over the row currently being finished (see {@link #endRow()}), used by
+     * {@link #filter}/{@link #aggregator}: partition-key and static values come from their
+     * partition-scoped caches (already fully populated for any real row - static rows are always
+     * read before any real row of the same partition), everything else from {@link #currentRowValues}.
+     */
+    @Override
+    public Object get(ColumnMetadata column)
+    {
+        if (column.isPartitionKey())
+            return partitionKeyValues.get(column);
+        if (column.isStatic())
+            return staticValues.get(column);
+        return currentRowValues.get(column);
     }
 
     public long nowInSec()
@@ -243,7 +296,11 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
     {
         try
         {
+            // When aggregation is active, no row is ever committed (see #endRow), so this is
+            // always a no-op (rowIndex stays 0) - the aggregated batch below is the only output.
             flush();
+            if (aggregator != null)
+                aggregator.emit(allocator, onBatch);
         }
         finally
         {
@@ -281,6 +338,7 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
 
     private void emitStaticOnlyRow()
     {
+        currentRowValues.clear();
         for (Map.Entry<ColumnMetadata, Object> entry : partitionKeyValues.entrySet())
             writeDecomposedValue(vectors.get(entry.getKey()), unwrap(entry.getKey().type), rowIndex, entry.getValue());
         for (Map.Entry<ColumnMetadata, Object> entry : staticValues.entrySet())
@@ -306,6 +364,8 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
     {
         if (!isStatic)
         {
+            currentRowValues.clear();
+
             // Partition key values are decoded once per partition (startPartition) and, like
             // static columns, replayed onto every row of it - a partition key does not have its
             // own per-row storage on disk (it is written once per partition, not once per row).
@@ -319,7 +379,9 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
                 if (value != null)
                 {
                     ByteBuffer buffer = clustering.accessor().toBuffer(value);
-                    writeDecomposedValue(vectors.get(column), unwrap(column.type), rowIndex, decompose(unwrap(column.type), buffer));
+                    Object decomposed = decompose(unwrap(column.type), buffer);
+                    currentRowValues.put(column, decomposed);
+                    writeDecomposedValue(vectors.get(column), unwrap(column.type), rowIndex, decomposed);
                 }
             }
         }
@@ -331,9 +393,44 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
         }
     }
 
+    /**
+     * Finishes the row currently being assembled: evaluates {@link #filter} (if any) and, depending
+     * on the outcome and whether {@link #aggregator} is active, either commits the row to the output
+     * batch, feeds it to the aggregator, or discards it - see the class javadoc's "Where filter/
+     * aggregation compose" note and {@link #discardDeadRow()}. Called for every row CursorCompactor
+     * (or the iterator path) determined has live data - see
+     * {@link #endRow(UnfilteredDescriptor, boolean)} - so a tombstone/expired-liveness-only row
+     * never reaches here (and is correctly never filtered/aggregated - it was never a real row).
+     */
     public void endRow()
     {
+        // A real (non-static) row existed for this partition regardless of what
+        // filter/aggregation do with it below - increment unconditionally so endPartition's
+        // static-only-row synthesis (emitStaticOnlyRow) correctly sees "at least one real row was
+        // seen" and does NOT fire just because every real row happened to be filtered out or fed
+        // to the aggregator instead of committed (a static-only-row synthesis storm, one phantom
+        // null-valued row per partition, was exactly the bug this comment now prevents - caught by
+        // RowAggregationTest#sumMinMaxAvgGroupedByStaticColumn).
         rowsInCurrentPartition++;
+
+        boolean passesFilter = filter == null || filter.evaluate(this);
+        if (aggregator != null)
+        {
+            if (passesFilter)
+                aggregator.accumulate(this);
+            discardDeadRow();
+            return;
+        }
+        if (!passesFilter)
+        {
+            discardDeadRow();
+            return;
+        }
+        commitRow();
+    }
+
+    private void commitRow()
+    {
         rowIndex++;
         maybeFlush();
     }
@@ -348,17 +445,24 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
         if (column.isStatic())
             staticValues.put(column, decomposed);
         else
+        {
+            currentRowValues.put(column, decomposed);
             writeDecomposedValue(vectors.get(column), type, rowIndex, decomposed);
+        }
     }
 
     /** Counter columns: {@code total} is the pre-composed {@link CounterContext#total} value. */
     public void putCounterCell(ColumnMetadata column, long total)
     {
-        FieldVector vector = column.isStatic() ? null : vectors.get(column);
         if (column.isStatic())
+        {
             staticValues.put(column, total);
+        }
         else
-            ((BigIntVector) vector).setSafe(rowIndex, total);
+        {
+            currentRowValues.put(column, total);
+            ((BigIntVector) vectors.get(column)).setSafe(rowIndex, total);
+        }
     }
 
     public void beginComplexColumn(ColumnMetadata column)
@@ -392,14 +496,13 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
     {
         AbstractType<?> type = unwrap(column.type);
         openComplexCellCount++;
+        // Accumulate a plain decoded Java value alongside the vector write below (regular columns)
+        // or INSTEAD of one (static columns, which are cached, not written immediately) - both are
+        // needed for the RowValues view (see #get) that FilterExpression/RowAggregator read, so a
+        // filter/GROUP BY can reference any complex column, static or regular.
+        accumulateComplexCell(column.isStatic() ? staticValues : currentRowValues, column, type, path, value);
         if (column.isStatic())
-        {
-            // Static complex columns are rare in practice (a static list/set/map/UDT); accumulate
-            // their decoded contents directly since the shared vector-building path below is
-            // row-indexed and static values are cached, not written immediately.
-            putStaticComplexCell(column, type, path, value);
             return;
-        }
         FieldVector vector = vectors.get(column);
         if (type instanceof ListType)
         {
@@ -432,29 +535,34 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
         }
     }
 
+    /**
+     * Accumulates one complex-column cell's decoded value into {@code target} ({@link #staticValues}
+     * for a static column, {@link #currentRowValues} for a regular one - see {@link #putComplexCell}),
+     * independent of (and in addition to, for regular columns) the row-indexed Arrow vector write.
+     */
     @SuppressWarnings("unchecked")
-    private void putStaticComplexCell(ColumnMetadata column, AbstractType<?> type, ByteBuffer path, ByteBuffer value)
+    private void accumulateComplexCell(Map<ColumnMetadata, Object> target, ColumnMetadata column, AbstractType<?> type, ByteBuffer path, ByteBuffer value)
     {
         if (type instanceof ListType)
         {
             AbstractType<?> elementType = ((ListType<?>) type).getElementsType();
-            ((List<Object>) staticValues.computeIfAbsent(column, c -> new ArrayList<>())).add(decompose(elementType, value));
+            ((List<Object>) target.computeIfAbsent(column, c -> new ArrayList<>())).add(decompose(elementType, value));
         }
         else if (type instanceof SetType)
         {
             AbstractType<?> elementType = ((SetType<?>) type).getElementsType();
-            ((List<Object>) staticValues.computeIfAbsent(column, c -> new ArrayList<>())).add(decompose(elementType, path));
+            ((List<Object>) target.computeIfAbsent(column, c -> new ArrayList<>())).add(decompose(elementType, path));
         }
         else if (type instanceof MapType)
         {
             MapType<?, ?> mapType = (MapType<?, ?>) type;
-            ((Map<Object, Object>) staticValues.computeIfAbsent(column, c -> new LinkedHashMap<>()))
+            ((Map<Object, Object>) target.computeIfAbsent(column, c -> new LinkedHashMap<>()))
                 .put(decompose(mapType.getKeysType(), path), decompose(mapType.getValuesType(), value));
         }
         else if (type instanceof UserType)
         {
             UserType userType = (UserType) type;
-            Object[] fields = (Object[]) staticValues.computeIfAbsent(column, c -> new Object[userType.size()]);
+            Object[] fields = (Object[]) target.computeIfAbsent(column, c -> new Object[userType.size()]);
             int fieldIndex = ByteBufferUtil.toShort(path);
             fields[fieldIndex] = decompose(unwrap(userType.fieldType(fieldIndex)), value);
         }
@@ -478,6 +586,8 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
             {
                 ((MapVector) vector).endValue(rowIndex, openComplexCellCount);
             }
+            if (openComplexCellCount == 0)
+                currentRowValues.remove(column);
         }
         else if (openComplexCellCount == 0)
         {
@@ -518,7 +628,11 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
 
     // ================= value decoding: raw on-disk bytes -> natural Java representation =================
 
-    private static Object decompose(AbstractType<?> type, ByteBuffer value)
+    /**
+     * Package-visible (not {@code private}) so {@link FilterCompiler} can normalize a filter literal
+     * into EXACTLY this same representation - see that class's javadoc.
+     */
+    static Object decompose(AbstractType<?> type, ByteBuffer value)
     {
         if (type instanceof IntegerType)
             return CassandraArrowTypeMapping.toArrowDecimal((BigInteger) type.compose(value));
@@ -637,8 +751,15 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable
 
     // ================= value writing: natural Java representation -> Arrow vector =================
 
+    /**
+     * Package-visible and {@code static} (not {@code private}/instance) - this method touches no
+     * instance state (every input is a parameter; recursion is self-contained), so
+     * {@link RowAggregator} reuses it as-is to write {@code GROUP BY}/{@code MIN}/{@code MAX} output
+     * values into its own, separately-schemad final batch, rather than duplicating this ~150-line
+     * type dispatch.
+     */
     @SuppressWarnings("unchecked")
-    private void writeDecomposedValue(FieldVector vector, AbstractType<?> type, int index, Object value)
+    static void writeDecomposedValue(FieldVector vector, AbstractType<?> type, int index, Object value)
     {
         if (value == null)
         {
