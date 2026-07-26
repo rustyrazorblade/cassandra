@@ -3603,6 +3603,12 @@ public class DatabaseDescriptor
         return conf.arrow_flight_port;
     }
 
+    /** See {@code org.apache.cassandra.arrow.CassandraFlightProducer}'s scan admission control. */
+    public static int getArrowFlightMaxConcurrentScans()
+    {
+        return conf.arrow_flight_max_concurrent_scans;
+    }
+
     /**
      * This is the port used with RPC address for the native protocol to communicate with clients. Now that thrift RPC
      * is no longer in use there is no RPC port.

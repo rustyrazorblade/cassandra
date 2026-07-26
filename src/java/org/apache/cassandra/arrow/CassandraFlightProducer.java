@@ -21,6 +21,8 @@ package org.apache.cassandra.arrow;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 
 import com.sun.management.ThreadMXBean;
@@ -97,15 +99,35 @@ public class CassandraFlightProducer implements FlightProducer
             THREAD_MX_BEAN.setThreadAllocatedMemoryEnabled(true);
     }
 
+    /**
+     * How long a {@link #getStream} call waits for a scan admission permit before being shed with
+     * a retryable status - "queues briefly" per cqlite-flight's equivalent design (see
+     * {@code ARROW-FLIGHT.md}'s Prior Art section), not an unbounded queue.
+     */
+    private static final long ADMISSION_QUEUE_TIMEOUT_MILLIS = 2000L;
+
     private final BufferAllocator allocator;
     private final long targetBatchBytes;
     private final Location location;
+    private final int maxConcurrentScans;
+    /**
+     * Bounds how many {@link #getStream} scans this node serves at once - see
+     * {@code Config#arrow_flight_max_concurrent_scans}'s javadoc for why this exists (a multi-table
+     * JOIN fans out concurrent scans across every table/split with no other coordination between
+     * them, so nothing else bounds the node's simultaneous scan-side memory pressure). A permit is
+     * acquired after ticket parsing (so a malformed ticket fails fast without consuming one) but
+     * before any table resolution or scan work, and released in a {@code finally} covering every
+     * exit path (success, error, cancellation).
+     */
+    private final Semaphore scanPermits;
 
-    public CassandraFlightProducer(BufferAllocator allocator, long targetBatchBytes, Location location)
+    public CassandraFlightProducer(BufferAllocator allocator, long targetBatchBytes, Location location, int maxConcurrentScans)
     {
         this.allocator = allocator;
         this.targetBatchBytes = targetBatchBytes;
         this.location = location;
+        this.maxConcurrentScans = maxConcurrentScans;
+        this.scanPermits = new Semaphore(maxConcurrentScans);
     }
 
     @Override
@@ -203,9 +225,32 @@ public class CassandraFlightProducer implements FlightProducer
         boolean measuring = THREAD_MX_BEAN.isThreadAllocatedMemorySupported() && THREAD_MX_BEAN.isThreadAllocatedMemoryEnabled();
         long startAllocatedBytes = measuring ? THREAD_MX_BEAN.getThreadAllocatedBytes(threadId) : -1;
         long[] rowsScanned = { 0 };
+        boolean permitAcquired = false;
         try
         {
+            // Parsed before admission control so a malformed ticket fails fast (INVALID_ARGUMENT,
+            // via the catch block below) without consuming a permit another request could use.
             FlightTicket parsed = FlightTicket.parse(ticket.getBytes());
+
+            try
+            {
+                permitAcquired = scanPermits.tryAcquire(ADMISSION_QUEUE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                throw CallStatus.UNAVAILABLE.withCause(e)
+                                             .withDescription("interrupted while waiting for a scan admission permit")
+                                             .toRuntimeException();
+            }
+            if (!permitAcquired)
+                // Retryable, not RESOURCE_EXHAUSTED - this is transient backpressure (a client
+                // should retry/fail over), not a permanent resource cap being exceeded. Mirrors
+                // cqlite-flight's --max-concurrent-scans (see ARROW-FLIGHT.md's Prior Art section).
+                throw CallStatus.UNAVAILABLE.withDescription(
+                    "Arrow Flight scan concurrency limit (" + maxConcurrentScans + ") reached; retry against " +
+                    "another replica or back off").toRuntimeException();
+
             TableMetadata table = resolveTable(parsed.keyspace, parsed.table);
             ColumnFamilyStore cfs = Keyspace.open(table.keyspace).getColumnFamilyStore(table.name);
 
@@ -272,6 +317,8 @@ public class CassandraFlightProducer implements FlightProducer
         }
         finally
         {
+            if (permitAcquired)
+                scanPermits.release();
             if (measuring)
             {
                 long allocatedBytes = THREAD_MX_BEAN.getThreadAllocatedBytes(threadId) - startAllocatedBytes;

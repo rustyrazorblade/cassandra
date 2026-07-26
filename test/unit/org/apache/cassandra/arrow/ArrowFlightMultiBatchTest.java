@@ -74,7 +74,7 @@ public class ArrowFlightMultiBatchTest extends CQLTester
         try (BufferAllocator serverAllocator = new RootAllocator();
              BufferAllocator clientAllocator = new RootAllocator())
         {
-            CassandraFlightProducer producer = new CassandraFlightProducer(serverAllocator, tinyTargetBatchBytes, location);
+            CassandraFlightProducer producer = new CassandraFlightProducer(serverAllocator, tinyTargetBatchBytes, location, 16);
             try (FlightServer server = FlightServer.builder(serverAllocator, location, producer).build().start())
             {
                 try (FlightClient client = FlightClient.builder(clientAllocator, Location.forGrpcInsecure("127.0.0.1", server.getPort())).build())

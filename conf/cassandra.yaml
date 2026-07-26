@@ -1045,6 +1045,11 @@ start_arrow_flight: true
 # port for the Arrow Flight service to listen for clients on, when start_arrow_flight is true.
 # Bound on the same address as native_transport_port (rpc_address). See the warning above.
 arrow_flight_port: 9143
+# Maximum number of Arrow Flight full-table-scan requests this node serves concurrently. A single
+# query that scans several tables/splits at once (e.g. a multi-table JOIN through Trino) has no
+# other bound on simultaneous scan-side memory pressure - a request beyond this cap is rejected
+# with a retryable UNAVAILABLE status rather than queued or blocked.
+arrow_flight_max_concurrent_scans: 16
 # The maximum threads for handling requests (note that idle threads are stopped
 # after 30 seconds so there is not corresponding minimum setting).
 # native_transport_max_threads: 128

@@ -126,7 +126,7 @@ public class FlightTicketSchemaDiscoveryTest extends CQLTester
         try (BufferAllocator serverAllocator = new RootAllocator();
              BufferAllocator clientAllocator = new RootAllocator())
         {
-            CassandraFlightProducer producer = new CassandraFlightProducer(serverAllocator, 16L * 1024 * 1024, location);
+            CassandraFlightProducer producer = new CassandraFlightProducer(serverAllocator, 16L * 1024 * 1024, location, 16);
             try (FlightServer server = FlightServer.builder(serverAllocator, location, producer).build().start())
             {
                 try (FlightClient client = FlightClient.builder(clientAllocator, Location.forGrpcInsecure("127.0.0.1", server.getPort())).build())

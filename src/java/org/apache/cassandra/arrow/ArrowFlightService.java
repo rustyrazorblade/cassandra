@@ -64,7 +64,8 @@ public class ArrowFlightService
         Location location = Location.forGrpcInsecure(address, port);
 
         allocator = new RootAllocator(ALLOCATOR_LIMIT_BYTES);
-        CassandraFlightProducer producer = new CassandraFlightProducer(allocator, TARGET_BATCH_BYTES, location);
+        int maxConcurrentScans = DatabaseDescriptor.getArrowFlightMaxConcurrentScans();
+        CassandraFlightProducer producer = new CassandraFlightProducer(allocator, TARGET_BATCH_BYTES, location, maxConcurrentScans);
         try
         {
             // Both build() and start() can fail (build() e.g. on a bad Location/port bind setup
@@ -79,10 +80,10 @@ public class ArrowFlightService
             throw new RuntimeException("Failed to start Arrow Flight service on " + location, e);
         }
 
-        logger.warn("Arrow Flight service started on {}. THIS INTERFACE HAS NO AUTHENTICATION OR " +
-                    "AUTHORIZATION - anyone who can reach this port can read every row of every " +
-                    "user table. This is a development/PoC-only service; do not enable it on a node " +
-                    "reachable from an untrusted network. See ARROW-FLIGHT.md.", location);
+        logger.warn("Arrow Flight service started on {} (max {} concurrent scans). THIS INTERFACE HAS NO " +
+                    "AUTHENTICATION OR AUTHORIZATION - anyone who can reach this port can read every row of " +
+                    "every user table. This is a development/PoC-only service; do not enable it on a node " +
+                    "reachable from an untrusted network. See ARROW-FLIGHT.md.", location, maxConcurrentScans);
     }
 
     // Accepted PoC limitation: unlike native transport's stop(boolean force) (which distinguishes

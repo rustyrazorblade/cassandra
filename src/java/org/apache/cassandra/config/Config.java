@@ -309,6 +309,20 @@ public class Config
     public boolean start_arrow_flight = false;
     public int arrow_flight_port = 9143;
 
+    /**
+     * Caps how many Arrow Flight {@code DoGet} scans this node serves concurrently (see
+     * {@code org.apache.cassandra.arrow.CassandraFlightProducer}). Without this, a single query
+     * that fans out across several tables/splits at once (e.g. a Trino multi-table JOIN, where
+     * every table side scans concurrently with no coordination between them) has no bound on how
+     * much simultaneous scan-side allocation the node takes on - "an unbounded analytical scan is
+     * a classic way to destabilize a database node" (see {@code ARROW-FLIGHT.md}'s Operational
+     * Implications). A request that arrives once every permit is already held is shed with a
+     * retryable {@code UNAVAILABLE} status rather than queuing unboundedly or blocking - mirrors
+     * the equivalent, independently-arrived-at design in cqlite-flight's
+     * {@code --max-concurrent-scans} (see {@code ARROW-FLIGHT.md}'s Prior Art section).
+     */
+    public int arrow_flight_max_concurrent_scans = 16;
+
     public boolean start_native_transport = true;
     public int native_transport_port = 9042;
     public int native_transport_max_threads = 128;
