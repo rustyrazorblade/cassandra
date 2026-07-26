@@ -175,10 +175,12 @@ public class ArrowFlightAggregatingPageSource implements ConnectorPageSource
         try (ArrowFlightClient.StreamHandle streamHandle = client.openFirstAvailable(subRange.replicas(), new Ticket(ticket.toJsonBytes())))
         {
             FlightStream stream = streamHandle.stream();
-            while (stream.next())
+            boolean hasNext = streamHandle.hasPreloadedFirst() ? streamHandle.consumePreloadedHasNext() : stream.next();
+            while (hasNext)
             {
                 Page page = ArrowPageBuilder.toPage(stream.getRoot(), wireSchema.columnNames(), wireSchema.columnTypes());
                 mergePage(page, wireSchema, bySubRangeGroup);
+                hasNext = stream.next();
             }
         }
         return bySubRangeGroup;

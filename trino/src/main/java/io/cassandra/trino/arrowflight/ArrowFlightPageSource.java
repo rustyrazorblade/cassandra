@@ -58,7 +58,8 @@ public class ArrowFlightPageSource implements ConnectorPageSource
         try
         {
             FlightStream stream = streamHandle.stream();
-            if (!stream.next())
+            boolean hasNext = streamHandle.hasPreloadedFirst() ? streamHandle.consumePreloadedHasNext() : stream.next();
+            if (!hasNext)
             {
                 finished = true;
                 return null;

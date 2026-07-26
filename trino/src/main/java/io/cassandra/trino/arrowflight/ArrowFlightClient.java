@@ -7,6 +7,7 @@ import org.apache.arrow.flight.FlightClient;
 import org.apache.arrow.flight.FlightDescriptor;
 import org.apache.arrow.flight.FlightInfo;
 import org.apache.arrow.flight.FlightRuntimeException;
+import org.apache.arrow.flight.FlightStatusCode;
 import org.apache.arrow.flight.FlightStream;
 import org.apache.arrow.flight.Location;
 import org.apache.arrow.flight.Ticket;
@@ -125,12 +126,30 @@ public final class ArrowFlightClient
         return FlightClient.builder(allocator, Location.forGrpcInsecure(host, port)).build();
     }
 
+    /** Retry budget against a single replica for a retryable (UNAVAILABLE) rejection - see {@link #openFirstAvailable}. */
+    private static final int MAX_ATTEMPTS_PER_REPLICA = 5;
+    private static final long INITIAL_BACKOFF_MILLIS = 200;
+    private static final long MAX_BACKOFF_MILLIS = 2000;
+
     /**
      * Tries each replica in order, opening a {@code DoGet} stream against the first one that
      * accepts it - see {@code ArrowFlightSplit}'s javadoc for the replica-selection simplification
      * this implements. Shared by {@link ArrowFlightPageSource} (one subrange per split) and
      * {@link ArrowFlightAggregatingPageSource} (every pushed-down aggregation's subrange, fetched
      * and merged within one split).
+     * <p>
+     * A gRPC streaming call does not block for the server's response at {@code getStream()} time -
+     * an error the server throws before ever sending a batch (e.g. an admission-control rejection,
+     * see {@code CassandraFlightProducer}'s scan concurrency limit) only surfaces once the client
+     * actually reads from the stream. So retry validation here eagerly calls {@code stream.next()}
+     * once per attempt: a retryable ({@code UNAVAILABLE}) failure there is retried with backoff
+     * against the same replica before moving on, since on a small cluster there may be no other
+     * replica to fail over to at all. Any other status (a real error, not transient backpressure)
+     * is not retried. The eagerly-consumed first {@code next()} result is preserved on the returned
+     * {@link StreamHandle} (see {@link StreamHandle#hasPreloadedFirst()}) so the caller's own first
+     * read doesn't silently skip a row batch. Retrying past this point (once real data has already
+     * been returned to a caller) is deliberately out of scope - only the pre-first-batch case is
+     * safe to retry from scratch here.
      */
     public StreamHandle openFirstAvailable(List<HostAddress> replicas, Ticket ticket)
     {
@@ -140,16 +159,50 @@ public final class ArrowFlightClient
         RuntimeException lastFailure = null;
         for (HostAddress replica : replicas)
         {
-            try
+            long backoffMillis = INITIAL_BACKOFF_MILLIS;
+            for (int attempt = 0; attempt < MAX_ATTEMPTS_PER_REPLICA; attempt++)
             {
-                return openStream(replica.getHostText(), replica.getPort(), ticket);
-            }
-            catch (FlightRuntimeException | IllegalStateException e)
-            {
-                lastFailure = e;
+                StreamHandle handle = null;
+                try
+                {
+                    handle = openStream(replica.getHostText(), replica.getPort(), ticket);
+                    boolean hasFirstBatch = handle.stream().next();
+                    return handle.withPreloadedFirst(hasFirstBatch);
+                }
+                catch (FlightRuntimeException e)
+                {
+                    if (handle != null)
+                        handle.close();
+                    lastFailure = e;
+                    boolean retryable = e.status().code() == FlightStatusCode.UNAVAILABLE;
+                    if (!retryable || attempt == MAX_ATTEMPTS_PER_REPLICA - 1)
+                        break; // not transient backpressure, or out of retries against this replica
+                    sleepBackoff(backoffMillis);
+                    backoffMillis = Math.min(backoffMillis * 2, MAX_BACKOFF_MILLIS);
+                }
+                catch (IllegalStateException e)
+                {
+                    if (handle != null)
+                        handle.close();
+                    lastFailure = e;
+                    break;
+                }
             }
         }
         throw lastFailure;
+    }
+
+    private static void sleepBackoff(long millis)
+    {
+        try
+        {
+            Thread.sleep(millis);
+        }
+        catch (InterruptedException e)
+        {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("interrupted during scan-admission retry backoff", e);
+        }
     }
 
     /** An open Flight stream paired with the client that owns it; {@link #close} releases both. */
@@ -157,11 +210,41 @@ public final class ArrowFlightClient
     {
         private final FlightClient client;
         private final FlightStream stream;
+        private boolean firstBatchPreloaded;
+        private boolean preloadedHasNext;
 
         StreamHandle(FlightClient client, FlightStream stream)
         {
             this.client = client;
             this.stream = stream;
+        }
+
+        /** Records that {@code stream.next()} was already called once, as part of retry validation - see {@link #openFirstAvailable}. */
+        StreamHandle withPreloadedFirst(boolean hasNext)
+        {
+            this.firstBatchPreloaded = true;
+            this.preloadedHasNext = hasNext;
+            return this;
+        }
+
+        /**
+         * True if this handle's very first {@code next()} call has already happened (as part of
+         * {@link #openFirstAvailable}'s retry validation) - the caller's own first read must use
+         * {@link #consumePreloadedHasNext()} instead of calling {@code stream().next()} again, or
+         * it will silently skip that first batch.
+         */
+        public boolean hasPreloadedFirst()
+        {
+            return firstBatchPreloaded;
+        }
+
+        /** One-shot: returns the preloaded {@code next()} result and clears the flag. */
+        public boolean consumePreloadedHasNext()
+        {
+            if (!firstBatchPreloaded)
+                throw new IllegalStateException("no preloaded first batch pending on this handle");
+            firstBatchPreloaded = false;
+            return preloadedHasNext;
         }
 
         public FlightStream stream()
