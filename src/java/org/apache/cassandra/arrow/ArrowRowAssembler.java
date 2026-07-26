@@ -135,6 +135,16 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, Ro
     private final long nowInSec;
     private final FilterExpression filter;
     private final RowAggregator aggregator;
+    // Whether anything will ever read the RowValues view (see #get) this row - i.e. whether a
+    // filter or aggregator is active. currentRowValues (unlike staticValues/partitionKeyValues,
+    // which are also needed for static/partition-key replication onto every row regardless) exists
+    // ONLY to serve that view - see the field's own javadoc. Skipping its upkeep entirely for a
+    // plain, unfiltered/unaggregated scan (the common case for a join-side full-table scan feeding
+    // Trino, which pushes no predicate at all onto the table it isn't filtering) removes one
+    // HashMap.Node allocation per regular/clustering column per row for free - real allocation
+    // measured via CassandraFlightProducer's ThreadMXBean instrumentation, not a hypothetical
+    // optimization (see ARROW-FLIGHT.md's garbage-free-reads investigation).
+    private final boolean needsRowValues;
 
     private final Schema schema;
     private final List<ColumnMetadata> partitionKeyColumns;
@@ -205,6 +215,7 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, Ro
         this.nowInSec = FBUtilities.nowInSeconds();
         this.filter = filter;
         this.aggregator = aggregation == null ? null : new RowAggregator(aggregation);
+        this.needsRowValues = filter != null || this.aggregator != null;
         this.schema = CassandraArrowTypeMapping.toArrowSchema(table);
         this.partitionKeyColumns = table.partitionKeyColumns();
         this.clusteringColumns = table.clusteringColumns();
@@ -364,7 +375,8 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, Ro
     {
         if (!isStatic)
         {
-            currentRowValues.clear();
+            if (needsRowValues)
+                currentRowValues.clear();
 
             // Partition key values are decoded once per partition (startPartition) and, like
             // static columns, replayed onto every row of it - a partition key does not have its
@@ -380,7 +392,8 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, Ro
                 {
                     ByteBuffer buffer = clustering.accessor().toBuffer(value);
                     Object decomposed = decompose(unwrap(column.type), buffer);
-                    currentRowValues.put(column, decomposed);
+                    if (needsRowValues)
+                        currentRowValues.put(column, decomposed);
                     writeDecomposedValue(vectors.get(column), unwrap(column.type), rowIndex, decomposed);
                 }
             }
@@ -446,7 +459,8 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, Ro
             staticValues.put(column, decomposed);
         else
         {
-            currentRowValues.put(column, decomposed);
+            if (needsRowValues)
+                currentRowValues.put(column, decomposed);
             writeDecomposedValue(vectors.get(column), type, rowIndex, decomposed);
         }
     }
@@ -460,7 +474,8 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, Ro
         }
         else
         {
-            currentRowValues.put(column, total);
+            if (needsRowValues)
+                currentRowValues.put(column, total);
             ((BigIntVector) vectors.get(column)).setSafe(rowIndex, total);
         }
     }
@@ -499,8 +514,14 @@ public class ArrowRowAssembler implements CursorMergeConsumer, AutoCloseable, Ro
         // Accumulate a plain decoded Java value alongside the vector write below (regular columns)
         // or INSTEAD of one (static columns, which are cached, not written immediately) - both are
         // needed for the RowValues view (see #get) that FilterExpression/RowAggregator read, so a
-        // filter/GROUP BY can reference any complex column, static or regular.
-        accumulateComplexCell(column.isStatic() ? staticValues : currentRowValues, column, type, path, value);
+        // filter/GROUP BY can reference any complex column, static or regular. A static column's
+        // accumulation into staticValues is NOT skippable even when !needsRowValues - unlike
+        // currentRowValues, staticValues also backs partition-wide replication (see startRow/
+        // emitStaticOnlyRow), so it is this cell's only chance to be captured for later writing.
+        if (column.isStatic())
+            accumulateComplexCell(staticValues, column, type, path, value);
+        else if (needsRowValues)
+            accumulateComplexCell(currentRowValues, column, type, path, value);
         if (column.isStatic())
             return;
         FieldVector vector = vectors.get(column);

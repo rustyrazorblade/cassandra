@@ -20,7 +20,11 @@ package org.apache.cassandra.arrow;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -130,14 +134,43 @@ public final class CassandraTableScanner
         {
             TableMetadata metadata = cfs.metadata();
             Range<PartitionPosition> keyRange = tokenRange == null ? null : Range.makeRowRange(tokenRange);
+            List<SSTableReader> sstables = rangeRestrict(cfs, view.sstables, keyRange);
             try (ArrowRowAssembler assembler = new ArrowRowAssembler(metadata, allocator, targetBatchBytes, onBatch, filter, aggregation))
             {
-                if (CursorCompactor.isCursorReadSupported(view.sstables, metadata))
-                    scanViaCursor(cfs, view.sstables, assembler, keyRange);
+                if (CursorCompactor.isCursorReadSupported(sstables, metadata))
+                    scanViaCursor(cfs, sstables, assembler, keyRange);
                 else
                     scanViaIterator(cfs, metadata, assembler, keyRange);
             }
         }
+    }
+
+    /**
+     * Restricts {@code candidates} (already reference-held, from the canonical view) to only
+     * sstables whose own key range overlaps {@code keyRange} - {@code null} means no restriction
+     * (whole-table scan, every candidate kept). Unlike the iterator fallback path (which already
+     * gets this for free via {@code PartitionRangeReadCommand}'s own {@code View.selectLive} use),
+     * the cursor path previously passed the FULL canonical sstable set into {@link CursorCompactor}
+     * regardless of {@code keyRange}, relying on each cursor's seek-to-bound to skip
+     * non-overlapping sstables after already opening them and registering a
+     * {@link CompactionController} reference against them - real, avoidable overhead per split,
+     * multiplied by however many splits/tables scan concurrently (see the garbage-free-reads/
+     * concurrency findings in {@code ARROW-FLIGHT.md}). Uses {@code View.liveSSTablesInBounds} -
+     * the same interval-tree-backed selector the normal read path already relies on - rather than
+     * hand-rolling first/last key comparisons.
+     */
+    private static List<SSTableReader> rangeRestrict(ColumnFamilyStore cfs, Collection<SSTableReader> candidates, Range<PartitionPosition> keyRange)
+    {
+        if (keyRange == null)
+            return new ArrayList<>(candidates);
+        Set<SSTableReader> overlapping = new HashSet<>();
+        for (SSTableReader sstable : cfs.getTracker().getView().liveSSTablesInBounds(keyRange.left, keyRange.right))
+            overlapping.add(sstable);
+        List<SSTableReader> result = new ArrayList<>(candidates.size());
+        for (SSTableReader sstable : candidates)
+            if (overlapping.contains(sstable))
+                result.add(sstable);
+        return result;
     }
 
     private static void scanViaCursor(ColumnFamilyStore cfs, List<SSTableReader> sstables, ArrowRowAssembler assembler, Range<PartitionPosition> keyRange)
