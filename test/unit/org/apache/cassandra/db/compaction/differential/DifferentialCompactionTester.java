@@ -92,6 +92,12 @@ public abstract class DifferentialCompactionTester extends CQLTester
     /** Fixed "now" used for JSON dumps so rendering cannot depend on wall clock. */
     private static final long DUMP_NOW_SEC = 0;
 
+    // sstabledump's "expired" fields come from WALL CLOCK, not the fixed nowInSec above
+    // (JsonTransformer), so the two paths' captures can render them differently; the flag is
+    // derived from expires_at, which is still compared.
+    private static final java.util.regex.Pattern EXPIRED_FLAG =
+        java.util.regex.Pattern.compile("\"expired\"\\s*:\\s*(true|false)");
+
     /**
      * Scale mode for very large scenarios (millions of rows): the logical dump is streamed
      * into a SHA-256 digest instead of being retained as a String, so capture memory stays
@@ -422,7 +428,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
                                             sstable.metadata(), DUMP_NOW_SEC, baos);
             }
             json = baos.toString(StandardCharsets.UTF_8)
-                       .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"");
+                       .transform(s -> EXPIRED_FLAG.matcher(s).replaceAll("\"expired\":\"normalized\""));
         }
 
         // 3. stats spot-check summary
@@ -633,9 +639,9 @@ public abstract class DifferentialCompactionTester extends CQLTester
 
         private void update(byte[] bytes, int length)
         {
-            byte[] normalized = new String(bytes, 0, length, StandardCharsets.UTF_8)
-                                .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"")
-                                .getBytes(StandardCharsets.UTF_8);
+            byte[] normalized = EXPIRED_FLAG.matcher(new String(bytes, 0, length, StandardCharsets.UTF_8))
+                                            .replaceAll("\"expired\":\"normalized\"")
+                                            .getBytes(StandardCharsets.UTF_8);
             digest.update(normalized);
             bytesSeen += normalized.length;
         }
