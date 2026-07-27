@@ -104,13 +104,15 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  *   <li>Purge gc-able tombstones if possible (see PurgeFunction below).</li>
  *   <li>Invalidate cached partitions that are empty post-compaction. This avoids keeping partitions with
  *       only purgable tombstones in the row cache.</li>
- *   <li>Keep tracks of the compaction progress.</li>
+ *   <li>Keeps track of the compaction progress.</li>
  * </ul>
- * This compaction implementation does not support 2ndary indexes or trie indexes at this time.
+ * This compaction implementation does not support 2ndary indexes, trie (BTI) sstable output,
+ * complex (collection/UDT) columns, or counter columns; see {@link #isSupported} and
+ * {@link #unsupportedMetadata} for the full set of gates.
  * <p>
-*     This compaction implmentation avoids garbage creation per partition/row/cell by utilizing reader/writer code
-*     which supports reusable copies of sstable entry components. The implementation consolidates and duplicates code
- *    from various classes to support the use of these reusable structures.
+ *     This compaction implementation avoids garbage creation per partition/row/cell by utilizing reader/writer code
+ *     which supports reusable copies of sstable entry components. The implementation consolidates and duplicates code
+ *     from various classes to support the use of these reusable structures.
  * </p>
  */
 public class CursorCompactor extends CompactionInfo.Holder
