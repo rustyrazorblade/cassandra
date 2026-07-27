@@ -38,14 +38,6 @@ import static org.junit.Assert.assertTrue;
 public class PurgeBoundaryDifferentialCompactionTest extends DifferentialCompactionTester
 {
 
-    private static String allJson(CapturedOutput out)
-    {
-        StringBuilder sb = new StringBuilder();
-        for (CapturedSSTable s : out.sstables)
-            sb.append(s.json);
-        return sb.toString();
-    }
-
     /** gcBefore exactly AT the tombstone's deletion time: NOT purgeable (strict less-than). */
     @Test
     public void boundaryExactlyAtDeletionTime() throws Exception

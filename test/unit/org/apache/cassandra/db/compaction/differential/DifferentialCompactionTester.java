@@ -130,6 +130,15 @@ public abstract class DifferentialCompactionTester extends CQLTester
         final List<CapturedSSTable> sstables = new ArrayList<>();
     }
 
+    /** Concatenates the canonical logical dump of every captured output sstable. */
+    protected static String allJson(CapturedOutput out)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (CapturedSSTable s : out.sstables)
+            sb.append(s.json);
+        return sb.toString();
+    }
+
     /** Creates the CompactionTask for one differential run. MUST honor keepOriginals=true. */
     public interface TaskFactory
     {
