@@ -41,14 +41,6 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 public class PartialSetDifferentialCompactionTest extends DifferentialCompactionTester
 {
 
-    private static String allJson(CapturedOutput out)
-    {
-        StringBuilder sb = new StringBuilder();
-        for (CapturedSSTable s : out.sstables)
-            sb.append(s.json);
-        return sb.toString();
-    }
-
     /** Flushes and returns the sstable that flush produced; tracks flush order explicitly. */
     private SSTableReader flushAndTrack(ColumnFamilyStore cfs, List<SSTableReader> flushed) throws Throwable
     {

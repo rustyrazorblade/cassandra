@@ -270,21 +270,43 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         assertCursorMatchesIterator(cfs);
     }
 
-    private static String insertStmt(TableMetadata metadata)
+    /** Appends {@code columns[i].name}, joined by separator. */
+    private static void appendNames(StringBuilder sb, List<ColumnMetadata> columns, String separator)
     {
-        StringBuilder sb = new StringBuilder("INSERT INTO ").append(metadata).append(" (");
-        Iterator<ColumnMetadata> cols = metadata.allColumnsInSelectOrder();
-        while (cols.hasNext())
+        for (int i = 0; i < columns.size(); i++)
         {
-            sb.append(cols.next().name.toCQLString());
-            if (cols.hasNext()) sb.append(", ");
+            if (i > 0) sb.append(separator);
+            sb.append(columns.get(i).name.toCQLString());
         }
-        sb.append(") VALUES (");
-        for (int i = 0; i < metadata.columns().size(); i++)
+    }
+
+    /** Appends "name = ?" equality predicates over columns, joined by separator. */
+    private static void appendEqPredicates(StringBuilder sb, List<ColumnMetadata> columns, String separator)
+    {
+        for (int i = 0; i < columns.size(); i++)
+        {
+            if (i > 0) sb.append(separator);
+            sb.append(columns.get(i).name.toCQLString()).append(" = ?");
+        }
+    }
+
+    /** Appends {@code count} "?" placeholders, joined by ", ". */
+    private static void appendPlaceholders(StringBuilder sb, int count)
+    {
+        for (int i = 0; i < count; i++)
         {
             if (i > 0) sb.append(", ");
             sb.append('?');
         }
+    }
+
+    private static String insertStmt(TableMetadata metadata)
+    {
+        List<ColumnMetadata> cols = ImmutableList.copyOf(metadata.allColumnsInSelectOrder());
+        StringBuilder sb = new StringBuilder("INSERT INTO ").append(metadata).append(" (");
+        appendNames(sb, cols, ", ");
+        sb.append(") VALUES (");
+        appendPlaceholders(sb, cols.size());
         return sb.append(')').toString();
     }
 
@@ -293,17 +315,9 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     {
         List<ColumnMetadata> keys = primaryKeyColumns(metadata);
         StringBuilder sb = new StringBuilder("INSERT INTO ").append(metadata).append(" (");
-        for (int i = 0; i < keys.size(); i++)
-        {
-            if (i > 0) sb.append(", ");
-            sb.append(keys.get(i).name.toCQLString());
-        }
+        appendNames(sb, keys, ", ");
         sb.append(") VALUES (");
-        for (int i = 0; i < keys.size(); i++)
-        {
-            if (i > 0) sb.append(", ");
-            sb.append('?');
-        }
+        appendPlaceholders(sb, keys.size());
         return sb.append(')').toString();
     }
 
@@ -311,18 +325,9 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     private static String updateStmt(TableMetadata metadata, List<ColumnMetadata> regularColumns)
     {
         StringBuilder sb = new StringBuilder("UPDATE ").append(metadata).append(" SET ");
-        for (int i = 0; i < regularColumns.size(); i++)
-        {
-            if (i > 0) sb.append(", ");
-            sb.append(regularColumns.get(i).name.toCQLString()).append(" = ?");
-        }
+        appendEqPredicates(sb, regularColumns, ", ");
         sb.append(" WHERE ");
-        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
-        for (int i = 0; i < keys.size(); i++)
-        {
-            if (i > 0) sb.append(" AND ");
-            sb.append(keys.get(i).name.toCQLString()).append(" = ?");
-        }
+        appendEqPredicates(sb, primaryKeyColumns(metadata), " AND ");
         return sb.toString();
     }
 
@@ -341,18 +346,9 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     private static String cellDeleteStmt(TableMetadata metadata, List<ColumnMetadata> columns, int keyColumnCount)
     {
         StringBuilder sb = new StringBuilder("DELETE ");
-        for (int i = 0; i < columns.size(); i++)
-        {
-            if (i > 0) sb.append(", ");
-            sb.append(columns.get(i).name.toCQLString());
-        }
+        appendNames(sb, columns, ", ");
         sb.append(" FROM ").append(metadata).append(" WHERE ");
-        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
-        for (int i = 0; i < keyColumnCount; i++)
-        {
-            if (i > 0) sb.append(" AND ");
-            sb.append(keys.get(i).name.toCQLString()).append(" = ?");
-        }
+        appendEqPredicates(sb, primaryKeyColumns(metadata).subList(0, keyColumnCount), " AND ");
         return sb.toString();
     }
 
@@ -366,11 +362,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         List<ColumnMetadata> keys = primaryKeyColumns(metadata);
         int partitionColumnCount = metadata.partitionKeyColumns().size();
         int bound = partitionColumnCount + eqDepth;
-        for (int i = 0; i < bound; i++)
-        {
-            if (i > 0) sb.append(" AND ");
-            sb.append(keys.get(i).name.toCQLString()).append(" = ?");
-        }
+        appendEqPredicates(sb, keys.subList(0, bound), " AND ");
         sb.append(" AND ").append(keys.get(bound).name.toCQLString()).append(' ').append(op).append(" ?");
         return sb.toString();
     }
@@ -394,12 +386,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     private static String deleteStmt(TableMetadata metadata, int keyColumnCount)
     {
         StringBuilder sb = new StringBuilder("DELETE FROM ").append(metadata).append(" WHERE ");
-        List<ColumnMetadata> keys = primaryKeyColumns(metadata);
-        for (int i = 0; i < keyColumnCount; i++)
-        {
-            if (i > 0) sb.append(" AND ");
-            sb.append(keys.get(i).name.toCQLString()).append(" = ?");
-        }
+        appendEqPredicates(sb, primaryKeyColumns(metadata).subList(0, keyColumnCount), " AND ");
         return sb.toString();
     }
 
