@@ -573,10 +573,19 @@ public abstract class DifferentialCompactionTester extends CQLTester
         return sb.toString();
     }
 
-    /** Streams a JSON dump into a digest, normalizing the wall-clock-derived "expired"
-     *  fields line by line (toJsonLines emits one partition per line). */
+    /**
+     * Streams a JSON dump into a digest, normalizing the wall-clock-derived "expired"
+     * fields. Buffers up to a line (toJsonLines emits one partition per line), but flushes
+     * oversized lines in bounded chunks so memory stays flat even for multi-GB partitions:
+     * the chunk cut keeps a small unprocessed tail so a normalization token can never be
+     * split, and the cut points are functions of CONTENT ONLY (buffer fill, not write()
+     * granularity), so both captures digest identical normalized streams.
+     */
     private static final class NormalizingDigestOutputStream extends java.io.OutputStream
     {
+        private static final int FLUSH_THRESHOLD = 8 << 20;
+        private static final int TAIL_KEEP = 64; // > the longest normalized token
+
         private final java.security.MessageDigest digest;
         private final ByteArrayOutputStream line = new ByteArrayOutputStream();
         long bytesSeen;
@@ -592,36 +601,44 @@ public abstract class DifferentialCompactionTester extends CQLTester
             line.write(b);
             if (b == '\n')
                 flushTail();
+            else if (line.size() >= FLUSH_THRESHOLD)
+                flushChunk();
         }
 
         @Override
         public void write(byte[] b, int off, int len)
         {
-            int start = off;
-            int end = off + len;
-            for (int i = off; i < end; i++)
-            {
-                if (b[i] == '\n')
-                {
-                    line.write(b, start, i - start + 1);
-                    flushTail();
-                    start = i + 1;
-                }
-            }
-            if (start < end)
-                line.write(b, start, end - start);
+            for (int i = off; i < off + len; i++)
+                write(b[i]);
         }
 
+        /** Digest all buffered content (end of a line or of the stream). */
         void flushTail()
         {
             if (line.size() == 0)
                 return;
-            byte[] normalized = line.toString(StandardCharsets.UTF_8)
-                                    .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"")
-                                    .getBytes(StandardCharsets.UTF_8);
+            update(line.toByteArray(), line.size());
+            line.reset();
+        }
+
+        /** Digest all but the last TAIL_KEEP buffered bytes; the tail stays buffered so the
+         *  "expired":... token can never straddle a chunk cut. */
+        private void flushChunk()
+        {
+            byte[] buffered = line.toByteArray();
+            int processed = buffered.length - TAIL_KEEP;
+            update(buffered, processed);
+            line.reset();
+            line.write(buffered, processed, TAIL_KEEP);
+        }
+
+        private void update(byte[] bytes, int length)
+        {
+            byte[] normalized = new String(bytes, 0, length, StandardCharsets.UTF_8)
+                                .replaceAll("\"expired\"\\s*:\\s*(true|false)", "\"expired\":\"normalized\"")
+                                .getBytes(StandardCharsets.UTF_8);
             digest.update(normalized);
             bytesSeen += normalized.length;
-            line.reset();
         }
     }
 
