@@ -101,6 +101,14 @@ public class CursorSupportMatrixTest extends CQLTester
         assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, u " + udt + ", PRIMARY KEY (pk, ck))");
     }
 
+    /** Vector and duration are inside the supported surface (single-cell types). */
+    @Test
+    public void vectorAndDurationSupported()
+    {
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, vec vector<float, 3>, dur duration, " +
+                        "PRIMARY KEY (pk, ck))");
+    }
+
     /** Increment 5 flips this to supported. */
     @Test
     public void countersUnsupported()
