@@ -297,7 +297,14 @@ public class CursorCompactor extends CompactionInfo.Holder
         this.activeCompactions.beginCompaction(this); // note that CompactionTask also calls this, but CT only creates CompactionIterator with a NOOP ActiveCompactions
 
         TableMetadata metadata = metadata();
-        this.hasStaticColumns = metadata.hasStaticColumns();
+        // the INPUT headers decide whether static rows can occur in this merge (and the output
+        // header, SerializationHeader.make, is their union): after ALTER TABLE ... DROP of the
+        // last static column, current metadata has no static columns but older sstables
+        // legitimately still carry static rows
+        boolean anyStaticColumns = false;
+        for (SSTableReader sstable : this.sstables)
+            anyStaticColumns |= sstable.header.hasStatic();
+        this.hasStaticColumns = anyStaticColumns;
         /**
          * Pipeline should end up similar to the one in {@link CompactionIterator}:
          * [MERGED -> ?TopPartitionTracker -> GarbageSkipper -> Purger -> org.apache.cassandra.db.transform.DuplicateRowChecker -> Abortable] -> next()
