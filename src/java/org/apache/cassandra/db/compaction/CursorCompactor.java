@@ -315,7 +315,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         this.sstableCursorsEqualsNext = new boolean[sstables.size()];
         this.enforceStrictLiveness = controller.cfs.metadata.get().enforceStrictLiveness();
 
-        purger = new Purger(type, controller, nowInSec);
+        purger = new Purger(type, controller);
 
         detachedLastWrittenKey = metadata.partitioner.createReusableKey(128);
     }
@@ -1423,8 +1423,6 @@ public class CursorCompactor extends CompactionInfo.Holder
      */
     static class Purger implements DeletionPurger
     {
-        private final long nowInSec;
-
         private final long oldestUnrepairedTombstone;
         private final boolean onlyPurgeRepairedTombstones;
         private final boolean shouldIgnoreGcGraceForAnyKey;
@@ -1438,12 +1436,11 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         private long compactedUnfiltered;
 
-        Purger(OperationType type, AbstractCompactionController controller, long nowInSec)
+        Purger(OperationType type, AbstractCompactionController controller)
         {
             oldestUnrepairedTombstone = controller.compactingRepaired() ? Long.MAX_VALUE : Integer.MIN_VALUE;
             onlyPurgeRepairedTombstones = controller.cfs.getCompactionStrategyManager().onlyPurgeRepairedTombstones();
             shouldIgnoreGcGraceForAnyKey = controller.cfs.shouldIgnoreGcGraceForAnyKey();
-            this.nowInSec = nowInSec;
             this.controller = controller;
             this.type = type;
         }
