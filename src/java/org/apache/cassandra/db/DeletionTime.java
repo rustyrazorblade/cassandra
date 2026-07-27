@@ -443,7 +443,13 @@ public abstract class DeletionTime implements Comparable<DeletionTime>, IMeasura
         public void reset(long markedForDeleteAt, long localDeletionTime)
         {
             this.markedForDeleteAt = markedForDeleteAt;
-            if (localDeletionTime < 0 || localDeletionTime > Cell.MAX_DELETION_TIME) // invalid
+            if (localDeletionTime == Cell.NO_DELETION_TIME)
+                // NO_DELETION_TIME (Long.MAX_VALUE) is the canonical "no deletion" long and must
+                // round-trip to the LIVE marker (deletionTimeLongToUnsignedInteger semantics);
+                // classifying it as invalid made reset(LIVE.markedForDeleteAt(),
+                // LIVE.localDeletionTime()) produce a NON-live deletion
+                this.localDeletionTimeUnsignedInteger = LOCAL_DELETION_TIME_LIVE;
+            else if (localDeletionTime < 0 || localDeletionTime > Cell.MAX_DELETION_TIME) // invalid
                 this.localDeletionTimeUnsignedInteger = Cell.MAX_DELETION_TIME_UNSIGNED_INTEGER + 1;
             else
                 this.localDeletionTimeUnsignedInteger = Cell.deletionTimeLongToUnsignedInteger(localDeletionTime);

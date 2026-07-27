@@ -443,4 +443,100 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
 
         assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
     }
+
+    /**
+     * Row liveness shapes: UPDATE-built rows carry NO primary-key liveness (different row
+     * flags than INSERT-built rows), primary-key-only INSERTs carry liveness and ZERO cells,
+     * and merges must reconcile liveness presence/absence across sstables exactly.
+     */
+    @Test
+    public void rowLivenessShapes() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, v2 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // UPDATE-built rows (no liveness) and liveness-only rows in sstable 1
+        for (long ck = 0; ck < 10; ck++)
+            execute("UPDATE %s SET v1 = ?, v2 = ? WHERE pk = ? AND ck = ?", "u" + ck, "w" + ck, 1L, ck);
+        for (long ck = 10; ck < 15; ck++)
+            execute("INSERT INTO %s (pk, ck) VALUES (?, ?)", 1L, ck);
+        flush();
+
+        // sstable 2: INSERT onto UPDATE-rows (liveness arrives later), cell tombstones onto
+        // liveness-only rows (row must survive on liveness alone), cell delete that empties
+        // an UPDATE-row entirely (no liveness + no cells = row vanishes)
+        for (long ck = 0; ck < 4; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", 1L, ck, "i" + ck);
+        for (long ck = 10; ck < 13; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, null, null)", 1L, ck);
+        execute("DELETE v1, v2 FROM %s WHERE pk = ? AND ck = ?", 1L, 5L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Row-level TTL (INSERT USING TTL sets liveness TTL + cell TTLs) merged against
+     * cell-level TTL (UPDATE USING TTL sets only cell TTLs) and against plain writes;
+     * includes same-timestamp expiring writes whose TTLs differ (rules (c)/(d) of the
+     * resolveRegular decision table run off localExpirationTime/ttl, not just timestamps).
+     */
+    @Test
+    public void rowAndCellTtlMix() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, v2 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 12; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?) USING TTL 86400", 1L, ck, "a" + ck, "b" + ck);
+        flush();
+
+        // cell-level TTL different from the row TTL; plain overwrites clearing TTLs;
+        // expiring-vs-expiring same-timestamp ties with different TTLs
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TTL 172800 SET v1 = ? WHERE pk = ? AND ck = ?", "c" + ck, 1L, ck);
+        for (long ck = 6; ck < 9; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", 1L, ck, "plain" + ck);
+        for (long ck = 9; ck < 12; ck++)
+            execute("UPDATE %s USING TTL 100000 AND TIMESTAMP 5000 SET v2 = ? WHERE pk = ? AND ck = ?", "t1" + ck, 1L, ck);
+        flush();
+
+        for (long ck = 9; ck < 12; ck++)
+            execute("UPDATE %s USING TTL 50000 AND TIMESTAMP 5000 SET v2 = ? WHERE pk = ? AND ck = ?", "t2" + ck, 1L, ck);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
+
+    /**
+     * Expiring-vs-live cells at the SAME timestamp, both directions across sstables: the
+     * CASSANDRA-14592 rule — an expiring (or deleted) cell beats a live one on timestamp
+     * tie regardless of value. Implemented in resolveRegular rule (a); this pins it at the
+     * differential level (timestampTies only covered live-vs-live and delete-vs-live).
+     */
+    @Test
+    public void expiringVsLiveTies() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // direction 1: live first, expiring second
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 1L, ck, "zzz-live" + ck);
+        // direction 2 partition: expiring first
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000 AND TTL 86400", 2L, ck, "aaa-ttl" + ck);
+        flush();
+
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000 AND TTL 86400", 1L, ck, "aaa-ttl" + ck);
+        for (long ck = 0; ck < 5; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 2L, ck, "zzz-live" + ck);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs, ALLOWLIST);
+    }
 }
