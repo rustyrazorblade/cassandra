@@ -11,6 +11,7 @@ Merged from 4.0:
 
 
 6.0-alpha2
+ * Serialise local metadata proposals so concurrent schema changes do not exhaust their retry budget contending for the same epoch (CASSANDRA-21537)
  * Apply performance optimizations for rows merging logic (CASSANDRA-21524)
  * Fix operationMode reporting DECOMMISSION_FAILED instead of LEAVING when resuming a failed decommission (CASSANDRA-21493)
  * Avoid megamorphic calls when serializing and deserializing fixed-length values (CASSANDRA-21536)
