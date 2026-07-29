@@ -113,8 +113,9 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  *       only purgable tombstones in the row cache.</li>
  *   <li>Keeps track of the compaction progress.</li>
  * </ul>
- * This compaction implementation does not support 2ndary indexes, trie (BTI) sstable output,
- * complex (collection/UDT) columns, or counter columns; see {@link #isSupported} and
+ * This compaction implementation supports BIG and BTI output formats (see the
+ * CursorIndexWriter seam) and complex (collection/UDT) columns; it does not support 2ndary
+ * indexes or counter columns at this time. See {@link #isSupported} and
  * {@link #unsupportedMetadata} for the full set of gates.
  * <p>
  *     This compaction implementation avoids garbage creation per partition/row/cell by utilizing reader/writer code
@@ -150,7 +151,8 @@ public class CursorCompactor extends CompactionInfo.Holder
             }
         }
         // BTI index writing is not supported yet
-        if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat))
+        if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat
+              || DatabaseDescriptor.getSelectedSSTableFormat() instanceof org.apache.cassandra.io.sstable.format.bti.BtiFormat))
         {
             if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only the BIG sstable output format is supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
             return false;
@@ -525,7 +527,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         boolean partitionWritten = isPartitionStarted();
         if (partitionWritten)
         {
-            ssTableCursorWriter.writePartitionEnd(partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength);
+            ssTableCursorWriter.writePartitionEnd(partitionDescriptor.key(), partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength);
             // update metadata tracking of min/max clustering on last unfiltered
             if (unfilteredCount > 1) {
                 ssTableCursorWriter.updateClusteringMetadata(lastWrittenClustering);

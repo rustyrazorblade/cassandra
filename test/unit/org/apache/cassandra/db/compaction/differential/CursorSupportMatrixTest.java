@@ -144,6 +144,23 @@ public class CursorSupportMatrixTest extends CQLTester
                         "PRIMARY KEY (pk, ck))");
     }
 
+    /** Supported since increment 3 (format-specific cursor index writers). */
+    @Test
+    public void btiFormatSupported() throws Throwable
+    {
+        org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> original =
+            org.apache.cassandra.config.DatabaseDescriptor.getSelectedSSTableFormat();
+        org.apache.cassandra.config.DatabaseDescriptor.setSelectedSSTableFormat("bti");
+        try
+        {
+            assertSupported("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, v text, PRIMARY KEY (pk, ck))");
+        }
+        finally
+        {
+            org.apache.cassandra.config.DatabaseDescriptor.setSelectedSSTableFormat(original);
+        }
+    }
+
     /** Increment 5 flips this to supported. */
     @Test
     public void countersUnsupported()

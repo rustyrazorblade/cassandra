@@ -81,7 +81,22 @@ public abstract class CursorIndexWriter
     public abstract void rowWritten(UnfilteredDescriptor descriptor, long rowStart, long rowEnd,
                                     DeletionTime openMarker) throws IOException;
 
-    /** The partition (including its end-of-partition marker) ends at partitionEnd. */
-    public abstract void endPartition(byte[] key, int keyLength, int headerLength,
-                                      DeletionTime partitionDeletionTime, long partitionEnd) throws IOException;
+    /**
+     * The partition (including its end-of-partition marker) ends at partitionEnd. Both key
+     * forms are provided: BIG consumes the raw bytes (Index.db entries, bloom filter), BTI
+     * consumes the decorated key (partition trie byte-comparable). The DecoratedKey is the
+     * caller's REUSABLE key — valid only for the duration of the call.
+     */
+    public abstract void endPartition(org.apache.cassandra.db.DecoratedKey key, byte[] keyBytes, int keyLength,
+                                      int headerLength, DeletionTime partitionDeletionTime,
+                                      long partitionEnd) throws IOException;
+
+    /**
+     * Release per-instance state when the owning writer closes — the iterator path's
+     * partition-writer lifecycle analogue (e.g. BtiFormatPartitionWriter.close() closes its
+     * row trie). The underlying file writers belong to the table writer, not to this seam.
+     */
+    public void close()
+    {
+    }
 }
