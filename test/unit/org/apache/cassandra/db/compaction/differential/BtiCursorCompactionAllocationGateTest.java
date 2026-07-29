@@ -54,4 +54,28 @@ public class BtiCursorCompactionAllocationGateTest extends CursorCompactionAlloc
     {
         return 768 * 1024;
     }
+
+    /**
+     * Same inherent per-partition BTI index cost, expressed per input byte for the RT-dense
+     * gate: marker-dense partitions are tiny (~10KB), so ~2KB/partition of trie/key-snapshot
+     * work adds ~0.2-0.3 B/B on top of the BIG residual. Measured 1.012 B/B (vs BIG's
+     * 0.684); a one-small-object-per-marker leak costs >1.5 B/B extra and still trips.
+     */
+    @Override
+    protected double rtPerInputByteCeiling()
+    {
+        return 1.3;
+    }
+
+    /**
+     * Counter rows are also tiny (~68B), so BTI's ~2KB/partition trie/key-snapshot cost
+     * lands on top of the BIG residual the same way as the RT gate: measured 1.646 B/B
+     * (vs BIG's 1.367, ceiling 1.7) — the 2.0 ceiling keeps comparable headroom and still
+     * trips on roughly one extra small object per input cell.
+     */
+    @Override
+    protected double counterPerInputByteCeiling()
+    {
+        return 2.0;
+    }
 }
