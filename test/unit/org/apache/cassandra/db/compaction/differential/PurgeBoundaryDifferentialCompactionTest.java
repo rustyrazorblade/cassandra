@@ -79,6 +79,61 @@ public class PurgeBoundaryDifferentialCompactionTest extends DifferentialCompact
                     allJson(past).contains("\"marked_deleted\":\"200\""));
     }
 
+    /**
+     * A PURGEABLE complex (collection) deletion must still shadow the cells it covers
+     * before it is dropped: the iterator applies the deletion at merge time
+     * (Row.Merger.ColumnDataReducer) and purges it afterwards (ComplexColumnData.purge),
+     * so both the deletion AND the older cells it deletes vanish. A resolver that purges
+     * the merged complex deletion BEFORE using it as the cells' shadow resurrects the
+     * deleted cells. Cells and deletion live in DIFFERENT sstables so the merge, not the
+     * memtable, must apply the shadow.
+     */
+    @Test
+    public void purgeableComplexDeletionShadowsCells() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 0");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // flanking permanent data so outputs are never empty
+        for (long ck = 0; ck < 4; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 100", 0L, ck, "keep" + ck);
+        // the doomed cells: complex cells only, no row liveness (UPDATE, not INSERT)
+        for (long ck = 0; ck < 4; ck++)
+            execute("UPDATE %s USING TIMESTAMP 100 SET m['k1'] = ?, m['k2'] = ? WHERE pk = ? AND ck = ?",
+                    "doomedA" + ck, "doomedB" + ck, 1L, ck);
+        flush();
+
+        // the complex deletion, alone in its own sstable, newer than the cells
+        for (long ck = 0; ck < 4; ck++)
+            execute("DELETE m FROM %s USING TIMESTAMP 200 WHERE pk = ? AND ck = ?", 1L, ck);
+        flush();
+
+        long maxLdt = Long.MIN_VALUE;
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+        {
+            long ldt = sstable.getSSTableMetadata().maxLocalDeletionTime;
+            if (ldt != Long.MAX_VALUE)
+                maxLdt = Math.max(maxLdt, ldt);
+        }
+        assertTrue("scenario produced no deletion times", maxLdt > 0 && maxLdt < Long.MAX_VALUE);
+
+        // NOT purgeable (ldt == gcBefore): deletion retained, doomed cells shadowed — both gone
+        CapturedOutput at = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, maxLdt);
+        assertTrue("retained complex deletion must be in the output",
+                   allJson(at).contains("\"marked_deleted\":\"200\""));
+        assertFalse("shadowed cells must not survive a retained complex deletion",
+                    allJson(at).contains("doomed"));
+
+        // purgeable (ldt < gcBefore): deletion purged AND the cells it shadowed stay gone
+        CapturedOutput past = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, maxLdt + 1);
+        assertFalse("purged complex deletion must not be in the output",
+                    allJson(past).contains("\"marked_deleted\":\"200\""));
+        assertFalse("cells shadowed by a purged complex deletion must not be resurrected",
+                    allJson(past).contains("doomed"));
+    }
+
     /** Same differential flow under direct I/O for the compaction read path. */
     @Test
     public void directDiskAccessMode() throws Exception
