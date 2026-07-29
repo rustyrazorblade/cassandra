@@ -45,6 +45,7 @@ import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.Cell;
@@ -54,6 +55,7 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.dht.ReusableDecoratedKey;
+import org.apache.cassandra.io.sstable.ClusteringDescriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.PartitionDescriptor;
 import org.apache.cassandra.io.sstable.SSTableCursorReader;
@@ -245,6 +247,13 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private StatefulCursor lastSource = null;
     private final ReusableDecoratedKey detachedLastWrittenKey;
+    // Snapshot of the clustering of the last unfiltered WRITTEN to the current output partition.
+    // sstableCursors[*].unfiltered() descriptors are reusable: a cursor overwrites its descriptor
+    // in place as soon as it reads its next unfiltered — including unfiltereds that then merge
+    // away or purge and never reach the output — so a reference captured during the merge loop
+    // can, by the time the partition closes, describe a clustering that was never written. A copy
+    // per written unfiltered keeps the true last written clustering for the min/max metadata.
+    private final ClusteringDescriptor lastWrittenClustering;
 
     // Partition state. Writes can be delayed if the deletion is purged, or live and partition is empty -> LIVE deletion.
     PartitionDescriptor partitionDescriptor;
@@ -327,6 +336,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         purger = new Purger(type, controller);
 
         detachedLastWrittenKey = metadata.partitioner.createReusableKey(128);
+        lastWrittenClustering = new ClusteringDescriptor(metadata.comparator.subtypes().toArray(AbstractType[]::new));
     }
 
     /**
@@ -432,7 +442,6 @@ public class CursorCompactor extends CompactionInfo.Holder
         int unfilteredMergeLimit = partitionMergeLimit;
         boolean isFirstUnfiltered = true;
         int unfilteredCount = 0;
-        UnfilteredDescriptor lastClustering = null;
         while (true)
         {
             unfilteredMergeLimit = prepareAndSortUnfilteredForMerge(partitionMergeLimit, unfilteredMergeLimit);
@@ -445,7 +454,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                 {
                     isFirstUnfiltered = false;
                     unfilteredCount++;
-                    lastClustering = sstableCursors[0].unfiltered();
+                    lastWrittenClustering.copy(sstableCursors[0].unfiltered());
                 }
             }
             else if (UnfilteredSerializer.isTombstoneMarker(flags)) {
@@ -454,7 +463,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                 {
                     isFirstUnfiltered = false;
                     unfilteredCount++;
-                    lastClustering = sstableCursors[0].unfiltered();
+                    lastWrittenClustering.copy(sstableCursors[0].unfiltered());
                 }
                 if (activeOpenRangeDeletion == DeletionTime.LIVE) {
                     activeDeletion = mergedDeletion;
@@ -476,7 +485,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             ssTableCursorWriter.writePartitionEnd(partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength);
             // update metadata tracking of min/max clustering on last unfiltered
             if (unfilteredCount > 1) {
-                ssTableCursorWriter.updateClusteringMetadata(lastClustering);
+                ssTableCursorWriter.updateClusteringMetadata(lastWrittenClustering);
             }
         }
         // move along
