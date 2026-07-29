@@ -27,9 +27,9 @@ import org.apache.cassandra.db.ColumnFamilyStore;
  * Volume scenario: TWO MILLION written rows across TWENTY input sstables — 2,000 partitions
  * x 50 rows per round x 20 flush rounds, with each round's clustering window overlapping the
  * previous round's by half so most output rows genuinely merge from 2-3 inputs. The mutation
- * mix runs at scale: ~14% TTL'd rows, ~8% explicit-timestamp ties on overwritten keys, ~3%
- * null-overwrite cell tombstones, plus per-round row deletes, bounded and single-sided range
- * deletes, and cycling partition deletes with resurrection.
+ * mix runs at scale: ~6% multi-cell map cells, ~14% TTL'd rows, ~8% explicit-timestamp ties
+ * on overwritten keys, ~3% null-overwrite cell tombstones, plus per-round row deletes,
+ * bounded and single-sided range deletes, and cycling partition deletes with resurrection.
  *
  * Runs in scale-capture mode (see DifferentialCompactionTester.scaleCapture): the logical
  * dump streams into a SHA-256 digest and byte comparison streams, so harness memory stays
@@ -73,7 +73,7 @@ public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionT
     @Test
     public void twoMillionRowsTwentySSTables() throws Throwable
     {
-        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, " +
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, m map<text, bigint>, " +
                     "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
@@ -86,6 +86,7 @@ public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionT
         String insert = "INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)";
         String insertTtl = insert + " USING TTL 86400";
         String insertTs = insert + " USING TIMESTAMP 5000";
+        String insertMap = "INSERT INTO %s (pk, ck, v1, v2, m) VALUES (?, ?, ?, ?, ?)";
 
         for (int round = 0; round < ROUNDS; round++)
         {
@@ -97,7 +98,9 @@ public class BigVolumeDifferentialCompactionTest extends DifferentialCompactionT
                     long ck = ckBase + j;
                     long v1 = ck * 31 + round;
                     String v2 = j % 31 == 30 ? null : "v" + round + "_" + ck + VALUE_PADDING;
-                    if (j % 7 == 3)
+                    if (j % 20 == 5)
+                        execute(insertMap, pk, ck, v1, v2, map("k" + (ck % 3), ck, "r", (long) round));
+                    else if (j % 7 == 3)
                         execute(insertTtl, pk, ck, v1, v2);
                     else if (j % 13 == 7)
                         execute(insertTs, pk, ck, v1, "tie" + round + "_" + ck + VALUE_PADDING);

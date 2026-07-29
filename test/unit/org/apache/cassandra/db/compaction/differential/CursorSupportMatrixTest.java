@@ -119,21 +119,21 @@ public class CursorSupportMatrixTest extends CQLTester
         assertSupported("CREATE TABLE %s (pk frozen<set<text>>, ck bigint, v text, PRIMARY KEY (pk, ck))");
     }
 
-    /** Increment 2 flips these to supported. */
+    /** Supported since increment 2 (complex read/merge/write). */
     @Test
-    public void multiCellCollectionsUnsupported()
+    public void multiCellCollectionsSupported()
     {
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, PRIMARY KEY (pk, ck))");
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, l list<text>, PRIMARY KEY (pk, ck))");
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, s set<int>, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, l list<text>, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, s set<int>, PRIMARY KEY (pk, ck))");
     }
 
-    /** Increment 2 flips this to supported. */
+    /** Supported since increment 2 (complex read/merge/write). */
     @Test
-    public void multiCellUdtUnsupported()
+    public void multiCellUdtSupported()
     {
         String udt = createType("CREATE TYPE %s (a int, b text)");
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, u " + udt + ", PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, u " + udt + ", PRIMARY KEY (pk, ck))");
     }
 
     /** Vector and duration are inside the supported surface (single-cell types). */

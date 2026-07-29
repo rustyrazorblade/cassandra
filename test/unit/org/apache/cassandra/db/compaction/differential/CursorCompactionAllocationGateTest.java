@@ -499,6 +499,69 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     /**
+     * Garbage-free property for COMPLEX (multi-cell) columns through the full cursor
+     * pipeline: read + per-(column,path) merge + marker/assembly write. Every row carries a
+     * map and a set (plus a complex deletion from the collection-literal INSERT), and the
+     * two rounds force real path-level merging. Same ceiling as the other gates.
+     */
+    @Test
+    public void allocationDoesNotScaleWithComplexColumns() throws Exception
+    {
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
+
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
+            long smallAlloc = measureComplex(19);
+            long smallBytes = lastInputBytes;
+            long bigAlloc = measureComplex(192);
+            long bigBytes = lastInputBytes;
+            long delta = bigAlloc - smallAlloc;
+            long extraBytes = bigBytes - smallBytes;
+            double perInputByte = (double) delta / extraBytes;
+            logger.info("complex-column cursor compaction allocation: small={}B big={}B delta={}B " +
+                        "over {}B extra input = {} B/B",
+                        smallAlloc, bigAlloc, delta, extraBytes, String.format("%.3f", perInputByte));
+            // Measured at the same multi-MB scale as allocationAtLargeFileSizes so the
+            // calibrated 0.5 B/B ceiling applies (at sub-MB inputs the volume-proportional
+            // test-env residual exceeds 1 B/B for ANY scenario, simple included). JFR over 30
+            // warmed complex compactions (recordComplexAllocationProfile) attributes ZERO
+            // scaling allocation to cursor frames: the profile is the per-compaction
+            // histogram-spool constants in maybeSwitchWriter, which cancel in the delta.
+            assertTrue(String.format("complex-column cursor allocation per input byte too high: " +
+                                     "%.3f B/B (delta %,dB over %,dB extra input)",
+                                     perInputByte, delta, extraBytes),
+                       perInputByte <= 0.5);
+        });
+    }
+
+    private long measureComplex(int partitions) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        String padding = "x".repeat(180); // multi-MB inputs so the 0.5 B/B residual calibration applies
+        for (int round = 0; round < 4; round++)
+        {
+            for (long pk = 0; pk < partitions; pk++)
+                for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                {
+                    execute("INSERT INTO %s (pk, ck, m, s, v) VALUES (?, ?, ?, ?, ?)",
+                            pk, ck, map("k" + ck, ck, "r" + round, (long) round), set((int) ck, round), padding + ck);
+                    if (ck % 4 == 0)
+                        execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "extra", ck, pk, ck);
+                }
+            flush();
+        }
+        captureLastInputBytes(cfs);
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+        return measureBest(cfs, gcBefore, 2, 2);
+    }
+
+    /**
      * Diagnostic, not a gate: records JFR allocation events (with stacks) over many warmed
      * cursor compactions of the big table and dumps to /tmp/cursor-alloc.jfr for offline
      * attribution of the scaling allocation (jfr print + aggregation). Always passes.
@@ -563,6 +626,41 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
 
             dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-rt.jfr"), 30, cfs, gcBefore);
             logger.info("allocation profile dumped to /tmp/cursor-alloc-rt.jfr");
+        });
+    }
+
+    /** Diagnostic, not a gate: JFR allocation profile over warmed cursor compactions of the
+     *  big COMPLEX table; dumps /tmp/cursor-alloc-complex.jfr for offline attribution. */
+    @Test
+    public void recordComplexAllocationProfile() throws Exception
+    {
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
+
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
+            createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, v text, " +
+                        "PRIMARY KEY (pk, ck)) WITH compression = {'enabled': 'false'}");
+            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            cfs.disableAutoCompaction();
+            int partitions = SMALL_PARTITIONS * SCALE;
+            for (int round = 0; round < 2; round++)
+            {
+                for (long pk = 0; pk < partitions; pk++)
+                    for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                    {
+                        execute("INSERT INTO %s (pk, ck, m, s, v) VALUES (?, ?, ?, ?, ?)",
+                                pk, ck, map("k" + ck, ck, "r" + round, (long) round), set((int) ck, round), "v" + ck);
+                        if (ck % 4 == 0)
+                            execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "extra", ck, pk, ck);
+                    }
+                flush();
+            }
+            long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+            assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+
+            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-complex.jfr"), 30, cfs, gcBefore);
+            logger.info("allocation profile dumped to /tmp/cursor-alloc-complex.jfr");
         });
     }
 
