@@ -273,6 +273,39 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
+    /**
+     * Same-timestamp ties between values of DIFFERENT LENGTHS: the reference tie-break
+     * (Cells.resolveRegular rule (e) -> ValueAccessor.compare) is plain unsigned
+     * lexicographic on the RAW value bytes, where a comparison of the WIRE form would see
+     * the leading length vint first and order by LENGTH (the vint's first byte encodes it).
+     * The timestampTies pin above uses equal-length values and cannot see the difference.
+     * Covers both directions and the 1-byte/2-byte vint boundary (length 128).
+     */
+    @Test
+    public void timestampTiesDifferentLengthValues() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // raw order: "z" > "aa"; wire order: len 1 < len 2 — the reference keeps "z"
+        for (long ck = 0; ck < 4; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 1L, ck, "z");
+        // vint-boundary variant: raw keeps the 100-char "b..."; wire would pick the
+        // 200-char "a..." (len 100 = one-byte vint 0x64, len 200 = two-byte vint 0x81 0x48)
+        for (long ck = 0; ck < 4; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 2L, ck, "b".repeat(100));
+        flush();
+
+        for (long ck = 0; ck < 4; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 1L, ck, "aa");
+        for (long ck = 0; ck < 4; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 1000", 2L, ck, "a".repeat(200));
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
     /** Newer partition deletion shadowing older data across several sstables. */
     @Test
     public void shadowedPartitions() throws Exception

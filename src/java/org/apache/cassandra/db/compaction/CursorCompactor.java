@@ -719,8 +719,21 @@ public class CursorCompactor extends CompactionInfo.Holder
 
                     // Matches Cells.resolveRegular: left (the current winner) wins ties, the
                     // challenger only wins with a strictly greater value
-                    // (compareValues(left, right) >= 0 ? left : right).
-                    int compare = Arrays.compareUnsigned(tempCellBuffer1.getData(), 0, tempCellBuffer1.getLength(), tempCellBuffer2.getData(), 0, tempCellBuffer2.getLength());
+                    // (compareValues(left, right) >= 0 ? left : right). The reference
+                    // comparison is over the RAW value bytes (ValueAccessor.compare, plain
+                    // unsigned lexicographic): these buffers hold the WIRE form, which for
+                    // variable-length types carries a leading length vint — comparing that
+                    // prefix orders by LENGTH first (the vint's leading byte encodes it) and
+                    // picks the wrong winner for ties between different-length values.
+                    // Fixed-length types carry no vint (and equal lengths).
+                    int skip1 = 0, skip2 = 0;
+                    if (cellCursor.cellType.valueLengthIfFixed() < 0)
+                    {
+                        skip1 = tempCellBuffer1.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer1.getData()[0]);
+                        skip2 = tempCellBuffer2.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer2.getData()[0]);
+                    }
+                    int compare = Arrays.compareUnsigned(tempCellBuffer1.getData(), skip1, tempCellBuffer1.getLength(),
+                                                         tempCellBuffer2.getData(), skip2, tempCellBuffer2.getLength());
                     if (compare < 0) {
                         // challenger wins: swap buffers so tempCellBuffer1 holds the winner's value
                         tempCellBuffer = tempCellBuffer1;
@@ -829,6 +842,17 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         }
         return isRowDropped;
+    }
+
+    /**
+     * Byte length of the leading unsigned vint in a wire-form variable-length value:
+     * non-negative first byte = single-byte vint (VIntCoding's own callers guard the same
+     * way before consulting numberOfExtraBytesToRead, which expects the SIGNED byte).
+     */
+    private static int wireVintSize(byte firstByte)
+    {
+        return firstByte >= 0 ? 1
+               : 1 + org.apache.cassandra.utils.vint.VIntCoding.numberOfExtraBytesToRead(firstByte);
     }
 
     enum CellResolution
