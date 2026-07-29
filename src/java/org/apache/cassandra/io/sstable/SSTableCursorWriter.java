@@ -503,9 +503,9 @@ public class SSTableCursorWriter implements AutoCloseable
         cursorIndexWriter.rowWritten(unfilteredDescriptor, unfilteredStartPosition, unfilteredEndPosition, openMarker);
     }
 
-    public void updateClusteringMetadata(UnfilteredDescriptor unfilteredDescriptor)
+    public void updateClusteringMetadata(ClusteringDescriptor clusteringDescriptor)
     {
-        metadataCollector.updateClusteringValues(unfilteredDescriptor);
+        metadataCollector.updateClusteringValues(clusteringDescriptor);
     }
 
     /**
