@@ -479,6 +479,21 @@ public class SSTableCursorWriter implements AutoCloseable
         rowBuffer.write(tempCellBuffer.getData(), 0, tempCellBuffer.getLength());
     }
 
+    /** Appends a variable-length cell value supplied as a raw window: vint length + bytes
+     *  (the wire form for variable-length types — counter contexts use this). */
+    public void writeCellValue(byte[] value, int offset, int length) throws IOException
+    {
+        rowBuffer.writeUnsignedVInt32(length);
+        rowBuffer.write(value, offset, length);
+    }
+
+    /** {@link org.apache.cassandra.db.rows.Cells#collectStats} parity: called once per
+     *  live counter cell in the output row. */
+    public void updateCounterShardStats(boolean hasLegacyShards)
+    {
+        metadataCollector.updateHasLegacyCounterShards(hasLegacyShards);
+    }
+
     public void writeRowEnd(UnfilteredDescriptor rHeader, boolean updateClusteringMetadata) throws IOException
     {
         boolean isExtended = isExtended(rowFlags);

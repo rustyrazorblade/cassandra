@@ -102,6 +102,15 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         JavaRandom qtRandom = new JavaRandom(seed);
         Random workload = new Random(seed);
 
+        // ~1 in 5 examples: a COUNTER table. Counters cannot mix with regular columns
+        // (CQL rejects the combination), so instead of widening the type generator they
+        // get a dedicated generation mode with counter-update syntax (increment 5).
+        if (workload.nextInt(5) == 0)
+        {
+            runCounterExample(seed, workload);
+            return;
+        }
+
         Gen<String> udtName = Generators.unique(IDENTIFIER_GEN);
         TypeGenBuilder safePrimary = AbstractTypeGenerators.withoutUnsafeEquality().withUDTNames(udtName);
         TableMetadata metadata;
@@ -270,6 +279,82 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
                 execute(deletePartitionStmt, (Object[]) Arrays.copyOf(victim, partitionColumnCount));
             }
             flush(KEYSPACE, metadata.name);
+        }
+
+        assertCursorMatchesIterator(cfs);
+    }
+
+    /**
+     * Counter-table example: random clustering depth (0-2), 1-3 counter columns, optional
+     * static counter; rounds of increments with random deltas plus cell, static-cell, row,
+     * and partition deletes — the CASSANDRA-7346 tombstone-vs-increment interleavings arise
+     * naturally from delete-then-increment round ordering.
+     */
+    private void runCounterExample(long seed, Random workload) throws Throwable
+    {
+        int clusterings = workload.nextInt(3);
+        int counters = 1 + workload.nextInt(3);
+        boolean staticCounter = clusterings > 0 && workload.nextBoolean();
+
+        StringBuilder schema = new StringBuilder("CREATE TABLE %s (pk bigint");
+        for (int i = 0; i < clusterings; i++)
+            schema.append(", ck").append(i).append(" bigint");
+        for (int i = 0; i < counters; i++)
+            schema.append(", c").append(i).append(" counter");
+        if (staticCounter)
+            schema.append(", cs counter static");
+        schema.append(", PRIMARY KEY (pk");
+        for (int i = 0; i < clusterings; i++)
+            schema.append(", ck").append(i);
+        schema.append(")) WITH gc_grace_seconds = 864000");
+        createTable(schema.toString());
+        logger.info("randomizedDifferential seed={} counter schema:\n{}", seed, schema);
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        StringBuilder where = new StringBuilder(" WHERE pk = ?");
+        for (int i = 0; i < clusterings; i++)
+            where.append(" AND ck").append(i).append(" = ?");
+
+        int rounds = 2 + workload.nextInt(3);
+        for (int round = 0; round < rounds; round++)
+        {
+            int writes = 15 + workload.nextInt(26);
+            for (int w = 0; w < writes; w++)
+            {
+                Object[] key = new Object[1 + clusterings];
+                key[0] = (long) workload.nextInt(4);
+                for (int i = 0; i < clusterings; i++)
+                    key[1 + i] = (long) workload.nextInt(6);
+
+                int op = workload.nextInt(100);
+                if (op < 70)
+                {
+                    int col = workload.nextInt(counters);
+                    Object[] args = new Object[1 + key.length];
+                    args[0] = (long) (workload.nextInt(200) - 100);
+                    System.arraycopy(key, 0, args, 1, key.length);
+                    execute("UPDATE %s SET c" + col + " = c" + col + " + ?" + where, args);
+                }
+                else if (op < 80 && staticCounter)
+                {
+                    execute("UPDATE %s SET cs = cs + ? WHERE pk = ?", (long) (workload.nextInt(50) - 25), key[0]);
+                }
+                else if (op < 90)
+                {
+                    int col = workload.nextInt(counters);
+                    execute("DELETE c" + col + " FROM %s" + where, key);
+                }
+                else if (op < 96)
+                {
+                    execute("DELETE FROM %s" + where, key);
+                }
+                else
+                {
+                    execute("DELETE FROM %s WHERE pk = ?", key[0]);
+                }
+            }
+            flush();
         }
 
         assertCursorMatchesIterator(cfs);

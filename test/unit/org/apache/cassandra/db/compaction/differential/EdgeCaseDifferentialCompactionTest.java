@@ -622,8 +622,8 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
      * (Cells.resolveRegular rule (e) -> ValueAccessor.compare) is plain unsigned
      * lexicographic on the RAW value bytes, where a comparison of the WIRE form would see
      * the leading length vint first and order by LENGTH (the vint's first byte encodes it).
-     * The timestampTies pin above uses equal-length values and cannot see the difference.
-     * Covers both directions and the 1-byte/2-byte vint boundary (length 128).
+     * The original timestampTies pin used equal-length values and could not see the
+     * difference. Covers both directions and the 1-byte/2-byte vint boundary (length 128).
      */
     @Test
     public void timestampTiesDifferentLengthValues() throws Exception
