@@ -85,6 +85,16 @@ public class TableQueryMetrics extends AbstractMetrics
         private final Histogram rowsFiltered;
 
         /**
+         * Bytes allocated (via {@link QueryContext#totalQueryAllocatedBytes} - see its doc for
+         * exactly what window this covers and its known gap for the vector/ANN path) over this
+         * query's execution. Added as a baseline measurement point before any SAI allocation-
+         * reduction work, specifically so this JMX histogram can be read before/after each such
+         * change lands (same query shape, same node, rebuild between commits) without needing a
+         * profiler - see the commit that introduced it for the measurement methodology.
+         */
+        private final Histogram allocatedBytes;
+
+        /**
          * Balanced tree index metrics.
          */
         private final Histogram balancedTreePostingsNumPostings;
@@ -119,6 +129,8 @@ public class TableQueryMetrics extends AbstractMetrics
 
             partitionReads = Metrics.histogram(createMetricName("PartitionReads"), false);
             rowsFiltered = Metrics.histogram(createMetricName("RowsFiltered"), false);
+
+            allocatedBytes = Metrics.histogram(createMetricName("AllocatedBytes"), false);
         }
 
         private void recordStringIndexCacheMetrics(QueryContext events)
@@ -149,6 +161,8 @@ public class TableQueryMetrics extends AbstractMetrics
 
             rowsFiltered.update(queryContext.rowsFiltered);
             totalRowsFiltered.inc(queryContext.rowsFiltered);
+
+            allocatedBytes.update(queryContext.totalQueryAllocatedBytes());
 
             if (Tracing.isTracing())
             {

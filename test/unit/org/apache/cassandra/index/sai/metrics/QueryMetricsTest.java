@@ -18,6 +18,7 @@
 package org.apache.cassandra.index.sai.metrics;
 
 import javax.management.InstanceNotFoundException;
+import javax.management.ObjectName;
 
 import com.datastax.driver.core.ResultSet;
 
@@ -27,6 +28,7 @@ import org.junit.rules.ExpectedException;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class QueryMetricsTest extends AbstractMetricsTest
 {
@@ -98,5 +100,37 @@ public class QueryMetricsTest extends AbstractMetricsTest
         // If we drop the last index on the table we should no longer see the table-level state metrics:
         dropIndex(String.format("DROP INDEX %s." + index, keyspace));
         assertThatThrownBy(() -> getTableQueryMetrics(keyspace, table, "TotalQueriesCompleted")).hasCauseInstanceOf(InstanceNotFoundException.class);
+    }
+
+    /**
+     * Pins that {@code TableQueryMetrics.PerQueryMetrics#allocatedBytes} - the JMX histogram added
+     * as a baseline measurement point ahead of SAI allocation-reduction work, so it can be read
+     * before/after each such change without a profiler - is actually reachable over JMX and
+     * actually measures something real (not always reporting 0, which would mean the underlying
+     * {@code QueryContext#totalQueryAllocatedBytes} measurement silently isn't working, e.g. because
+     * this JVM's {@code ThreadMXBean} doesn't support allocation tracking or the single-thread
+     * assumption that measurement depends on doesn't hold here).
+     */
+    @Test
+    public void testAllocatedBytesMetricIsRecorded() throws Throwable
+    {
+        String table = "test_allocated_bytes_metric";
+        String index = "test_allocated_bytes_metric_index";
+
+        String keyspace = createKeyspace(CREATE_KEYSPACE_TEMPLATE);
+
+        createTable(String.format(CREATE_TABLE_TEMPLATE, keyspace, table));
+        createIndex(String.format(CREATE_INDEX_TEMPLATE, index, keyspace, table, "v1"));
+
+        for (int i = 0; i < 10; i++)
+            execute(String.format("INSERT INTO %s.%s (id1, v1, v2) VALUES ('%d', %d, '%d')", keyspace, table, i, i, i));
+
+        ResultSet rows = executeNet("SELECT id1 FROM " + keyspace + '.' + table + " WHERE v1 >= 0");
+        assertEquals(10, rows.all().size());
+
+        ObjectName allocatedBytes = objectNameNoIndex("AllocatedBytes", keyspace, table, TableQueryMetrics.PerQueryMetrics.PER_QUERY_METRICS_TYPE);
+        assertEquals("exactly one query should have been recorded", 1L, ((Number) getMBeanAttribute(allocatedBytes, "Count")).longValue());
+        assertTrue("a real, positive allocation figure should have been measured for that query",
+                  ((Number) getMBeanAttribute(allocatedBytes, "Max")).longValue() > 0);
     }
 }
