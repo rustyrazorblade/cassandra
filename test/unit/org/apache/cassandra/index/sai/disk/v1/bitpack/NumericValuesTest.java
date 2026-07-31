@@ -97,6 +97,25 @@ public class NumericValuesTest extends SAIRandomizedTester
             {
                 assertEquals(array[x], reader.get(x));
             }
+
+            // Access indexes out of order (rather than the strictly-forward pass above) to pin the
+            // per-block sub-reader cache in AbstractBlockPackedReader#get against backward and
+            // random access - not just the sequential access this class most commonly sees.
+            int[] shuffledIndexes = new int[array.length];
+            for (int x = 0; x < array.length; x++)
+                shuffledIndexes[x] = x;
+            for (int x = shuffledIndexes.length - 1; x > 0; x--)
+            {
+                int swapWith = getRandom().nextIntBetween(0, x);
+                int tmp = shuffledIndexes[x];
+                shuffledIndexes[x] = shuffledIndexes[swapWith];
+                shuffledIndexes[swapWith] = tmp;
+            }
+
+            for (int x : shuffledIndexes)
+            {
+                assertEquals(array[x], reader.get(x));
+            }
         }
     }
 

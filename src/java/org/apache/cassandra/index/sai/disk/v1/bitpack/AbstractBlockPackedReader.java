@@ -38,6 +38,12 @@ public abstract class AbstractBlockPackedReader implements LongArray
     private long previousValue = Long.MIN_VALUE;
     private long lastIndex; // the last index visited by token -> row ID searches
 
+    // Cache of the sub-reader for the most recently accessed block, since get() is very often
+    // called repeatedly for indexes within the same block (e.g. sequential or nearby row IDs) -
+    // avoids reallocating a DirectReader on every single call.
+    private int cachedBlockIndex = -1;
+    private LongValues cachedSubReader;
+
     AbstractBlockPackedReader(IndexInput indexInput, byte[] blockBitsPerValue, int blockShift, int blockMask, long valueCount)
     {
         this.blockShift = blockShift;
@@ -59,10 +65,16 @@ public abstract class AbstractBlockPackedReader implements LongArray
 
         int blockIndex = (int) (valueIndex >>> blockShift);
         int inBlockIndex = (int) (valueIndex & blockMask);
-        byte bitsPerValue = blockBitsPerValue[blockIndex];
-        final LongValues subReader = bitsPerValue == 0 ? LongValues.ZEROES
-                                                       : DirectReader.getInstance(input, bitsPerValue, blockOffsetAt(blockIndex));
-        return delta(blockIndex, inBlockIndex) + subReader.get(inBlockIndex);
+
+        if (blockIndex != cachedBlockIndex)
+        {
+            byte bitsPerValue = blockBitsPerValue[blockIndex];
+            cachedSubReader = bitsPerValue == 0 ? LongValues.ZEROES
+                                                : DirectReader.getInstance(input, bitsPerValue, blockOffsetAt(blockIndex));
+            cachedBlockIndex = blockIndex;
+        }
+
+        return delta(blockIndex, inBlockIndex) + cachedSubReader.get(inBlockIndex);
     }
 
     @Override
