@@ -170,10 +170,36 @@ public class Validator implements Runnable
      */
     public void add(UnfilteredRowIterator partition)
     {
-        assert Range.isInRanges(partition.partitionKey().getToken(), desc.ranges) : partition.partitionKey().getToken() + " is not contained in " + desc.ranges;
-        assert lastKey == null || lastKey.compareTo(partition.partitionKey()) < 0
-               : "partition " + partition.partitionKey() + " received out of order wrt " + lastKey;
-        lastKey = partition.partitionKey();
+        // MerkleTree uses XOR internally, so we want lots of output bits here
+        Digest digest = Digest.forValidator();
+        UnfilteredRowIterators.digest(partition, digest, MessagingService.current_version);
+        addHash(partition.partitionKey(), digest.digest(), digest.inputBytes());
+    }
+
+    /**
+     * Cursor-backed counterpart to {@link #add}: takes a digest already computed directly from
+     * cursor primitives (see {@code DigestingCursorMergeSink}) instead of an
+     * {@link UnfilteredRowIterator}, so the partition is never re-walked to recompute a digest
+     * that's already been produced - the whole point of the cursor-backed digest path.
+     *
+     * @param key partition key the digest was computed over
+     * @param digestBytes the precomputed digest, matching what {@link UnfilteredRowIterators#digest}
+     * would have produced over the same partition
+     * @param inputBytes the precomputed digest's {@link Digest#inputBytes()} - see the
+     * CASSANDRA-8979 zero-input skip in {@link #addHash}
+     */
+    public void addDigest(DecoratedKey key, byte[] digestBytes, long inputBytes)
+    {
+        addHash(key, digestBytes, inputBytes);
+    }
+
+    private void addHash(DecoratedKey key, byte[] digestBytes, long inputBytes)
+    {
+        validated++;
+        assert Range.isInRanges(key.getToken(), desc.ranges) : key.getToken() + " is not contained in " + desc.ranges;
+        assert lastKey == null || lastKey.compareTo(key) < 0
+               : "partition " + key + " received out of order wrt " + lastKey;
+        lastKey = key;
 
         if (range == null)
             range = ranges.next();
@@ -188,11 +214,12 @@ public class Validator implements Runnable
 
         assert range.contains(lastKey.getToken()) : "Token not in MerkleTree: " + lastKey.getToken();
         // case 3 must be true: mix in the hashed row
-        RowHash rowHash = rowHash(partition);
-        if (rowHash != null)
+        // only add a hash for the merkle tree in case the digest was actually updated - see CASSANDRA-8979
+        if (inputBytes > 0)
         {
-            if(topPartitionCollector != null)
-                topPartitionCollector.trackPartitionSize(partition.partitionKey(), rowHash.size);
+            RowHash rowHash = new MerkleTree.RowHash(key.getToken(), digestBytes, inputBytes);
+            if (topPartitionCollector != null)
+                topPartitionCollector.trackPartitionSize(key, rowHash.size);
             range.addHash(rowHash);
         }
     }
@@ -205,18 +232,6 @@ public class Validator implements Runnable
         }
 
         return range.contains(t);
-    }
-
-    private MerkleTree.RowHash rowHash(UnfilteredRowIterator partition)
-    {
-        validated++;
-        // MerkleTree uses XOR internally, so we want lots of output bits here
-        Digest digest = Digest.forValidator();
-        UnfilteredRowIterators.digest(partition, digest, MessagingService.current_version);
-        // only return new hash for merkle tree in case digest was updated - see CASSANDRA-8979
-        return digest.inputBytes() > 0
-             ? new MerkleTree.RowHash(partition.partitionKey().getToken(), digest.digest(), digest.inputBytes())
-             : null;
     }
 
     /**

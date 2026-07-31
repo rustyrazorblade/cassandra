@@ -1140,6 +1140,23 @@ public class SSTableCursorReader implements AutoCloseable
         return state == DONE || dataReader.isEOF();
     }
 
+    /**
+     * True end-of-file of the underlying data file - as opposed to {@link #isEOF()}, which is
+     * also true when {@link #forceDone()} has put this cursor in {@code DONE} early because a
+     * caller-supplied partial-range bound was exhausted (see {@code StatefulCursor.positionAt}),
+     * with the file itself not actually exhausted.
+     */
+    public boolean isFileEOF()
+    {
+        return dataReader.isEOF();
+    }
+
+    /** Forces {@code DONE} without consuming further input - see {@link #isFileEOF()}. */
+    protected int forceDone()
+    {
+        return state = DONE;
+    }
+
     public int state()
     {
         return state;
