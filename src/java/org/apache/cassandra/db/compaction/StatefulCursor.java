@@ -18,6 +18,9 @@
 
 package org.apache.cassandra.db.compaction;
 
+import java.util.Iterator;
+import java.util.List;
+
 import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.config.Config;
@@ -32,6 +35,7 @@ import org.apache.cassandra.io.sstable.PartitionDescriptor;
 import org.apache.cassandra.io.sstable.SSTableCursorReader;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 
 import static org.apache.cassandra.db.rows.Cell.INVALID_DELETION_TIME;
 import static org.apache.cassandra.db.rows.Cell.NO_DELETION_TIME;
@@ -39,6 +43,7 @@ import static org.apache.cassandra.db.rows.Cell.NO_TTL;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_VALUE_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
 
@@ -65,6 +70,11 @@ class StatefulCursor extends SSTableCursorReader
 
     private boolean isOpenRangeTombstonePresent = false;
 
+    // Multi-segment partial-range bound support (see positionAt()). Null means unbounded (the
+    // default, existing full-range behavior) - every check below short-circuits in that case.
+    private Iterator<PartitionPositionBounds> remainingBounds;
+    private long currentSegmentEndPosition;
+
     public StatefulCursor(SSTableReader reader, DiskAccessMode diskAccessMode)
     {
         super(reader, diskAccessMode);
@@ -76,8 +86,76 @@ class StatefulCursor extends SSTableCursorReader
         unfiltered = new UnfilteredDescriptor(reader.header.clusteringTypes().toArray(AbstractType[]::new));
     }
 
+    /**
+     * Installs a set of partition-boundary-aligned byte ranges (as produced by
+     * {@link SSTableReader#getPositionsForRanges}, the same type {@link org.apache.cassandra.io.sstable.format.SSTableSimpleScanner}
+     * consumes) this cursor is restricted to, and seeks to the first one. Ranges must be
+     * non-overlapping and in ascending order, exactly like {@code SSTableSimpleScanner}'s
+     * contract - each range's bounds must fall on a partition boundary (verified by
+     * {@link #seekPartition}).
+     * <p>
+     * Must be called before the first {@link #readPartitionHeader()}. Exhausting the assigned
+     * ranges surfaces as the ordinary {@code DONE} state to callers - indistinguishable from
+     * true end-of-file - see {@link #isFileEOF()} for the byte-accounting distinction.
+     *
+     * @return the resulting cursor state (mirrors {@link #seekPartition})
+     */
+    public int positionAt(List<PartitionPositionBounds> bounds)
+    {
+        assert bounds != null && !bounds.isEmpty();
+        remainingBounds = bounds.iterator();
+        PartitionPositionBounds first = remainingBounds.next();
+        currentSegmentEndPosition = first.upperPosition;
+        int state = seekPartition(first.lowerPosition);
+        // Without this, bytesReadSinceSnapshot()'s first call after positioning would diff
+        // against the stale default of 0, over-reporting by first.lowerPosition worth of bytes
+        // that were skipped via seek, never actually read.
+        bytesReadPositionSnapshot = first.lowerPosition;
+        return state;
+    }
+
     public int readPartitionHeader()
     {
+        // Multi-segment bound support: once the underlying reader reaches the end of the
+        // currently-active segment, advance to the next assigned segment (skipping any
+        // degenerate empty ones) or report DONE if none remain - never read a partition that
+        // falls outside the assigned ranges.
+        while (remainingBounds != null && position() >= currentSegmentEndPosition)
+        {
+            if (!remainingBounds.hasNext())
+            {
+                // Every call to this method that does not fall through to the real read below is
+                // still "one round" of reads as far as the deferred partition steal is concerned
+                // (see #partitionSwaps) - the unbounded (remainingBounds == null) path always
+                // swaps before it can discover true EOF, since the swap sits ahead of the
+                // fallthrough read unconditionally. Skipping the swap here would leave a round
+                // that legitimately called readPartitionHeader() without the swap the steal's
+                // deferral invariant counts on.
+                swapCurrAndPrevPartition();
+                return forceDone();
+            }
+
+            PartitionPositionBounds next = remainingBounds.next();
+            currentSegmentEndPosition = next.upperPosition;
+            long posBeforeSeek = position();
+            int seekState = seekPartition(next.lowerPosition);
+            // The seek jumps over the gap between the previous segment's end and this segment's
+            // start; those bytes are skipped, never read, so advance the snapshot past them - the
+            // same correction positionAt() applies for the leading skip. Without this the gap is
+            // counted as bytes read on the next bytesReadSinceSnapshot(), pushing getBytesRead()
+            // beyond getEstimatedBytes() (>100% progress) for a validation over disjoint ranges.
+            bytesReadPositionSnapshot += next.lowerPosition - posBeforeSeek;
+            if (seekState == DONE)
+            {
+                // Same reasoning as the forceDone() branch above: this round's read attempt found
+                // true EOF instead of the next segment, but it is still one round of reads for the
+                // deferred-steal invariant.
+                swapCurrAndPrevPartition();
+                return seekState;
+            }
+            // loop again: the newly-entered segment may itself already be at its own end
+        }
+
         swapCurrAndPrevPartition();
         int state = readPartitionHeader(currPartition);
 
@@ -216,7 +294,13 @@ class StatefulCursor extends SSTableCursorReader
 
     public long bytesReadSinceSnapshot()
     {
-        long latestByteReadPosition = isEOF() ? uncompressedLength() : position();
+        // isFileEOF(), NOT isEOF(): a cursor stopped early by positionAt()'s bounds reports DONE
+        // via isEOF() well before the file's actual end - using uncompressedLength() there would
+        // over-report this cursor's remaining/total bytes. isFileEOF() distinguishes true
+        // end-of-file from that logical, bound-triggered DONE. For an unbounded cursor the two
+        // are always equivalent (state only ever reaches DONE when dataReader.isEOF() does), so
+        // this is behavior-preserving for existing full-range callers.
+        long latestByteReadPosition = isFileEOF() ? uncompressedLength() : position();
         long cursorBytesRead = latestByteReadPosition - bytesReadPositionSnapshot;
         bytesReadPositionSnapshot = latestByteReadPosition;
         return cursorBytesRead;

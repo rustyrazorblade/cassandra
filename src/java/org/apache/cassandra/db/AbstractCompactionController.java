@@ -57,5 +57,18 @@ public abstract class AbstractCompactionController implements AutoCloseable
         return null;
     }
 
+    /**
+     * Whether this controller is guaranteed to always yield a null/empty {@link #shadowSources}
+     * regardless of {@link #tombstoneOption} - e.g. because it's always constructed with no
+     * compacting set. Lets a caller that can't implement
+     * {@code CompactionIterator.GarbageSkipper}-equivalent behavior (see
+     * {@code CursorCompactor#isValidationSupported}) accept such a controller safely, without
+     * checking for a specific concrete controller type.
+     */
+    public boolean guaranteesNoShadowSources()
+    {
+        return false;
+    }
+
     public abstract LongPredicate getPurgeEvaluator(DecoratedKey key);
 }

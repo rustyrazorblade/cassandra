@@ -25,7 +25,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.LongPredicate;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -36,10 +35,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.ActiveCompactionsTracker;
-import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CompactionIterator;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.OperationType;
@@ -67,37 +64,6 @@ import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 public class CassandraValidationIterator extends ValidationPartitionIterator
 {
     private static final Logger logger = LoggerFactory.getLogger(CassandraValidationIterator.class);
-
-    /*
-     * Controller for validation compaction that always purges.
-     * Note that we should not call cfs.getOverlappingSSTables on the provided
-     * sstables because those sstables are not guaranteed to be active sstables
-     * (since we can run repair on a snapshot).
-     */
-    private static class ValidationCompactionController extends CompactionController
-    {
-        public ValidationCompactionController(ColumnFamilyStore cfs, long gcBefore)
-        {
-            super(cfs, gcBefore);
-        }
-
-        @Override
-        public LongPredicate getPurgeEvaluator(DecoratedKey key)
-        {
-            /*
-             * The main reason we always purge is that including gcable tombstone would mean that the
-             * repair digest will depends on the scheduling of compaction on the different nodes. This
-             * is still not perfect because gcbefore is currently dependend on the current time at which
-             * the validation compaction start, which while not too bad for normal repair is broken for
-             * repair on snapshots. A better solution would be to agree on a gcbefore that all node would
-             * use, and we'll do that with CASSANDRA-4932.
-             * Note validation compaction includes all sstables, so we don't have the problem of purging
-             * a tombstone that could shadow a column in another sstable, but this is doubly not a concern
-             * since validation compaction is read-only.
-             */
-            return time -> true;
-        }
-    }
 
     private static class ValidationCompactionIterator extends CompactionIterator
     {

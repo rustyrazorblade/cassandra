@@ -60,7 +60,7 @@ import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_TTL;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.IS_MARKER;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.isExtended;
 
-public class SSTableCursorWriter implements AutoCloseable
+public class SSTableCursorWriter implements AutoCloseable, CursorMergeSink
 {
     private static final UnfilteredSerializer SERIALIZER = UnfilteredSerializer.serializer;
     private static final ColumnMetadata[] EMPTY_COL_META = new ColumnMetadata[0];
