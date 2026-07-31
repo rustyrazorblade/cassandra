@@ -119,6 +119,12 @@ public class KeyLookup
         // A temporary buffer used to hold the key at the start of the next block.
         private final BytesRef nextBlockKey;
 
+        // Reused across clusteredSeekToKey calls (via asBytesRef) instead of allocating a fresh
+        // BytesRefBuilder - and its backing byte[] - on every call. asBytesRef's returned BytesRef
+        // is a view over this builder's mutable array, not a defensive copy - do not cache it
+        // beyond the single clusteredSeekToKey call that produced it.
+        private final BytesRefBuilder searchKeyBuilder = new BytesRefBuilder();
+
         // The point id the cursor currently points to.
         private long currentPointId;
         private long currentBlockIndex;
@@ -364,13 +370,13 @@ public class KeyLookup
 
         private BytesRef asBytesRef(ByteComparable source)
         {
-            BytesRefBuilder builder = new BytesRefBuilder();
+            searchKeyBuilder.clear();
 
             ByteSource byteSource = source.asComparableBytes(ByteComparable.Version.OSS50);
             int val;
             while ((val = byteSource.next()) != ByteSource.END_OF_STREAM)
-                builder.append((byte) val);
-            return builder.get();
+                searchKeyBuilder.append((byte) val);
+            return searchKeyBuilder.get();
         }
     }
 }
