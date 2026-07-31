@@ -242,6 +242,20 @@ public class BlockBalancedTreeReader extends BlockBalancedTreeWalker implements 
         private final byte[] packedValue;
         private final short[] origIndex;
 
+        // treeInput doesn't change across leaves, and SeekingRandomAccessInput carries no
+        // leaf-specific state of its own (it seeks-then-reads treeInput fresh on every access) -
+        // safe to construct once and reuse per leaf instead of reallocating the wrapper on every
+        // filterLeaf() call. The shared treeInput cursor itself is fine to share too: filterLeaf
+        // re-seeks it explicitly on every entry before reading, so no leaf depends on where a
+        // prior leaf left the cursor positioned.
+        //
+        // NOT extended to the FixedBitSet built per leaf just below (in buildPostingsFilter*):
+        // unlike this wrapper, those bitsets are read lazily by FilteringPostingList well after
+        // filterLeaf() returns, and multiple leaves' bitsets stay simultaneously alive in
+        // postingLists until the whole-query merge (MergePostingList) finishes interleaving them -
+        // reusing/clearing a single mutable bitset across leaves would silently corrupt results.
+        private final SeekingRandomAccessInput randomAccessInput;
+
         FilteringIntersection(IndexInput treeInput, IndexInput postingsInput, IndexInput postingsSummaryInput,
                               IntersectVisitor visitor, QueryEventListener.BalancedTreeEventListener listener, QueryContext context)
         {
@@ -249,6 +263,7 @@ public class BlockBalancedTreeReader extends BlockBalancedTreeWalker implements 
             this.visitor = visitor;
             this.packedValue = new byte[bytesPerValue];
             this.origIndex = new short[maxValuesInLeafNode];
+            this.randomAccessInput = new SeekingRandomAccessInput(treeInput);
         }
 
         @Override
@@ -292,7 +307,6 @@ public class BlockBalancedTreeReader extends BlockBalancedTreeWalker implements 
             int orderMapLength = treeInput.readVInt();
             long orderMapPointer = treeInput.getFilePointer();
 
-            SeekingRandomAccessInput randomAccessInput = new SeekingRandomAccessInput(treeInput);
             LongValues leafOrderMapReader = DirectReader.getInstance(randomAccessInput, leafOrderMapBitsRequired, orderMapPointer);
             for (int index = 0; index < count; index++)
             {
