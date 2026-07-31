@@ -317,6 +317,12 @@ public class Murmur3Partitioner implements IPartitioner
         return getToken(key, getHash(key));
     }
 
+    @Override
+    public LongToken getTokenFromLong(long value)
+    {
+        return new LongToken(value);
+    }
+
     private LongToken getToken(ByteBuffer key, long[] hash)
     {
         if (key.remaining() == 0)
