@@ -256,7 +256,7 @@ public class TrieMemoryIndex extends MemoryIndex
     private KeyRangeIterator exactMatch(Expression expression, AbstractBounds<PartitionPosition> keyRange)
     {
         ByteComparable comparableMatch = expression.lower() == null ? ByteComparable.EMPTY
-                                                                    : asComparableBytes(expression.lower().value.encoded);
+                                                                    : asComparableBytes(expression.lower().value.encoded());
         PrimaryKeys primaryKeys = data.get(comparableMatch);
         return primaryKeys == null ? KeyRangeIterator.empty()
                                    : new FilteringInMemoryKeyRangeIterator(primaryKeys.keys(), keyRange);
@@ -328,7 +328,7 @@ public class TrieMemoryIndex extends MemoryIndex
         boolean lowerInclusive, upperInclusive;
         if (expression.lower() != null)
         {
-            lowerBound = asComparableBytes(expression.lower().value.encoded);
+            lowerBound = asComparableBytes(expression.lower().value.encoded());
             lowerInclusive = expression.lower().inclusive;
         }
         else
@@ -339,7 +339,7 @@ public class TrieMemoryIndex extends MemoryIndex
 
         if (expression.upper() != null)
         {
-            upperBound = asComparableBytes(expression.upper().value.encoded);
+            upperBound = asComparableBytes(expression.upper().value.encoded());
             upperInclusive = expression.upper().inclusive;
         }
         else

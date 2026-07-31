@@ -159,4 +159,17 @@ public class QueryContext
     {
         return readCommand.limits().count();
     }
+
+    /**
+     * The query's canonical "now" (in seconds), frozen at read-command construction time - the same
+     * value the rest of the read path already uses for liveness/TTL evaluation (see
+     * {@link ReadCommand#nowInSec()}). Used by {@link org.apache.cassandra.index.sai.plan.FilterTree}
+     * instead of a fresh {@link org.apache.cassandra.utils.FBUtilities#nowInSeconds()} clock read per
+     * row, since this value already exists and second-granularity TTL checks don't benefit from
+     * re-reading the clock on every row of a single query.
+     */
+    public long nowInSec()
+    {
+        return readCommand.nowInSec();
+    }
 }

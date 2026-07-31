@@ -587,7 +587,7 @@ public class IndexTermType
     public int comparePostFilter(Expression.Value requestedValue, Expression.Value columnValue)
     {
         if (isInetAddress())
-            return compareInet(requestedValue.encoded, columnValue.encoded);
+            return compareInet(requestedValue.encoded(), columnValue.encoded());
         // bigint, decimal, and varint are not indexed in reversed byte-comparable form or treated as reversed types by
         // Expression, so it is correct to compare with the base/unwrapped type
         else if (isLong() || isBigDecimal() || isBigInteger())

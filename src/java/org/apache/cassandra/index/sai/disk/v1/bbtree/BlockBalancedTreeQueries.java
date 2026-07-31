@@ -52,14 +52,14 @@ public class BlockBalancedTreeQueries
         Bound lower = null ;
         if (expression.lower() != null)
         {
-            final byte[] lowerBound = toComparableBytes(bytesPerValue, expression.lower().value.encoded, expression.getIndexTermType());
+            final byte[] lowerBound = toComparableBytes(bytesPerValue, expression.lower().value.encoded(), expression.getIndexTermType());
             lower = new Bound(lowerBound, !expression.lower().inclusive);
         }
 
         Bound upper = null;
         if (expression.upper() != null)
         {
-            final byte[] upperBound = toComparableBytes(bytesPerValue, expression.upper().value.encoded, expression.getIndexTermType());
+            final byte[] upperBound = toComparableBytes(bytesPerValue, expression.upper().value.encoded(), expression.getIndexTermType());
             upper = new Bound(upperBound, !expression.upper().inclusive);
         }
 

@@ -53,8 +53,8 @@ public class RangeTermTree
 
     public List<SSTableIndex> search(Expression e)
     {
-        ByteBuffer minTerm = e.lower() == null ? min : e.lower().value.encoded;
-        ByteBuffer maxTerm = e.upper() == null ? max : e.upper().value.encoded;
+        ByteBuffer minTerm = e.lower() == null ? min : e.lower().value.encoded();
+        ByteBuffer maxTerm = e.upper() == null ? max : e.upper().value.encoded();
 
         return rangeTree.search(Interval.create(new Term(minTerm, indexTermType),
                                                 new Term(maxTerm, indexTermType),

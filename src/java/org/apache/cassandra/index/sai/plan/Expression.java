@@ -51,6 +51,12 @@ public abstract class Expression
     private final IndexTermType indexTermType;
     protected IndexOperator operator;
 
+    // Cache of the unpacked IN-list values, computed lazily on first termMatches(IN) call. The IN
+    // operator always sets lower == upper (see #add), so requestedValue is constant for the life of
+    // this Expression - unpacking it fresh on every row (termMatches is called once per row) is
+    // unnecessary work.
+    private List<? extends ByteBuffer> inValues;
+
     public Bound lower, upper;
     // The upperInclusive and lowerInclusive flags are maintained separately to the inclusive flags
     // in the upper and lower bounds because the upper and lower bounds have their inclusivity relaxed
@@ -247,7 +253,7 @@ public abstract class Expression
                 Value second = new Value(buffers.get(1), indexTermType);
 
                 // SAI enforces a non-arbitrary ordering between IPv4 and IPv6 addresses, so correction may still be necessary.
-                boolean outOfOrder = indexTermType.compare(first.encoded, second.encoded) > 0;
+                boolean outOfOrder = indexTermType.compare(first.encoded(), second.encoded()) > 0;
                 lower = new Bound(outOfOrder ? second : first, true);
                 upper = new Bound(outOfOrder ? first : second, true);
 
@@ -362,9 +368,12 @@ public abstract class Expression
                 isMatch = isLowerSatisfiedBy(term) && isUpperSatisfiedBy(term);
                 break;
             case IN:
-                ListType<?> type = ListType.getInstance(indexTermType.columnMetadata().type, true);
-                List<? extends ByteBuffer> buffers = type.unpack(requestedValue);
-                for (ByteBuffer value : buffers)
+                if (inValues == null)
+                {
+                    ListType<?> type = ListType.getInstance(indexTermType.columnMetadata().type, true);
+                    inValues = type.unpack(requestedValue);
+                }
+                for (ByteBuffer value : inValues)
                 {
                     if (indexTermType.compare(term, value) == 0)
                     {
@@ -534,12 +543,29 @@ public abstract class Expression
     public static class Value
     {
         public final ByteBuffer raw;
-        public final ByteBuffer encoded;
+        private final IndexTermType indexTermType;
+        private ByteBuffer encoded;
 
         public Value(ByteBuffer value, IndexTermType indexTermType)
         {
             this.raw = value;
-            this.encoded = indexTermType.asIndexBytes(value);
+            this.indexTermType = indexTermType;
+        }
+
+        /**
+         * The encoded (index-comparable) form of {@link #raw}, computed lazily on first access.
+         * <p>
+         * A {@link Value} is constructed fresh per row in {@link Expression#isSatisfiedBy(ByteBuffer)},
+         * but {@link IndexTermType#comparePostFilter(Value, Value)} - by far the most common consumer -
+         * only actually reads this for {@code InetAddressType} columns; every other type compares by
+         * {@link #raw}. Computing it eagerly in the constructor did real (and usually wasted) encoding
+         * work on every single row.
+         */
+        public ByteBuffer encoded()
+        {
+            if (encoded == null)
+                encoded = indexTermType.asIndexBytes(raw);
+            return encoded;
         }
 
         @Override
@@ -549,7 +575,7 @@ public abstract class Expression
                 return false;
 
             Value o = (Value) other;
-            return raw.equals(o.raw) && encoded.equals(o.encoded);
+            return raw.equals(o.raw) && encoded().equals(o.encoded());
         }
 
         @Override
@@ -557,7 +583,7 @@ public abstract class Expression
         {
             HashCodeBuilder builder = new HashCodeBuilder();
             builder.append(raw);
-            builder.append(encoded);
+            builder.append(encoded());
             return builder.toHashCode();
         }
     }

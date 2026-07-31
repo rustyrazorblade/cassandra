@@ -25,7 +25,6 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.function.BiFunction;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ArrayListMultimap;
@@ -51,20 +50,24 @@ public class Operation
 {
     public enum BooleanOperator
     {
-        AND((a, b) -> a & b),
-        OR((a, b) -> a | b);
-
-        private final BiFunction<Boolean, Boolean, Boolean> func;
-
-        BooleanOperator(BiFunction<Boolean, Boolean, Boolean> func)
+        AND
         {
-            this.func = func;
-        }
-
-        public boolean apply(boolean a, boolean b)
+            @Override
+            public boolean apply(boolean a, boolean b)
+            {
+                return a & b;
+            }
+        },
+        OR
         {
-            return func.apply(a, b);
-        }
+            @Override
+            public boolean apply(boolean a, boolean b)
+            {
+                return a | b;
+            }
+        };
+
+        public abstract boolean apply(boolean a, boolean b);
     }
 
     public static class Expressions
