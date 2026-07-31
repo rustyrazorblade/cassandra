@@ -44,6 +44,7 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.TOMBSTON
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * Low-level tests directly against {@link StatefulCursor}'s partial-range bound support
@@ -242,5 +243,96 @@ public class StatefulCursorPartialRangeTest extends CQLTester
         assertTrue(bounded.isEOF());
         assertEquals("a bound that extends to the end of the file must stop at the file's end",
                      bounded.uncompressedLength(), bounded.position());
+    }
+
+    /** Reads to DONE via bound exhaustion, stopping short of true end of file. */
+    private static StatefulCursor exhaustBounds(SSTableReader sstable, List<DecoratedKey> allKeysInTokenOrder)
+    {
+        Range<Token> firstTwo = rangeBetween(sstable.getPartitioner().getMinimumToken(), allKeysInTokenOrder.get(1));
+        List<PartitionPositionBounds> bounds = sstable.getPositionsForRanges(Collections.singletonList(firstTwo));
+        StatefulCursor bounded = new StatefulCursor(sstable, bounds, DiskAccessMode.standard);
+        readAllPartitionKeys(bounded, sstable.getPartitioner());
+        assertEquals(DONE, bounded.state());
+        assertTrue("test setup: cursor must stop on bound exhaustion, short of the file's end",
+                   bounded.position() < bounded.uncompressedLength());
+        return bounded;
+    }
+
+    /**
+     * A cursor put in DONE by bound exhaustion must reject a repeat {@code readPartitionHeader()}
+     * exactly the way an unbounded cursor does (which throws from
+     * {@code readPartitionHeader(PartitionDescriptor)}'s {@code state != PARTITION_START} check).
+     * Without the guard the bounded path silently fell through to the curr/prev swap, rotating
+     * {@code prevPartition} onto stale content on every extra call.
+     */
+    @Test
+    public void readPartitionHeaderRejectsReentryAfterBoundExhaustedDone() throws Throwable
+    {
+        SSTableReader sstable = flushSinglePartitionPerRowTable();
+        IPartitioner partitioner = sstable.getPartitioner();
+        List<DecoratedKey> allKeysInTokenOrder = readAllPartitionKeys(new StatefulCursor(sstable, DiskAccessMode.standard), partitioner);
+        StatefulCursor bounded = exhaustBounds(sstable, allKeysInTokenOrder);
+
+        assertEquals("test setup: prevKey must be the last partition inside the bounds",
+                     allKeysInTokenOrder.get(1),
+                     partitioner.decorateKey(ByteBufferUtil.clone(bounded.prevKey().getKey())));
+
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                bounded.readPartitionHeader();
+                fail("readPartitionHeader() must reject re-entry once the cursor is DONE");
+            }
+            catch (IllegalStateException expected)
+            {
+                // a rejected call must not have disturbed the cursor's descriptors
+                assertEquals("a rejected re-entry must leave prevKey() untouched",
+                             allKeysInTokenOrder.get(1),
+                             partitioner.decorateKey(ByteBufferUtil.clone(bounded.prevKey().getKey())));
+            }
+        }
+    }
+
+    /**
+     * Pins the POST-reset invariant {@code CursorCompactor} depends on: whichever route a cursor took
+     * to DONE, {@code resetAfterDone()} leaves {@code prevKey()} on the last partition actually read
+     * (consulted as the last key written to an output sstable) and {@code currPartition} cleared.
+     * <p>
+     * What this does NOT prove, spelled out so it is not over-trusted: on its own it does not
+     * discriminate {@code readPartitionHeader()}'s swap-ORDERING fix. Revert that fix AND
+     * {@code resetAfterDone()}'s conditional swap together, and the bound-exhaustion route still nets
+     * exactly one swap by the time this test looks - the two bugs cancel - so it passes against the
+     * fully pre-fix code. {@link #readPartitionHeaderRejectsReentryAfterBoundExhaustedDone} is what
+     * catches that, because it inspects {@code prevKey()} BEFORE any reset, where the cancellation
+     * has not happened yet. Verified by reverting both fixes and observing exactly that split. This
+     * test does discriminate a revert of the conditional swap alone.
+     */
+    @Test
+    public void resetAfterDonePreservesLastReadKeyOnBothDoneRoutes() throws Throwable
+    {
+        SSTableReader sstable = flushSinglePartitionPerRowTable();
+        IPartitioner partitioner = sstable.getPartitioner();
+        List<DecoratedKey> allKeysInTokenOrder = readAllPartitionKeys(new StatefulCursor(sstable, DiskAccessMode.standard), partitioner);
+
+        // route 1: bound exhaustion
+        StatefulCursor bounded = exhaustBounds(sstable, allKeysInTokenOrder);
+        assertTrue(bounded.resetAfterDone());
+        assertEquals("bound-exhausted cursor must keep the last partition it read in prevKey()",
+                     allKeysInTokenOrder.get(1),
+                     partitioner.decorateKey(ByteBufferUtil.clone(bounded.prevKey().getKey())));
+        assertEquals("the stale current partition must be cleared", 0, bounded.currPartition().keyLength());
+        assertFalse("resetAfterDone() is once-only", bounded.resetAfterDone());
+
+        // route 2: true end of file (DONE returned by the read itself)
+        StatefulCursor unbounded = new StatefulCursor(sstable, DiskAccessMode.standard);
+        readAllPartitionKeys(unbounded, partitioner);
+        assertEquals(DONE, unbounded.state());
+        assertEquals(unbounded.uncompressedLength(), unbounded.position());
+        assertTrue(unbounded.resetAfterDone());
+        assertEquals("EOF cursor must keep the last partition it read in prevKey()",
+                     allKeysInTokenOrder.get(PARTITION_COUNT - 1),
+                     partitioner.decorateKey(ByteBufferUtil.clone(unbounded.prevKey().getKey())));
+        assertEquals("the stale current partition must be cleared", 0, unbounded.currPartition().keyLength());
     }
 }
