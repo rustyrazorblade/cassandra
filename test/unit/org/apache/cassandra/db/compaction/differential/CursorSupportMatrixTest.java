@@ -427,4 +427,29 @@ public class CursorSupportMatrixTest extends CQLTester
             return CursorCompactor.isSupported(scanners, controller);
         }
     }
+
+    /**
+     * Materialized views are supported by this metadata-level gate (and therefore by regular
+     * cursor compaction - see {@code differential.MaterializedViewDifferentialCompactionTest},
+     * which differentially proves it out end to end): modern view maintenance hasn't produced a
+     * shadowable row deletion since CASSANDRA-13409 ({@code Row.Deletion.shadowable(...)} has no
+     * remaining caller in this codebase). Cursor *validation* is more conservative about the same
+     * risk - see {@code CursorValidationIteratorTest#constructorThrowsDedicatedExceptionForMaterializedView}
+     * - because a repair session that hits a shadowable deletion mid-merge fails the whole repair
+     * with a hard error, and repair sessions can run against sstables from any supported-upgrade
+     * Cassandra version, unlike compaction which can simply retry later. That gate lives directly
+     * in {@link CursorCompactor#isValidationSupported}, not in this shared metadata-only method.
+     */
+    @Test
+    public void materializedViewSupported()
+    {
+        requireNetwork();
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, PRIMARY KEY (pk, ck))");
+        String view = createView("CREATE MATERIALIZED VIEW %s AS SELECT pk, ck, v1 FROM %s " +
+                                 "WHERE pk IS NOT NULL AND ck IS NOT NULL AND v1 IS NOT NULL " +
+                                 "PRIMARY KEY (v1, pk, ck)");
+        TableMetadata viewMetadata = getColumnFamilyStore(KEYSPACE, view).metadata();
+        assertFalse("expected materialized view to be cursor-compaction-supported: " + viewMetadata,
+                    CursorCompactor.unsupportedMetadata(viewMetadata));
+    }
 }

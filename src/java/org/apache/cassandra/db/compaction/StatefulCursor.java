@@ -42,6 +42,7 @@ import static org.apache.cassandra.db.rows.Cell.NO_TTL;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_VALUE_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
 

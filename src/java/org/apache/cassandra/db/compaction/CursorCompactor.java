@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.function.LongPredicate;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -58,22 +59,26 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.io.sstable.ClusteringDescriptor;
+import org.apache.cassandra.io.sstable.CursorMergeSink;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.PartitionDescriptor;
 import org.apache.cassandra.io.sstable.SSTableCursorReader;
 import org.apache.cassandra.io.sstable.SSTableCursorWriter;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.io.sstable.format.SSTableSimpleScanner;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
 import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.metrics.TopPartitionTracker;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.TimeUUID;
 
@@ -215,6 +220,67 @@ public class CursorCompactor extends CompactionInfo.Holder
                 return true;
         }
         return false;
+    }
+
+    /**
+     * Support gate for the read-only, partial-range validation path (see {@link #mergeNextPartition}),
+     * as opposed to {@link #isSupported} which gates the writing compaction path. Differs from
+     * {@code isSupported} in three ways, all because validation never writes output and always
+     * reads partial ranges: partial-range scanners are the expected case here, not rejected;
+     * the BIG/BTI output-format gate doesn't apply (nothing is written); and the
+     * {@code tombstoneOption} gate - aimed at {@code CompactionIterator.GarbageSkipper}-equivalent
+     * behavior - is replaced by requiring {@link AbstractCompactionController#guaranteesNoShadowSources}
+     * on the controller, which {@code ValidationCompactionController} overrides to {@code true}
+     * (it's always constructed with {@code compacting = null} and therefore always yields
+     * null/empty {@link AbstractCompactionController#shadowSources} regardless of
+     * {@code tombstoneOption} - see {@code ValidationCompactionControllerTest}, which pins that
+     * invariant). Checking the capability rather than the controller's concrete type keeps this
+     * class from depending on {@code db.repair}.
+     */
+    public static boolean isValidationSupported(Collection<SSTableReader> sstables, AbstractCompactionController controller)
+    {
+        TableMetadata metadata = controller.cfs.metadata();
+        if (unsupportedMetadata(metadata)) return false;
+
+        // Materialized-view sstables can carry shadowable row deletions, which SSTableCursorReader
+        // rejects mid-read (see its static-row UnsupportedOperationException / non-static
+        // corruptSSTable paths). Modern view maintenance hasn't produced these since CASSANDRA-13409
+        // (Row.Deletion.shadowable(...) has no remaining caller in this codebase), so regular cursor
+        // compaction admits views - see MaterializedViewDifferentialCompactionTest - but validation
+        // stays conservative here: unlike compaction, which can retry via ordinary background
+        // compaction, a repair session that hits this mid-merge fails the whole repair with a hard
+        // error instead of falling back pre-construction the way the two-stage support check is
+        // designed to, and repair sessions can run against sstables written by any Cassandra version
+        // still in the supported upgrade path.
+        if (metadata.isView())
+        {
+            LOGGER.debug("Cursor validation is not supported for {}.{}: materialized views are not supported",
+                         metadata.keyspace, metadata.name);
+            return false;
+        }
+
+        for (SSTableReader reader : sstables)
+        {
+            Version version = reader.descriptor.version;
+            if (!version.isLatestVersion())
+            {
+                LOGGER.debug("Cursor validation is not supported for {}.{}: sstable version {} is not the latest",
+                             metadata.keyspace, metadata.name, version);
+                return false;
+            }
+            if (unsupportedHeaderColumns(metadata, reader))
+                return false;
+        }
+
+        if (!controller.guaranteesNoShadowSources())
+        {
+            LOGGER.debug("Cursor validation is not supported for {}.{}: the controller does not guarantee that there are no shadow sources",
+                         metadata.keyspace, metadata.name);
+            return false;
+        }
+
+        LOGGER.debug("Cursor validation compaction is supported for {}.{}", metadata.keyspace, metadata.name);
+        return true;
     }
 
     public static boolean unsupportedMetadata(TableMetadata metadata)
@@ -382,7 +448,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     // Keep targetDirectory for compactions, needed for `nodetool compactionstats`
     private volatile String targetDirectory;
 
-    private SSTableCursorWriter ssTableCursorWriter;
+    private CursorMergeSink ssTableCursorWriter;
     private boolean finished = false;
 
     /*
@@ -400,6 +466,16 @@ public class CursorCompactor extends CompactionInfo.Holder
     private long totalBytesRead = 0;
     private long totalSourceCQLRows;
     private long totalDataBytesWritten;
+
+    // Optional top-partitions-by-tombstones tracking for the read-only validation path
+    // (mergeNextPartition). Null on the writing compaction path, where every counting site below is
+    // a no-op. Mirrors the legacy TopPartitionTracker.TombstoneCounter, which CompactionIterator
+    // applies to the MERGED stream BEFORE the Purger runs - so tombstones are counted post-shadow
+    // (a cell/deletion shadowed by a higher-level deletion is excluded, matching Row.Merger) but
+    // PRE-purge (a gc-purgeable tombstone is still counted). Complex/collection deletions are not
+    // counted, and static-row tombstones are excluded, matching TombstoneCounter.
+    private TopPartitionTracker.Collector topPartitionCollector;
+    private long partitionTombstoneCount;
 
     // state
     final Purger purger;
@@ -436,6 +512,12 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     // This will be 0 if we haven't written partition header.
     int partitionHeaderLength = 0;
+    // Whether startPartition() has been called for the partition currently being merged - tracked
+    // independently of partitionHeaderLength (a byte count only meaningful to the real sstable
+    // writer's header-length bookkeeping) so isPartitionStarted() doesn't require a non-writing
+    // CursorMergeSink (see DigestingCursorMergeSink) to fabricate meaningful byte positions purely
+    // to keep this control-flow check correct.
+    private boolean partitionStarted = false;
     private CompactionAwareWriter compactionAwareWriter;
 
     public CursorCompactor(OperationType type, List<ISSTableScanner> scanners, AbstractCompactionController controller, long nowInSec, TimeUUID compactionId)
@@ -545,11 +627,119 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /**
+     * Builds cursors directly from {@code boundsBySSTable}'s sstables, each restricted to its
+     * given partial byte ranges (via {@link StatefulCursor#positionAt}) instead of full-range
+     * scanners - e.g. repair validation, which only ever reads its assigned repair ranges and
+     * never writes output. Pair with {@link #mergeNextPartition}, never {@link #writeNextPartition}.
+     * Callers must have already confirmed {@link #isValidationSupported} for this
+     * {@code sstables}/{@code controller} pair.
+     */
+    public CursorCompactor(OperationType type,
+                          Map<SSTableReader, List<PartitionPositionBounds>> boundsBySSTable,
+                          AbstractCompactionController controller,
+                          long nowInSec,
+                          TimeUUID compactionId)
+    {
+        this(type, boundsBySSTable, controller, nowInSec, compactionId, ActiveCompactionsTracker.NOOP);
+    }
+
+    public CursorCompactor(OperationType type,
+                          Map<SSTableReader, List<PartitionPositionBounds>> boundsBySSTable,
+                          AbstractCompactionController controller,
+                          long nowInSec,
+                          TimeUUID compactionId,
+                          ActiveCompactionsTracker activeCompactions)
+    {
+        this.controller = controller;
+        this.type = type;
+        TableMetadata tableMetadata = controller.cfs.metadata();
+        this.nowInSec = tableMetadata.isAccordEnabled() || tableMetadata.migratingFromAccord()
+                        ? controller.gcBefore
+                        : nowInSec;
+        this.compactionId = compactionId;
+
+        long inputBytes = 0;
+        long compressedInputBytes = 0;
+        for (Map.Entry<SSTableReader, List<PartitionPositionBounds>> entry : boundsBySSTable.entrySet())
+        {
+            long entryBytes = 0;
+            for (PartitionPositionBounds bounds : entry.getValue())
+                entryBytes += bounds.upperPosition - bounds.lowerPosition;
+            inputBytes += entryBytes;
+            SSTableReader sstable = entry.getKey();
+            compressedInputBytes += sstable.compression ? sstable.onDiskSizeForPartitionPositions(entry.getValue())
+                                                        : entryBytes;
+        }
+        this.totalInputBytes = inputBytes;
+        this.totalCompressedInputBytes = compressedInputBytes;
+        this.sstables = ImmutableSet.copyOf(boundsBySSTable.keySet());
+        this.partitionMergeCounters = new long[sstables.size()];
+        this.staticRowMergeCounters = new long[partitionMergeCounters.length];
+        this.rowMergeCounters = new long[partitionMergeCounters.length];
+        this.rangeTombstonesMergeCounters = new long[partitionMergeCounters.length];
+        this.cellMergeCounters = new long[partitionMergeCounters.length];
+        // note that we leak `this` from the constructor when calling beginCompaction below, this means we have to get the sstables before
+        // calling that to avoid a NPE (sstables is set above).
+        this.activeCompactions = activeCompactions == null ? ActiveCompactionsTracker.NOOP : activeCompactions;
+        this.activeCompactions.beginCompaction(this);
+
+        // beginCompaction above registered this compaction with the active tracker; finishCompaction
+        // only runs from close(), which never runs on a constructor that throws. If anything below
+        // fails (e.g. an I/O error opening the partial-range cursors), unregister here before
+        // rethrowing so a failed setup doesn't leave a phantom nodetool compactionstats entry that
+        // never clears.
+        try
+        {
+            TableMetadata metadata = metadata();
+            boolean anyStaticColumns = false;
+            for (SSTableReader sstable : this.sstables)
+                anyStaticColumns |= sstable.header.hasStatic();
+            this.hasStaticColumns = anyStaticColumns;
+
+            this.sstableCursors = convertSSTablesToPartialRangeCursors(boundsBySSTable, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+            this.sstableCursorsEqualsNext = new boolean[sstables.size()];
+            this.enforceStrictLiveness = controller.cfs.metadata.get().enforceStrictLiveness();
+            this.probeCursorOrder = enforceStrictLiveness ? new StatefulCursor[sstableCursors.length] : null;
+            this.probeEqualsNext = enforceStrictLiveness ? new boolean[sstableCursors.length] : null;
+            this.probeCursorState = enforceStrictLiveness ? new int[sstableCursors.length] : null;
+            this.probeComplexDeletion = enforceStrictLiveness ? DeletionTime.ReusableDeletionTime.live() : null;
+
+            purger = new Purger(type, controller);
+
+            lastWrittenPartition = new PartitionDescriptor(metadata.partitioner.createReusableKey(0));
+            lastWrittenUnfiltered = new UnfilteredDescriptor(metadata.comparator.subtypes().toArray(AbstractType[]::new));
+            assert clusteringParsingAgrees() : "the cursors disagree on how to parse a clustering: " + metadata;
+        }
+        catch (Throwable t)
+        {
+            activeCompactions.finishCompaction(this);
+            throw t;
+        }
+    }
+
+    /**
      * @return false if finished, true if partition is written (which might require multiple partition reads)
      */
     public boolean writeNextPartition(CompactionAwareWriter compactionAwareWriter) throws IOException {
         while (!finished) {
             if (tryWriteNextPartition(compactionAwareWriter)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Read-only counterpart to {@link #writeNextPartition}: drives the merge against {@code sink}
+     * without ever touching a {@link CompactionAwareWriter} or writer-rollover machinery
+     * ({@link #maybeSwitchWriter}) - e.g. repair validation, which never produces output
+     * sstables. Unlike the writing path, {@code sink} is fixed for this compactor's entire
+     * lifetime: there is no rollover concept for a non-writing consumer.
+     */
+    public boolean mergeNextPartition(CursorMergeSink sink) throws IOException {
+        this.ssTableCursorWriter = sink;
+        while (!finished) {
+            if (tryWriteNextPartition(null)) {
                 return true;
             }
         }
@@ -610,6 +800,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             lastSource = currSource;
             partitionDescriptor = null;
             partitionHeaderLength = 0;
+            partitionStarted = false;
         }
     }
 
@@ -706,9 +897,17 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         partitionMergeCounters[partitionMergeLimit - 1]++;
 
+        // Reset the per-partition pre-purge tombstone tally (validation path only).
+        partitionTombstoneCount = 0;
+
         // Pick "max" pDeletion
         /** {@link UnfilteredRowIterators.UnfilteredRowMergeIterator#collectPartitionLevelDeletion(List, UnfilteredRowIterators.MergeListener)}*/
         final DeletionTime mergedDeletion = mergePartitionDeletions(partitionMergeLimit);
+
+        // Pre-purge partition-level deletion count, matching TombstoneCounter.applyToPartition
+        // (which counts the merged partitionLevelDeletion before the Purger runs).
+        if (topPartitionCollector != null && !mergedDeletion.isLive())
+            partitionTombstoneCount++;
 
         // maybe purge? If the partition is written out, this will be the deletion we write.
         final DeletionTime toWritePartitionDeletion = maybePurgedOutputDeletion(mergedDeletion);
@@ -735,6 +934,14 @@ public class CursorCompactor extends CompactionInfo.Holder
                 ssTableCursorWriter.updateClusteringMetadata(lastName);
             }
         }
+        // Report the pre-purge tombstone tally for this partition, matching legacy
+        // TombstoneCounter.onPartitionClose - which fires once per merged partition regardless of
+        // whether it survives purge. The collector keeps a stable key, so snapshot the reusable one.
+        if (topPartitionCollector != null)
+        {
+            DecoratedKey stableKey = metadata().partitioner.decorateKey(ByteBufferUtil.clone(partitionDescriptor.key().getKey()));
+            topPartitionCollector.trackTombstoneCount(stableKey, partitionTombstoneCount);
+        }
         // move along
         continueReadingAfterMerge(partitionMergeLimit, PARTITION_END);
         return partitionWritten;
@@ -742,11 +949,15 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private void startPartition(DeletionTime toWritePartitionDeletion) throws IOException
     {
-        maybeSwitchWriter(compactionAwareWriter);
+        // compactionAwareWriter is null for mergeNextPartition()'s read-only path: ssTableCursorWriter
+        // was already fixed to the sink for this compactor's whole lifetime, no rollover applies.
+        if (compactionAwareWriter != null)
+            maybeSwitchWriter(compactionAwareWriter);
         partitionHeaderLength = ssTableCursorWriter.writePartitionStart(
                                     partitionDescriptor.keyBytes(),
                                     partitionDescriptor.keyLength(),
                                     toWritePartitionDeletion);
+        partitionStarted = true;
     }
 
     private DeletionTime maybePurgedOutputDeletion(DeletionTime mergedDeletion) throws IOException
@@ -795,7 +1006,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         }
 
         foldRowLivenessAndDeletion(rowMergeLimit);
-        DeletionTime rowActiveDeletion = applyRowPurge(partitionActiveDeletion);
+        DeletionTime rowActiveDeletion = applyRowPurge(partitionActiveDeletion, isStatic);
 
         boolean isRowDropped = mergedRow.deletion.isLive() && mergedRow.info.isEmpty();
 
@@ -895,15 +1106,23 @@ public class CursorCompactor extends CompactionInfo.Holder
     /**
      * Applies the partition's deletion and the purger to {@link #mergedRow}.
      *
+     * @param isStatic a static row is not counted as a tombstone; see TombstoneCounter.applyToRow
      * @return the deletion in effect for the row's cells
      * @see BTreeRow#purge(DeletionPurger, long, boolean)
      */
-    private DeletionTime applyRowPurge(DeletionTime partitionActiveDeletion)
+    private DeletionTime applyRowPurge(DeletionTime partitionActiveDeletion, boolean isStatic)
     {
         DeletionTime rowActiveDeletion = partitionActiveDeletion;
         mergedRow.hasDeletionAtNow = false;
         if (mergedRow.deletion.supersedes(rowActiveDeletion))
         {
+            // Pre-purge row-deletion count, matching TombstoneCounter.applyToRow (!row.deletion().
+            // isLive()): counted only when the merged row deletion is NOT shadowed by the active
+            // (partition/range) deletion - the same condition Row.Merger uses to keep it - and
+            // before shouldPurge below can drop it. Static rows are excluded (TombstoneCounter runs
+            // via applyToRow, not applyToStatic).
+            if (topPartitionCollector != null && !isStatic)
+                partitionTombstoneCount++;
             rowActiveDeletion = mergedRow.deletion; // deletion is in effect before purge takes effect
             if (purger.shouldPurge(mergedRow.deletion))
             {
@@ -1257,6 +1476,16 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         selectWinningCell(cellMergeLimit, effectiveDeletion);
 
+        // Pre-purge cell-tombstone count, matching TombstoneCounter (which counts c.isTombstone()
+        // over the merged row's cells before the Purger runs). Must be evaluated on the winning
+        // cell's ORIGINAL liveness - before the ttl-to-tombstone conversion just below, which would
+        // otherwise make an expired-but-not-yet-purged expiring cell look like a tombstone here even
+        // though legacy still sees it as expiring at TombstoneCounter time. Count only cells that
+        // survive shadowing by the active/complex deletion (Row.Merger drops shadowed cells before
+        // TombstoneCounter), and exclude static rows.
+        if (topPartitionCollector != null && !isStatic
+            && !effectiveDeletion.deletesCellAt(cellWinner.liveness.timestamp()) && cellWinner.liveness.isTombstone())
+            partitionTombstoneCount++;
 
         /** {@link Cell.Serializer#serialize} */
         int cellFlags = applyExpiredTtl(cellWinner.cursor.cellFlags);
@@ -1637,6 +1866,12 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         if (tombstoneLiveness != null)
         {
+            // Pre-purge cell-tombstone count for a surviving counter tombstone. It is a cell
+            // tombstone (AbstractCell.isTombstone) that survived shadowing by the active deletion
+            // (shadowed inputs were skipped above), so TombstoneCounter would count it before the
+            // Purger runs. Count before the shouldPurge drop below. Static rows excluded.
+            if (topPartitionCollector != null && !isStatic)
+                partitionTombstoneCount++;
             // 7346 supremacy: any surviving tombstone wins; merged live shards are discarded
             if (purger.shouldPurge(tombstoneLiveness, nowInSec))
                 return isRowDropped;
@@ -1732,6 +1967,13 @@ public class CursorCompactor extends CompactionInfo.Holder
             DeletionTime newDeletionTimeInMerged = activeOpenRangeDeletion;
             if (previousDeletionTimeInMerged.equals(newDeletionTimeInMerged))
                 return false;
+
+            // Past the equals() check the merge produces exactly one RangeTombstoneMarker at this
+            // clustering (a bound or a single boundary object) - so count one, matching
+            // TombstoneCounter.applyToMarker, which fires once per merged marker before the Purger
+            // may drop or split it below.
+            if (topPartitionCollector != null)
+                partitionTombstoneCount++;
 
             // we will stomp on the unfiltered descriptor and write it out
             UnfilteredDescriptor rangeTombstone = sstableCursors[0].unfiltered();
@@ -1922,7 +2164,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private boolean isPartitionStarted()
     {
-        return partitionHeaderLength != 0;
+        return partitionStarted;
     }
 
     private boolean isPartitionStartDelayed()
@@ -1994,7 +2236,14 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         if (ssTableCursorWriter != null) {
             totalDataBytesWritten += ssTableCursorWriter.getPosition();
-            ssTableCursorWriter.setLast(lastWrittenKey().getKey());
+            // lastWrittenKey() asserts hasWrittenPartition() (lastSource is still null) if no
+            // partition was ever merged - reachable in practice via the read-only validation path
+            // (mergeNextPartition), where a repair range can genuinely intersect zero partitions
+            // even though the sstable itself is non-empty (see StatefulCursor's positionAt bounds).
+            // Real (writing) compaction never hits this: an input sstable always has at least one
+            // partition.
+            if (lastSource != null || hasWrittenPartition())
+                ssTableCursorWriter.setLast(lastWrittenKey().getKey());
         }
         ssTableCursorWriter = null;
     }
@@ -2437,6 +2686,17 @@ public class CursorCompactor extends CompactionInfo.Holder
         this.targetDirectory = targetDirectory;
     }
 
+    /**
+     * Enables pre-purge top-partitions-by-tombstones counting for the read-only validation path
+     * ({@link #mergeNextPartition}), matching the legacy {@code TopPartitionTracker.TombstoneCounter}.
+     * Only the validation entry point ({@code CursorValidationIterator}) sets this; left null the
+     * writing compaction path counts nothing (every counting site is guarded).
+     */
+    public void setTopPartitionCollector(TopPartitionTracker.Collector topPartitionCollector)
+    {
+        this.topPartitionCollector = topPartitionCollector;
+    }
+
     public long[] getMergedRowsCounts()
     {
         return rowMergeCounters;
@@ -2535,6 +2795,26 @@ public class CursorCompactor extends CompactionInfo.Holder
                 }
             }
             assert i == cursors.length : "cursor count " + i + " differs from sstable count " + cursors.length;
+            return cursors;
+        }
+        catch (RuntimeException | Error e)
+        {
+            Throwables.closeNonNullAndAddSuppressed(e, cursors);
+            throw e;
+        }
+    }
+
+    private static StatefulCursor[] convertSSTablesToPartialRangeCursors(Map<SSTableReader, List<PartitionPositionBounds>> boundsBySSTable,
+                                                                         DiskAccessMode diskAccessMode)
+    {
+        StatefulCursor[] cursors = new StatefulCursor[boundsBySSTable.size()];
+        int i = 0;
+        try
+        {
+            for (Map.Entry<SSTableReader, List<PartitionPositionBounds>> entry : boundsBySSTable.entrySet())
+            {
+                cursors[i++] = new StatefulCursor(entry.getKey(), entry.getValue(), diskAccessMode);
+            }
             return cursors;
         }
         catch (RuntimeException | Error e)
