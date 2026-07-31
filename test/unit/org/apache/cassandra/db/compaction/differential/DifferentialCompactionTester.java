@@ -605,7 +605,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
         }
     }
 
-    private CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
+    protected CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
     {
         // 1. copy components FIRST: when verification (or the dump) fails, the transaction
         // rolls back and deletes the live files — the captured copies are then the ONLY

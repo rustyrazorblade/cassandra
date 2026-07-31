@@ -35,6 +35,11 @@ class CursorCompactionPipeline extends AbstractCompactionPipeline {
     final CompactionTask task;
     long totalKeysWritten;
     CompactionAwareWriter writer;
+    // Bound once in openWriterResource, not per partition: `writer::maybeSwitchWriter` allocates a
+    // capturing lambda on every evaluation, and it escapes into CursorCompactor.writerProvider so
+    // escape analysis cannot scalar-replace it. Re-binding it per call would put ~16B of garbage on
+    // the hot path of a compactor whose whole purpose is to allocate nothing per partition.
+    CursorCompactor.OutputWriterProvider writerProvider;
 
     CursorCompactionPipeline(CompactionTask task, OperationType type, AbstractCompactionStrategy.ScannerList scanners, AbstractCompactionController controller, long nowInSec, TimeUUID compactionId) {
         this.task = task;
@@ -46,6 +51,7 @@ class CursorCompactionPipeline extends AbstractCompactionPipeline {
                                             ILifecycleTransaction transaction,
                                             Set<SSTableReader> nonExpiredSSTables) {
         this.writer = task.getCompactionAwareWriter(cfs, directories, transaction, nonExpiredSSTables);
+        this.writerProvider = writer::maybeSwitchWriter;
         return writer;
     }
 
@@ -72,7 +78,7 @@ class CursorCompactionPipeline extends AbstractCompactionPipeline {
 
     @Override
     boolean processNextPartitionKey() throws IOException {
-        if (cursorCompactor.writeNextPartition(writer)) {
+        if (cursorCompactor.writeNextPartition(writerProvider)) {
             totalKeysWritten++;
             cursorCompactor.setTargetDirectory(writer.getSStableDirectoryPath());
             return true;

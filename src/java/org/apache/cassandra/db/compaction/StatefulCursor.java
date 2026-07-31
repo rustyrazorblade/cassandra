@@ -45,6 +45,7 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEA
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_VALUE_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
 
 class StatefulCursor extends SSTableCursorReader
@@ -74,6 +75,10 @@ class StatefulCursor extends SSTableCursorReader
     // default, existing full-range behavior) - every check below short-circuits in that case.
     private Iterator<PartitionPositionBounds> remainingBounds;
     private long currentSegmentEndPosition;
+    // True when DONE was reached by exhausting those bounds inside readPartitionHeader(), rather
+    // than by hitting end of file from continueReading(). The two leave opposite curr/prev
+    // arrangements - see resetAfterDone(), the only reader of this.
+    private boolean doneByBoundExhaustion = false;
 
     public StatefulCursor(SSTableReader reader, DiskAccessMode diskAccessMode)
     {
@@ -116,6 +121,25 @@ class StatefulCursor extends SSTableCursorReader
 
     public int readPartitionHeader()
     {
+        // Re-entry guard, matching the one readPartitionHeader(PartitionDescriptor) already applies
+        // for unbounded cursors. A bounded cursor reaches DONE via forceDone() below without ever
+        // entering that method, so without this check a repeat call would fall through to the swap
+        // and rotate prevPartition onto stale data - silently, where the unbounded path throws.
+        // Both DONE paths now reject re-entry identically, and checking before the swap leaves a
+        // rejected call's descriptors untouched.
+        if (state() != PARTITION_START)
+            throw new IllegalStateException("readPartitionHeader() requires PARTITION_START, was: " + this);
+
+        // Swap BEFORE the bounds check below, not just before the read: every path out of this
+        // method must leave prevPartition holding the last partition actually read, because
+        // CursorCompactor reads it back as the last key written to the output sstable
+        // (writerRollover -> setLast). A cursor stopped early by its bounds returns DONE from
+        // inside the loop below, and without this swap it would leave prevPartition one partition
+        // behind - writing a `last` key that disagrees with the index. Unbounded cursors reach
+        // DONE from readPartitionHeader(currPartition) after the swap has already happened, which
+        // is the arrangement this reproduces.
+        swapCurrAndPrevPartition();
+
         // Multi-segment bound support: once the underlying reader reaches the end of the
         // currently-active segment, advance to the next assigned segment (skipping any
         // degenerate empty ones) or report DONE if none remain - never read a partition that
@@ -124,14 +148,7 @@ class StatefulCursor extends SSTableCursorReader
         {
             if (!remainingBounds.hasNext())
             {
-                // Every call to this method that does not fall through to the real read below is
-                // still "one round" of reads as far as the deferred partition steal is concerned
-                // (see #partitionSwaps) - the unbounded (remainingBounds == null) path always
-                // swaps before it can discover true EOF, since the swap sits ahead of the
-                // fallthrough read unconditionally. Skipping the swap here would leave a round
-                // that legitimately called readPartitionHeader() without the swap the steal's
-                // deferral invariant counts on.
-                swapCurrAndPrevPartition();
+                doneByBoundExhaustion = true;
                 return forceDone();
             }
 
@@ -147,16 +164,13 @@ class StatefulCursor extends SSTableCursorReader
             bytesReadPositionSnapshot += next.lowerPosition - posBeforeSeek;
             if (seekState == DONE)
             {
-                // Same reasoning as the forceDone() branch above: this round's read attempt found
-                // true EOF instead of the next segment, but it is still one round of reads for the
-                // deferred-steal invariant.
-                swapCurrAndPrevPartition();
+                // Also post-swap, so it leaves the same arrangement as the forceDone above.
+                doneByBoundExhaustion = true;
                 return seekState;
             }
             // loop again: the newly-entered segment may itself already be at its own end
         }
 
-        swapCurrAndPrevPartition();
         int state = readPartitionHeader(currPartition);
 
         if (prevPartition.keyLength() != 0 && prevPartition.key().compareTo(currPartition.key()) >= 0)
@@ -258,15 +272,43 @@ class StatefulCursor extends SSTableCursorReader
     }
 
     /**
-     * @return true if this call reset the cursor, false if an earlier call already did
+     * Establishes the same post-DONE arrangement however this cursor reached DONE: {@link #prevKey()}
+     * holds the last partition actually read - {@code CursorCompactor} consults it as the last key
+     * written to an output sstable ({@code writerRollover -> setLast}) - and {@code currPartition} is
+     * cleared, so partition-key sorting sees no leftover key for a cursor with nothing left to offer.
+     * <p>
+     * The two routes to DONE arrive with OPPOSITE arrangements, which is why the swap is conditional:
+     * <ul>
+     *   <li>End of file: reached from {@code continueReading()} after the last partition's
+     *       {@code PARTITION_END}, WITHOUT re-entering {@link #readPartitionHeader()} - so
+     *       {@code currPartition} still holds the last partition read and has to be swapped into
+     *       {@code prevPartition} before being cleared.</li>
+     *   <li>Bound exhaustion: reached from inside {@link #readPartitionHeader()}, which already
+     *       swapped on the way in - so {@code prevPartition} ALREADY holds the last partition read
+     *       and {@code currPartition} holds stale content. Swapping again would clear the last
+     *       partition read and leave {@code prevKey()} pointing two partitions back.</li>
+     * </ul>
+     *
+     * @return true if reset, false if already been reset
      */
     public boolean resetAfterDone()
     {
         if (resetAfterDone)
             return false;
         resetAfterDone = true;
-        swapCurrAndPrevPartition();
-        // Reset curr only. The prev slot must keep the last written partition.
+        if (!doneByBoundExhaustion)
+        {
+            // Exactly ONE route reaches DONE without setting that flag - true end of file - and the
+            // swap below is correct only for that one. A future third route (CASSANDRA-21544 also
+            // does multi-cursor partial-range writing) that reaches DONE by some other means would
+            // land here and swap the wrong way: prevKey() would point two partitions back and the
+            // output sstable would get a `last` key disagreeing with its index, silently, with no
+            // error anywhere. Fail loudly instead of corrupting quietly.
+            assert isFileEOF() : "resetAfterDone() reached DONE via neither bound exhaustion nor end of " +
+                                 "file, so the curr/prev arrangement here is unknown: " + this;
+            swapCurrAndPrevPartition();
+        }
+        // only current is reset, prev is still needed.
         currPartition().resetPartition();
         unfiltered().resetUnfiltered();
         return true;
