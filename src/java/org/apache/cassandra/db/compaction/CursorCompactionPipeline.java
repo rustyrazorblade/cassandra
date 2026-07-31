@@ -19,16 +19,34 @@
 package org.apache.cassandra.db.compaction;
 
 import java.io.IOException;
+import java.util.Set;
 
 import org.apache.cassandra.db.AbstractCompactionController;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Directories;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.TimeUUID;
 
 class CursorCompactionPipeline extends AbstractCompactionPipeline {
     final CursorCompactor cursorCompactor;
+    // CompactionAwareWriter is the provider itself, so this binding allocates nothing at all: the
+    // merge loop of a compactor whose whole purpose is to allocate nothing per partition stays clean.
+    CursorCompactor.OutputWriterProvider writerProvider;
 
     CursorCompactionPipeline(CompactionTask task, OperationType type, AbstractCompactionStrategy.ScannerList scanners, AbstractCompactionController controller, long nowInSec, TimeUUID compactionId) {
         super(task);
         cursorCompactor = new CursorCompactor(type, scanners.scanners, controller, nowInSec, compactionId);
+    }
+
+    @Override
+    public AutoCloseable openWriterResource(ColumnFamilyStore cfs,
+                                            Directories directories,
+                                            ILifecycleTransaction transaction,
+                                            Set<SSTableReader> nonExpiredSSTables) {
+        AutoCloseable resource = super.openWriterResource(cfs, directories, transaction, nonExpiredSSTables);
+        this.writerProvider = writer;
+        return resource;
     }
 
     @Override
@@ -38,7 +56,7 @@ class CursorCompactionPipeline extends AbstractCompactionPipeline {
 
     @Override
     boolean processNextPartitionKey() throws IOException {
-        if (cursorCompactor.writeNextPartition(writer)) {
+        if (cursorCompactor.writeNextPartition(writerProvider)) {
             totalKeysWritten++;
             cursorCompactor.setTargetDirectory(writer.getSStableDirectoryPath());
             return true;
