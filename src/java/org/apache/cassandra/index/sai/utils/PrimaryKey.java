@@ -155,6 +155,24 @@ public interface PrimaryKey extends Comparable<PrimaryKey>, ByteComparable
         }
 
         /**
+         * Create a {@link DecoratedKey} from a {@link ByteSource}, using an already-known token value
+         * instead of re-hashing the key bytes via {@link IPartitioner#getToken(ByteBuffer)}. Callers
+         * that already have the token on hand (e.g. read from a precomputed on-disk row-to-token
+         * array) should prefer this over {@link #partitionKeyFromComparableBytes(ByteSource)}.
+         *
+         * @throws UnsupportedOperationException if this factory's partitioner's tokens are not
+         * long-backed - see {@link IPartitioner#getTokenFromLong(long)}. In practice this is
+         * unreachable for SAI's own callers: the on-disk row-to-token array this overload exists
+         * for is only ever populated via {@link Token#getLongValue()} at index-build time, which
+         * itself already requires a long-backed partitioner.
+         */
+        public DecoratedKey partitionKeyFromComparableBytes(ByteSource byteSource, long token)
+        {
+            ByteBuffer decoratedKey = ByteBuffer.wrap(ByteSourceInverse.getUnescapedBytes(ByteSource.peekable(byteSource)));
+            return new BufferDecoratedKey(partitioner.getTokenFromLong(token), decoratedKey);
+        }
+
+        /**
          * Create a {@link Clustering} from a {@link ByteSource}. This is a separate method because of its use by
          * the {@link org.apache.cassandra.index.sai.disk.v1.WidePrimaryKeyMap} to create its clustering keys.
          */

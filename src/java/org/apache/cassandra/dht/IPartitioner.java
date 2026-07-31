@@ -118,6 +118,21 @@ public interface IPartitioner
     public Token getToken(ByteBuffer key);
 
     /**
+     * Constructs a {@link Token} directly from a raw {@code long} value, without hashing a key.
+     * <p>
+     * Only supported by partitioners whose tokens are backed by a primitive long value - the same
+     * set of partitioners for which {@link Token#getLongValue()} does not throw. Callers that
+     * already have a token's long value on hand (e.g. read back from a precomputed on-disk array)
+     * can use this to avoid re-deriving the token from key bytes.
+     *
+     * @throws UnsupportedOperationException if this partitioner's tokens are not long-backed
+     */
+    default Token getTokenFromLong(long value)
+    {
+        throw new UnsupportedOperationException(getClass().getSimpleName() + " tokens are not backed by a primitive long value");
+    }
+
+    /**
      * @return a Token that can be used to route a given key
      * (This is NOT a method to create a Token from its string representation;
      * for that, use TokenFactory.fromString.)

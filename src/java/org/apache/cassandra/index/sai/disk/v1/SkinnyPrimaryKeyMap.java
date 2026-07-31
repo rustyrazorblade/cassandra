@@ -205,6 +205,9 @@ public class SkinnyPrimaryKeyMap implements PrimaryKeyMap
 
     protected DecoratedKey readPartitionKey(long sstableRowId)
     {
-        return primaryKeyFactory.partitionKeyFromComparableBytes(partitionKeyCursor.seekToPointId(rowIdToPartitionIdArray.get(sstableRowId)));
+        // The token for this row is already known via rowIdToTokenArray, so it's passed straight
+        // through instead of being re-derived by hashing the partition key bytes.
+        return primaryKeyFactory.partitionKeyFromComparableBytes(partitionKeyCursor.seekToPointId(rowIdToPartitionIdArray.get(sstableRowId)),
+                                                                  rowIdToTokenArray.get(sstableRowId));
     }
 }
