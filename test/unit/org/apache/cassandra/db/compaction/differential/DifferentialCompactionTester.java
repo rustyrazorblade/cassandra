@@ -54,6 +54,7 @@ import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.tools.JsonTransformer;
 import org.apache.cassandra.tools.Util;
@@ -407,14 +408,13 @@ public abstract class DifferentialCompactionTester extends CQLTester
      */
     protected void assertCursorPathWillRun(ColumnFamilyStore cfs, Set<SSTableReader> inputs, long gcBefore) throws Exception
     {
-        // Cursor compaction only supports BIG output (CursorCompactor.isSupported), so under a
-        // non-BIG format — `ant test-latest` selects BTI — every scenario in this suite would fail
-        // the assertion below for a reason that is not a defect. Skip instead, and keep the
-        // assertion for every other unsupported-ness reason so the iterator-vs-iterator trap
-        // still fires.
-        Assume.assumeTrue("cursor compaction requires the BIG sstable format; selected=" +
+        // Cursor compaction only supports BIG and BTI output (CursorCompactor.isSupported), so
+        // under any other format every scenario in this suite would fail the assertion below for
+        // a reason that is not a defect. Skip instead, and keep the assertion for every other
+        // unsupported-ness reason so the iterator-vs-iterator trap still fires.
+        Assume.assumeTrue("cursor compaction requires the BIG or BTI sstable format; selected=" +
                           DatabaseDescriptor.getSelectedSSTableFormat().name(),
-                          BigFormat.isSelected());
+                          BigFormat.isSelected() || BtiFormat.isSelected());
         try (CompactionController controller = new CompactionController(cfs, inputs, gcBefore);
              AbstractCompactionStrategy.ScannerList scanners =
                  cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs), null))
