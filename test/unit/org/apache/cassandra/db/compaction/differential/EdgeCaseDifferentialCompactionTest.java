@@ -576,9 +576,9 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
      * decision table (Cells.resolveRegular) — the tombstone wins the tie, BEFORE any
      * localDeletionTime comparison. This is the one same-timestamp pairing where both
      * sides carry a localExpirationTime (tombstone: deletion second; expiring: expiry
-     * second), so a resolver that classifies "tombstone" via the loose
-     * ReusableLivenessInfo.isExpiring() predicate (true for tombstones too) never
-     * fires rule (b) and falls through to the ldt compare,
+     * second), so a resolver that classifies "tombstone" by the presence of a
+     * localExpirationTime rather than by the absence of a TTL never fires rule (b) and
+     * falls through to the ldt compare,
      * which the expiring cell's future expiry second wins: deleted data resurrected
      * until the TTL lapses. Both flush orders and both tombstone shapes
      * (UPDATE SET v = null, DELETE v) across distinct partitions.
@@ -632,6 +632,62 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         flush();
 
         assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /**
+     * Fixed-length values LARGER than the cursor's 4KiB copy buffer. A {@code vector<float, 1536>} — a
+     * mainstream embedding width — is 6144 bytes, and unlike a variable-length value it carries no
+     * length vint, so the copy cannot be driven off the wire length. Covers a value spanning several
+     * chunks, one landing exactly on the buffer boundary ({@code vector<float, 1024>} is 4096), a
+     * same-timestamp tie ACROSS sstables so the value also travels through the compactor's temp
+     * buffers rather than straight to the writer, and a null overwrite of an oversized column.
+     */
+    @Test
+    public void fixedLengthValuesLargerThanCopyBuffer() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, big vector<float, 1536>, " +
+                    "exact vector<float, 1024>, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 4; ck++)
+        {
+            // ck 2 is written only by the same-timestamp inserts below. An auto-timestamp write
+            // here would reconcile with them in the memtable and win, and the merge would then
+            // resolve on timestamp and never reach the value comparison.
+            if (ck == 2)
+                continue;
+            execute("INSERT INTO %s (pk, ck, big, exact, v) VALUES (?, ?, ?, ?, ?)",
+                    1L, ck, floats(1536, ck), floats(1024, ck), "v" + ck);
+        }
+        // ck 2: one half of a same-timestamp tie. It must be in a DIFFERENT sstable from its
+        // partner, or the memtable reconciles the two before either reaches disk and the merge
+        // resolves on timestamp instead of reaching the value comparison.
+        execute("INSERT INTO %s (pk, ck, big, exact) VALUES (?, ?, ?, ?) USING TIMESTAMP 5000",
+                1L, 2L, floats(1536, 7), floats(1024, 7));
+        flush();
+
+        // ck 0..1: overwritten at a later timestamp, so the winner is copied straight through
+        for (long ck = 0; ck < 2; ck++)
+            execute("INSERT INTO %s (pk, ck, big, exact, v) VALUES (?, ?, ?, ?, ?)",
+                    1L, ck, floats(1536, ck + 100), floats(1024, ck + 100), "w" + ck);
+        // ck 2: the other half of the tie, so both oversized values are buffered and compared
+        execute("INSERT INTO %s (pk, ck, big, exact) VALUES (?, ?, ?, ?) USING TIMESTAMP 5000",
+                1L, 2L, floats(1536, 8), floats(1024, 8));
+        // ck 3: null overwrite -> cell tombstone on an oversized fixed-length column
+        execute("INSERT INTO %s (pk, ck, big) VALUES (?, ?, null)", 1L, 3L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Deterministic float vector of the given dimension; dimension * 4 bytes on the wire. */
+    private Vector<Float> floats(int dimension, long salt)
+    {
+        float[] v = new float[dimension];
+        for (int i = 0; i < dimension; i++)
+            v[i] = i + salt;
+        return vector(v);
     }
 
     /**

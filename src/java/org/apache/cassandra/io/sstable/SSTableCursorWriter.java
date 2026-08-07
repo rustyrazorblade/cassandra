@@ -25,7 +25,6 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.agrona.collections.IntArrayList;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
@@ -33,19 +32,16 @@ import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
-import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.guardrails.Threshold;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.SerializationHelper;
-import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SortedTableWriter;
-import org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter;
 import org.apache.cassandra.io.sstable.format.big.BigTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -75,11 +71,15 @@ public class SSTableCursorWriter implements AutoCloseable
     private final boolean hasStaticColumns;
 
     private long partitionStart;
-    // Offset within the current partition of the previous non-static unfiltered's first byte.
-    // Used to write the previousUnfilteredSize field exactly as the iterator path does
-    // (see SortedTablePartitionWriter.addUnfiltered): rows/markers write the distance from the
-    // previous unfiltered's start; static rows write 0 and do not advance this offset.
-    private long previousRowStartOffset;
+    // File position of the previous non-static unfiltered's first byte, or the partition start while the
+    // partition has none. previousUnfilteredSize is the distance from it, exactly as the iterator path
+    // computes it (see SortedTablePartitionWriter.addUnfiltered): rows/markers write the distance from
+    // the previous unfiltered's start; static rows write 0 and do not advance it.
+    private long previousUnfilteredStart;
+    // The dataWriter position writeRowStart encoded previousUnfilteredSize against. Nothing may write to
+    // dataWriter between writeRowStart and writeRowEnd or that distance is stale, so writeRowEnd asserts
+    // the position has not moved.
+    private long rowStartPosition;
     // ROW contents, needed because of the order of writing and the var int fields
     private int rowFlags; // discovered as we go along
     private int rowExtendedFlags;
@@ -155,7 +155,7 @@ public class SSTableCursorWriter implements AutoCloseable
         openMarker.resetLive();
 
         partitionStart = dataWriter.position();
-        previousRowStartOffset = 0;
+        previousUnfilteredStart = partitionStart;
         writePartitionHeader(partitionKey, partitionKeyLength, partitionDeletionTime);
         cursorIndexWriter.startPartition(partitionStart, dataWriter.position());
         // immediately after startPartition this is the partition header length — always small
@@ -232,6 +232,7 @@ public class SSTableCursorWriter implements AutoCloseable
         columns = staticColumns;
         // TOD: we should be able to skip the use of the row buffers in this special case, maybe it doesn't matter
         rowHeaderBuffer.clear();
+        rowHeaderBuffer.writeUnsignedVInt(0L); // previousUnfilteredSize, always 0 for a static row
         rowBuffer.clear();
         columnsWrittenCount = 0;
         missingColumns.clear();
@@ -258,6 +259,10 @@ public class SSTableCursorWriter implements AutoCloseable
         // and the row columns data (will differ if they use their own timestamps, probably). Unfortunate.
         // rest of header
         rowHeaderBuffer.clear();
+        // previousUnfilteredSize leads the row body, ahead of the liveness data. dataWriter has not been
+        // written since the previous unfiltered finished, so its position is this unfiltered's first byte.
+        rowStartPosition = dataWriter.position();
+        rowHeaderBuffer.writeUnsignedVInt(isStatic ? 0 : rowStartPosition - previousUnfilteredStart);
         missingColumns.clear();
         rowBuffer.clear();
         columnsWrittenCount = 0;
@@ -398,19 +403,16 @@ public class SSTableCursorWriter implements AutoCloseable
             dataWriter.write(clustering, 0, clusteringLength);
         }
 
-        // Matches UnfilteredSerializer.serialize: the row size includes the vint length of the
-        // previousUnfilteredSize field, which is written between the size and the row body.
-        // Static rows write 0 and do not advance the chain (UnfilteredSerializer.serializeStaticRow).
-        long previousUnfilteredSize = 0;
         if (!isStatic)
         {
-            long offsetInPartition = unfilteredStartPosition - partitionStart;
-            previousUnfilteredSize = offsetInPartition - previousRowStartOffset;
-            previousRowStartOffset = offsetInPartition;
+            assert rowStartPosition == unfilteredStartPosition
+                   : "dataWriter moved between writeRowStart and writeRowEnd: " + rowStartPosition + " != " + unfilteredStartPosition;
+            previousUnfilteredStart = unfilteredStartPosition;
         }
-        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength() + rowBuffer.getLength()
-                                       + TypeSizes.sizeofUnsignedVInt(previousUnfilteredSize));
-        dataWriter.writeUnsignedVInt(previousUnfilteredSize);
+        // The size spans the whole row body, previousUnfilteredSize included: it is the leading vint of
+        // rowHeaderBuffer. UnfilteredSerializer.serialize reaches the same bytes by adding that field's
+        // vint width to the size of a body buffer that excludes it.
+        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength() + rowBuffer.getLength());
 
         dataWriter.write(rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
         dataWriter.write(rowBuffer.getData(), 0, rowBuffer.getLength());
@@ -461,6 +463,9 @@ public class SSTableCursorWriter implements AutoCloseable
             dataWriter.write(clustering, 0, clusteringLength);
         }
         rowHeaderBuffer.clear();
+        // previousUnfilteredSize leads the marker body, ahead of the deletion times
+        rowHeaderBuffer.writeUnsignedVInt(unfilteredStartPosition - previousUnfilteredStart);
+        previousUnfilteredStart = unfilteredStartPosition;
 
         if (kind.isBoundary())
         {
@@ -477,19 +482,15 @@ public class SSTableCursorWriter implements AutoCloseable
                 openMarker.resetLive();
         }
 
-        // Matches UnfilteredSerializer.serialize(RangeTombstoneMarker...): marker size includes the
-        // vint length of previousUnfilteredSize, written between the size and the marker body.
-        long offsetInPartition = unfilteredStartPosition - partitionStart;
-        long previousUnfilteredSize = offsetInPartition - previousRowStartOffset;
-        previousRowStartOffset = offsetInPartition;
-        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength()
-                                       + TypeSizes.sizeofUnsignedVInt(previousUnfilteredSize));
-        dataWriter.writeUnsignedVInt(previousUnfilteredSize);
+        // The size spans the whole marker body, previousUnfilteredSize included; see
+        // UnfilteredSerializer.serialize(RangeTombstoneMarker...), which reaches the same bytes by
+        // adding that field's vint width to a body size that excludes it.
+        dataWriter.writeUnsignedVInt32(rowHeaderBuffer.getLength());
         dataWriter.write(rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
 
         long unfilteredEndPosition = getPosition();
 
-        /** {@link org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter#addUnfiltered(Unfiltered)} */
+        /** {@link org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter#addUnfiltered(org.apache.cassandra.db.rows.Unfiltered)} */
         // if we hit the index block size that we have to index after, go ahead and index it.
         updateMetadataAndIndexBlock(rangeTombstone, unfilteredStartPosition, unfilteredEndPosition, updateClusteringMetadata);
     }

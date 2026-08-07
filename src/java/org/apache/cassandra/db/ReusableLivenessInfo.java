@@ -43,10 +43,16 @@ public class ReusableLivenessInfo implements LivenessInfo
         return localExpirationTime;
     }
 
+    /**
+     * "Has a TTL", as specified by {@link LivenessInfo#isExpiring()} and implemented by every other
+     * liveness type ({@link LivenessInfo.ExpiringLivenessInfo}, {@link org.apache.cassandra.db.rows.AbstractCell#isExpiring()}).
+     * Note this is NOT "has an expiration time": cell liveness held here can be a tombstone, which
+     * carries a local deletion time with no TTL.
+     */
     @Override
     public boolean isExpiring()
     {
-        return localExpirationTime != NO_EXPIRATION_TIME;
+        return ttl != NO_TTL;
     }
 
     @Override
@@ -63,6 +69,15 @@ public class ReusableLivenessInfo implements LivenessInfo
         return localExpirationTime != NO_EXPIRATION_TIME && ttl == NO_TTL;
     }
 
+    /**
+     * The cell contract, {@link org.apache.cassandra.db.rows.Cell#isLive(long)}: liveness with no
+     * expiration time is live, otherwise it must carry a TTL that has not lapsed. Cell liveness
+     * needs that reading, and it differs from the row references twice over. Row callers gate on
+     * {@link #isEmpty()}, which covers the first: empty liveness reports live here, where
+     * {@link LivenessInfo#EMPTY} does not. Nothing covers the second: liveness carrying
+     * {@link #EXPIRED_LIVENESS_TTL} reports live until its expiration second, where
+     * {@link LivenessInfo.ExpiredLivenessInfo} never reports live at all.
+     */
     @Override
     public boolean isLive(long nowInSec)
     {

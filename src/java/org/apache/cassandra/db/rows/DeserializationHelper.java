@@ -147,11 +147,36 @@ public class DeserializationHelper
 
     public boolean isDropped(Cell<?> cell, boolean isComplex)
     {
+        return isDropped(cell.column(), cell.timestamp(), isComplex);
+    }
+
+    /**
+     * Drop rule over the decoded cell header, for readers that never materialize a {@link Cell}.
+     *
+     * @param column    the cell's column; ignored when {@code isComplex}
+     * @param timestamp the cell's timestamp
+     * @param isComplex reads the {@link #currentDroppedComplex} cache instead of looking the column
+     *                  up by name. Only correct after {@link #startOfComplexColumn} has primed that
+     *                  cache for this column; a caller that has not filters nothing.
+     */
+    public boolean isDropped(ColumnMetadata column, long timestamp, boolean isComplex)
+    {
         if (!hasDroppedColumns)
             return false;
 
-        DroppedColumn dropped = isComplex ? currentDroppedComplex : droppedColumns.get(cell.column().name.bytes);
-        return dropped != null && cell.timestamp() <= dropped.droppedTime;
+        DroppedColumn dropped = isComplex ? currentDroppedComplex : droppedColumns.get(column.name.bytes);
+        return dropped != null && timestamp <= dropped.droppedTime;
+    }
+
+    public boolean hasDroppedColumns()
+    {
+        return hasDroppedColumns;
+    }
+
+    /** True if {@code column} has a drop horizon at all, whatever the timestamp. */
+    public boolean isDroppedColumn(ColumnMetadata column)
+    {
+        return hasDroppedColumns && droppedColumns.containsKey(column.name.bytes);
     }
 
     public boolean isDroppedComplexDeletion(DeletionTime complexDeletion)

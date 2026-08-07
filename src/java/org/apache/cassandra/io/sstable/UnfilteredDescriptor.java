@@ -67,6 +67,7 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         this.flags = flags;
         this.extendedFlags = 0;
         rowColumns = null;
+        missingColumnsMask = 0;
         useColumnsWords = false;
         byte clusteringKind = dataReader.readByte();
         if (clusteringKind == STATIC_CLUSTERING_KIND || clusteringKind == ROW_CLUSTERING_KIND) {

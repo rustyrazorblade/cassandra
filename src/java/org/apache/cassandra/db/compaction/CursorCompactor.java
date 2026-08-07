@@ -42,7 +42,6 @@ import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.ReusableLivenessInfo;
-import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -140,6 +139,8 @@ public class CursorCompactor extends CompactionInfo.Holder
                     if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Older sstable versions are not supported. version=" + version);
                     return false;
                 }
+                if (unsupportedHeaderColumns(metadata, reader))
+                    return false;
             }
         }
         // BTI index writing is not supported yet
@@ -194,6 +195,47 @@ public class CursorCompactor extends CompactionInfo.Holder
             else if (column.isCounterColumn())
             {
                 if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Counter columns are not supported. column=" + column);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * {@link #unsupportedSchema} only sees the columns the table has NOW. Dropping a column
+     * removes it from {@link TableMetadata#regularAndStaticColumns()}, but every sstable written
+     * before the drop still lists it in that sstable's own serialization header, with its original
+     * type intact — {@code TableMetadata.recordColumnDrop} stores {@code type.expandUserTypes()},
+     * so a dropped non-frozen collection is still a multi-cell column there. The reader builds its
+     * column arrays from the header, not from the schema, so such a column reaches the cell cursor,
+     * which reads a single cell where the complex framing
+     * ({@code [complex deletion?][vint cellsCount][cells]}) requires a count-led run, and misparses
+     * the row.
+     *
+     * Whether that misparse then surfaces at all is not something the reader can decide sensibly:
+     * {@link #mergeCells} rejects complex columns outright, but reaching it depends on the
+     * dropped-column filter, and the timestamp that filter compares against the drop horizon was
+     * itself decoded from the misread framing rather than written by any cell. So the column is
+     * discarded silently or rejected loudly according to bytes that mean nothing here — neither
+     * outcome can be relied on, which is why the screening belongs at the gate.
+     *
+     * Dropping a non-frozen collection is legal and cursor compaction is on by default, so the
+     * schema check alone lets that misparse through. Screen the columns the readers will actually
+     * present. The fallback is permanent for this table: the ghost column stays in those headers
+     * until the pre-drop sstables are rewritten by the iterator path.
+     */
+    private static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader)
+    {
+        // RegularAndStaticColumns iterates statics then regulars, so this covers both
+        for (ColumnMetadata column : reader.header.columns())
+        {
+            // the header records its own type for any column whose type has since changed, so ask
+            // it as well as the schema: that is the type the reader will decode against
+            AbstractType<?> diskType = reader.header.getType(column);
+            if (column.isComplex() || column.isCounterColumn()
+                || (diskType != null && (diskType.isMultiCell() || diskType.isCounter())))
+            {
+                if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Complex and counter columns are not supported, and " + reader.descriptor + " still carries one in its header (dropped from the schema?). column=" + column);
                 return true;
             }
         }
@@ -806,13 +848,11 @@ public class CursorCompactor extends CompactionInfo.Holder
                 isRowDropped = false;
                 lateStartRow(isStatic);
             }
-            /** {@link org.apache.cassandra.db.rows.Cell.Serializer#serialize(Cell, ColumnMetadata, DataOutputPlus, LivenessInfo, SerializationHeader)} */
+            /** {@link org.apache.cassandra.db.rows.Cell.Serializer#serialize(Cell, ColumnMetadata, DataOutputPlus, LivenessInfo, org.apache.cassandra.db.SerializationHeader)} */
             boolean isDeleted = cellLiveness.isTombstone();
-            // NOTE: ReusableLivenessInfo.isExpiring() means "has an expiration time", which is
-            // also true for tombstones. Cell flag semantics need AbstractCell.isExpiring(),
-            // i.e. ttl set — and Cell.Serializer treats deleted/expiring as mutually exclusive
-            // (else-if), so a tombstone must never carry IS_EXPIRING or a TTL field.
-            boolean isExpiring = cellLiveness.ttl() != LivenessInfo.NO_TTL;
+            // Cell.Serializer treats deleted/expiring as mutually exclusive (else-if below), so a
+            // tombstone must never carry IS_EXPIRING or a TTL field.
+            boolean isExpiring = cellLiveness.isExpiring();
             boolean useRowTimestamp = !rowLiveness.isEmpty() && cellLiveness.timestamp() == rowLiveness.timestamp();
             boolean useRowTTL = isExpiring && rowLiveness.isExpiring() &&
                                 cellLiveness.ttl() == rowLiveness.ttl() &&
@@ -886,15 +926,10 @@ public class CursorCompactor extends CompactionInfo.Holder
             // (i.e. before expiry, the pure tombstone; after expiry, whichever is more recent)
             // this inconsistency has no user-visible distinction, as at this point they are both logically tombstones
             // (the only possible difference is the time at which the cells become purgeable)
-            // NOTE: ReusableLivenessInfo.isExpiring() means "has an expiration time", which is
-            // also true for tombstones — !isExpiring() would be false for BOTH sides here (both
-            // have an expiration time once we are past the presence check above), making this
-            // tie-break dead and letting the localDeletionTime comparison below pick an expiring
-            // cell over a tombstone. Tombstone semantics need AbstractCell.isTombstone():
-            // within this block both sides have localExpirationTime set, so ttl == NO_TTL is
-            // exactly "is a tombstone" (mirrors Cells.resolveRegular's !left.isExpiring()).
-            boolean leftIsTombstone = left.ttl() == LivenessInfo.NO_TTL;
-            boolean rightIsTombstone = right.ttl() == LivenessInfo.NO_TTL;
+            // Mirrors Cells.resolveRegular's !left.isExpiring(): within this block both sides have
+            // a localExpirationTime, so "no TTL" is exactly "is a tombstone".
+            boolean leftIsTombstone = !left.isExpiring();
+            boolean rightIsTombstone = !right.isExpiring();
             if (leftIsTombstone != rightIsTombstone)
                 return leftIsTombstone ? LEFT : RIGHT;
 

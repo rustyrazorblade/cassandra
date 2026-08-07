@@ -35,6 +35,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 
 import org.apache.commons.io.FileUtils;
+import org.junit.Assume;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
@@ -51,6 +52,7 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.tools.JsonTransformer;
 import org.apache.cassandra.tools.Util;
@@ -374,6 +376,14 @@ public abstract class DifferentialCompactionTester extends CQLTester
      */
     protected void assertCursorPathWillRun(ColumnFamilyStore cfs, Set<SSTableReader> inputs, long gcBefore) throws Exception
     {
+        // Cursor compaction only supports BIG output (CursorCompactor.isSupported), so under a
+        // non-BIG format — `ant test-latest` selects BTI — every scenario in this suite would fail
+        // the assertion below for a reason that is not a defect. Skip instead, and keep the
+        // assertion for every other unsupported-ness reason so the iterator-vs-iterator trap
+        // still fires.
+        Assume.assumeTrue("cursor compaction requires the BIG sstable format; selected=" +
+                          DatabaseDescriptor.getSelectedSSTableFormat().name(),
+                          BigFormat.isSelected());
         try (CompactionController controller = new CompactionController(cfs, inputs, gcBefore);
              AbstractCompactionStrategy.ScannerList scanners =
                  cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs), null))

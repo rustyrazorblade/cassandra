@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.db.compaction;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -32,6 +34,7 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 
 import static org.apache.cassandra.db.rows.Cell.INVALID_DELETION_TIME;
 import static org.apache.cassandra.db.rows.Cell.NO_DELETION_TIME;
+import static org.apache.cassandra.db.rows.Cell.NO_TTL;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_VALUE_START;
@@ -205,7 +208,11 @@ class StatefulCursor extends SSTableCursorReader
     public int readCellHeader()
     {
         int state = super.readCellHeader();
-        if (corruptedTombstoneValidationEnabled)
+        // Validate only where a cell was actually surfaced. Every path that surfaces one returns
+        // CELL_VALUE_START or CELL_END, including a valueless final cell; UNFILTERED_END means the
+        // dropped-column filter discarded every remaining column, and cellLiveness then still
+        // describes the last DISCARDED cell rather than the current position.
+        if (corruptedTombstoneValidationEnabled && isState(state, CELL_VALUE_START | CELL_END))
             validateInvalidCellDeletion();
         return state;
     }
@@ -231,14 +238,33 @@ class StatefulCursor extends SSTableCursorReader
     private void validateInvalidCellDeletion()
     {
         ReusableLivenessInfo cellLiveness = cellCursor().cellLiveness;
-        long ldt = cellLiveness.localExpirationTime();
-        if (cellLiveness.ttl() < 0 || ldt == INVALID_DELETION_TIME || ldt < 0 || (cellLiveness.isExpiring() && ldt == NO_DELETION_TIME)) {
+        if (hasInvalidCellDeletion(cellLiveness.ttl(), cellLiveness.localExpirationTime())) {
             UnfilteredValidation.handleInvalid(
             ssTableReader().metadata(),
             currPartition.key(),
             ssTableReader(),
             "cellLiveness="+cellLiveness);
         }
+    }
+
+    /**
+     * Mirrors {@link org.apache.cassandra.db.rows.AbstractCell#hasInvalidDeletions()}, where
+     * {@code ttl != NO_TTL} is the reference's {@code isExpiring()}.
+     */
+    @VisibleForTesting
+    static boolean hasInvalidCellDeletion(int ttl, long localExpirationTime)
+    {
+        return ttl < 0
+               || localExpirationTime == INVALID_DELETION_TIME
+               || localExpirationTime < 0
+               || (ttl != NO_TTL && localExpirationTime == NO_DELETION_TIME);
+    }
+
+    /** Mirrors the primary-key liveness clause of {@link org.apache.cassandra.db.rows.AbstractRow#hasInvalidDeletions()}. */
+    @VisibleForTesting
+    static boolean hasInvalidRowLiveness(int ttl, long localExpirationTime)
+    {
+        return ttl != NO_TTL && (ttl < 0 || localExpirationTime < 0);
     }
 
     private void validateInvalidRowDeletion()
@@ -251,7 +277,7 @@ class StatefulCursor extends SSTableCursorReader
                 "rowDeletion="+currPartition.deletionTime().toString());
         }
         ReusableLivenessInfo livenessInfo = unfiltered.livenessInfo();
-        if (livenessInfo.isExpiring() && (livenessInfo.ttl() < 0 || livenessInfo.localExpirationTime() < 0)) {
+        if (hasInvalidRowLiveness(livenessInfo.ttl(), livenessInfo.localExpirationTime())) {
             UnfilteredValidation.handleInvalid(
                 ssTableReader().metadata(),
                 currPartition.key(),

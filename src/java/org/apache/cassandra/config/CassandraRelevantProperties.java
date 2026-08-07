@@ -633,6 +633,19 @@ public enum CassandraRelevantProperties
     TEST_COMPRESSION_ALGO("cassandra.test.compression.algo", "lz4"),
     TEST_DEBUG_REF_COUNT("cassandra.debugrefcount"),
     TEST_DEBUG_REF_EVENTS("cassandra.debug.refevents"),
+    /** Scale knobs for the cursor-vs-iterator differential compaction suite. */
+    TEST_DIFFERENTIAL_BIGVOLUME_PARTITIONS("cassandra.test.differential.bigvolume.partitions", "2000"),
+    TEST_DIFFERENTIAL_BIGVOLUME_ROUNDS("cassandra.test.differential.bigvolume.rounds", "20"),
+    TEST_DIFFERENTIAL_BIGVOLUME_ROWS_PER_ROUND("cassandra.test.differential.bigvolume.rows_per_round", "50"),
+    TEST_DIFFERENTIAL_BIGVOLUME_VALUE_PADDING("cassandra.test.differential.bigvolume.value_padding", "0"),
+    /** Number of generated examples the randomized differential soak runs; must be > 0. */
+    TEST_DIFFERENTIAL_EXAMPLES("cassandra.test.differential.examples"),
+    TEST_DIFFERENTIAL_LARGEPARTITION_CK_STRIDE("cassandra.test.differential.largepartition.ck_stride"),
+    TEST_DIFFERENTIAL_LARGEPARTITION_ROWS_PER_SSTABLE("cassandra.test.differential.largepartition.rows_per_sstable", "250000"),
+    TEST_DIFFERENTIAL_LARGEPARTITION_SSTABLES("cassandra.test.differential.largepartition.sstables", "4"),
+    TEST_DIFFERENTIAL_LARGEPARTITION_VALUE_PADDING("cassandra.test.differential.largepartition.value_padding", "120"),
+    /** Seed for the randomized differential soak; defaults to the wall clock, logged per example. */
+    TEST_DIFFERENTIAL_SEED("cassandra.test.differential.seed"),
     TEST_DRIVER_CONNECTION_TIMEOUT_MS("cassandra.test.driver.connection_timeout_ms", "5000"),
     TEST_DRIVER_READ_TIMEOUT_MS("cassandra.test.driver.read_timeout_ms", "12000"),
     TEST_ENCRYPTION("cassandra.test.encryption", "false"),

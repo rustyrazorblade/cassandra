@@ -19,12 +19,11 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.Map;
 
 import com.google.common.collect.ImmutableList;
 
 import org.apache.cassandra.config.Config.DiskAccessMode;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.Columns;
 import org.apache.cassandra.db.DeletionTime;
@@ -46,7 +45,6 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.ResizableByteBuffer;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.tools.Util;
@@ -108,10 +106,6 @@ public class SSTableCursorReader implements AutoCloseable
         public ColumnMetadata cellColumn;
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
-        // Per-column drop horizon (microseconds), Long.MIN_VALUE when the column was never
-        // dropped; cells with timestamp <= the horizon are discarded, mirroring
-        // DeserializationHelper.isDropped. Built once per superset, like cellTypeArray.
-        private long[] droppedTimesArray;
 
         // Remaining PRESENT columns of this row as a bitmask over columnsArray indices.
         // Garbage-free sparse-row iteration: rows that do not contain every header column
@@ -127,19 +121,19 @@ public class SSTableCursorReader implements AutoCloseable
 
         void init (Columns columns, long missingColumnsMask, long[] presentColumnsWords, ReusableLivenessInfo rowLiveness)
         {
+            // the sstable-scoped dropped-column flag is only sound while the superset comes from
+            // this sstable's header; a schema-derived Columns here would under-filter silently
+            assert columns == serializationHeader.columns(false) || columns == serializationHeader.columns(true)
+                 : "cell superset must be one of this sstable's header column sets";
             if (this.columns != columns)
             {
                 // This will be a problem with changing columns
                 this.columns = columns;
                 columnsArray = columns.toArray(COLUMN_METADATA_TYPE);
                 cellTypeArray = new AbstractType<?>[columnsArray.length];
-                droppedTimesArray = new long[columnsArray.length];
                 for (int i = 0; i < columnsArray.length; i++)
                 {
-                    ColumnMetadata cellColumn = columnsArray[i];
-                    cellTypeArray[i]  = serializationHeader.getType(cellColumn);
-                    DroppedColumn dropped = droppedColumns.get(cellColumn.name.bytes);
-                    droppedTimesArray[i] = dropped == null ? Long.MIN_VALUE : dropped.droppedTime;
+                    cellTypeArray[i] = serializationHeader.getType(columnsArray[i]);
                 }
                 columnsSize = columns.size();
             }
@@ -244,7 +238,6 @@ public class SSTableCursorReader implements AutoCloseable
                 }
                 cellColumn = columnsArray[currIndex];
                 cellType = cellTypeArray[currIndex];
-                long cellDroppedTime = droppedTimesArray[currIndex];
                 cellFlags = dataReader.readUnsignedByte();
                 // TODO: specialize common case where flags == HAS_VALUE | USE_ROW_TS?
                 boolean hasValue = Cell.Serializer.hasValue(cellFlags);
@@ -267,7 +260,10 @@ public class SSTableCursorReader implements AutoCloseable
                                 ? cellColumn.cellPathSerializer().deserialize(dataReader)
                                 : null;
 
-                if (hasDroppedColumns && timestamp <= cellDroppedTime)
+                // pass isComplex=false unconditionally: the complex branch reads the helper's
+                // startOfComplexColumn cache, which this reader never primes, so it would always
+                // read null and filter nothing
+                if (sstableHasDroppedColumns && deserializationHelper.isDropped(cellColumn, timestamp, false))
                 {
                     // mirror UnfilteredSerializer.readSimpleColumn: cells of a dropped column
                     // written at or before the drop are discarded on read
@@ -286,13 +282,12 @@ public class SSTableCursorReader implements AutoCloseable
     private final AbstractType<?>[] clusteringColumnTypes;
     private final DeserializationHelper deserializationHelper;
     private final SerializationHeader serializationHeader;
-    // Dropped-column filtering, mirroring DeserializationHelper.isDropped /
-    // isDroppedComplexDeletion: cells (and complex deletions) of a dropped column written at or
-    // before the drop are discarded at deserialization on the iterator path
-    // (UnfilteredSerializer.readSimpleColumn/readComplexColumn), so the cursor must never
-    // surface them either.
-    private final Map<ByteBuffer, DroppedColumn> droppedColumns;
-    private final boolean hasDroppedColumns;
+    // True when a column of THIS sstable's header carries a drop horizon; the helper's
+    // identically-purposed flag is table-scoped, hence the name. Sstable scope is sound because the
+    // cell cursor's superset comes from serializationHeader.columns() — asserted in CellCursor.init
+    // — so a column absent from this header can never reach readCellHeader. Held as a field so the
+    // common case, no dropped column in this sstable, costs one boolean per cell not a map lookup.
+    private final boolean sstableHasDroppedColumns;
 
     // need to be closed
     private final SSTableReader ssTableReader;
@@ -343,8 +338,7 @@ public class SSTableCursorReader implements AutoCloseable
         }
         deserializationHelper = new DeserializationHelper(metadata, version.correspondingMessagingVersion(), DeserializationHelper.Flag.LOCAL, null);
         serializationHeader = reader.header;
-        droppedColumns = metadata.droppedColumns;
-        hasDroppedColumns = !droppedColumns.isEmpty();
+        sstableHasDroppedColumns = anyDroppedColumn(deserializationHelper, serializationHeader);
 
         dataReader = reader.openDataReaderForScan(diskAccessMode);
         // the HEADER decides whether this sstable can contain static rows: after
@@ -359,6 +353,19 @@ public class SSTableCursorReader implements AutoCloseable
         dataReader.close();
         if (ssTableReaderRef != null)
             ssTableReaderRef.close();
+    }
+
+    private static boolean anyDroppedColumn(DeserializationHelper deserializationHelper, SerializationHeader header)
+    {
+        if (!deserializationHelper.hasDroppedColumns())
+            return false;
+        // RegularAndStaticColumns iterates statics then regulars, so this covers both
+        for (ColumnMetadata column : header.columns())
+        {
+            if (deserializationHelper.isDroppedColumn(column))
+                return true;
+        }
+        return false;
     }
 
     private void resetOnPartitionStart()
@@ -508,20 +515,9 @@ public class SSTableCursorReader implements AutoCloseable
     // TODO: move to cell cursor? maybe avoid copy through buffer?
     private void copyCellContents(DataOutputPlus writer, byte[] transferBuffer, int length) throws IOException
     {
-        if (length >= 0)
+        if (length < 0)
         {
-            try
-            {
-                dataReader.readFully(transferBuffer, 0, length);
-            }
-            catch (Exception e)
-            {
-                corruptSSTable(e);
-            }
-            writer.write(transferBuffer, 0, length);
-        }
-        else
-        {
+            // variable length: the wire carries a length vint, which is mirrored to the output
             try
             {
                 length = dataReader.readUnsignedVInt32();
@@ -530,24 +526,31 @@ public class SSTableCursorReader implements AutoCloseable
             {
                 corruptSSTable(e);
             }
+            // both checks mirror AbstractType.read, the reference for this wire format
             if (length < 0)
                 corruptSSTable("Corrupt (negative) value length encountered");
+            if (length > DatabaseDescriptor.getMaxValueSize())
+                corruptSSTable(String.format("Corrupt value length %d encountered, as it exceeds the maximum of %d, " +
+                                             "which is set via max_value_size in cassandra.yaml",
+                                             length, DatabaseDescriptor.getMaxValueSize()));
             writer.writeUnsignedVInt32(length);
-            int remaining = length;
-            while (remaining > 0)
+        }
+        // Fixed-length values carry no vint but are not bounded by the transfer buffer either:
+        // valueLengthIfFixed() is 6144 for a vector<float, 1536>. Both cases copy in chunks.
+        int remaining = length;
+        while (remaining > 0)
+        {
+            int chunk = Math.min(remaining, transferBuffer.length);
+            try
             {
-                int readLength = Math.min(remaining, transferBuffer.length);
-                try
-                {
-                    dataReader.readFully(transferBuffer, 0, readLength);
-                }
-                catch (Exception e)
-                {
-                    corruptSSTable(e);
-                }
-                writer.write(transferBuffer, 0, readLength);
-                remaining -= readLength;
+                dataReader.readFully(transferBuffer, 0, chunk);
             }
+            catch (Exception e)
+            {
+                corruptSSTable(e);
+            }
+            writer.write(transferBuffer, 0, chunk);
+            remaining -= chunk;
         }
     }
 

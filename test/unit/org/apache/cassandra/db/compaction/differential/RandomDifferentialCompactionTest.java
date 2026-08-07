@@ -28,8 +28,9 @@ import java.util.Map;
 import java.util.Random;
 
 import com.google.common.collect.ImmutableList;
-import org.junit.Test;
 
+import org.junit.AssumptionViolatedException;
+import org.junit.Test;
 import org.quicktheories.core.Gen;
 import org.quicktheories.generators.SourceDSL;
 import org.quicktheories.impl.JavaRandom;
@@ -47,6 +48,7 @@ import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
 import org.apache.cassandra.utils.Generators;
 
 import static org.apache.cassandra.utils.Generators.IDENTIFIER_GEN;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Randomized soak for the cursor-vs-iterator differential harness: random schemas restricted to
@@ -81,7 +83,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     }
 
     private static final int DEFAULT_EXAMPLES = 10;
-    private static final int EXAMPLES = Integer.getInteger("cassandra.test.differential.examples", DEFAULT_EXAMPLES);
+    private static final int EXAMPLES = CassandraRelevantProperties.TEST_DIFFERENTIAL_EXAMPLES.getInt(DEFAULT_EXAMPLES);
 
     /** Long enough that expiry can never fall between the two differential runs. */
     private static final int SOAK_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -89,6 +91,9 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     @Test
     public void randomizedDifferential() throws Throwable
     {
+        // a zero or negative example count would make SeedRunner.run iterate zero times and the
+        // test pass having compared nothing
+        assertTrue("cassandra.test.differential.examples must be > 0, got " + EXAMPLES, EXAMPLES > 0);
         new SeedRunner(EXAMPLES).run(this::runOneExample);
     }
 
@@ -397,7 +402,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         private static final long addend = 0xBL;
         private static final long mask = (1L << 48) - 1;
 
-        private long seed = Long.getLong("cassandra.test.differential.seed", System.currentTimeMillis());
+        private long seed = CassandraRelevantProperties.TEST_DIFFERENTIAL_SEED.getLong(System.currentTimeMillis());
         private final int examples;
 
         SeedRunner(int examples)
@@ -427,6 +432,12 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
                 try
                 {
                     test.run(seed);
+                }
+                catch (AssumptionViolatedException a)
+                {
+                    // an Assume skip has to stay a skip: JUnit decides skip-vs-fail on the type
+                    // thrown, not on its cause, so wrapping this below would turn the soak red
+                    throw a;
                 }
                 catch (Throwable t)
                 {
