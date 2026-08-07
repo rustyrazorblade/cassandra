@@ -277,8 +277,12 @@ public class CursorCompactor extends CompactionInfo.Holder
      *
      * Dropping a non-frozen collection is legal and cursor compaction is on by default, so the
      * schema check alone lets that misparse through. Screen the columns the readers will actually
-     * present. The fallback is permanent for this table: the ghost column stays in those headers
-     * until the pre-drop sstables are rewritten by the iterator path.
+     * present, but only reject a header column that is no longer live in the current schema —
+     * complex/counter columns still present in {@code metadata} are supported (complex landed in
+     * increment 2, counters in increment 5) and must not be rejected just because a header lists
+     * them; only a header column absent from the live schema (i.e. dropped) is the ghost case this
+     * guards against. The fallback is permanent for this table: the ghost column stays in those
+     * headers until the pre-drop sstables are rewritten by the iterator path.
      */
     private static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader)
     {
@@ -288,10 +292,11 @@ public class CursorCompactor extends CompactionInfo.Holder
             // the header records its own type for any column whose type has since changed, so ask
             // it as well as the schema: that is the type the reader will decode against
             AbstractType<?> diskType = reader.header.getType(column);
-            if (column.isComplex() || column.isCounterColumn()
-                || (diskType != null && (diskType.isMultiCell() || diskType.isCounter())))
+            if ((column.isComplex() || column.isCounterColumn()
+                 || (diskType != null && (diskType.isMultiCell() || diskType.isCounter())))
+                && metadata.getColumn(column.name) == null)
             {
-                if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Complex and counter columns are not supported, and " + reader.descriptor + " still carries one in its header (dropped from the schema?). column=" + column);
+                if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Complex and counter columns dropped from the schema are not supported, and " + reader.descriptor + " still carries one in its header. column=" + column);
                 return true;
             }
         }
