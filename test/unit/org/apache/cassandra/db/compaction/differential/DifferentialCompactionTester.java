@@ -34,6 +34,8 @@ import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
+import org.apache.commons.io.FileUtils;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -190,6 +192,13 @@ public abstract class DifferentialCompactionTester extends CQLTester
         // to delete the originals (SSTableRewriter.moveStarts obsoleted fully-covered inputs
         // unconditionally — now fixed and guarded by the flag), and this harness depends on
         // the originals surviving, so every differential run doubles as the regression test.
+        //
+        // scratch holds byte-for-byte copies of every captured output sstable (both paths) —
+        // it is deleted as soon as the comparison that needs them is done, win or lose, rather
+        // than accumulating for the lifetime of the test JVM: with hundreds of invocations per
+        // fork (e.g. the randomized soak), leaving cleanup to the temp-dir removal at JVM exit
+        // let disk usage grow unbounded over a single run.
+        try
         {
             CapturedOutput iterator = compactPath(cfs, inputs, false, gcBefore, scratch.resolve("iterator"), taskFactory);
             // the input INSTANCES were replaced during restore; re-resolve the subset by descriptor
@@ -204,6 +213,10 @@ public abstract class DifferentialCompactionTester extends CQLTester
             CapturedOutput cursor = compactPath(cfs, reResolved, true, gcBefore, scratch.resolve("cursor"), taskFactory);
             assertEquivalentOutputs(iterator, cursor);
             return iterator;
+        }
+        finally
+        {
+            FileUtils.deleteDirectory(scratch.toFile());
         }
     }
 
