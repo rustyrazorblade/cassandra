@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.compaction.differential;
 
-import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -36,6 +35,7 @@ import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.ThreadStats;
 
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -44,7 +44,7 @@ import static org.junit.Assert.assertTrue;
  * Regression gate for cursor compaction's GARBAGE-FREE property: steady-state heap
  * allocation must not scale with the number of rows/cells compacted.
  *
- * Method: measure thread-allocated bytes (ThreadMXBean) around CompactionTask.execute for a
+ * Method: measure thread-allocated bytes (ThreadStats) around CompactionTask.execute for a
  * SMALL table and a 10x BIG table (same row shape, warmed by prior iterations, min over
  * several measured iterations to suppress transient noise), and assert the difference stays
  * under a fixed ceiling.
@@ -101,13 +101,12 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     /** Runs warmup + measured compactions, returning the minimum allocated over the measured tail. */
-    private long measureBest(com.sun.management.ThreadMXBean threadMXBean, ColumnFamilyStore cfs, long gcBefore,
-                             int warmup, int measured) throws Exception
+    private long measureBest(ColumnFamilyStore cfs, long gcBefore, int warmup, int measured) throws Exception
     {
         long best = Long.MAX_VALUE;
         for (int i = 0; i < warmup + measured; i++)
         {
-            long allocated = compactOnceMeasured(threadMXBean, cfs, gcBefore);
+            long allocated = compactOnceMeasured(cfs, gcBefore);
             if (i >= warmup)
                 best = Math.min(best, allocated);
         }
@@ -123,20 +122,18 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     private void dumpAllocationProfile(java.nio.file.Path dest, int iterations,
-                                       com.sun.management.ThreadMXBean threadMXBean,
                                        ColumnFamilyStore cfs, long gcBefore) throws Exception
     {
-        dumpAllocationProfile(dest, WARMUP_ITERATIONS, iterations, threadMXBean, cfs, gcBefore);
+        dumpAllocationProfile(dest, WARMUP_ITERATIONS, iterations, cfs, gcBefore);
     }
 
     /** Warms up, then records a JFR allocation profile (with stacks) over `iterations` cursor
      *  compactions of cfs, dumped to dest for offline attribution. */
     private void dumpAllocationProfile(java.nio.file.Path dest, int warmup, int iterations,
-                                       com.sun.management.ThreadMXBean threadMXBean,
                                        ColumnFamilyStore cfs, long gcBefore) throws Exception
     {
         for (int i = 0; i < warmup; i++)
-            compactOnceMeasured(threadMXBean, cfs, gcBefore);
+            compactOnceMeasured(cfs, gcBefore);
 
         try (jdk.jfr.Recording recording = new jdk.jfr.Recording())
         {
@@ -144,7 +141,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             recording.enable("jdk.ObjectAllocationOutsideTLAB").withStackTrace();
             recording.start();
             for (int i = 0; i < iterations; i++)
-                compactOnceMeasured(threadMXBean, cfs, gcBefore);
+                compactOnceMeasured(cfs, gcBefore);
             recording.stop();
             recording.dump(dest);
         }
@@ -153,20 +150,19 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void allocationDoesNotScaleWithRows() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
         Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
-                          threadMXBean != null);
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
         withMeasurementEnv(() -> {
             DatabaseDescriptor.setCursorCompactionEnabled(true);
-            long smallAlloc = measureSteadyStateAllocation(threadMXBean, SMALL_PARTITIONS, true);
-            long bigAlloc = measureSteadyStateAllocation(threadMXBean, SMALL_PARTITIONS * SCALE, true);
+            long smallAlloc = measureSteadyStateAllocation(SMALL_PARTITIONS, true);
+            long bigAlloc = measureSteadyStateAllocation(SMALL_PARTITIONS * SCALE, true);
             long delta = bigAlloc - smallAlloc;
 
             // iterator-path numbers measured purely for context in the log: the iterator
             // allocates per row/cell BY DESIGN and is not gated
-            long smallIter = measureSteadyStateAllocation(threadMXBean, SMALL_PARTITIONS, false);
-            long bigIter = measureSteadyStateAllocation(threadMXBean, SMALL_PARTITIONS * SCALE, false);
+            long smallIter = measureSteadyStateAllocation(SMALL_PARTITIONS, false);
+            long bigIter = measureSteadyStateAllocation(SMALL_PARTITIONS * SCALE, false);
 
             logger.info("cursor compaction allocation: small={}B big={}B delta={}B ceiling={}B " +
                         "(iterator path for context: small={}B big={}B delta={}B)",
@@ -180,12 +176,12 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         });
     }
 
-    private long measureSteadyStateAllocation(com.sun.management.ThreadMXBean threadMXBean, int partitions, boolean cursor) throws Exception
+    private long measureSteadyStateAllocation(int partitions, boolean cursor) throws Exception
     {
-        return measureSteadyStateAllocation(threadMXBean, partitions, cursor, 2, "val", WARMUP_ITERATIONS, MEASURED_ITERATIONS);
+        return measureSteadyStateAllocation(partitions, cursor, 2, "val", WARMUP_ITERATIONS, MEASURED_ITERATIONS);
     }
 
-    private long measureSteadyStateAllocation(com.sun.management.ThreadMXBean threadMXBean, int partitions, boolean cursor,
+    private long measureSteadyStateAllocation(int partitions, boolean cursor,
                                               int rounds, String valuePadding, int warmup, int measured) throws Exception
     {
         DatabaseDescriptor.setCursorCompactionEnabled(cursor);
@@ -209,7 +205,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
 
         captureLastInputBytes(cfs);
-        return measureBest(threadMXBean, cfs, gcBefore, warmup, measured);
+        return measureBest(cfs, gcBefore, warmup, measured);
     }
 
     /** Total on-disk input bytes of the most recent measureSteadyStateAllocation call. */
@@ -224,21 +220,21 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void allocationAtLargeFileSizes() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
         String padding = "v".repeat(500);
         withMeasurementEnv(() -> {
             // 4 rounds = 4 input files; big: 192 partitions * 100 rows * ~520B = ~10MB/file
-            long smallAlloc = measureSteadyStateAllocation(threadMXBean, 19, true, 4, padding, 2, 2);
+            long smallAlloc = measureSteadyStateAllocation(19, true, 4, padding, 2, 2);
             long smallBytes = lastInputBytes;
-            long bigAlloc = measureSteadyStateAllocation(threadMXBean, 192, true, 4, padding, 2, 2);
+            long bigAlloc = measureSteadyStateAllocation(192, true, 4, padding, 2, 2);
             long bigBytes = lastInputBytes;
             long delta = bigAlloc - smallAlloc;
             long extraBytes = bigBytes - smallBytes;
             double perInputByte = (double) delta / extraBytes;
-            long smallIter = measureSteadyStateAllocation(threadMXBean, 19, false, 4, padding, 2, 2);
-            long bigIter = measureSteadyStateAllocation(threadMXBean, 192, false, 4, padding, 2, 2);
+            long smallIter = measureSteadyStateAllocation(19, false, 4, padding, 2, 2);
+            long bigIter = measureSteadyStateAllocation(192, false, 4, padding, 2, 2);
 
             logger.info("LARGE-FILE cursor compaction allocation (4 files, ~10MB each big): " +
                         "cursor small={}B big={}B delta={}B over {}B extra input = {}B/B; " +
@@ -258,7 +254,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     }
 
     /** Compacts all live sstables on the cursor path, measuring ONLY execute(); restores inputs. */
-    private long compactOnceMeasured(com.sun.management.ThreadMXBean threadMXBean, ColumnFamilyStore cfs, long gcBefore) throws Exception
+    private long compactOnceMeasured(ColumnFamilyStore cfs, long gcBefore) throws Exception
     {
         Set<SSTableReader> inputs = new HashSet<>(cfs.getLiveSSTables());
         Set<Descriptor> liveBeforeDescs = new HashSet<>();
@@ -273,10 +269,9 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         assertNotNull("unable to mark inputs compacting", txn);
         CompactionTask task = new CompactionTask(cfs, txn, gcBefore, true /* keepOriginals */);
 
-        long tid = Thread.currentThread().getId();
-        long before = threadMXBean.getThreadAllocatedBytes(tid);
+        long before = ThreadStats.getCurrentThreadAllocatedBytes();
         task.execute(ActiveCompactionsTracker.NOOP);
-        long allocated = threadMXBean.getThreadAllocatedBytes(tid) - before;
+        long allocated = ThreadStats.getCurrentThreadAllocatedBytes() - before;
 
         List<SSTableReader> retainedInputClones = new ArrayList<>();
         List<SSTableReader> outputs = identifyOutputs(cfs, liveBeforeDescs, liveBeforeDescs, retainedInputClones);
@@ -293,13 +288,13 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void allocationDoesNotScaleWithSparseRows() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
         withMeasurementEnv(() -> {
             DatabaseDescriptor.setCursorCompactionEnabled(true);
-            long smallAlloc = measureSparse(threadMXBean, SMALL_PARTITIONS);
-            long bigAlloc = measureSparse(threadMXBean, SMALL_PARTITIONS * SCALE);
+            long smallAlloc = measureSparse(SMALL_PARTITIONS);
+            long bigAlloc = measureSparse(SMALL_PARTITIONS * SCALE);
             long delta = bigAlloc - smallAlloc;
             logger.info("sparse-row cursor compaction allocation: small={}B big={}B delta={}B ceiling={}B",
                         smallAlloc, bigAlloc, delta, CEILING_BYTES);
@@ -310,7 +305,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         });
     }
 
-    private long measureSparse(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    private long measureSparse(int partitions) throws Exception
     {
         DatabaseDescriptor.setCursorCompactionEnabled(true);
         createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, PRIMARY KEY (pk, ck)) " +
@@ -331,7 +326,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         }
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
         assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
-        return measureBest(threadMXBean, cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
+        return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
     }
 
     /**
@@ -346,14 +341,14 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void allocationDoesNotScaleWithWideSchemaSparseRows() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
         withMeasurementEnv(() -> {
             DatabaseDescriptor.setCursorCompactionEnabled(true);
-            long smallAlloc = measureWideSparse(threadMXBean, SMALL_PARTITIONS);
+            long smallAlloc = measureWideSparse(SMALL_PARTITIONS);
             long smallBytes = lastInputBytes;
-            long bigAlloc = measureWideSparse(threadMXBean, SMALL_PARTITIONS * SCALE);
+            long bigAlloc = measureWideSparse(SMALL_PARTITIONS * SCALE);
             long bigBytes = lastInputBytes;
             long delta = bigAlloc - smallAlloc;
             long extraBytes = bigBytes - smallBytes;
@@ -374,7 +369,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         });
     }
 
-    private long measureWideSparse(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    private long measureWideSparse(int partitions) throws Exception
     {
         DatabaseDescriptor.setCursorCompactionEnabled(true);
         int cols = 70;
@@ -423,7 +418,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
         assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
         captureLastInputBytes(cfs);
-        return measureBest(threadMXBean, cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
+        return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
     }
 
     /**
@@ -443,14 +438,14 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void allocationDoesNotScaleWithRangeTombstones() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
         withMeasurementEnv(() -> {
             DatabaseDescriptor.setCursorCompactionEnabled(true);
-            long smallAlloc = measureRangeTombstones(threadMXBean, 12);
+            long smallAlloc = measureRangeTombstones(12);
             long smallBytes = lastInputBytes;
-            long bigAlloc = measureRangeTombstones(threadMXBean, 96);
+            long bigAlloc = measureRangeTombstones(96);
             long bigBytes = lastInputBytes;
             long delta = bigAlloc - smallAlloc;
             long extraBytes = bigBytes - smallBytes;
@@ -476,7 +471,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         return 1.0;
     }
 
-    private long measureRangeTombstones(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    private long measureRangeTombstones(int partitions) throws Exception
     {
         DatabaseDescriptor.setCursorCompactionEnabled(true);
         createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck)) " +
@@ -500,7 +495,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
         assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
         captureLastInputBytes(cfs);
-        return measureBest(threadMXBean, cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
+        return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
     }
 
     /**
@@ -511,8 +506,8 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void recordAllocationProfile() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
         withMeasurementEnv(() -> {
             DatabaseDescriptor.setCursorCompactionEnabled(true);
@@ -531,7 +526,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
             assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
 
-            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc.jfr"), 30, threadMXBean, cfs, gcBefore);
+            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc.jfr"), 30, cfs, gcBefore);
             logger.info("allocation profile dumped to /tmp/cursor-alloc.jfr");
         });
     }
@@ -541,8 +536,8 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void recordRangeTombstoneAllocationProfile() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
         withMeasurementEnv(() -> {
             DatabaseDescriptor.setCursorCompactionEnabled(true);
@@ -566,7 +561,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
             assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
 
-            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-rt.jfr"), 30, threadMXBean, cfs, gcBefore);
+            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-rt.jfr"), 30, cfs, gcBefore);
             logger.info("allocation profile dumped to /tmp/cursor-alloc-rt.jfr");
         });
     }
@@ -575,8 +570,8 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void recordLargeFileAllocationProfile() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
         String padding = "v".repeat(500);
         withMeasurementEnv(() -> {
             DatabaseDescriptor.setCursorCompactionEnabled(true);
@@ -594,20 +589,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
             assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
 
-            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-large.jfr"), 2, 8, threadMXBean, cfs, gcBefore);
+            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-large.jfr"), 2, 8, cfs, gcBefore);
         });
-    }
-
-    private static com.sun.management.ThreadMXBean threadMXBean()
-    {
-        java.lang.management.ThreadMXBean bean = ManagementFactory.getThreadMXBean();
-        if (!(bean instanceof com.sun.management.ThreadMXBean))
-            return null;
-        com.sun.management.ThreadMXBean sunBean = (com.sun.management.ThreadMXBean) bean;
-        if (!sunBean.isThreadAllocatedMemorySupported())
-            return null;
-        if (!sunBean.isThreadAllocatedMemoryEnabled())
-            sunBean.setThreadAllocatedMemoryEnabled(true);
-        return sunBean;
     }
 }
