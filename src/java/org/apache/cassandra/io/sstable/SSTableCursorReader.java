@@ -265,9 +265,15 @@ public class SSTableCursorReader implements AutoCloseable
                 localDeletionTime = Cell.decodeLocalDeletionTime(localDeletionTime, ttl, deserializationHelper);
 
                 cellLiveness.reset(timestamp, ttl, localDeletionTime);
-                cellPath = cellColumn.isComplex()
-                                ? cellColumn.cellPathSerializer().deserialize(dataReader)
-                                : null;
+                // Complex (multi-cell) columns never reach the cell cursor: CursorCompactor's
+                // unsupportedSchema and unsupportedHeaderColumns gates both reject them before
+                // compaction starts, including a dropped complex column still recorded in an
+                // older sstable's header — see unsupportedHeaderColumns's javadoc for why that
+                // needs its own check. cellPath is therefore always null on this path; assert
+                // the invariant instead of paying a per-cell isComplex() dispatch and a dead
+                // deserialize call.
+                assert !cellColumn.isComplex() : "complex column reached the cell cursor: " + cellColumn;
+                cellPath = null;
 
                 // Equivalent to deserializationHelper.isDropped(cellColumn, timestamp, false), but
                 // via the precomputed per-superset array instead of a ByteBuffer-keyed map lookup
