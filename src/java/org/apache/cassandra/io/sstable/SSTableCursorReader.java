@@ -106,6 +106,12 @@ public class SSTableCursorReader implements AutoCloseable
         public ColumnMetadata cellColumn;
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
+        // Parallel to columnsArray: each column's drop horizon, or Long.MIN_VALUE if none (so
+        // "timestamp <= droppedTimeArray[i]" is false for any real timestamp on a non-dropped
+        // column). Built once per superset change (see init) so the per-cell drop check is a
+        // plain compare instead of a ByteBuffer-keyed map lookup on sstableHasDroppedColumns
+        // tables.
+        private long[] droppedTimeArray;
 
         // Remaining PRESENT columns of this row as a bitmask over columnsArray indices.
         // Garbage-free sparse-row iteration: rows that do not contain every header column
@@ -131,9 +137,12 @@ public class SSTableCursorReader implements AutoCloseable
                 this.columns = columns;
                 columnsArray = columns.toArray(COLUMN_METADATA_TYPE);
                 cellTypeArray = new AbstractType<?>[columnsArray.length];
+                droppedTimeArray = sstableHasDroppedColumns ? new long[columnsArray.length] : null;
                 for (int i = 0; i < columnsArray.length; i++)
                 {
                     cellTypeArray[i] = serializationHeader.getType(columnsArray[i]);
+                    if (sstableHasDroppedColumns)
+                        droppedTimeArray[i] = deserializationHelper.droppedTimeOrMin(columnsArray[i]);
                 }
                 columnsSize = columns.size();
             }
@@ -260,10 +269,12 @@ public class SSTableCursorReader implements AutoCloseable
                                 ? cellColumn.cellPathSerializer().deserialize(dataReader)
                                 : null;
 
-                // pass isComplex=false unconditionally: the complex branch reads the helper's
-                // startOfComplexColumn cache, which this reader never primes, so it would always
-                // read null and filter nothing
-                if (sstableHasDroppedColumns && deserializationHelper.isDropped(cellColumn, timestamp, false))
+                // Equivalent to deserializationHelper.isDropped(cellColumn, timestamp, false), but
+                // via the precomputed per-superset array instead of a ByteBuffer-keyed map lookup
+                // per cell (isDropped's isComplex=false path would look up droppedColumns.get(
+                // column.name.bytes) every time; this reader never primes startOfComplexColumn's
+                // cache, so isComplex=true was never an option here either).
+                if (sstableHasDroppedColumns && timestamp <= droppedTimeArray[currIndex])
                 {
                     // mirror UnfilteredSerializer.readSimpleColumn: cells of a dropped column
                     // written at or before the drop are discarded on read

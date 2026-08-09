@@ -173,6 +173,21 @@ public class DeserializationHelper
         return hasDroppedColumns;
     }
 
+    /**
+     * The column's drop horizon, or Long.MIN_VALUE if it has none — chosen so that {@code
+     * timestamp <= droppedTimeOrMin(column)} is false for any real timestamp on a non-dropped
+     * column, matching {@code dropped != null && timestamp <= dropped.droppedTime}. For callers
+     * that build a per-superset array of these once (e.g. SSTableCursorReader.CellCursor), so a
+     * per-cell drop check becomes a plain array compare instead of a map lookup.
+     */
+    public long droppedTimeOrMin(ColumnMetadata column)
+    {
+        if (!hasDroppedColumns)
+            return Long.MIN_VALUE;
+        DroppedColumn dropped = droppedColumns.get(column.name.bytes);
+        return dropped != null ? dropped.droppedTime : Long.MIN_VALUE;
+    }
+
     /** True if {@code column} has a drop horizon at all, whatever the timestamp. */
     public boolean isDroppedColumn(ColumnMetadata column)
     {
