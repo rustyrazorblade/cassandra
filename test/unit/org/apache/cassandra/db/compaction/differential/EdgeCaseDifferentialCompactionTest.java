@@ -222,6 +222,150 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         assertCursorMatchesIteratorAcrossGenerations(cfs);
     }
 
+    /**
+     * Partition keys larger than 128 bytes: every other scenario in this suite uses an 8-byte
+     * bigint pk, which never exercises anything beyond the smallest possible key. Partition keys
+     * are length-prefixed with an unsigned SHORT (not a vint), so there is no 128-byte encoding
+     * boundary here the way there is for clustering/cell values — this scenario instead pins
+     * that large (100s-1000s of bytes) partition keys round-trip correctly through the cursor's
+     * partition-key copy/compare/index paths, which nothing else in this suite reaches.
+     */
+    @Test
+    public void largePartitionKey() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk text, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        String[] pks = { "k".repeat(200), "m".repeat(500), "z".repeat(1000) };
+        for (int round = 0; round < 3; round++)
+        {
+            for (String pk : pks)
+                for (long ck = 0; ck < 10; ck++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "round" + round + "-" + ck);
+            flush();
+        }
+        execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?", pks[1], 2L, 5L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Composite partition key whose components individually stay small but sum past 128 bytes. */
+    @Test
+    public void largeCompositePartitionKey() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk1 text, pk2 text, ck bigint, v text, PRIMARY KEY ((pk1, pk2), ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        String a = "a".repeat(100);
+        String b = "b".repeat(100);
+        for (int round = 0; round < 3; round++)
+        {
+            for (long ck = 0; ck < 10; ck++)
+                execute("INSERT INTO %s (pk1, pk2, ck, v) VALUES (?, ?, ?, ?)", a, b, ck, "v" + round + "-" + ck);
+            flush();
+        }
+        execute("DELETE FROM %s WHERE pk1 = ? AND pk2 = ? AND ck >= ? AND ck < ?", a, b, 2L, 6L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /**
+     * Clustering column values straddling the 1-byte/2-byte vint length-prefix boundary (128
+     * bytes) — timestampTiesDifferentLengthValues below pins this boundary for regular VALUES,
+     * but the clustering block's own per-component length vints (readUnfilteredClustering) are
+     * never exercised at the boundary anywhere else in this suite.
+     */
+    @Test
+    public void largeClusteringColumn() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck text, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // 127/128/129: astride the one-byte/two-byte vint length-prefix boundary; 300: well past it
+        String[] cks = { "a".repeat(127), "b".repeat(128), "c".repeat(129), "d".repeat(300) };
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 3; pk++)
+                for (String ck : cks)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, ck, "v" + round);
+            flush();
+        }
+        execute("DELETE FROM %s WHERE pk = 0 AND ck = ?", cks[1]);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Frozen UDT as the CLUSTERING key (not just a regular column, as in frozenCollections above). */
+    @Test
+    public void frozenUdtInClusteringKey() throws Exception
+    {
+        String udt = createType("CREATE TYPE %s (a int, b text)");
+        createTable("CREATE TABLE %s (pk bigint, ck frozen<" + udt + ">, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 4; pk++)
+                for (int i = 0; i < 5; i++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, userType("a", i, "b", "b" + i), "v" + round);
+            flush();
+        }
+        execute("DELETE FROM %s WHERE pk = 0 AND ck = ?", userType("a", 2, "b", "b2"));
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Frozen UDT as (part of) the PARTITION key. */
+    @Test
+    public void frozenUdtInPartitionKey() throws Exception
+    {
+        String udt = createType("CREATE TYPE %s (a int, b text)");
+        createTable("CREATE TABLE %s (pk frozen<" + udt + ">, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (int i = 0; i < 4; i++)
+                for (long ck = 0; ck < 5; ck++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", userType("a", i, "b", "p" + i), ck, "v" + round);
+            flush();
+        }
+        execute("DELETE FROM %s WHERE pk = ? AND ck >= ? AND ck < ?", userType("a", 1, "b", "p1"), 1L, 3L);
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Frozen collection as the CLUSTERING key (not just a regular column, as in frozenCollections above). */
+    @Test
+    public void frozenCollectionInClusteringKey() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck frozen<list<int>>, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 4; pk++)
+                for (int i = 0; i < 5; i++)
+                    execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", pk, list(i, i + 1, i + 2), "v" + round);
+            flush();
+        }
+        execute("DELETE FROM %s WHERE pk = 0 AND ck = ?", list(2, 3, 4));
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
     /** TTLs: live expiring cells and already-expired cells (expiry far from run boundaries). */
     @Test
     public void expiringCells() throws Exception

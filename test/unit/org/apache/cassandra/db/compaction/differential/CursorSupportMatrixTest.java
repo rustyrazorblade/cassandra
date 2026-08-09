@@ -95,6 +95,30 @@ public class CursorSupportMatrixTest extends CQLTester
                         "t frozen<tuple<int, text>>, PRIMARY KEY (pk, ck))");
     }
 
+    /** Frozen UDT as the CLUSTERING key: still a single cell, not a regular column. */
+    @Test
+    public void frozenUdtInClusteringKeySupported()
+    {
+        String udt = createType("CREATE TYPE %s (a int, b text)");
+        assertSupported("CREATE TABLE %s (pk bigint, ck frozen<" + udt + ">, v text, PRIMARY KEY (pk, ck))");
+    }
+
+    /** Frozen UDT as (part of) the PARTITION key. */
+    @Test
+    public void frozenUdtInPartitionKeySupported()
+    {
+        String udt = createType("CREATE TYPE %s (a int, b text)");
+        assertSupported("CREATE TABLE %s (pk frozen<" + udt + ">, ck bigint, v text, PRIMARY KEY (pk, ck))");
+    }
+
+    /** Frozen collections as (part of) the PRIMARY key, not just as regular columns. */
+    @Test
+    public void frozenCollectionInPrimaryKeySupported()
+    {
+        assertSupported("CREATE TABLE %s (pk bigint, ck frozen<list<int>>, v text, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk frozen<set<text>>, ck bigint, v text, PRIMARY KEY (pk, ck))");
+    }
+
     /** Increment 2 flips these to supported. */
     @Test
     public void multiCellCollectionsUnsupported()
