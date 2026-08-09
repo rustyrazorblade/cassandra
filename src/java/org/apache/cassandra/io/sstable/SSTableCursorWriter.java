@@ -388,7 +388,14 @@ public class SSTableCursorWriter implements AutoCloseable
 
             encodeColumnsSubset(missingColumns, columnsLength, rowHeaderBuffer);
         }
-        long unfilteredStartPosition = dataWriter.position();
+        // rowStartPosition was already captured in writeRowStart, and the invariant this class
+        // documents (nothing writes to dataWriter between writeRowStart and writeRowEnd) means
+        // a fresh read here would always equal it; reuse it instead of re-reading. The verifying
+        // read moves into the assert itself (evaluated before any of this method's own writes),
+        // so it costs nothing with assertions disabled.
+        assert isStatic || dataWriter.position() == rowStartPosition
+               : "dataWriter moved between writeRowStart and writeRowEnd: " + rowStartPosition + " != " + dataWriter.position();
+        long unfilteredStartPosition = rowStartPosition;
         /** See: {@link UnfilteredSerializer#serialize} */
         dataWriter.writeByte(rowFlags);
         if (isExtended)
@@ -401,12 +408,6 @@ public class SSTableCursorWriter implements AutoCloseable
             byte[] clustering = rHeader.clusteringBytes();
             int clusteringLength = rHeader.clusteringLength();
             dataWriter.write(clustering, 0, clusteringLength);
-        }
-
-        if (!isStatic)
-        {
-            assert rowStartPosition == unfilteredStartPosition
-                   : "dataWriter moved between writeRowStart and writeRowEnd: " + rowStartPosition + " != " + unfilteredStartPosition;
             previousUnfilteredStart = unfilteredStartPosition;
         }
         // The size spans the whole row body, previousUnfilteredSize included: it is the leading vint of
@@ -434,7 +435,8 @@ public class SSTableCursorWriter implements AutoCloseable
 
         if (isStatic)
         {
-            cursorIndexWriter.staticRowWritten(dataWriter.position());
+            // Nothing writes to dataWriter between the unfilteredEndPosition read above and here.
+            cursorIndexWriter.staticRowWritten(unfilteredEndPosition);
         }
         else
         {
