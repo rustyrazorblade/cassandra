@@ -110,7 +110,7 @@ public abstract class DeletionTime implements Comparable<DeletionTime>, IMeasura
      */
     public boolean isLive()
     {
-        return markedForDeleteAt() == Long.MIN_VALUE && localDeletionTime() == Long.MAX_VALUE;
+        return markedForDeleteAt == Long.MIN_VALUE && localDeletionTimeUnsignedInteger == Cell.NO_DELETION_TIME_UNSIGNED_INTEGER;
     }
 
     public void digest(Digest digest)
@@ -138,7 +138,7 @@ public abstract class DeletionTime implements Comparable<DeletionTime>, IMeasura
         if(!(o instanceof DeletionTime))
             return false;
         DeletionTime that = (DeletionTime)o;
-        return markedForDeleteAt() == that.markedForDeleteAt() && localDeletionTime() == that.localDeletionTime();
+        return markedForDeleteAt == that.markedForDeleteAt && localDeletionTimeUnsignedInteger == that.localDeletionTimeUnsignedInteger;
     }
 
     @Override
@@ -168,7 +168,7 @@ public abstract class DeletionTime implements Comparable<DeletionTime>, IMeasura
      */
     public boolean supersedes(DeletionTime dt)
     {
-        return markedForDeleteAt() > dt.markedForDeleteAt() || (markedForDeleteAt() == dt.markedForDeleteAt() && localDeletionTime() > dt.localDeletionTime());
+        return markedForDeleteAt > dt.markedForDeleteAt || (markedForDeleteAt == dt.markedForDeleteAt && CassandraUInt.compare(localDeletionTimeUnsignedInteger, dt.localDeletionTimeUnsignedInteger) > 0);
     }
 
     public boolean deletes(LivenessInfo info)

@@ -224,7 +224,7 @@ public class BigCursorIndexWriter extends CursorIndexWriter
                 indexFileWriter.write(rowIndexEntries.getData(), 0, endOfEntries);
                 for (int i = 0; i < rowIndexEntriesOffsets.size(); i++)
                 {
-                    int offset = rowIndexEntriesOffsets.get(i);
+                    int offset = rowIndexEntriesOffsets.getInt(i);
                     indexFileWriter.writeInt(offset);
                 }
             }

@@ -1327,7 +1327,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             return 0;
         }
 
-        sortPerturbedCursors(perturbedCursors, sstableCursors.length, CursorCompactor::compareByPartitionKey);
+        sortPerturbedCursors(perturbedCursors, sstableCursors.length, COMPARE_PARTITION_KEY);
         // top cursor is DONE -> all cursors are DONE
         int state = sstableCursors[0].state();
         if(state == DONE)
@@ -1367,7 +1367,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         }
 
         // Sort rows by their clustering
-        sortPerturbedCursors(prevMergeLimit, partitionMergeLimit, CursorCompactor::compareByRowClustering);
+        sortPerturbedCursors(prevMergeLimit, partitionMergeLimit, COMPARE_ROW_CLUSTERING);
         int state = sstableCursors[0].state();
         if (state == PARTITION_END)
         {
@@ -1385,7 +1385,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private int prepareAndSortStaticForMerge(int partitionMergeLimit) throws IOException
     {
-        sortPerturbedCursors(partitionMergeLimit, partitionMergeLimit, CursorCompactor::compareByStatic);
+        sortPerturbedCursors(partitionMergeLimit, partitionMergeLimit, COMPARE_STATIC);
         int state = sstableCursors[0].state();
         if (state != STATIC_ROW_START)
         {
@@ -1411,7 +1411,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private int prepareAndSortCellsForMerge(int rowMergeLimit, int prevCellMergeLimit)
     {
-        sortPerturbedCursors(prevCellMergeLimit, rowMergeLimit, CursorCompactor::compareByColumn);
+        sortPerturbedCursors(prevCellMergeLimit, rowMergeLimit, COMPARE_COLUMN);
         // next row/partition/done
         if (sstableCursors[0].state() == UNFILTERED_END)
             return 0;
@@ -1427,6 +1427,28 @@ public class CursorCompactor extends CompactionInfo.Holder
                 break;
         }
         return cellMergeLimit;
+    }
+
+    // Discriminators for compareCursors: the merge-order sort runs across partition/row/static/
+    // cell levels through the SAME hot loop (bubbleInsertCursorsToPreSorted), so dispatching via
+    // a shared Comparator<StatefulCursor> call site sees all 4 implementations interleaved and
+    // goes megamorphic. A switch on a small int, calling each compareByXxx directly, keeps that
+    // call site monomorphic/inlinable.
+    private static final int COMPARE_PARTITION_KEY = 0;
+    private static final int COMPARE_ROW_CLUSTERING = 1;
+    private static final int COMPARE_STATIC = 2;
+    private static final int COMPARE_COLUMN = 3;
+
+    private static int compareCursors(int comparisonKind, StatefulCursor c1, StatefulCursor c2)
+    {
+        switch (comparisonKind)
+        {
+            case COMPARE_PARTITION_KEY: return compareByPartitionKey(c1, c2);
+            case COMPARE_ROW_CLUSTERING: return compareByRowClustering(c1, c2);
+            case COMPARE_STATIC:         return compareByStatic(c1, c2);
+            case COMPARE_COLUMN:         return compareByColumn(c1, c2);
+            default: throw new IllegalStateException("Unknown comparison kind: " + comparisonKind);
+        }
     }
 
     private static int compareByPartitionKey(StatefulCursor c1, StatefulCursor c2)
@@ -1715,22 +1737,63 @@ public class CursorCompactor extends CompactionInfo.Holder
         }
     }
 
-    private void sortPerturbedCursors(int perturbedLimit, int mergeLimit, Comparator<? super StatefulCursor> comparator) {
+    private void sortPerturbedCursors(int perturbedLimit, int mergeLimit, int comparisonKind) {
         for (; perturbedLimit > 0; perturbedLimit--) {
-            bubbleInsertElementToPreSorted(sstableCursors, sstableCursorsEqualsNext, perturbedLimit, mergeLimit, comparator);
+            bubbleInsertCursorsToPreSorted(sstableCursors, sstableCursorsEqualsNext, perturbedLimit, mergeLimit, comparisonKind);
         }
+    }
+
+    /**
+     * Same algorithm as {@link #bubbleInsertElementToPreSorted}, specialized to StatefulCursor
+     * and dispatching through {@link #compareCursors} instead of a shared Comparator, so the
+     * merge-order sort's hot compare call site stays monomorphic (see the COMPARE_* constants).
+     */
+    private static void bubbleInsertCursorsToPreSorted(StatefulCursor[] preSortedArray,
+                                                        boolean[] equalsNext,
+                                                        int sortedFrom,
+                                                        int sortedTo,
+                                                        int comparisonKind)
+    {
+        int insertInto = sortedFrom - 1;
+        StatefulCursor newElement = preSortedArray[insertInto];
+        for (; insertInto < sortedTo - 1; insertInto++)
+        {
+            int cmp = compareCursors(comparisonKind, newElement, preSortedArray[insertInto + 1]);
+            if (cmp < 0)
+            {
+                equalsNext[insertInto] = false;
+                break;
+            }
+            else if (cmp == 0) {
+                equalsNext[insertInto] = true;
+                break;
+            }
+            else
+            {
+                // skip the section of equal elements who are smaller than the new element
+                for (; insertInto < sortedTo - 1; insertInto++)
+                {
+                    if (!equalsNext[insertInto + 1])
+                    {
+                        break;
+                    }
+                    preSortedArray[insertInto] = preSortedArray[insertInto + 1];
+                    equalsNext[insertInto] = true;
+                }
+                preSortedArray[insertInto] = preSortedArray[insertInto + 1];
+                equalsNext[insertInto] = false;
+            }
+        }
+        preSortedArray[insertInto] = newElement;
     }
 
     /**
      * Use bubble sort to insert the <code>sortedFrom - 1</code> element into a pre-sorted array, and track element
      * equality to next element to help in finding merge ranges.
      * </p>
-     * We use this method to sort the cursor array on 3 levels:
-     * <ul>
-     *     <li>Partition - insert sort the newly read partitions into the full list, comparing on pKey</li>
-     *     <li>Unfiltered - insert sort the newly read rows into the sub-list of merging partitions, comparing on clustering</li>
-     *     <li>Cell - insert sort the newly read cells into the sub-list of merging rows, comparing on column</li>
-     * </ul>
+     * General-purpose version retained for {@code PreSortedBubbleInsertTest} to exercise the
+     * algorithm in isolation; the cursor-compaction hot path uses
+     * {@link #bubbleInsertCursorsToPreSorted} instead (see its javadoc for why).
      *
      * @param preSortedArray partially pre-sorted array of elements to be sorted in place
      * @param equalsNext tracking the equality between each element and the next in the sorted array
