@@ -183,6 +183,9 @@ public class ClusteringComparator implements Comparator<Clusterable>
         return compare(types, c1, c2, types.length);
     }
 
+    // 2-bit per-component flag in the wire clustering block: 0b00 valued, 0b01 empty, 0b10 null.
+    private static final int CLUSTERING_VALUE_FLAG_NULL = 0b10;
+
     private static int compare(AbstractType<?>[] types, ByteBuffer c1, ByteBuffer c2, int size)
     {
         long clusteringBlock1 = 0;
@@ -252,7 +255,7 @@ public class ClusteringComparator implements Comparator<Clusterable>
                         // decided by the type: every base type sorts empty before values, so
                         // ReversedType sorts empty AFTER values (it swaps operands around the
                         // base comparison) — flip the flag-derived order for reversed columns.
-                        if ((v1Flags & 0b10) == 0 && (v2Flags & 0b10) == 0 && type.isReversed())
+                        if ((v1Flags & CLUSTERING_VALUE_FLAG_NULL) == 0 && (v2Flags & CLUSTERING_VALUE_FLAG_NULL) == 0 && type.isReversed())
                             cmp = -cmp;
                         return cmp;
                     }
