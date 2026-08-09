@@ -26,6 +26,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * Accord-enabled user tables purge and expire relative to gcBefore, not wall-clock now:
@@ -59,6 +60,8 @@ public class AccordTableDifferentialCompactionTest extends DifferentialCompactio
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
+        long writeTimeSec = FBUtilities.nowInSeconds();
+
         // expiring rows (row liveness + cells carry the TTL) alongside plain ones
         for (long ck = 0; ck < 10; ck++)
             execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (0, ?, ?, ?) USING TTL 1", ck, ck, "ttl-" + ck);
@@ -73,12 +76,12 @@ public class AccordTableDifferentialCompactionTest extends DifferentialCompactio
             execute("INSERT INTO %s (pk, ck, v1) VALUES (1, ?, ?)", ck, ck + 100);
         flush();
 
-        // let every TTL lapse relative to wall-clock now (but not relative to the accord
-        // gcBefore, which is NO_GC with no transaction history)
-        Thread.sleep(1100);
+        // fixed "now" past every TTL=1 cell's expiration (writeTimeSec + 2), deterministically —
+        // not relative to the accord gcBefore, which is NO_GC with no transaction history
+        long fixedNow = writeTimeSec + 2;
 
         // NO_GC mirrors what the compaction scheduler passes for accord tables
         // (CompactionTask.getCompactionController asserts gcBefore <= 0 before deriving)
-        assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, CompactionManager.NO_GC);
+        assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), taskWithFixedNow(fixedNow), CompactionManager.NO_GC);
     }
 }

@@ -23,6 +23,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * Edge-case corpus for the differential cursor-vs-iterator compaction harness, covering the
@@ -229,6 +230,8 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
+        long writeTimeSec = FBUtilities.nowInSeconds();
+
         // long TTLs: alive during both runs
         for (long pk = 0; pk < 5; pk++)
             for (long ck = 0; ck < 10; ck++)
@@ -243,9 +246,11 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
             execute("UPDATE %s USING TTL 86400 SET v1 = ? WHERE pk = ? AND ck = ?", "ttl" + ck, 2L, ck);
         flush();
 
-        Thread.sleep(2000); // let the short TTLs expire well before the first run
+        // fixed "now" past the short TTLs' expiration (writeTimeSec + 3), deterministically, for
+        // both generations; the long TTLs (86400s) stay alive relative to this fixed value too
+        long fixedNow = writeTimeSec + 3;
 
-        assertCursorMatchesIteratorAcrossGenerations(cfs);
+        assertCursorMatchesIteratorAcrossGenerations(cfs, () -> fixedNow);
     }
 
     /** Same-timestamp conflicting writes: reconciliation must tie-break identically. */

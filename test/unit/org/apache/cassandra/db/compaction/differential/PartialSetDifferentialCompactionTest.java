@@ -87,9 +87,10 @@ public class PartialSetDifferentialCompactionTest extends DifferentialCompaction
                 execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 50", pk, ck, "old" + ck);
         flushAndTrack(cfs, flushed);
 
-        Thread.sleep(1100); // deletion local times strictly in the past for both runs
+        // purge boundary: gcBefore strictly past sstable B's tombstones, read from its own stats
+        long gcBefore = flushed.get(1).getSSTableMetadata().maxLocalDeletionTime + 1;
 
-        CapturedOutput out = assertCursorMatchesIterator(cfs, new HashSet<>(flushed.subList(0, 2)), DEFAULT_TASK);
+        CapturedOutput out = assertCursorMatchesIterator(cfs, new HashSet<>(flushed.subList(0, 2)), DEFAULT_TASK, gcBefore);
         // non-vacuousness: the overlap must have actually BLOCKED the purge
         assertTrue("expected ts=200 tombstones retained because of the overlapping non-participant",
                    allJson(out).contains("\"marked_deleted\":\"200\""));
@@ -127,9 +128,10 @@ public class PartialSetDifferentialCompactionTest extends DifferentialCompaction
                 execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 50", pk, ck, "other" + ck);
         flushAndTrack(cfs, flushed);
 
-        Thread.sleep(1100);
+        // purge boundary: gcBefore strictly past sstable B's tombstones, read from its own stats
+        long gcBefore = flushed.get(1).getSSTableMetadata().maxLocalDeletionTime + 1;
 
-        CapturedOutput out = assertCursorMatchesIterator(cfs, new HashSet<>(flushed.subList(0, 2)), DEFAULT_TASK);
+        CapturedOutput out = assertCursorMatchesIterator(cfs, new HashSet<>(flushed.subList(0, 2)), DEFAULT_TASK, gcBefore);
         // non-vacuousness: with no overlap on those keys, the tombstones must actually purge
         assertFalse("expected ts=200 tombstones purged (disjoint non-participant cannot block)",
                     allJson(out).contains("\"marked_deleted\":\"200\""));
@@ -166,10 +168,11 @@ public class PartialSetDifferentialCompactionTest extends DifferentialCompaction
             execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 300", pk, 20L, "new");
         flushAndTrack(cfs, flushed);
 
-        Thread.sleep(1100);
+        // purge boundary: gcBefore strictly past sstable B's tombstones, read from its own stats
+        long gcBefore = flushed.get(1).getSSTableMetadata().maxLocalDeletionTime + 1;
 
         // compact B+C, leaving A (the shadowed data) out
-        CapturedOutput out = assertCursorMatchesIterator(cfs, new HashSet<>(flushed.subList(1, 3)), DEFAULT_TASK);
+        CapturedOutput out = assertCursorMatchesIterator(cfs, new HashSet<>(flushed.subList(1, 3)), DEFAULT_TASK, gcBefore);
         // non-vacuousness: tombstones still shadow A's data and must survive
         assertTrue("expected ts=200 tombstones retained over the shadowed non-participant",
                    allJson(out).contains("\"marked_deleted\":\"200\""));

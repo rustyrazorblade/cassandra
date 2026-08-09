@@ -22,6 +22,9 @@ package org.apache.cassandra.db.compaction.differential;
 import org.junit.Test;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+
+import static org.junit.Assert.assertTrue;
 
 /**
  * Smoke scenarios for the differential cursor-vs-iterator compaction harness.
@@ -100,10 +103,18 @@ public class BasicDifferentialCompactionTest extends DifferentialCompactionTeste
         execute("DELETE FROM %s WHERE pk = 0 AND ck = 0");
         flush();
 
-        // ensure local deletion times are strictly in the past relative to both compaction runs
-        Thread.sleep(1100);
+        // purge boundary: gcBefore strictly past the tombstones' recorded local deletion time,
+        // read from the sstable's own stats instead of sleeping past wall-clock now
+        long maxLdt = Long.MIN_VALUE;
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+        {
+            long ldt = sstable.getSSTableMetadata().maxLocalDeletionTime;
+            if (ldt != Long.MAX_VALUE)
+                maxLdt = Math.max(maxLdt, ldt);
+        }
+        assertTrue("scenario produced no tombstone deletion times", maxLdt > 0 && maxLdt < Long.MAX_VALUE);
 
-        assertCursorMatchesIterator(cfs);
+        assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, maxLdt + 1);
     }
 
     /** Same as tombstonesRetained but uncompressed, so Data.db bytes are directly comparable. */

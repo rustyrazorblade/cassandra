@@ -33,6 +33,7 @@ import java.util.SortedMap;
 import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.LongSupplier;
 
 import org.apache.commons.io.FileUtils;
 import org.junit.Assume;
@@ -87,9 +88,10 @@ import static org.junit.Assert.fail;
  *  - the cursor run asserts {@link CursorCompactor#isSupported} up front: a scenario that
  *    silently falls back to the iterator path is a test bug, not a pass.
  *
- * Known limitation: nowInSec for TTL expiry
- * evaluation is taken inside CompactionTask per run; scenarios must not place TTL expiry
- * boundaries within seconds of the test run.
+ * nowInSec for TTL expiry evaluation is taken inside CompactionTask per run; scenarios that
+ * need TTL expiry boundaries placed deterministically (rather than sleeping past them) should
+ * use {@link #taskWithFixedNow} or the {@code LongSupplier}-taking overloads below instead of
+ * relying on wall-clock timing.
  */
 public abstract class DifferentialCompactionTester extends CQLTester
 {
@@ -150,6 +152,16 @@ public abstract class DifferentialCompactionTester extends CQLTester
     }
 
     public static final TaskFactory DEFAULT_TASK = (cfs, txn, gcBefore) -> new CompactionTask(cfs, txn, gcBefore, true);
+
+    /**
+     * A TaskFactory that pins CompactionTask's internal TTL-expiry "now" to a fixed value
+     * instead of wall-clock time, so scenarios with short TTLs don't need to sleep past the
+     * expiry boundary. keepOriginals mirrors {@link #DEFAULT_TASK}.
+     */
+    public static TaskFactory taskWithFixedNow(long nowInSeconds)
+    {
+        return (cfs, txn, gcBefore) -> new CompactionTask(cfs, txn, gcBefore, true).setNowInSecondsSupplier(() -> nowInSeconds);
+    }
 
     /**
      * Runs both compaction paths over the current live sstables of the table and asserts
@@ -235,14 +247,26 @@ public abstract class DifferentialCompactionTester extends CQLTester
      */
     protected CapturedOutput assertCursorMatchesIteratorAcrossGenerations(ColumnFamilyStore cfs) throws Exception
     {
-        CapturedOutput gen1 = assertCursorMatchesIterator(cfs);
+        return assertCursorMatchesIteratorAcrossGenerations(cfs, FBUtilities::nowInSeconds);
+    }
+
+    /**
+     * As above, but pins CompactionTask's internal TTL-expiry "now" to nowInSecondsSupplier
+     * for every run (both generations) instead of reading the wall clock, so scenarios with
+     * short TTLs don't need to sleep past the expiry boundary.
+     */
+    protected CapturedOutput assertCursorMatchesIteratorAcrossGenerations(ColumnFamilyStore cfs,
+                                                                          LongSupplier nowInSecondsSupplier) throws Exception
+    {
+        TaskFactory taskFactory = (c, txn, gcBefore) -> new CompactionTask(c, txn, gcBefore, true).setNowInSecondsSupplier(nowInSecondsSupplier);
+        CapturedOutput gen1 = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), taskFactory);
 
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
-        commitCompaction(cfs, cfs.getLiveSSTables(), true, gcBefore);
+        commitCompaction(cfs, cfs.getLiveSSTables(), true, gcBefore, nowInSecondsSupplier);
         if (cfs.getLiveSSTables().isEmpty())
             return gen1; // gen 1 purged everything; there are no gen-2 inputs
 
-        assertCursorMatchesIterator(cfs);
+        assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), taskFactory);
         return gen1;
     }
 
@@ -253,12 +277,19 @@ public abstract class DifferentialCompactionTester extends CQLTester
      */
     protected void commitCompaction(ColumnFamilyStore cfs, Set<SSTableReader> inputs, boolean cursor, long gcBefore) throws Exception
     {
+        commitCompaction(cfs, inputs, cursor, gcBefore, FBUtilities::nowInSeconds);
+    }
+
+    /** As above, but pins CompactionTask's internal TTL-expiry "now" to nowInSecondsSupplier. */
+    protected void commitCompaction(ColumnFamilyStore cfs, Set<SSTableReader> inputs, boolean cursor, long gcBefore,
+                                    LongSupplier nowInSecondsSupplier) throws Exception
+    {
         DatabaseDescriptor.setCursorCompactionEnabled(cursor);
         if (cursor)
             assertCursorPathWillRun(cfs, inputs, gcBefore);
         LifecycleTransaction txn = cfs.getTracker().tryModify(inputs, OperationType.COMPACTION);
         assertNotNull("unable to mark inputs compacting for commit", txn);
-        new CompactionTask(cfs, txn, gcBefore, false).execute(ActiveCompactionsTracker.NOOP);
+        new CompactionTask(cfs, txn, gcBefore, false).setNowInSecondsSupplier(nowInSecondsSupplier).execute(ActiveCompactionsTracker.NOOP);
     }
 
     /**
