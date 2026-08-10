@@ -346,18 +346,14 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void allocationDoesNotScaleWithCounterCells() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
-        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
-        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
-        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
-        DatabaseDescriptor.setCursorCompactionEnabled(true);
-        try
-        {
-            long smallAlloc = measureCounters(threadMXBean, SMALL_PARTITIONS);
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
+            long smallAlloc = measureCounters(SMALL_PARTITIONS);
             long smallBytes = lastInputBytes;
-            long bigAlloc = measureCounters(threadMXBean, SMALL_PARTITIONS * SCALE);
+            long bigAlloc = measureCounters(SMALL_PARTITIONS * SCALE);
             long bigBytes = lastInputBytes;
             long delta = bigAlloc - smallAlloc;
             long extraBytes = bigBytes - smallBytes;
@@ -369,12 +365,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
                                      "%.3f B/B (delta %,dB over %,dB extra input, ceiling %.2f)",
                                      perInputByte, delta, extraBytes, counterPerInputByteCeiling()),
                        perInputByte <= counterPerInputByteCeiling());
-        }
-        finally
-        {
-            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
-            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
-        }
+        });
     }
 
     protected double counterPerInputByteCeiling()
@@ -382,7 +373,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         return 1.7;
     }
 
-    private long measureCounters(com.sun.management.ThreadMXBean threadMXBean, int partitions) throws Exception
+    private long measureCounters(int partitions) throws Exception
     {
         DatabaseDescriptor.setCursorCompactionEnabled(true);
         createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, PRIMARY KEY (pk, ck)) " +
@@ -402,17 +393,8 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         }
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
         assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
-        lastInputBytes = 0;
-        for (SSTableReader sstable : cfs.getLiveSSTables())
-            lastInputBytes += sstable.onDiskLength();
-        long best = Long.MAX_VALUE;
-        for (int i = 0; i < WARMUP_ITERATIONS + MEASURED_ITERATIONS; i++)
-        {
-            long allocated = compactOnceMeasured(threadMXBean, cfs, gcBefore);
-            if (i >= WARMUP_ITERATIONS)
-                best = Math.min(best, allocated);
-        }
-        return best;
+        captureLastInputBytes(cfs);
+        return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
     }
 
     /**
@@ -720,15 +702,11 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     @Test
     public void recordCounterAllocationProfile() throws Exception
     {
-        com.sun.management.ThreadMXBean threadMXBean = threadMXBean();
-        Assume.assumeTrue(threadMXBean != null);
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
-        int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
-        DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
-        boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
-        DatabaseDescriptor.setCursorCompactionEnabled(true);
-        try
-        {
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
             createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, PRIMARY KEY (pk, ck)) " +
                         "WITH compression = {'enabled': 'false'}");
             ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
@@ -748,26 +726,9 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
             assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
 
-            for (int i = 0; i < WARMUP_ITERATIONS; i++)
-                compactOnceMeasured(threadMXBean, cfs, gcBefore);
-
-            try (jdk.jfr.Recording recording = new jdk.jfr.Recording())
-            {
-                recording.enable("jdk.ObjectAllocationInNewTLAB").withStackTrace();
-                recording.enable("jdk.ObjectAllocationOutsideTLAB").withStackTrace();
-                recording.start();
-                for (int i = 0; i < 30; i++)
-                    compactOnceMeasured(threadMXBean, cfs, gcBefore);
-                recording.stop();
-                recording.dump(java.nio.file.Path.of("/tmp/cursor-alloc-counter.jfr"));
-            }
+            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-counter.jfr"), 30, cfs, gcBefore);
             logger.info("allocation profile dumped to /tmp/cursor-alloc-counter.jfr");
-        }
-        finally
-        {
-            DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
-            DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
-        }
+        });
     }
 
     /** Diagnostic, not a gate: JFR allocation profile over warmed cursor compactions of the
