@@ -20,6 +20,7 @@ package org.apache.cassandra.db;
 
 import java.nio.ByteBuffer;
 
+import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 
@@ -30,6 +31,11 @@ import org.apache.cassandra.utils.FastByteOperations;
 public class Digest
 {
     private static final ThreadLocal<byte[]> localBuffer = ThreadLocal.withInitial(() -> new byte[4096]);
+
+    // Concatenates the hash code from 2 hash functions (murmur3_128) with different seeds
+    // to produce a 256 bit hashcode. Immutable and stateless, so shared across all validators.
+    private static final HashFunction VALIDATOR_HASH_FUNCTION = Hashing.concatenating(Hashing.murmur3_128(1000),
+                                                                                      Hashing.murmur3_128(2000));
 
     private final Hasher hasher;
     private long inputBytes = 0;
@@ -52,11 +58,7 @@ public class Digest
 
     public static Digest forValidator()
     {
-        // Uses a Hasher that concatenates the hash code from 2 hash functions
-        // (murmur3_128) with different seeds to produce a 256 bit hashcode
-        return new Digest(Hashing.concatenating(Hashing.murmur3_128(1000),
-                                                Hashing.murmur3_128(2000))
-                                 .newHasher());
+        return new Digest(VALIDATOR_HASH_FUNCTION.newHasher());
     }
 
     public static Digest forRepairedDataTracking()
