@@ -21,8 +21,11 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -395,7 +398,8 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
     {
         Set<InetAddressAndPort> allNeighbors = new HashSet<>();
         Set<InetAddressAndPort> includeNeighbors = new HashSet<>();
-        List<CommonRange> commonRanges = new ArrayList<>();
+        // keyed on (endpoints, transient endpoints); linked so the groups keep the order the ranges were seen in
+        Map<Pair<Set<InetAddressAndPort>, Set<InetAddressAndPort>>, CommonRange> commonRanges = new LinkedHashMap<>();
 
         //pre-calculate output of getLocalReplicas and pass it to getNeighbors to increase performance and prevent
         //calculation multiple times
@@ -457,7 +461,7 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
             if (shouldExcludeDeadParticipants) includeNeighbors = actualNeighbors;
             else logger.info("{} all replicas {} considered up and healthy; clearing force flag for this job", state.id, includeNeighbors);
         }
-        return new NeighborsAndRanges(shouldExcludeDeadParticipants, includeNeighbors.containsAll(allNeighbors), includeNeighbors, commonRanges);
+        return new NeighborsAndRanges(shouldExcludeDeadParticipants, includeNeighbors.containsAll(allNeighbors), includeNeighbors, new ArrayList<>(commonRanges.values()));
     }
 
     private void maybeStoreParentRepairStart(String[] cfnames)
@@ -529,23 +533,20 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
                 .pooled("Repair#" + state.cmd, state.options.getJobThreads());
     }
 
-    private static void addRangeToNeighbors(List<CommonRange> neighborRangeList, Range<Token> range, EndpointsForRange neighbors)
+    private static void addRangeToNeighbors(Map<Pair<Set<InetAddressAndPort>, Set<InetAddressAndPort>>, CommonRange> neighborRanges,
+                                            Range<Token> range,
+                                            EndpointsForRange neighbors)
     {
         Set<InetAddressAndPort> endpoints = neighbors.endpoints();
         Set<InetAddressAndPort> transEndpoints = neighbors.filter(Replica::isTransient).endpoints();
 
-        for (CommonRange commonRange : neighborRangeList)
-        {
-            if (commonRange.matchesEndpoints(endpoints, transEndpoints))
-            {
-                commonRange.ranges.add(range);
-                return;
-            }
-        }
+        neighborRanges.compute(Pair.create(endpoints, transEndpoints), (key, commonRange) -> {
+            if (commonRange == null)
+                return new CommonRange(endpoints, transEndpoints, Collections.singletonList(range));
 
-        List<Range<Token>> ranges = new ArrayList<>();
-        ranges.add(range);
-        neighborRangeList.add(new CommonRange(endpoints, transEndpoints, ranges));
+            commonRange.ranges.add(range);
+            return commonRange;
+        });
     }
 
     private Thread createQueryThread(final TimeUUID sessionId)
