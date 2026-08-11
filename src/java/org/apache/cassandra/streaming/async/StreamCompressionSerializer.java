@@ -27,10 +27,12 @@ import net.jpountz.lz4.LZ4SafeDecompressor;
 
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
+import org.apache.cassandra.utils.ByteArrayUtil;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 
+import static java.lang.Math.max;
 import static org.apache.cassandra.net.MessagingService.current_version;
 
 /**
@@ -44,7 +46,16 @@ import static org.apache.cassandra.net.MessagingService.current_version;
  */
 public class StreamCompressionSerializer
 {
+    private static final double GROWTH_FACTOR = 1.5;
+
     private final ByteBufAllocator allocator;
+
+    /**
+     * Staging buffer for the compressed bytes, reused across chunks and grown on demand. Only used when the input
+     * isn't a {@link ReadableByteChannel} - which is the case for {@link org.apache.cassandra.net.AsyncStreamingInputPlus},
+     * the input used by real streaming.
+     */
+    private byte[] compressedChunk = ByteArrayUtil.EMPTY_BYTE_ARRAY;
 
     public StreamCompressionSerializer(ByteBufAllocator allocator)
     {
@@ -100,9 +111,11 @@ public class StreamCompressionSerializer
             }
             else
             {
-                byte[] compressedBytes = new byte[compressedLength];
-                in.readFully(compressedBytes);
-                compressedNioBuffer = ByteBuffer.wrap(compressedBytes);
+                if (compressedChunk.length < compressedLength)
+                    compressedChunk = new byte[max((int) (compressedChunk.length * GROWTH_FACTOR), compressedLength)];
+
+                in.readFully(compressedChunk, 0, compressedLength);
+                compressedNioBuffer = ByteBuffer.wrap(compressedChunk, 0, compressedLength);
             }
 
             uncompressed = allocator.directBuffer(uncompressedLength);
