@@ -322,6 +322,7 @@ public class CompactionsTest
 
         // disable compaction while flushing
         cfs.disableAutoCompaction();
+        cfs.clearUnsafe();
 
         final int ROWS_PER_SSTABLE = 10;
         for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
