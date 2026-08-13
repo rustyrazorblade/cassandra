@@ -62,7 +62,6 @@ import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
-import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.BytesType;
@@ -474,7 +473,7 @@ public class CompactionsTest
             @Override
             public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs,
                                                                   Directories directories,
-                                                                  ILifecycleTransaction transaction,
+                                                                  LifecycleTransaction transaction,
                                                                   Set<SSTableReader> nonExpiredSSTables)
             {
                 return new MaxSSTableSizeWriter(cfs, directories, transaction, nonExpiredSSTables, maxSSTableSize, 0);

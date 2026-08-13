@@ -161,7 +161,7 @@ public class DataComponentDirectWriteSelectionTest
         MetadataCollector collector = new MetadataCollector(new ClusteringComparator(Collections.singletonList(BytesType.instance)));
         // finishOnClose(false) routes try-with-resources close through abort, avoiding finish() side effects on an empty writer.
         SequentialWriterOption options = SequentialWriterOption.newBuilder().finishOnClose(false).build();
-        return DataComponent.buildWriter(descriptor, metadata, options, collector, op, FlushCompression.fast, null);
+        return DataComponent.buildWriter(descriptor, metadata, options, collector, op, FlushCompression.fast);
     }
 
     private static TableMetadata compressedMetadata()

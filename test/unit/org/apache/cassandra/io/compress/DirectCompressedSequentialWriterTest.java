@@ -185,7 +185,7 @@ public class DirectCompressedSequentialWriterTest
             MetadataCollector collector = newCollector();
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            SequentialWriterOption.DEFAULT, params, collector, null))
+            SequentialWriterOption.DEFAULT, params, collector))
             {
                 int blockSize = FileUtils.getBlockSize(dataFile.parent());
                 int maxChunkWrite = params.getSstableCompressor().initialCompressedBufferLength(params.chunkLength());
@@ -211,7 +211,7 @@ public class DirectCompressedSequentialWriterTest
         withTempDataFile("metric", (dataFile, metadataFile) ->
         {
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-            dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, CompressionParams.lz4(), newCollector(), null))
+            dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, CompressionParams.lz4(), newCollector()))
             {
                 assertEquals("byte gauge must rise by the allocated buffer capacity",
                              bytes0 + writer.writeBuffer().capacity(), StorageMetrics.directWriteBufferBytes.getCount());
@@ -274,7 +274,7 @@ public class DirectCompressedSequentialWriterTest
             MetadataCollector collector = newCollector();
             try (SequentialWriter writer = direct
                                            ? new DirectCompressedSequentialWriter(dataFile, metadataFile, digestFile,
-                                                                                  SequentialWriterOption.DEFAULT, params, collector, null)
+                                                                                  SequentialWriterOption.DEFAULT, params, collector)
                                            : new CompressedSequentialWriter(dataFile, metadataFile, digestFile,
                                                                             SequentialWriterOption.DEFAULT, params, collector))
             {
@@ -299,7 +299,7 @@ public class DirectCompressedSequentialWriterTest
             MetadataCollector collector = newCollector();
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            SequentialWriterOption.DEFAULT, CompressionParams.lz4(), collector, null))
+            SequentialWriterOption.DEFAULT, CompressionParams.lz4(), collector))
             {
                 writer.write(new byte[100]);
                 try
@@ -322,7 +322,7 @@ public class DirectCompressedSequentialWriterTest
             MetadataCollector collector = newCollector();
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            SequentialWriterOption.DEFAULT, CompressionParams.lz4(), collector, null))
+            SequentialWriterOption.DEFAULT, CompressionParams.lz4(), collector))
             {
                 writer.write(new byte[100]);
                 try
@@ -355,7 +355,7 @@ public class DirectCompressedSequentialWriterTest
             DirectCompressedSequentialWriter writerRef;
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            abortOnCloseOption, CompressionParams.lz4(), collector, null))
+            abortOnCloseOption, CompressionParams.lz4(), collector))
             {
                 writerRef = writer;
                 writer.write(testData);
@@ -405,7 +405,7 @@ public class DirectCompressedSequentialWriterTest
             DirectCompressedSequentialWriter writerRef;
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            abortOnCloseOption, params, collector, null))
+            abortOnCloseOption, params, collector))
             {
                 writerRef = writer;
                 writer.write(testData);
@@ -447,7 +447,7 @@ public class DirectCompressedSequentialWriterTest
 
             long memoryUsedBefore;
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                 dataFile, metadataFile, null, abortOnClose, CompressionParams.lz4(), collector, null))
+                 dataFile, metadataFile, null, abortOnClose, CompressionParams.lz4(), collector))
             {
                 writer.write(new byte[1024]);
                 memoryUsedBefore = directPool.getMemoryUsed();
@@ -522,7 +522,7 @@ public class DirectCompressedSequentialWriterTest
                 {
                     new DirectCompressedSequentialWriter(dataFile, metadataFile, null,
                                                          SequentialWriterOption.DEFAULT,
-                                                         CompressionParams.lz4(), collector, null);
+                                                         CompressionParams.lz4(), collector);
                     fail("Expected IllegalStateException for non-power-of-two block size");
                 }
                 catch (IllegalStateException expected)
@@ -553,7 +553,7 @@ public class DirectCompressedSequentialWriterTest
                     withTempDataFile(prefix, (dataFile, metadataFile) ->
                     {
                         try (DirectCompressedSequentialWriter w = new DirectCompressedSequentialWriter(
-                             dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, CompressionParams.lz4(), newCollector(), null))
+                             dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, CompressionParams.lz4(), newCollector()))
                         {
                         }
                     });
@@ -588,7 +588,7 @@ public class DirectCompressedSequentialWriterTest
                                CompressionParams parameters,
                                MetadataCollector collector)
         {
-            super(file, offsetsFile, null, option, parameters, collector, null);
+            super(file, offsetsFile, null, option, parameters, collector);
         }
 
         @Override
@@ -616,7 +616,7 @@ public class DirectCompressedSequentialWriterTest
 
                     try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
                     dataFile, metadataFile, digestFile,
-                    SequentialWriterOption.DEFAULT, params, newCollector(), null))
+                    SequentialWriterOption.DEFAULT, params, newCollector()))
                     {
                         writer.write(testData);
                         writer.finish();
@@ -648,7 +648,7 @@ public class DirectCompressedSequentialWriterTest
         {
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            SequentialWriterOption.DEFAULT, params, newCollector(), null))
+            SequentialWriterOption.DEFAULT, params, newCollector()))
             {
                 writer.write(testData);
                 writer.finish();
@@ -720,7 +720,7 @@ public class DirectCompressedSequentialWriterTest
             {
                 mocked.when(() -> FileUtils.getBlockSize(any())).thenReturn(blockSize);
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, params, newCollector(), null))
+                dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, params, newCollector()))
                 {
                     // Invariant: cap < blockSize. The channel is handed block-aligned flush buffers
                     // (always >= blockSize), so a sub-block cap forces every flush to split across calls.
@@ -756,7 +756,7 @@ public class DirectCompressedSequentialWriterTest
         {
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            SequentialWriterOption.DEFAULT, params, newCollector(), null))
+            SequentialWriterOption.DEFAULT, params, newCollector()))
             {
                 assertEquals("pointer must be 0 before any write", 0L, writer.getOnDiskFilePointer());
 
@@ -901,7 +901,7 @@ public class DirectCompressedSequentialWriterTest
         {
             MetadataCollector collector = newCollector();
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, params, collector, null))
+                dataFile, metadataFile, null, SequentialWriterOption.DEFAULT, params, collector))
             {
                 // PREEMPTIVE binds to whatever offset the writer reports durable via the post-flush listener
                 // (the same hook that drives PartitionIndexBuilder.markDataSynced). Register before writing.
@@ -1092,7 +1092,7 @@ public class DirectCompressedSequentialWriterTest
         {
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
             dataFile, metadataFile, null,
-            SequentialWriterOption.DEFAULT, params, newCollector(), null))
+            SequentialWriterOption.DEFAULT, params, newCollector()))
             {
                 writer.write(testData);
                 writer.finish();
@@ -1142,7 +1142,7 @@ public class DirectCompressedSequentialWriterTest
         {
             MetadataCollector dCollector = newCollector();
             try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                 directFile, directMeta, null, SequentialWriterOption.DEFAULT, params, dCollector, null))
+                 directFile, directMeta, null, SequentialWriterOption.DEFAULT, params, dCollector))
             {
                 writer.write(payload);
                 writer.finish();
@@ -1264,7 +1264,7 @@ public class DirectCompressedSequentialWriterTest
             {
                 mocked.when(() -> FileUtils.getBlockSize(any())).thenReturn(blockSize);
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                     dataFile, metaFile, null, SequentialWriterOption.DEFAULT, params, collector, null))
+                     dataFile, metaFile, null, SequentialWriterOption.DEFAULT, params, collector))
                 {
                     recording = installRecordingChannel(writer, dataFile);
                     writer.finish();
@@ -1346,7 +1346,7 @@ public class DirectCompressedSequentialWriterTest
             {
                 mocked.when(() -> FileUtils.getBlockSize(any())).thenReturn(blockSize);
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                     dataFile, metaFile, null, SequentialWriterOption.DEFAULT, params, collector, null))
+                     dataFile, metaFile, null, SequentialWriterOption.DEFAULT, params, collector))
                 {
                     RecordingFileChannel channel = installRecordingChannel(writer, dataFile);
                     recording = channel;
@@ -1457,7 +1457,7 @@ public class DirectCompressedSequentialWriterTest
                                                                                   .finishOnClose(false)
                                                                                   .build();
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                     dataFile, metaFile, null, abortOnCloseOption, params, collector, null))
+                     dataFile, metaFile, null, abortOnCloseOption, params, collector))
                 {
                     channel = installFaultChannel(writer, dataFile).failOnWriteIndex(failOnWrite);
                     try
@@ -1510,7 +1510,7 @@ public class DirectCompressedSequentialWriterTest
             {
                 FSWriteError observed = null;
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                     dataFile, metadataFile, null, abortOnCloseOption, CompressionParams.lz4(), newCollector(), null))
+                     dataFile, metadataFile, null, abortOnCloseOption, CompressionParams.lz4(), newCollector()))
                 {
                     channel = installFaultChannel(writer, dataFile).failTruncate();
                     writer.write(compressible(1024)); // sub-block tail → finish() must pad, write, truncate
@@ -1555,7 +1555,7 @@ public class DirectCompressedSequentialWriterTest
             {
                 FSReadError observed = null;
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                     dataFile, metadataFile, null, abortOnCloseOption, params, newCollector(), null))
+                     dataFile, metadataFile, null, abortOnCloseOption, params, newCollector()))
                 {
                     channel = installFaultChannel(writer, dataFile).failOnPositionCall(1);
                     writer.setPostFlushListener(offset -> {});
@@ -1629,7 +1629,7 @@ public class DirectCompressedSequentialWriterTest
             {
                 mocked.when(() -> FileUtils.getBlockSize(any())).thenReturn(blockSize);
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                     dataFile, metaFile, null, SequentialWriterOption.DEFAULT, params, collector, null))
+                     dataFile, metaFile, null, SequentialWriterOption.DEFAULT, params, collector))
                 {
                     recording = installRecordingChannel(writer, dataFile);
                     for (byte[] slice : slices)

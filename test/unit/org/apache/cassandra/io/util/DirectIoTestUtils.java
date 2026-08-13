@@ -22,15 +22,15 @@ import java.util.concurrent.Callable;
 
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.utils.Throwables.ThrowingRunnable;
+import org.apache.cassandra.utils.Throwables.DiscreteAction;
 
 public final class DirectIoTestUtils
 {
     private DirectIoTestUtils() {}
 
-    public static void withDirectWrites(ThrowingRunnable body) throws Exception
+    public static void withDirectWrites(DiscreteAction<? extends Exception> body) throws Exception
     {
-        withDirectWrites(() -> { body.run(); return null; });
+        withDirectWrites(() -> { body.perform(); return null; });
     }
 
     public static <T> T withDirectWrites(Callable<T> body) throws Exception

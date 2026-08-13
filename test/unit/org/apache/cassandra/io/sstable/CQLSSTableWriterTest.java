@@ -202,20 +202,17 @@ public abstract class CQLSSTableWriterTest
                 writer.addRow(i, "row-" + i);
         }
 
-        loadSSTables(dataDir, keyspace, table);
+        loadSSTables(dataDir, keyspace);
 
-        if (verifyDataAfterLoading)
+        UntypedResultSet rs = QueryProcessor.executeInternal("SELECT k, v FROM " + qualifiedTable);
+        assertEquals(50, rs.size());
+
+        Set<Integer> seen = new HashSet<>();
+        for (UntypedResultSet.Row row : rs)
         {
-            UntypedResultSet rs = QueryProcessor.executeInternal("SELECT k, v FROM " + qualifiedTable);
-            assertEquals(50, rs.size());
-
-            Set<Integer> seen = new HashSet<>();
-            for (UntypedResultSet.Row row : rs)
-            {
-                int k = row.getInt("k");
-                assertTrue("duplicate key " + k, seen.add(k));
-                assertEquals("row-" + k, row.getString("v"));
-            }
+            int k = row.getInt("k");
+            assertTrue("duplicate key " + k, seen.add(k));
+            assertEquals("row-" + k, row.getString("v"));
         }
     }
 
