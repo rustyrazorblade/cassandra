@@ -35,7 +35,6 @@ import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.filesystem.ListenableFileSystem;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.schema.CompressionParams;
-import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import static accord.utils.Property.qt;
 
@@ -109,7 +108,7 @@ public class StandardCompressedChunkReaderTest extends CompressedChunkReaderTest
         }
         finally
         {
-            MemoryUtil.clean(buffer);
+            FileUtils.clean(buffer);
         }
     }
 }

@@ -110,7 +110,8 @@ public class StartupChecks
         check_filesystem_ownership(true),
         check_dc,
         check_rack,
-        check_data_resurrection(true);
+        check_data_resurrection(true),
+        check_directio_support;
 
         public final boolean disabledByDefault;
 
@@ -598,15 +599,15 @@ public class StartupChecks
     public static final StartupCheck checkDirectIOSupport = new StartupCheck()
     {
         @Override
-        public String name()
+        public StartupCheckType getStartupCheckType()
         {
-            return "directio_support";
+            return StartupCheckType.check_directio_support;
         }
 
         @Override
-        public void execute(StartupChecksConfiguration configuration) throws StartupException
+        public void execute(StartupChecksOptions options) throws StartupException
         {
-            if (configuration.isDisabled(name()))
+            if (options.isDisabled(getStartupCheckType()))
                 return;
 
             // Only check if compaction_read_disk_access_mode is direct

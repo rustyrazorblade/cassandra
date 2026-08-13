@@ -24,8 +24,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.agrona.BitUtil;
 import org.agrona.BufferUtil;
 
-import org.apache.cassandra.utils.memory.MemoryUtil;
-
 import io.netty.util.concurrent.FastThreadLocal;
 import sun.nio.ch.DirectBuffer;
 
@@ -73,7 +71,7 @@ public final class DirectThreadLocalByteBufferHolder implements ByteBufferHolder
         // Aligned buffers are slices; clean the backing buffer (attachment)
         DirectBuffer db = (DirectBuffer) buffer;
         ByteBuffer attachment = (ByteBuffer) db.attachment();
-        MemoryUtil.clean(attachment != null ? attachment : buffer);
+        FileUtils.clean(attachment != null ? attachment : buffer);
     }
 
 }
