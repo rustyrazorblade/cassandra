@@ -96,8 +96,8 @@ public abstract class AbstractLocalProcessor implements Processor
         String transformStr = transform.toString(); // convert once as idempotent and used in multiple logs
         logger.debug("Starting local commit of {} with policy {}", transformStr, retryPolicy);
         long commitStart = nanoTime();
-        // History, not per-iteration state: set immediately before the first tryCommitOne call and never cleared, so
-        // that the failure message below can only claim nothing was proposed while it is still false.
+        // History, not per-iteration state: latched true by the first cycle which reaches tryCommitOne and never
+        // cleared, so the failure message below can only claim nothing was proposed while it is still false.
         boolean proposalAttempted = false;
         while (!retryPolicy.hasExpired())
         {
@@ -106,159 +106,268 @@ public abstract class AbstractLocalProcessor implements Processor
             if (!acquireProposalLock(retryPolicy))
                 return notAdmitted(transformStr, commitStart, retryPolicy, proposalAttempted);
 
-            ClusterMetadata previous;
-            Transformation.Result result;
-            Outcome outcome;
-            Throwable failure = null;
-            // The one critical section: read the highest consecutive metadata, execute against it, propose the derived
-            // epoch and, if the proposal won, append it locally. Nothing else belongs here, and the lock is dropped in
-            // the single finally below before any of the outcomes are acted on.
+            CycleResult cycle;
             try
             {
-                previous = log.waitForHighestConsecutive();
-                if (!acceptCommit(previous))
-                {
-                    String msg = String.format("Node %s is not a CMS member in epoch %s; members=%s",
-                                               FBUtilities.getBroadcastAddressAndPort(),
-                                               previous.epoch.getEpoch(),
-                                               previous.fullCMSMembers());
-                    logger.warn(msg);
-                    throw new NotCMSException(msg);
-                }
-
-                if (!transform.eligibleToCommit(previous))
-                {
-                    result = new Transformation.Rejected(INVALID, "Transformation rejected, can't commit " + transformStr +
-                                                                  " it not supported with cluster common serialization version " + previous.directory.commonSerializationVersion +
-                                                                  " and min/max serialization versions " + previous.directory.clusterMinVersion + "/" + previous.directory.clusterMaxVersion);
-                }
-                else
-                {
-                    result = executeStrictly(previous, transform);
-                }
-
-                if (result.isRejected())
-                {
-                    // Nothing to propose; the catch-up which decides whether this rejection is final happens after the
-                    // lock is released, as it may involve remote peers.
-                    outcome = Outcome.REJECTED;
-                }
-                else
-                {
-                    try
-                    {
-                        Epoch nextEpoch = result.success().metadata.epoch;
-                        // If metadata applies, try committing it to the log
-                        long casStart = nanoTime();
-                        proposalAttempted = true;
-                        boolean applied = tryCommitOne(entryId, transform, previous.epoch, nextEpoch);
-                        long casElapsedUs = NANOSECONDS.toMicros(nanoTime() - casStart);
-                        logger.debug("tryCommitOne for {} epoch {}->{}: applied={}, took {}us",
-                                     transform.kind(), previous.epoch, nextEpoch, applied, casElapsedUs);
-
-                        // Application here semantially means "succeeded in committing to the distributed log".
-                        if (applied)
-                        {
-                            logger.info("Committed {}. New epoch is {}. Took {} attempts in {}us total.",
-                                        transformStr, nextEpoch, retryPolicy.attempts(),
-                                        NANOSECONDS.toMicros(nanoTime() - commitStart));
-                            log.append(new Entry(entryId, nextEpoch, new Transformation.Executed(transform, result)));
-                            outcome = Outcome.APPLIED;
-                        }
-                        else
-                        {
-                            outcome = Outcome.NOT_APPLIED;
-                        }
-                    }
-                    catch (Throwable e)
-                    {
-                        // Reported and inspected outside the lock, so that neither is done while holding it.
-                        failure = e;
-                        outcome = Outcome.FAILED;
-                    }
-                }
+                cycle = runCycle(entryId, transform, transformStr, commitStart, retryPolicy);
             }
             finally
             {
                 proposalLock.unlock();
             }
+            proposalAttempted |= cycle.proposalAttempted;
 
             // Everything from here on runs without the lock: it is either remote, uninterruptible, or waits on the
             // local log being caught up, and none of it is part of deriving and proposing an epoch.
-            if (outcome == Outcome.REJECTED)
-            {
-                // If we got a rejection, it could be that _we_ are not aware of the highest epoch.
-                // Just try to catch up to the latest distributed state.
-                // Use a dedicated retry policy here as the one for the commit itself may not be appropriate.
-                // It uses the wrong metric and for STARTUP transformations will retry indefinitely, which is not
-                // what we want here.
-                Retry fetchLogRetry = Retry.until(retryPolicy.deadlineNanos, TCMMetrics.instance.fetchLogRetries);
-                ClusterMetadata replayed = fetchLogAndWait(null, fetchLogRetry);
-
-                // Retry if replay has changed the epoch, return rejection otherwise.
-                if (!replayed.epoch.isAfter(previous.epoch))
-                {
-                    logger.info("No epoch change after fetched latest log entries, returning rejection response");
-                    return maybeFailure(entryId,
-                                        lastKnown,
-                                        () -> Commit.Result.rejected(result.rejected().code, result.rejected().reason, toLogState(lastKnown)));
-                }
-
-                logger.info("Fetched latest log entries after transformation rejection, re-entering " +
-                            "commit retry loop with {}ms remaining until deadline",
-                            NANOSECONDS.toMillis(retryPolicy.remainingNanos()));
-                continue;
-            }
-
-            if (outcome == Outcome.FAILED)
-            {
-                logger.error("Caught error while trying to perform a local commit", failure);
-                JVMStabilityInspector.inspectThrowable(failure);
-                if (!retryPolicy.maybeSleep())
-                    break;
-                continue;
-            }
-
-            try
-            {
-                if (outcome == Outcome.APPLIED)
-                {
-                    // The proposal is durable in the distributed log and appended locally, so the next proposer can
-                    // already derive its epoch from it. Holding the lock across this wait would serialise the local
-                    // enactment latency of this commit onto unrelated ones.
-                    Epoch nextEpoch = result.success().metadata.epoch;
-                    log.awaitAtLeast(nextEpoch);
-
-                    return new Commit.Result.Success(nextEpoch,
-                                                     toLogState(result.success(), entryId, lastKnown, transform));
-                }
-
-                // Lost the epoch, or the outcome is unknown. Back off, then refetch: the sleep is uninterruptible and
-                // the fetch may be remote, neither of which should block another local proposer.
-                if (!retryPolicy.maybeSleep())
-                    break;
-
-                logger.info("Backed off after failure to commit to log, fetching latest log entries before retry");
-                // TODO: could also add epoch from mis-application from [applied].
-                // Use a dedicated retry policy here as the one for the commit itself may not be appropriate.
-                // It uses the wrong metric and for STARTUP transformations will retry indefinitely, which is not
-                // what we want here.
-                Retry fetchLogRetry = Retry.until(retryPolicy.deadlineNanos, TCMMetrics.instance.fetchLogRetries);
-                fetchLogAndWait(null, fetchLogRetry);
-                logger.info("Fetched latest log entries, re-entering commit retry loop with {}ms remaining until deadline",
-                            NANOSECONDS.toMillis(retryPolicy.remainingNanos()));
-            }
-            catch (Throwable e)
-            {
-                logger.error("Caught error while trying to perform a local commit", e);
-                JVMStabilityInspector.inspectThrowable(e);
-                if (!retryPolicy.maybeSleep())
-                    break;
-            }
+            Decision decision = react(entryId, transform, lastKnown, retryPolicy, cycle);
+            if (decision.result != null)
+                return decision.result;
+            if (decision.giveUp)
+                break;
         }
         String failureMsg = String.format("Could not perform commit after %d attempts. Time remaining: %dms",
                                           retryPolicy.attempts(), NANOSECONDS.toMillis(retryPolicy.remainingNanos()));
         return failed(transformStr, commitStart, failureMsg);
+    }
+
+    /**
+     * The one critical section of a commit attempt, run with {@link #proposalLock} held: reads the highest
+     * consecutive metadata, executes the transformation against it, and - if it produced something worth proposing -
+     * proposes it and, when the proposal wins its epoch, appends it to the local log. Nothing else belongs here.
+     *
+     * <p>An exception raised before a proposal is attempted (a rejecting {@link #acceptCommit}, in particular
+     * {@link NotCMSException}) is deliberately left to propagate to the caller uncaught, unwinding the commit
+     * entirely rather than being folded into {@link CycleResult}. Only a throwable from {@link #tryCommitOne} or the
+     * subsequent {@link LocalLog#append} is captured, as {@link Outcome#FAILED}, so that it is reported and
+     * inspected once the lock has been released rather than while holding it.
+     */
+    private CycleResult runCycle(Entry.Id entryId, Transformation transform, String transformStr, long commitStart, Retry retryPolicy)
+    {
+        ClusterMetadata previous = log.waitForHighestConsecutive();
+        if (!acceptCommit(previous))
+        {
+            String msg = String.format("Node %s is not a CMS member in epoch %s; members=%s",
+                                       FBUtilities.getBroadcastAddressAndPort(),
+                                       previous.epoch.getEpoch(),
+                                       previous.fullCMSMembers());
+            logger.warn(msg);
+            throw new NotCMSException(msg);
+        }
+
+        Transformation.Result result;
+        if (!transform.eligibleToCommit(previous))
+        {
+            result = new Transformation.Rejected(INVALID, "Transformation rejected, can't commit " + transformStr +
+                                                          " it not supported with cluster common serialization version " + previous.directory.commonSerializationVersion +
+                                                          " and min/max serialization versions " + previous.directory.clusterMinVersion + "/" + previous.directory.clusterMaxVersion);
+        }
+        else
+        {
+            result = executeStrictly(previous, transform);
+        }
+
+        if (result.isRejected())
+            // Nothing to propose; the catch-up which decides whether this rejection is final happens after the
+            // lock is released, as it may involve remote peers.
+            return CycleResult.rejected(previous, result);
+
+        try
+        {
+            Epoch nextEpoch = result.success().metadata.epoch;
+            // If metadata applies, try committing it to the log
+            long casStart = nanoTime();
+            boolean applied = tryCommitOne(entryId, transform, previous.epoch, nextEpoch);
+            long casElapsedUs = NANOSECONDS.toMicros(nanoTime() - casStart);
+            logger.debug("tryCommitOne for {} epoch {}->{}: applied={}, took {}us",
+                         transform.kind(), previous.epoch, nextEpoch, applied, casElapsedUs);
+
+            // Application here semantially means "succeeded in committing to the distributed log".
+            if (!applied)
+                return CycleResult.notApplied(previous, result);
+
+            logger.info("Committed {}. New epoch is {}. Took {} attempts in {}us total.",
+                        transformStr, nextEpoch, retryPolicy.attempts(),
+                        NANOSECONDS.toMicros(nanoTime() - commitStart));
+            log.append(new Entry(entryId, nextEpoch, new Transformation.Executed(transform, result)));
+            return CycleResult.applied(previous, result);
+        }
+        catch (Throwable e)
+        {
+            // Reported and inspected outside the lock, so that neither is done while holding it.
+            return CycleResult.failed(e);
+        }
+    }
+
+    /**
+     * Reacts to a {@link CycleResult} once {@link #proposalLock} has been released, dispatching to the handler for
+     * its {@link Outcome}.
+     */
+    private Decision react(Entry.Id entryId, Transformation transform, Epoch lastKnown, Retry retryPolicy, CycleResult cycle)
+    {
+        switch (cycle.outcome)
+        {
+            case REJECTED:
+                return handleRejected(entryId, lastKnown, retryPolicy, cycle);
+            case FAILED:
+                return handleFailure(retryPolicy, cycle.failure);
+            case APPLIED:
+                return handleApplied(entryId, transform, lastKnown, retryPolicy, cycle);
+            case NOT_APPLIED:
+                return handleNotApplied(retryPolicy);
+            default:
+                throw new AssertionError("Unhandled outcome: " + cycle.outcome);
+        }
+    }
+
+    /**
+     * A rejection could mean that <em>we</em> are not aware of the highest epoch, so catch up to the latest
+     * distributed state before deciding whether the rejection is final.
+     */
+    private Decision handleRejected(Entry.Id entryId, Epoch lastKnown, Retry retryPolicy, CycleResult cycle)
+    {
+        ClusterMetadata replayed = fetchLogAndWait(null, fetchLogRetry(retryPolicy));
+
+        // Retry if replay has changed the epoch, return rejection otherwise.
+        if (!replayed.epoch.isAfter(cycle.previous.epoch))
+        {
+            logger.info("No epoch change after fetched latest log entries, returning rejection response");
+            return Decision.returning(maybeFailure(entryId,
+                                                    lastKnown,
+                                                    () -> Commit.Result.rejected(cycle.result.rejected().code, cycle.result.rejected().reason, toLogState(lastKnown))));
+        }
+
+        logger.info("Fetched latest log entries after transformation rejection, re-entering " +
+                    "commit retry loop with {}ms remaining until deadline",
+                    NANOSECONDS.toMillis(retryPolicy.remainingNanos()));
+        return Decision.CONTINUE;
+    }
+
+    /** Shared by every outcome that failed unexpectedly: reports and inspects the throwable, then backs off. */
+    private Decision handleFailure(Retry retryPolicy, Throwable failure)
+    {
+        logger.error("Caught error while trying to perform a local commit", failure);
+        JVMStabilityInspector.inspectThrowable(failure);
+        return retryPolicy.maybeSleep() ? Decision.CONTINUE : Decision.GIVE_UP;
+    }
+
+    private Decision handleApplied(Entry.Id entryId, Transformation transform, Epoch lastKnown, Retry retryPolicy, CycleResult cycle)
+    {
+        try
+        {
+            // The proposal is durable in the distributed log and appended locally, so the next proposer can already
+            // derive its epoch from it. Holding the lock across this wait would serialise the local enactment
+            // latency of this commit onto unrelated ones.
+            Epoch nextEpoch = cycle.result.success().metadata.epoch;
+            log.awaitAtLeast(nextEpoch);
+
+            return Decision.returning(new Commit.Result.Success(nextEpoch,
+                                                                 toLogState(cycle.result.success(), entryId, lastKnown, transform)));
+        }
+        catch (Throwable e)
+        {
+            return handleFailure(retryPolicy, e);
+        }
+    }
+
+    private Decision handleNotApplied(Retry retryPolicy)
+    {
+        try
+        {
+            // Lost the epoch, or the outcome is unknown. Back off, then refetch: the sleep is uninterruptible and
+            // the fetch may be remote, neither of which should block another local proposer.
+            if (!retryPolicy.maybeSleep())
+                return Decision.GIVE_UP;
+
+            logger.info("Backed off after failure to commit to log, fetching latest log entries before retry");
+            // TODO: could also add epoch from mis-application from [applied].
+            fetchLogAndWait(null, fetchLogRetry(retryPolicy));
+            logger.info("Fetched latest log entries, re-entering commit retry loop with {}ms remaining until deadline",
+                        NANOSECONDS.toMillis(retryPolicy.remainingNanos()));
+            return Decision.CONTINUE;
+        }
+        catch (Throwable e)
+        {
+            return handleFailure(retryPolicy, e);
+        }
+    }
+
+    /**
+     * A retry policy dedicated to fetching and waiting on the distributed log after a rejection or a lost proposal.
+     * Deliberately distinct from the caller's own {@code retryPolicy}: that one uses the commit metric and, for
+     * STARTUP transformations, retries indefinitely, neither of which is appropriate for a log fetch.
+     */
+    private static Retry fetchLogRetry(Retry retryPolicy)
+    {
+        return Retry.until(retryPolicy.deadlineNanos, TCMMetrics.instance.fetchLogRetries);
+    }
+
+    /**
+     * What one {@link #runCycle} concluded, captured immutably so it can cross the {@link #proposalLock} release in
+     * {@link #commit} without relying on locals that are set inside the try block and merely happen to survive it.
+     */
+    private static final class CycleResult
+    {
+        final Outcome outcome;
+        final ClusterMetadata previous;
+        final Transformation.Result result;
+        final Throwable failure;
+        /** Whether this cycle reached {@link #tryCommitOne}, i.e. whether retrying is still known to be safe. */
+        final boolean proposalAttempted;
+
+        private CycleResult(Outcome outcome, ClusterMetadata previous, Transformation.Result result, Throwable failure, boolean proposalAttempted)
+        {
+            this.outcome = outcome;
+            this.previous = previous;
+            this.result = result;
+            this.failure = failure;
+            this.proposalAttempted = proposalAttempted;
+        }
+
+        static CycleResult rejected(ClusterMetadata previous, Transformation.Result result)
+        {
+            return new CycleResult(Outcome.REJECTED, previous, result, null, false);
+        }
+
+        static CycleResult applied(ClusterMetadata previous, Transformation.Result result)
+        {
+            return new CycleResult(Outcome.APPLIED, previous, result, null, true);
+        }
+
+        static CycleResult notApplied(ClusterMetadata previous, Transformation.Result result)
+        {
+            return new CycleResult(Outcome.NOT_APPLIED, previous, result, null, true);
+        }
+
+        static CycleResult failed(Throwable failure)
+        {
+            return new CycleResult(Outcome.FAILED, null, null, failure, true);
+        }
+    }
+
+    /**
+     * What {@link #commit} should do next once a {@link CycleResult} has been reacted to: keep retrying
+     * ({@link #CONTINUE}), return a definitive {@link #result}, or give up on this call to {@link #commit} once and
+     * for all ({@link #GIVE_UP}, used when {@link Retry#maybeSleep()} refuses to back off further - which, since it
+     * also enforces the attempt cap, can happen before the caller's deadline itself has expired).
+     */
+    private static final class Decision
+    {
+        static final Decision CONTINUE = new Decision(null, false);
+        static final Decision GIVE_UP = new Decision(null, true);
+
+        final Commit.Result result;
+        final boolean giveUp;
+
+        private Decision(Commit.Result result, boolean giveUp)
+        {
+            this.result = result;
+            this.giveUp = giveUp;
+        }
+
+        static Decision returning(Commit.Result result)
+        {
+            return new Decision(result, false);
+        }
     }
 
     /**
