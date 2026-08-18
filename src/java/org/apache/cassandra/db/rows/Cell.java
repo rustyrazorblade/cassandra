@@ -43,7 +43,7 @@ import org.apache.cassandra.utils.memory.Cloner;
  *   2) expiring cells: on top of regular cells, those have a ttl and a local deletion time (when they are expired).
  *   3) tombstone cells: those won't have value, but they have a local deletion time (when the tombstone was created).
  */
-public abstract class Cell<V> extends ColumnData
+public abstract class Cell<V> extends ColumnData implements CellLivenessInfo
 {
     public static final int NO_TTL = 0;
     public static final long NO_DELETION_TIME = Long.MAX_VALUE;
@@ -171,6 +171,11 @@ public abstract class Cell<V> extends ColumnData
      * @return whether the cell is live or not at {@code nowInSec}.
      */
     public abstract boolean isLive(long nowInSec);
+
+    public final boolean isLive(long nowInSec, long localDeletionTime, int ttl)
+    {
+        return CellLivenessInfo.isLive(nowInSec, localDeletionTime, ttl);
+    }
 
     /**
      * For cells belonging to complex types (non-frozen collection and UDT), the
