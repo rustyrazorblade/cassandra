@@ -27,10 +27,12 @@ import java.net.ServerSocket;
 import java.nio.ByteBuffer;
 import java.rmi.server.RMISocketFactory;
 import java.util.AbstractList;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
@@ -173,7 +175,9 @@ import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.transport.SimpleClient;
 import org.apache.cassandra.transport.messages.ResultMessage;
+import org.apache.cassandra.utils.AbstractTypeGenerators;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JMXServerUtils;
 import org.apache.cassandra.utils.Pair;
@@ -1031,6 +1035,36 @@ public abstract class CQLTester
     protected String createTable(String query)
     {
         return createTable(KEYSPACE, query);
+    }
+
+    protected void maybeCreateUDTs(TableMetadata metadata)
+    {
+        Set<org.apache.cassandra.db.marshal.UserType> udts = CassandraGenerators.extractUDTs(metadata);
+        if (!udts.isEmpty())
+        {
+            Deque<org.apache.cassandra.db.marshal.UserType> pending = new ArrayDeque<>(udts);
+            Set<ByteBuffer> created = new HashSet<>();
+            while (!pending.isEmpty())
+            {
+                org.apache.cassandra.db.marshal.UserType next = pending.poll();
+                Set<org.apache.cassandra.db.marshal.UserType> subTypes = AbstractTypeGenerators.extractUDTs(next);
+                subTypes.remove(next); // it includes self
+                if (subTypes.isEmpty() || subTypes.stream().allMatch(t -> created.contains(t.name)))
+                {
+                    String cql = next.toCqlString(false, false);
+                    logger.warn("Creating UDT {}", cql);
+                    schemaChange(cql);
+                    created.add(next.name);
+                }
+                else
+                {
+                    logger.warn("Unable to create UDT {}; following sub-types still not created: {}",
+                                next.getCqlTypeName(),
+                                subTypes.stream().filter(t -> !created.contains(t.name)).collect(Collectors.toSet()));
+                    pending.add(next);
+                }
+            }
+        }
     }
 
     protected String createTable(String keyspace, String query)

@@ -78,52 +78,13 @@ public abstract class Cells
 
     private static Cell<?> resolveRegular(Cell<?> left, Cell<?> right)
     {
-        long leftTimestamp = left.timestamp();
-        long rightTimestamp = right.timestamp();
-        if (leftTimestamp != rightTimestamp)
-            return leftTimestamp > rightTimestamp ? left : right;
+        // 5.0 has no HeapAbstractCell to narrow to; every cell takes the general path.
+        CellLivenessInfo.Resolution resolution = CellLivenessInfo.resolve(left, right);
 
-        long leftLocalDeletionTime = left.localDeletionTime();
-        long rightLocalDeletionTime = right.localDeletionTime();
-
-        boolean leftIsExpiringOrTombstone = leftLocalDeletionTime != Cell.NO_DELETION_TIME;
-        boolean rightIsExpiringOrTombstone = rightLocalDeletionTime != Cell.NO_DELETION_TIME;
-
-        if (leftIsExpiringOrTombstone | rightIsExpiringOrTombstone)
-        {
-            // Tombstones always win reconciliation with live cells of the same timstamp
-            // CASSANDRA-14592: for consistency of reconciliation, regardless of system clock at time of reconciliation
-            // this requires us to treat expiring cells (which will become tombstones at some future date) the same wrt regular cells
-            if (leftIsExpiringOrTombstone != rightIsExpiringOrTombstone)
-                return leftIsExpiringOrTombstone ? left : right;
-
-            // for most historical consistency, we still prefer tombstones over expiring cells.
-            // While this leads to the an inconsistency over which is chosen
-            // (i.e. before expiry, the pure tombstone; after expiry, whichever is more recent)
-            // this inconsistency has no user-visible distinction, as at this point they are both logically tombstones
-            // (the only possible difference is the time at which the cells become purgeable)
-            boolean leftIsTombstone = !left.isExpiring(); // !isExpiring() == isTombstone(), but does not need to consider localDeletionTime()
-            boolean rightIsTombstone = !right.isExpiring();
-            if (leftIsTombstone != rightIsTombstone)
-                return leftIsTombstone ? left : right;
-
-            // ==> (leftIsExpiring && rightIsExpiring) or (leftIsTombstone && rightIsTombstone)
-            // if both are expiring, we do not want to consult the value bytes if we can avoid it, as like with C-14592
-            // the value bytes implicitly depend on the system time at reconciliation, as a
-            // would otherwise always win (unless it had an empty value), until it expired and was translated to a tombstone
-            if (leftLocalDeletionTime != rightLocalDeletionTime)
-                return leftLocalDeletionTime > rightLocalDeletionTime ? left : right;
-
-            // Both cells are either tombstones or expiring at the same timestamp. If expiring and the
-            // TTLs differ, write the lower one -- the write is probably from a more recent
-            // UPDATE USING TTL AND TIMESTAMP, so select the most recent one to be deterministic and be
-            // closest to client intent.
-            if (!leftIsTombstone && left.ttl() != right.ttl())
-            {
-                assert !rightIsTombstone;
-                return left.ttl() < right.ttl() ? left : right;
-            }
-        }
+        if (resolution == CellLivenessInfo.Resolution.LEFT)
+            return left;
+        if (resolution == CellLivenessInfo.Resolution.RIGHT)
+            return right;
 
         return compareValues(left, right) >= 0 ? left : right;
     }
