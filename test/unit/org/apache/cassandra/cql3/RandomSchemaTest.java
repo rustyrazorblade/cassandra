@@ -19,11 +19,8 @@
 package org.apache.cassandra.cql3;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Deque;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NavigableMap;
@@ -40,7 +37,6 @@ import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.CursorCompactor;
-import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -169,36 +165,6 @@ public class RandomSchemaTest extends CQLTester.InMemory
                 }
             }
         });
-    }
-
-    private void maybeCreateUDTs(TableMetadata metadata)
-    {
-        Set<UserType> udts = CassandraGenerators.extractUDTs(metadata);
-        if (!udts.isEmpty())
-        {
-            Deque<UserType> pending = new ArrayDeque<>(udts);
-            Set<ByteBuffer> created = new HashSet<>();
-            while (!pending.isEmpty())
-            {
-                UserType next = pending.poll();
-                Set<UserType> subTypes = AbstractTypeGenerators.extractUDTs(next);
-                subTypes.remove(next); // it includes self
-                if (subTypes.isEmpty() || subTypes.stream().allMatch(t -> created.contains(t.name)))
-                {
-                    String cql = next.toCqlString(false, false);
-                    logger.warn("Creating UDT {}", cql);
-                    schemaChange(cql);
-                    created.add(next.name);
-                }
-                else
-                {
-                    logger.warn("Unable to create UDT {}; following sub-types still not created: {}",
-                                next.getCqlTypeName(),
-                                subTypes.stream().filter(t -> !created.contains(t.name)).collect(Collectors.toSet()));
-                    pending.add(next);
-                }
-            }
-        }
     }
 
     private static int primaryColumnCount(TableMetadata metadata)
