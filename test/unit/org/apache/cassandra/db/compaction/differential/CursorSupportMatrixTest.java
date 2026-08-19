@@ -163,11 +163,24 @@ public class CursorSupportMatrixTest extends CQLTester
         }
     }
 
-    /** Counter columns are a planned gap in the supported surface, not a permanent limit. */
+    /** Nested types (collections of frozen collections, UDTs holding frozen collections,
+     *  UDT-in-UDT) are inside the supported surface. */
     @Test
-    public void countersUnsupported()
+    public void nestedTypesSupported()
     {
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        String inner = createType("CREATE TYPE %s (xs frozen<list<int>>, name text)");
+        String outer = createType("CREATE TYPE %s (i frozen<" + inner + ">, tag text)");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, " +
+                        "m map<text, frozen<list<int>>>, u " + inner + ", o " + outer + ", " +
+                        "PRIMARY KEY (pk, ck))");
+    }
+
+    /** Flipped by increment 5: counter tables compact through the cursor. */
+    @Test
+    public void countersSupported()
+    {
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, s counter static, PRIMARY KEY (pk, ck))");
     }
 
     /** An indexed table keeps the iterator path. */
