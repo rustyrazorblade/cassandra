@@ -1024,10 +1024,24 @@ public abstract class DifferentialCompactionTester extends CQLTester
 
     private CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
     {
-        // 1. the output really is in the format this scenario selected
+        // 1. copy components FIRST: when verification (or the dump) fails, the transaction
+        // rolls back and deletes the live files — the captured copies are then the ONLY
+        // evidence for offline byte-level decoding (the captured dirs are the established
+        // debugging instrument of this harness)
+        Files.createDirectories(dir);
+        SortedMap<String, Long> copiedSizes = new TreeMap<>();
+        for (Component c : sstable.descriptor.discoverComponents())
+        {
+            Path source = sstable.descriptor.fileFor(c).toPath();
+            Path target = dir.resolve(c.name());
+            Files.copy(source, target);
+            copiedSizes.put(c.name(), Files.size(target));
+        }
+
+        // 2. the output really is in the format this scenario selected
         assertOutputFormatIsSelected(sstable);
 
-        // 2. structural verification of the output. The verifier's debug stream is always
+        // 3. structural verification of the output. The verifier's debug stream is always
         // silenced: the extended index walk debug-logs EVERY index block, and ant's junit
         // formatter buffers all test output in memory, so the log volume OOMs the fork.
         // Verification is unaffected; a failure arrives as an exception, not as narration.
@@ -1039,13 +1053,13 @@ public abstract class DifferentialCompactionTester extends CQLTester
             verifier.verify();
         }
 
-        // 3. every row is retrievable through a real slice, i.e. the index routes seeks correctly.
+        // 4. every row is retrievable through a real slice, i.e. the index routes seeks correctly.
         // Skipped in scale mode for the same reason the verifier is muted there: those scenarios hold
         // millions of rows in one partition, and a seek per row is not affordable.
         if (SLICE_READBACK && !scaleCapture())
             assertEveryRowReadableThroughASlice(sstable);
 
-        // 4. canonical logical dump
+        // 5. canonical logical dump
         // JsonTransformer computes its "expired" fields from WALL CLOCK (currentTimeMillis),
         // ignoring the fixed nowInSec passed below. Byte-identical outputs therefore render
         // differently when a localExpirationTime falls between the two paths' captures, which run
@@ -1083,7 +1097,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
                                .replaceAll("\"expired\":\"normalized\"");
         }
 
-        // 5. stats spot-check summary
+        // 6. stats spot-check summary
         StatsMetadata stats = sstable.getSSTableMetadata();
         String statsSummary = "minTimestamp=" + stats.minTimestamp +
                               " maxTimestamp=" + stats.maxTimestamp +
@@ -1103,16 +1117,8 @@ public abstract class DifferentialCompactionTester extends CQLTester
                               " minTTL=" + stats.minTTL + " maxTTL=" + stats.maxTTL +
                               " hasPartitionLevelDeletions=" + stats.hasPartitionLevelDeletions;
 
-        // 6. copy components for byte comparison
-        Files.createDirectories(dir);
         CapturedSSTable captured = new CapturedSSTable(dir, json, statsSummary);
-        for (Component c : sstable.descriptor.discoverComponents())
-        {
-            Path source = sstable.descriptor.fileFor(c).toPath();
-            Path target = dir.resolve(c.name());
-            Files.copy(source, target);
-            captured.componentSizes.put(c.name(), Files.size(target));
-        }
+        captured.componentSizes.putAll(copiedSizes);
         return captured;
     }
 

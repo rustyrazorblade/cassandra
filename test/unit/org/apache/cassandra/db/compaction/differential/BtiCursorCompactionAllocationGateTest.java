@@ -55,6 +55,18 @@ public class BtiCursorCompactionAllocationGateTest extends CursorCompactionAlloc
     }
 
     /**
+     * Counter rows are small too, about 68B, so BTI's 2KB per partition lands on top of the
+     * BIG residual the same way as the range-tombstone case. Measured 1.646 B/B under BTI
+     * against 1.367 under BIG, whose ceiling is 1.7. A ceiling of 2.0 keeps headroom
+     * comparable and still fails on about one extra small object per input cell.
+     */
+    @Override
+    protected double counterPerInputByteCeiling()
+    {
+        return 2.0;
+    }
+
+    /**
      * The complex-column test runs at multi-MB scale, unlike the range-tombstone one. BTI's
      * 2KB per partition then spreads across far more input bytes and barely moves the ratio.
      * Measured 0.511 B/B under BTI against about 0.5 under BIG, whose ceiling is 0.5. A
