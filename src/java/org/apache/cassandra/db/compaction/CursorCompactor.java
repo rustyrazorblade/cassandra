@@ -109,9 +109,10 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  *       only purgable tombstones in the row cache.</li>
  *   <li>Keeps track of the compaction progress.</li>
  * </ul>
- * This compaction implementation does not support 2ndary indexes, trie (BTI) sstable output,
- * counter columns, or a multi-cell column that the schema has dropped, and it stands aside for a
- * compaction that ignores gc grace for a key; see {@link #isSupported} and
+ * This compaction implementation supports BIG and BTI output formats (see the
+ * CursorIndexWriter seam) and complex (collection/UDT) columns; it does not support 2ndary
+ * indexes, counter columns, or a multi-cell column that the schema has dropped, and it stands
+ * aside for a compaction that ignores gc grace for a key. See {@link #isSupported} and
  * {@link #unsupportedMetadata} for the full set of gates.
  * <p>
  *     This compaction implementation avoids garbage creation per partition/row/cell by utilizing reader/writer code
@@ -146,10 +147,10 @@ public class CursorCompactor extends CompactionInfo.Holder
                     return false;
             }
         }
-        // BTI index writing is not supported yet
-        if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat))
+        if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat
+              || DatabaseDescriptor.getSelectedSSTableFormat() instanceof org.apache.cassandra.io.sstable.format.bti.BtiFormat))
         {
-            if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only the BIG sstable output format is supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
+            if (LOGGER.isDebugEnabled()) logDebugReason(metadata, "Only the BIG and BTI sstable output formats are supported. format=" + DatabaseDescriptor.getSelectedSSTableFormat());
             return false;
         }
         // TODO: Implement CompactionIterator.GarbageSkipper like functionality
@@ -676,7 +677,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             // clustering of the last unfiltered written here; a partition that wrote none has no trailing
             // block to cut, hence null.
             ClusteringDescriptor lastName = unfilteredsWrittenToPartition > 0 ? lastWrittenClustering() : null;
-            ssTableCursorWriter.writePartitionEnd(partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength, lastName);
+            ssTableCursorWriter.writePartitionEnd(partitionDescriptor.key(), partitionDescriptor.keyBytes(), partitionDescriptor.keyLength(), toWritePartitionDeletion, partitionHeaderLength, lastName);
             // Update min/max clustering metadata. The count guard is required; see
             // unfilteredsWrittenToPartition.
             if (unfilteredsWrittenToPartition > 1) {

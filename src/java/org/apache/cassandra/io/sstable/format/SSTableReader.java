@@ -923,6 +923,18 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
                                                               boolean updateStats,
                                                               SSTableReadsListener listener);
 
+    /**
+     * Format-agnostic convenience form of {@link #getRowIndexEntry(PartitionPosition, Operator, boolean,
+     * SSTableReadsListener)}, for callers (tests) outside this class's package that only need the entry,
+     * not stats/cache control. BigTableReader narrows the return type via a covariant override; formats
+     * without one (BTI) get this default.
+     */
+    @VisibleForTesting
+    public AbstractRowIndexEntry getRowIndexEntry(PartitionPosition key, Operator op)
+    {
+        return getRowIndexEntry(key, op, true, SSTableReadsListener.NOOP_LISTENER);
+    }
+
     public UnfilteredRowIterator simpleIterator(FileDataInput file, DecoratedKey key, long dataPosition, boolean tombstoneOnly)
     {
         return SSTableIdentityIterator.create(this, file, dataPosition, key, tombstoneOnly);

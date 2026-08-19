@@ -79,14 +79,26 @@ public abstract class CursorIndexWriter
                                     DeletionTime openMarker) throws IOException;
 
     /**
-     * The partition ends at partitionEnd, which includes the end-of-partition marker.
+     * The partition (including its end-of-partition marker) ends at partitionEnd. Both key
+     * forms are provided: BIG consumes the raw bytes (Index.db entries, bloom filter), BTI
+     * consumes the decorated key (partition trie byte-comparable). The DecoratedKey is the
+     * caller's REUSABLE key — valid only for the duration of the call.
      *
-     * @param lastName the clustering of the last non-static unfiltered in this partition. A
-     *                 trailing index block uses it as the block's last name. Null if the
-     *                 partition wrote no non-static unfiltered, which leaves no trailing block
-     *                 to cut.
+     * @param lastName the clustering of the last non-static unfiltered written to this partition, which a
+     *                 trailing index block needs as its last name; null if the partition wrote none, in which
+     *                 case there is no trailing block to cut. Only formats that do not capture block
+     *                 boundaries themselves consume it (BIG does; BTI keeps its own reusable descriptors).
      */
-    public abstract void endPartition(byte[] key, int keyLength, int headerLength,
-                                      DeletionTime partitionDeletionTime, long partitionEnd,
-                                      ClusteringDescriptor lastName) throws IOException;
+    public abstract void endPartition(org.apache.cassandra.db.DecoratedKey key, byte[] keyBytes, int keyLength,
+                                      int headerLength, DeletionTime partitionDeletionTime,
+                                      long partitionEnd, ClusteringDescriptor lastName) throws IOException;
+
+    /**
+     * Release per-instance state when the owning writer closes — the iterator path's
+     * partition-writer lifecycle analogue (e.g. BtiFormatPartitionWriter.close() closes its
+     * row trie). The underlying file writers belong to the table writer, not to this seam.
+     */
+    public void close()
+    {
+    }
 }

@@ -35,6 +35,7 @@ import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.guardrails.Threshold;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellLivenessInfo;
 import org.apache.cassandra.db.rows.Row;
@@ -140,8 +141,23 @@ public class SSTableCursorWriter implements AutoCloseable
         hasStaticColumns = serializationHeader.hasStatic();
         staticColumns = hasStaticColumns ? serializationHeader.columns(true).toArray(EMPTY_COL_META) : EMPTY_COL_META;
         regularColumns = serializationHeader.columns(false).toArray(EMPTY_COL_META);
-        this.cursorIndexWriter = new BigCursorIndexWriter((BigTableWriter.IndexWriter) indexWriter,
-                                                           this.deletionTimeSerializer);
+        AbstractType<?>[] clusteringTypes = serializationHeader.clusteringTypes().toArray(AbstractType[]::new);
+        if (ssTableWriter instanceof org.apache.cassandra.io.sstable.format.bti.BtiTableWriter)
+            this.cursorIndexWriter = new org.apache.cassandra.io.sstable.format.bti.BtiCursorIndexWriter(
+                (org.apache.cassandra.io.sstable.format.bti.BtiTableWriter) ssTableWriter,
+                serializationHeader.clusteringTypes().isEmpty() ? new org.apache.cassandra.db.ClusteringComparator()
+                                                                : new org.apache.cassandra.db.ClusteringComparator(serializationHeader.clusteringTypes()),
+                clusteringTypes);
+        else if (indexWriter instanceof BigTableWriter.IndexWriter)
+            this.cursorIndexWriter = new BigCursorIndexWriter((BigTableWriter.IndexWriter) indexWriter,
+                                                              this.deletionTimeSerializer);
+        else
+            // the support gate (CursorCompactor.isSupported: BigFormat || BtiFormat) must
+            // reject any other format before a writer is ever constructed; reaching here
+            // means the gate and this dispatch have drifted apart
+            throw new IllegalStateException("cursor compaction has no index writer for format of " +
+                                            ssTableWriter.getClass().getName() +
+                                            "; CursorCompactor.isSupported is out of sync with this dispatch");
     }
 
     public SSTableCursorWriter(SortedTableWriter<?,?> ssTableWriter)
@@ -157,6 +173,7 @@ public class SSTableCursorWriter implements AutoCloseable
     @Override
     public void close()
     {
+        cursorIndexWriter.close();
         SSTableReader finish = ssTableWriter.finish(false);
         if (finish != null) {
             Ref<SSTableReader> ref = finish.ref();
@@ -191,7 +208,8 @@ public class SSTableCursorWriter implements AutoCloseable
      * @param lastName the clustering of the last non-static unfiltered written to this partition, needed as
      *                 the last name of a trailing index block; null if the partition wrote none.
      */
-    public void writePartitionEnd(byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime,
+    public void writePartitionEnd(org.apache.cassandra.db.DecoratedKey decoratedKey, byte[] partitionKey,
+                                  int partitionKeyLength, DeletionTime partitionDeletionTime,
                                   int headerLength, ClusteringDescriptor lastName) throws IOException
     {
         SERIALIZER.writeEndOfPartition(dataWriter);
@@ -209,7 +227,7 @@ public class SSTableCursorWriter implements AutoCloseable
          // this is implemented differently for BIG/BTI
          createRowIndexEntry(key, partitionLevelDeletion, partitionEnd - 1);
          */
-        cursorIndexWriter.endPartition(partitionKey, partitionKeyLength, headerLength, partitionDeletionTime, partitionEnd, lastName);
+        cursorIndexWriter.endPartition(decoratedKey, partitionKey, partitionKeyLength, headerLength, partitionDeletionTime, partitionEnd, lastName);
     }
 
 

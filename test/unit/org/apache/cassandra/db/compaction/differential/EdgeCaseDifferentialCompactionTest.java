@@ -28,8 +28,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigTableReader;
-import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
+import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -429,8 +428,8 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     /** Promoted index block count for {@code pk} in {@code sstable}; 0 when the partition is not indexed. */
     private static int blockCount(SSTableReader sstable, long pk)
     {
-        RowIndexEntry entry = ((BigTableReader) sstable).getRowIndexEntry(sstable.decorateKey(ByteBufferUtil.bytes(pk)),
-                                                                         SSTableReader.Operator.EQ);
+        AbstractRowIndexEntry entry = sstable.getRowIndexEntry(sstable.decorateKey(ByteBufferUtil.bytes(pk)),
+                                                               SSTableReader.Operator.EQ);
         assertNotNull("expected pk " + pk + " to be present in " + sstable.descriptor, entry);
         return entry.blockCount();
     }
