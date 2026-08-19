@@ -607,7 +607,21 @@ public abstract class DifferentialCompactionTester extends CQLTester
 
     private CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
     {
-        // 1. structural verification of the output. In scale mode the verifier's debug
+        // 1. copy components FIRST: when verification (or the dump) fails, the transaction
+        // rolls back and deletes the live files — the captured copies are then the ONLY
+        // evidence for offline byte-level decoding (the captured dirs are the established
+        // debugging instrument of this harness)
+        Files.createDirectories(dir);
+        SortedMap<String, Long> copiedSizes = new TreeMap<>();
+        for (Component c : sstable.descriptor.discoverComponents())
+        {
+            Path source = sstable.descriptor.fileFor(c).toPath();
+            Path target = dir.resolve(c.name());
+            Files.copy(source, target);
+            copiedSizes.put(c.name(), Files.size(target));
+        }
+
+        // 2. structural verification of the output. In scale mode the verifier's debug
         // stream must be silenced: the extended index walk debug-logs EVERY index block
         // (~560K lines for a >2GiB partition), and ant's junit formatter buffers all test
         // output in memory — the log volume, not the verification, OOMs the fork.
@@ -673,16 +687,8 @@ public abstract class DifferentialCompactionTester extends CQLTester
                               " tombstoneHist=" + stats.estimatedTombstoneDropTime +
                               " cellsPerPartition=" + stats.estimatedCellPerPartitionCount.mean() + "/" + stats.estimatedCellPerPartitionCount.count();
 
-        // 4. copy components for byte comparison
-        Files.createDirectories(dir);
         CapturedSSTable captured = new CapturedSSTable(dir, json, statsSummary);
-        for (Component c : sstable.descriptor.discoverComponents())
-        {
-            Path source = sstable.descriptor.fileFor(c).toPath();
-            Path target = dir.resolve(c.name());
-            Files.copy(source, target);
-            captured.componentSizes.put(c.name(), Files.size(target));
-        }
+        captured.componentSizes.putAll(copiedSizes);
         return captured;
     }
 

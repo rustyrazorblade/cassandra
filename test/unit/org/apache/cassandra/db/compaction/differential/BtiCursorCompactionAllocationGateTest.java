@@ -68,6 +68,18 @@ public class BtiCursorCompactionAllocationGateTest extends CursorCompactionAlloc
     }
 
     /**
+     * Counter rows are also tiny (~68B), so BTI's ~2KB/partition trie/key-snapshot cost
+     * lands on top of the BIG residual the same way as the RT gate: measured 1.646 B/B
+     * (vs BIG's 1.367, ceiling 1.7) — the 2.0 ceiling keeps comparable headroom and still
+     * trips on roughly one extra small object per input cell.
+     */
+    @Override
+    protected double counterPerInputByteCeiling()
+    {
+        return 2.0;
+    }
+
+    /**
      * Unlike the RT/counter gates, the complex-column gate runs at multi-MB scale, so BTI's
      * ~2KB/partition trie/key-snapshot cost is diluted across far more input bytes per
      * partition and barely moves the ratio: measured 0.511 B/B (vs BIG's ~0.5, ceiling 0.5).
