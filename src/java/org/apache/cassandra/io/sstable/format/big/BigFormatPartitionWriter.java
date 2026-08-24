@@ -21,7 +21,6 @@ package org.apache.cassandra.io.sstable.format.big;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -48,6 +47,13 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
     @VisibleForTesting
     public static final int DEFAULT_GRANULARITY = 64 * 1024;
 
+    /**
+     * Ceiling on how far ahead {@link #presizeIndexOffsets(long)} will size the offsets buffer, in elements. 1M
+     * elements is a 4MiB buffer, enough for a 64GiB partition at the default granularity; anything beyond that is
+     * covered by the (doubling) growth path instead of being reserved up front on the strength of an estimate.
+     */
+    private static final int MAX_PRESIZED_INDEX_OFFSETS = 1 << 20;
+
     // used, if the row-index-entry reaches config switchIndexInfoToBufferThreshold
     private DataOutputBuffer rowIndexEntryBuffer;
     // used to track the total serialized size of indexSamples (unused for buffer)
@@ -58,7 +64,8 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
     private DataOutputBuffer reusableBuffer;
 
     private int columnIndexCount;
-    private int[] indexOffsets;
+    // offsets of the serialized IndexInfo objects; retained across partitions for the lifetime of this writer
+    private final PooledIntArray indexOffsets = new PooledIntArray();
 
     private final ISerializer<IndexInfo> idxSerializer;
 
@@ -122,9 +129,30 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
 
     public int[] offsets()
     {
-        return indexOffsets != null
-               ? Arrays.copyOf(indexOffsets, columnIndexCount)
+        return columnIndexCount > 0
+               ? indexOffsets.toArray(columnIndexCount)
                : null;
+    }
+
+    /**
+     * Sizes the offsets buffer for a partition of the given estimated size before its first index block is added, so
+     * that writing a large partition does not repeatedly grow and copy the buffer. Purely an optimisation - an
+     * estimate that undershoots is corrected by {@link PooledIntArray#ensureCapacity(int)} as blocks are added.
+     *
+     * <p>A {@code column_index_size} of 0 is a legal configuration meaning "index every row", so the block count
+     * cannot be derived from the partition size; such a writer is left to grow its buffer geometrically instead.
+     *
+     * @param estimatedPartitionSizeBytes estimated size of the partition about to be written, or a non-positive value
+     *                                    if no estimate is available
+     */
+    void presizeIndexOffsets(long estimatedPartitionSizeBytes)
+    {
+        if (estimatedPartitionSizeBytes <= 0 || indexBlockThreshold <= 0)
+            return;
+
+        // one block beyond the estimate, plus the trailing partial block that finish() always adds
+        long estimatedBlocks = estimatedPartitionSizeBytes / indexBlockThreshold + 2;
+        indexOffsets.ensureCapacity((int) Math.min(estimatedBlocks, MAX_PRESIZED_INDEX_OFFSETS));
     }
 
     private void addIndexBlock() throws IOException
@@ -143,26 +171,14 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
         // indexOffsets contains the offsets of the serialized IndexInfo objects.
         // I.e. indexOffsets[0] is always 0 so we don't have to deal with a special handling
         // for index #0 and always subtracting 1 for the index (which could be error-prone).
-        if (indexOffsets == null)
-            indexOffsets = new int[10];
-        else
-        {
-            if (columnIndexCount >= indexOffsets.length)
-                indexOffsets = Arrays.copyOf(indexOffsets, indexOffsets.length + 10);
-
-            //the 0th element is always 0
-            if (columnIndexCount == 0)
-            {
-                indexOffsets[columnIndexCount] = 0;
-            }
-            else
-            {
-                indexOffsets[columnIndexCount] =
-                rowIndexEntryBuffer != null
-                ? Ints.checkedCast(rowIndexEntryBuffer.position())
-                : indexSamplesSerializedSize;
-            }
-        }
+        indexOffsets.ensureCapacity(columnIndexCount + 1);
+        //the 0th element is always 0
+        indexOffsets.set(columnIndexCount,
+                         columnIndexCount == 0
+                         ? 0
+                         : (rowIndexEntryBuffer != null
+                            ? Ints.checkedCast(rowIndexEntryBuffer.position())
+                            : indexSamplesSerializedSize));
         columnIndexCount++;
 
         // First, we collect the IndexInfo objects until we reach Config.column_index_cache_size in an ArrayList.
@@ -242,7 +258,7 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
         if (rowIndexEntryBuffer != null)
         {
             for (int i = 0; i < columnIndexCount; i++)
-                rowIndexEntryBuffer.writeInt(indexOffsets[i]);
+                rowIndexEntryBuffer.writeInt(indexOffsets.get(i));
         }
 
         // we should always have at least one computed index block, but we only write it out if there is more than that.
@@ -261,6 +277,6 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
     @Override
     public void close()
     {
-        // no-op
+        indexOffsets.release();
     }
 }

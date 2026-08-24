@@ -73,6 +73,7 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
     private final RowIndexEntry.IndexSerializer rowIndexEntrySerializer;
     private final Map<DecoratedKey, AbstractRowIndexEntry> cachedKeys = new HashMap<>();
     private final boolean shouldMigrateKeyCache;
+    private final long maxInputPartitionSize;
 
     public BigTableWriter(Builder builder, ILifecycleTransaction txn, SSTable.Owner owner)
     {
@@ -83,12 +84,37 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
 
         this.shouldMigrateKeyCache = DatabaseDescriptor.shouldMigrateKeycacheOnCompaction()
                                      && !txn.isOffline();
+        this.maxInputPartitionSize = builder.maxInputPartitionSizeHint > 0
+                                     ? builder.maxInputPartitionSizeHint
+                                     : maxEstimatedPartitionSize(txn);
+    }
+
+    /**
+     * The largest partition recorded by any of the sstables this writer is rewriting, used as a per-writer ceiling
+     * when sizing the partition writer's index bookkeeping for a key the owner knows nothing specific about.
+     *
+     * @return the size in bytes, or {@code -1} if there are no input sstables, as when flushing a memtable
+     */
+    public static long maxEstimatedPartitionSize(ILifecycleTransaction txn)
+    {
+        long max = -1;
+        for (SSTableReader reader : txn.originals())
+            max = Math.max(max, reader.getSSTableMetadata().estimatedPartitionSize.max());
+        return max;
     }
 
     @Override
     protected void onStartPartition(DecoratedKey key)
     {
+        partitionWriter.presizeIndexOffsets(estimatedPartitionSize(key));
         notifyObservers(o -> o.startPartition(key, partitionWriter.getPartitionStartPosition(), indexWriter.writer.position()));
+    }
+
+    private long estimatedPartitionSize(DecoratedKey key)
+    {
+        SSTable.Owner owner = owner().orElse(null);
+        long known = owner != null ? owner.getKnownPartitionSize(key) : -1;
+        return known > 0 ? known : maxInputPartitionSize;
     }
 
     @Override
@@ -364,6 +390,7 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
         private RowIndexEntry.IndexSerializer rowIndexEntrySerializer;
         private MmappedRegionsCache mmappedRegionsCache;
         private OperationType operationType;
+        private long maxInputPartitionSizeHint = -1;
 
         // Writers are expected to be opened only once during construction of the sstable. The following flags are used
         // to ensure that.
@@ -374,6 +401,17 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
         public Builder(Descriptor descriptor)
         {
             super(descriptor);
+        }
+
+        /**
+         * Supplies {@link #maxEstimatedPartitionSize(ILifecycleTransaction)} for callers that have already computed it,
+         * so several writers over the same transaction do not each rescan the input sstables. Values {@code <= 0} are
+         * ignored and the writer computes it itself.
+         */
+        public Builder setMaxInputPartitionSizeHint(long maxInputPartitionSizeHint)
+        {
+            this.maxInputPartitionSizeHint = maxInputPartitionSizeHint;
+            return this;
         }
 
         @Override

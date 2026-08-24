@@ -28,6 +28,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -76,6 +77,8 @@ import org.apache.cassandra.db.DiskBoundaries;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.db.commitlog.CommitLogPosition;
+import org.apache.cassandra.db.commitlog.IntervalSet;
 import org.apache.cassandra.db.compaction.CompactionInfo.Holder;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
@@ -101,6 +104,7 @@ import org.apache.cassandra.io.sstable.SSTableRewriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.format.big.BigTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.File;
@@ -1846,36 +1850,80 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                                                               Collection<SSTableReader> sstables,
                                                               ILifecycleTransaction txn)
     {
+        UUID originatingHostId = StorageService.instance.getLocalHostUUID();
+        return createWriterForAntiCompaction(cfs,
+                                             compactionFileLocation,
+                                             expectedBloomFilterSize,
+                                             repairedAt,
+                                             pendingRepair,
+                                             isTransient,
+                                             txn,
+                                             minSSTableLevel(sstables),
+                                             originatingHostId,
+                                             MetadataCollector.computeCommitLogIntervals(sstables, originatingHostId),
+                                             SerializationHeader.make(cfs.metadata(), sstables),
+                                             -1);
+    }
+
+    /**
+     * Same as {@link #createWriterForAntiCompaction(ColumnFamilyStore, File, int, long, TimeUUID, boolean, Collection, ILifecycleTransaction)},
+     * but with the values that depend only on the input sstables already computed, so a caller creating several writers
+     * over the same inputs pays for them once instead of once per writer.
+     */
+    private static SSTableWriter createWriterForAntiCompaction(ColumnFamilyStore cfs,
+                                                               File compactionFileLocation,
+                                                               int expectedBloomFilterSize,
+                                                               long repairedAt,
+                                                               TimeUUID pendingRepair,
+                                                               boolean isTransient,
+                                                               ILifecycleTransaction txn,
+                                                               int minLevel,
+                                                               UUID originatingHostId,
+                                                               IntervalSet<CommitLogPosition> commitLogIntervals,
+                                                               SerializationHeader serializationHeader,
+                                                               long maxInputPartitionSizeHint)
+    {
         FileUtils.createDirectory(compactionFileLocation);
+
+        Descriptor descriptor = cfs.newSSTableDescriptor(compactionFileLocation);
+        SSTableWriter.Builder<?, ?> builder =
+            descriptor.getFormat().getWriterFactory().builder(descriptor)
+                      .setKeyCount(expectedBloomFilterSize)
+                      .setRepairedAt(repairedAt)
+                      .setPendingRepair(pendingRepair)
+                      .setTransientSSTable(isTransient)
+                      .setTableMetadataRef(cfs.metadata)
+                      .setMetadataCollector(new MetadataCollector(cfs.metadata().comparator, originatingHostId).commitLogIntervals(commitLogIntervals)
+                                                                                                              .sstableLevel(minLevel))
+                      .setSerializationHeader(serializationHeader)
+                      .addDefaultComponents(cfs.indexManager.listIndexGroups())
+                      .setSecondaryIndexGroups(cfs.indexManager.listIndexGroups())
+                      .setCompressionDictionaryManager(cfs.compressionDictionaryManager());
+
+        // only the big format sizes its index bookkeeping from the input partition sizes; other formats ignore the hint
+        if (builder instanceof BigTableWriter.Builder)
+            ((BigTableWriter.Builder) builder).setMaxInputPartitionSizeHint(maxInputPartitionSizeHint);
+
+        return builder.build(txn, cfs);
+    }
+
+    /**
+     * If all sstables have the same level, we can compact them together without creating overlap during anticompaction.
+     * Note that we only anticompact from unrepaired sstables, which is not leveled, but we still keep original level
+     * after first migration to be able to drop the sstables back in their original place in the repaired sstable manifest.
+     */
+    private static int minSSTableLevel(Collection<SSTableReader> sstables)
+    {
         int minLevel = Integer.MAX_VALUE;
-        // if all sstables have the same level, we can compact them together without creating overlap during anticompaction
-        // note that we only anticompact from unrepaired sstables, which is not leveled, but we still keep original level
-        // after first migration to be able to drop the sstables back in their original place in the repaired sstable manifest
         for (SSTableReader sstable : sstables)
         {
             if (minLevel == Integer.MAX_VALUE)
                 minLevel = sstable.getSSTableLevel();
 
             if (minLevel != sstable.getSSTableLevel())
-            {
-                minLevel = 0;
-                break;
-            }
+                return 0;
         }
-
-        Descriptor descriptor = cfs.newSSTableDescriptor(compactionFileLocation);
-        return descriptor.getFormat().getWriterFactory().builder(descriptor)
-                         .setKeyCount(expectedBloomFilterSize)
-                         .setRepairedAt(repairedAt)
-                         .setPendingRepair(pendingRepair)
-                         .setTransientSSTable(isTransient)
-                         .setTableMetadataRef(cfs.metadata)
-                         .setMetadataCollector(new MetadataCollector(sstables, cfs.metadata().comparator).sstableLevel(minLevel))
-                         .setSerializationHeader(SerializationHeader.make(cfs.metadata(), sstables))
-                         .addDefaultComponents(cfs.indexManager.listIndexGroups())
-                         .setSecondaryIndexGroups(cfs.indexManager.listIndexGroups())
-                         .setCompressionDictionaryManager(cfs.compressionDictionaryManager())
-                         .build(txn, cfs);
+        return minLevel;
     }
 
     /**
@@ -1999,9 +2047,16 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         {
             int expectedBloomFilterSize = Math.max(cfs.metadata().params.minIndexInterval, (int)(SSTableReader.getApproximateKeyCount(sstableAsSet)));
 
-            fullWriter.switchWriter(CompactionManager.createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, pendingRepair, false, sstableAsSet, txn));
-            transWriter.switchWriter(CompactionManager.createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, pendingRepair, true, sstableAsSet, txn));
-            unrepairedWriter.switchWriter(CompactionManager.createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, NO_PENDING_REPAIR, false, sstableAsSet, txn));
+            // the three writers share the same inputs, so the setup work that only depends on them is done once
+            int minLevel = minSSTableLevel(sstableAsSet);
+            UUID originatingHostId = StorageService.instance.getLocalHostUUID();
+            IntervalSet<CommitLogPosition> commitLogIntervals = MetadataCollector.computeCommitLogIntervals(sstableAsSet, originatingHostId);
+            SerializationHeader serializationHeader = SerializationHeader.make(cfs.metadata(), sstableAsSet);
+            long maxInputPartitionSize = BigTableWriter.maxEstimatedPartitionSize(txn);
+
+            fullWriter.switchWriter(createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, pendingRepair, false, txn, minLevel, originatingHostId, commitLogIntervals, serializationHeader, maxInputPartitionSize));
+            transWriter.switchWriter(createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, pendingRepair, true, txn, minLevel, originatingHostId, commitLogIntervals, serializationHeader, maxInputPartitionSize));
+            unrepairedWriter.switchWriter(createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, NO_PENDING_REPAIR, false, txn, minLevel, originatingHostId, commitLogIntervals, serializationHeader, maxInputPartitionSize));
 
             Predicate<Token> fullChecker = !ranges.onlyFull().isEmpty() ? new Range.OrderedRangeContainmentChecker(ranges.onlyFull().ranges()) : t -> false;
             Predicate<Token> transChecker = !ranges.onlyTransient().isEmpty() ? new Range.OrderedRangeContainmentChecker(ranges.onlyTransient().ranges()) : t -> false;
