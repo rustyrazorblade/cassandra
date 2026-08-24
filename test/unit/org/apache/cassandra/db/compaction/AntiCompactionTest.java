@@ -43,13 +43,20 @@ import org.junit.Test;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.UpdateBuilder;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.commitlog.CommitLogPosition;
+import org.apache.cassandra.db.commitlog.IntervalSet;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
+import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.EncodingStats;
+import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.ByteOrderedPartitioner.BytesToken;
 import org.apache.cassandra.dht.Murmur3Partitioner;
@@ -57,9 +64,12 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.SSTableTxnWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.big.BigTableReader;
+import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
 import org.apache.cassandra.io.util.DirectIoTestUtils;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -72,9 +82,12 @@ import org.apache.cassandra.schema.MockSchema;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ActiveRepairService;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.OutputHandler;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Refs;
 import org.apache.cassandra.utils.concurrent.Transactional;
@@ -220,6 +233,25 @@ public class AntiCompactionTest
         return stats;
     }
 
+    /**
+     * Anticompacts {@code sstables} as a single {@link CompactionManager#antiCompactGroup} call, bypassing
+     * {@link CompactionManager#performAnticompaction}'s automatic (and here, undesired) splitting of the inputs
+     * into several independently-anticompacted groups -- tests that assert something about every output sstable
+     * need all inputs processed together for that assertion to be meaningful.
+     */
+    private void antiCompactAsSingleGroup(ColumnFamilyStore store, RangesAtEndpoint ranges, Collection<SSTableReader> sstables) throws IOException
+    {
+        TimeUUID sessionID = nextTimeUUID();
+        try (LifecycleTransaction txn = store.getTracker().tryModify(sstables, OperationType.ANTICOMPACTION);
+             Refs<SSTableReader> refs = Refs.ref(sstables))
+        {
+            if (txn == null)
+                throw new IllegalStateException();
+            registerParentRepairSession(sessionID, store, ranges.ranges(), FBUtilities.nowInSeconds(), sessionID);
+            CompactionManager.instance.antiCompactGroup(store, ranges, txn, sessionID, () -> false);
+        }
+    }
+
     @Test
     public void antiCompactOneFull() throws Exception
     {
@@ -350,6 +382,177 @@ public class AntiCompactionTest
         assertEquals(sum, cfs.metric.liveDiskSpaceUsed.getCount());
         assertEquals(rows, 1000 * (1000 * 5));//See writeFile for how this number is derived
         assertOnDiskState(cfs, 2);
+    }
+
+    @Test
+    public void antiCompactionPreservesUniformSSTableLevel() throws IOException, NoSuchRepairSessionException
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        store.disableAutoCompaction();
+
+        for (int table = 0; table < 3; table++)
+            generateSStable(store, Integer.toString(table));
+
+        for (SSTableReader s : store.getLiveSSTables())
+        {
+            s.descriptor.getMetadataSerializer().mutateLevel(s.descriptor, 2);
+            s.reloadSSTableMetadata();
+        }
+
+        antiCompactAsSingleGroup(store, atEndpoint(range(0, 4), NO_RANGES), getUnrepairedSSTables(store));
+
+        assertFalse(store.getLiveSSTables().isEmpty());
+        for (SSTableReader output : store.getLiveSSTables())
+            assertEquals(2, output.getSSTableLevel());
+    }
+
+    @Test
+    public void antiCompactionZeroesMixedSSTableLevels() throws IOException, NoSuchRepairSessionException
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        store.disableAutoCompaction();
+
+        for (int table = 0; table < 3; table++)
+            generateSStable(store, Integer.toString(table));
+
+        int level = 1;
+        for (SSTableReader s : store.getLiveSSTables())
+        {
+            s.descriptor.getMetadataSerializer().mutateLevel(s.descriptor, level++);
+            s.reloadSSTableMetadata();
+        }
+
+        antiCompactAsSingleGroup(store, atEndpoint(range(0, 4), NO_RANGES), getUnrepairedSSTables(store));
+
+        assertFalse(store.getLiveSSTables().isEmpty());
+        for (SSTableReader output : store.getLiveSSTables())
+            assertEquals(0, output.getSSTableLevel());
+    }
+
+    @Test
+    public void antiCompactionCarriesCommitLogIntervalsAndOrigin() throws Exception
+    {
+        ColumnFamilyStore store = prepareColumnFamilyStore();
+
+        Collection<SSTableReader> inputs = getUnrepairedSSTables(store);
+        assertFalse(inputs.isEmpty());
+
+        IntervalSet.Builder<CommitLogPosition> builder = new IntervalSet.Builder<>();
+        for (SSTableReader sstable : inputs)
+            builder.addAll(sstable.getSSTableMetadata().commitLogIntervals);
+        IntervalSet<CommitLogPosition> expectedUnion = builder.build();
+        assertFalse("commit log must be live so inputs carry non-empty intervals, otherwise this test would pass vacuously",
+                    expectedUnion.isEmpty());
+
+        antiCompactRanges(store, atEndpoint(range(0, 4), NO_RANGES));
+
+        assertFalse(store.getLiveSSTables().isEmpty());
+        for (SSTableReader output : store.getLiveSSTables())
+        {
+            assertEquals(expectedUnion, output.getSSTableMetadata().commitLogIntervals);
+            assertEquals(StorageService.instance.getLocalHostUUID(), output.getSSTableMetadata().originatingHostId);
+        }
+    }
+
+    @Test
+    public void antiCompactionLargePartitionReadBack() throws Exception
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF);
+        store.disableAutoCompaction();
+
+        int savedIndexSizeInKiB = DatabaseDescriptor.getColumnIndexSizeInKiB();
+        DatabaseDescriptor.setColumnIndexSizeInKiB(1);
+        try
+        {
+            // "2" falls inside range(0, 4] (anticompacted into the pending-repair sstable), "5" falls outside it.
+            String containedKey = "2";
+            String outsideKey = "5";
+            ColumnIdentifier valColumn = new ColumnIdentifier("val", true);
+
+            // Both keys are written into the SAME two flushes (rather than each key getting its own sstables),
+            // so every resulting sstable's bounds span from containedKey to outsideKey and therefore intersect
+            // range(0, 4) -- an sstable holding only out-of-range data would be rejected by anticompaction outright.
+            Map<String, List<Pair<String, String>>> expected = new HashMap<>();
+            expected.put(containedKey, new ArrayList<>());
+            expected.put(outsideKey, new ArrayList<>());
+            for (int half = 0; half < 2; half++)
+            {
+                for (String key : Arrays.asList(containedKey, outsideKey))
+                {
+                    for (int r = 0; r < 500; r++)
+                    {
+                        String clustering = String.format("c%05d", half * 500 + r);
+                        String value = CompactionAllocationTest.makeRandomString(1024);
+                        expected.get(key).add(Pair.create(clustering, value));
+                        new RowUpdateBuilder(metadata, System.currentTimeMillis(), key)
+                            .clustering(clustering)
+                            .add("val", value)
+                            .build()
+                            .applyUnsafe();
+                    }
+                }
+                Util.flush(store);
+            }
+
+            antiCompactRanges(store, atEndpoint(range(0, 4), NO_RANGES));
+
+            boolean checkedContainedKeyBlockCount = false;
+            assertFalse(store.getLiveSSTables().isEmpty());
+            for (SSTableReader output : store.getLiveSSTables())
+            {
+                try (IVerifier verifier = output.getVerifier(store, new OutputHandler.LogOutput(), false,
+                                                              IVerifier.options().invokeDiskFailurePolicy(true)
+                                                                                 .extendedVerification(true).build()))
+                {
+                    verifier.verify();
+                }
+
+                boolean sawContainedKey = false;
+                try (ISSTableScanner scanner = output.getScanner())
+                {
+                    while (scanner.hasNext())
+                    {
+                        try (UnfilteredRowIterator partition = scanner.next())
+                        {
+                            String pk = ByteBufferUtil.string(partition.partitionKey().getKey());
+                            List<Pair<String, String>> expectedRows = expected.get(pk);
+                            if (expectedRows == null)
+                                continue;
+
+                            sawContainedKey |= pk.equals(containedKey);
+
+                            List<Pair<String, String>> actualRows = new ArrayList<>();
+                            while (partition.hasNext())
+                            {
+                                Row row = (Row) partition.next();
+                                String ck = ByteBufferUtil.string(row.clustering().bufferAt(0));
+                                Cell<?> cell = row.getCell(metadata.getColumn(valColumn));
+                                actualRows.add(Pair.create(ck, ByteBufferUtil.string(cell.buffer())));
+                            }
+                            assertEquals("row mismatch for key " + pk, expectedRows, actualRows);
+                        }
+                    }
+                }
+
+                if (sawContainedKey)
+                {
+                    DecoratedKey dk = store.decorateKey(ByteBufferUtil.bytes(containedKey));
+                    RowIndexEntry rie = ((BigTableReader) output).getRowIndexEntry(dk, SSTableReader.Operator.EQ);
+                    assertNotNull(rie);
+                    assertTrue("expected >500 index blocks for the ~1MiB contained partition, got " + rie.blockCount(),
+                              rie.blockCount() > 500);
+                    checkedContainedKeyBlockCount = true;
+                }
+            }
+            assertTrue("contained key was never found in any anticompaction output", checkedContainedKeyBlockCount);
+        }
+        finally
+        {
+            DatabaseDescriptor.setColumnIndexSizeInKiB(savedIndexSizeInKiB);
+        }
     }
 
     private SSTableReader writeFile(ColumnFamilyStore cfs, int count)

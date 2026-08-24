@@ -251,6 +251,25 @@ public class TopPartitionTrackerTest extends CQLTester
     }
 
     @Test
+    public void testGetEstimate()
+    {
+        createTable("create table %s (id bigint primary key, x int)");
+        DatabaseDescriptor.setMinTrackedPartitionSizeInBytes(new DataStorageSpec.LongBytesBound("0B"));
+        DatabaseDescriptor.setMaxTopSizePartitionCount(10);
+        Collection<Range<Token>> fullRange = singleton(r(0, 0));
+        TopPartitionTracker tpt = new TopPartitionTracker(getCurrentColumnFamilyStore().metadata());
+        TopPartitionTracker.Collector collector = new TopPartitionTracker.Collector(fullRange);
+        DecoratedKey trackedKey = dk(1);
+        long trackedSize = 12345L;
+        collector.trackPartitionSize(trackedKey, trackedSize);
+        tpt.merge(collector);
+
+        DecoratedKey untrackedKey = dk(2);
+        assertEquals(trackedSize, tpt.topSizes().getEstimate(trackedKey));
+        assertEquals(0, tpt.topSizes().getEstimate(untrackedKey));
+    }
+
+    @Test
     public void testRanges() throws UnknownHostException
     {
         createTable("create table %s (id bigint primary key, x int)");
