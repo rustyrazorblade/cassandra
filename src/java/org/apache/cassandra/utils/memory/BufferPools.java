@@ -44,13 +44,26 @@ public class BufferPools
     private static final long NETWORKING_MEMORY_USAGE_THRESHOLD = DatabaseDescriptor.getNetworkingCacheSizeInMiB() * 1024L * 1024L;
     private static final BufferPool NETWORKING_POOL = new BufferPool("networking", NETWORKING_MEMORY_USAGE_THRESHOLD, false);
 
+    /**
+     * Used by sstable partition writers for per-index-block bookkeeping. A buffer is held for as long as the writer
+     * that borrowed it, so partial recycling is enabled as it is for the chunk cache.
+     * <p>
+     * Deliberately not configurable: at most one buffer is outstanding per in-flight sstable writer, so the ceiling is
+     * a function of flush and compaction concurrency rather than of anything an operator would tune, and a request the
+     * pool cannot serve falls back to a direct allocation instead of failing.
+     */
+    private static final long PARTITION_WRITER_MEMORY_USAGE_THRESHOLD = 32L * 1024 * 1024;
+    private static final BufferPool PARTITION_WRITER_POOL = new BufferPool("partition-writers", PARTITION_WRITER_MEMORY_USAGE_THRESHOLD, true);
+
     static
     {
-        logger.info("Global buffer pool limit is {} for {} and {} for {}",
+        logger.info("Global buffer pool limit is {} for {}, {} for {} and {} for {}",
                     prettyPrintMemory(FILE_MEMORY_USAGE_THRESHOLD),
                     CHUNK_CACHE_POOL.name,
                     prettyPrintMemory(NETWORKING_MEMORY_USAGE_THRESHOLD),
-                    NETWORKING_POOL.name);
+                    NETWORKING_POOL.name,
+                    prettyPrintMemory(PARTITION_WRITER_MEMORY_USAGE_THRESHOLD),
+                    PARTITION_WRITER_POOL.name);
 
     }
     /**
@@ -69,10 +82,19 @@ public class BufferPools
         return NETWORKING_POOL;
     }
 
+    /**
+     * Buffers used by sstable partition writers for index bookkeeping, held for the lifetime of a single writer.
+     */
+    public static BufferPool forPartitionWriters()
+    {
+        return PARTITION_WRITER_POOL;
+    }
+
     public static void shutdownLocalCleaner(long timeout, TimeUnit unit) throws TimeoutException, InterruptedException
     {
         CHUNK_CACHE_POOL.shutdownLocalCleaner(timeout, unit);
         NETWORKING_POOL.shutdownLocalCleaner(timeout, unit);
+        PARTITION_WRITER_POOL.shutdownLocalCleaner(timeout, unit);
     }
 
 }

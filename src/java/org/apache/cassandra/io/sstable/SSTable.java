@@ -378,6 +378,16 @@ public abstract class SSTable
         TableMetrics getMetrics();
 
         CompressionDictionaryManager compressionDictionaryManager();
+
+        /**
+         * The size in bytes of the given partition, if the owner happens to know it exactly - for instance because a
+         * previous repair recorded it among the table's largest partitions. Writers use this to size per-partition
+         * bookkeeping up front; it is never a correctness input, so an owner with no such knowledge may always answer
+         * {@code -1}.
+         *
+         * @return the size of the partition in bytes, or {@code -1} if unknown
+         */
+        long getKnownPartitionSize(DecoratedKey key);
     }
 
     /**

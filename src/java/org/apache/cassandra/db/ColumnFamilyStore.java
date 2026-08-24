@@ -3523,6 +3523,16 @@ public <T> T withAllSSTables(final OperationType operationType, Function<Lifecyc
     }
 
     @Override
+    public long getKnownPartitionSize(DecoratedKey key)
+    {
+        if (topPartitions == null)
+            return -1;
+
+        long size = topPartitions.getSizeEstimate(key);
+        return size > 0 ? size : -1;
+    }
+
+    @Override
     public Map<String, Long> getTopTombstonePartitions()
     {
         if (topPartitions == null)

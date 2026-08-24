@@ -58,13 +58,15 @@ import org.apache.cassandra.utils.FBUtilities;
 import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
- * Baseline benchmark for the cost of writing a single large partition through {@link BigFormatPartitionWriter}.
+ * Benchmark for the cost of writing a single large partition through {@link BigFormatPartitionWriter}.
  *
- * <p>{@link BigFormatPartitionWriter#addIndexBlock()} grows its on-heap {@code indexOffsets} array by a fixed
- * increment of 10 elements, so a partition with n index blocks performs n/10 reallocations copying O(n^2) bytes in
- * total. A 20GiB partition at the default 64KiB granularity produces roughly 327,680 blocks, which is tens of GiB of
- * memcpy and on-heap garbage for a single partition. This test records allocation, wall-clock and GC cost in that
- * regime so the follow-up fix can be compared against it.
+ * <p>{@link BigFormatPartitionWriter#addIndexBlock()} used to grow its on-heap {@code indexOffsets} array by a fixed
+ * increment of 10 elements, so a partition with n index blocks performed n/10 reallocations copying O(n^2) bytes in
+ * total. A 20GiB partition at the default 64KiB granularity produces roughly 327,680 blocks, which was tens of GiB of
+ * memcpy and on-heap garbage for a single partition. The array is now presized from the partition's known or
+ * estimated size into a pooled off-heap buffer and doubled when an estimate undershoots. This test records
+ * allocation, wall-clock and GC cost in that regime, so a regression back towards the quadratic growth shows up as a
+ * change in the recorded numbers.
  *
  * <p>Two deliberate choices:
  *
@@ -160,8 +162,10 @@ public class LargePartitionWriteOverheadTest
         sb.append("- allocation measured with `ThreadMXBean.getThreadAllocatedBytes` on the compacting thread\n");
         sb.append("- a full GC is requested immediately before each measured window, so the GC columns count only\n");
         sb.append("  collections the operation itself provoked; at the default scale the burst still fits in young gen\n\n");
-        sb.append("Growing `indexOffsets` by 10 elements at a time copies ~`0.2 * blocks^2` bytes over a partition,\n");
-        sb.append("so most of the allocated total below is expected to be that copying rather than compaction proper.\n\n");
+        sb.append("`indexOffsets` is presized from the partition's known or estimated size into a pooled off-heap\n");
+        sb.append("buffer, reused across partitions within a writer and doubled rather than grown by a constant when\n");
+        sb.append("an estimate undershoots, so the allocated total below is compaction proper rather than offset\n");
+        sb.append("copying.\n\n");
         sb.append("| scenario | rows | index blocks | partition MiB | allocated MiB | bytes/block | wall clock ms | GC count | GC ms |\n");
         sb.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (Result result : results)
