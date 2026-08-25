@@ -33,11 +33,19 @@ import org.apache.cassandra.utils.memory.BufferPools;
  * Growth doubles the capacity and is expected to be rare - callers should size the array up front via
  * {@link #ensureCapacity(int)} whenever they have an estimate of the final element count.
  * <p>
- * Instances hold a pooled buffer until {@link #release()} is called and are not thread safe.
+ * Only requests up to {@link BufferPool#NORMAL_CHUNK_SIZE} are served from pooled chunks; a larger one falls back to
+ * a direct allocation that is freed on {@link #release()}. That is still one allocation per writer rather than one per
+ * resize, which is the cost this class exists to remove, but it means a very large partition does not benefit from
+ * recycling and does charge {@code -XX:MaxDirectMemorySize}.
+ * <p>
+ * Instances hold a buffer until {@link #release()} is called and are not thread safe.
  */
 final class PooledIntArray
 {
     private static final int MIN_CAPACITY = 16;
+
+    /** The largest element count whose byte size still fits an int, leaving the buffer size arithmetic safe. */
+    static final int MAX_CAPACITY = Integer.MAX_VALUE / Integer.BYTES;
 
     private ByteBuffer buffer;
     private int capacity;
@@ -57,7 +65,12 @@ final class PooledIntArray
         if (minElements <= capacity)
             return;
 
-        int newCapacity = Math.max(Math.max(minElements, MIN_CAPACITY), capacity * 2);
+        // in long, so a doubling past 2^29 elements is clamped rather than wrapping to a negative allocation size
+        long grown = Math.max(Math.max(minElements, MIN_CAPACITY), capacity * 2L);
+        int newCapacity = (int) Math.min(grown, MAX_CAPACITY);
+        if (newCapacity < minElements)
+            throw new IllegalArgumentException("cannot hold " + minElements + " offsets; the limit is " + MAX_CAPACITY);
+
         BufferPool pool = BufferPools.forPartitionWriters();
         ByteBuffer fresh = pool.get(newCapacity * Integer.BYTES, BufferType.OFF_HEAP);
         fresh.order(ByteOrder.nativeOrder());
@@ -82,8 +95,13 @@ final class PooledIntArray
     int[] toArray(int count)
     {
         int[] copy = new int[count];
-        for (int i = 0; i < count; i++)
-            copy[i] = get(i);
+        if (count == 0)
+            return copy;
+
+        ByteBuffer source = buffer.duplicate().order(buffer.order());
+        source.position(0);
+        source.limit(count * Integer.BYTES);
+        source.asIntBuffer().get(copy, 0, count);
         return copy;
     }
 
