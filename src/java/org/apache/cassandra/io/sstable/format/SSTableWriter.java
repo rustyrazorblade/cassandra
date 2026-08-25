@@ -295,6 +295,16 @@ public abstract class SSTableWriter extends SSTable implements Transactional
     public final void onSSTableWriterSwitched()
     {
         observers.forEach(SSTableFlushObserver::onSSTableWriterSwitched);
+        onSwitched();
+    }
+
+    /**
+     * Called once no further partitions will be appended to this writer. {@link SSTableRewriter} keeps every writer it
+     * has switched away from alive until the whole rewrite commits, so anything held only for the append path should
+     * be released here rather than waiting for transactional cleanup. Implementations must be idempotent.
+     */
+    protected void onSwitched()
+    {
     }
 
     public final Throwable commit(Throwable accumulate)
@@ -454,6 +464,24 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         private List<Index.Group> indexGroups;
         @Nullable
         private CompressionDictionaryManager compressionDictionaryManager;
+        private long maxInputPartitionSizeHint = -1;
+
+        /**
+         * The size of the largest partition held by the sstables this writer rewrites, for callers that have already
+         * computed it and would otherwise make every writer over the same transaction rescan the inputs. A format
+         * whose partition writer does no size-dependent bookkeeping ignores it; a value {@code <= 0} means no
+         * estimate is available.
+         */
+        public B setMaxInputPartitionSizeHint(long maxInputPartitionSizeHint)
+        {
+            this.maxInputPartitionSizeHint = maxInputPartitionSizeHint;
+            return (B) this;
+        }
+
+        public long getMaxInputPartitionSizeHint()
+        {
+            return maxInputPartitionSizeHint;
+        }
 
         public B setMetadataCollector(MetadataCollector metadataCollector)
         {

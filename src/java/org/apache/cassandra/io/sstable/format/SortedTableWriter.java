@@ -360,6 +360,14 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
     }
 
     @Override
+    protected void onSwitched()
+    {
+        // SSTableRewriter holds every switched-away writer until the rewrite commits, so a compaction emitting many
+        // sstables would otherwise hold one partition-writer buffer per output for the whole run.
+        partitionWriter.releaseBuffers();
+    }
+
+    @Override
     public final long getFilePointer()
     {
         return dataWriter.position();

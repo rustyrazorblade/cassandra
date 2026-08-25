@@ -76,6 +76,14 @@ public abstract class SortedTablePartitionWriter implements AutoCloseable
         this.version = version;
     }
 
+    /**
+     * Releases any pooled or off-heap bookkeeping held between partitions. Called once no further partitions will be
+     * written, which happens well before transactional cleanup when a rewrite emits several sstables. Idempotent.
+     */
+    public void releaseBuffers()
+    {
+    }
+
     protected void reset()
     {
         this.partitionStartPosition = writer.position();

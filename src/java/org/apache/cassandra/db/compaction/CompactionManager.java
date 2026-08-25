@@ -1841,34 +1841,10 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                          .build(txn, cfs);
     }
 
-    public static SSTableWriter createWriterForAntiCompaction(ColumnFamilyStore cfs,
-                                                              File compactionFileLocation,
-                                                              int expectedBloomFilterSize,
-                                                              long repairedAt,
-                                                              TimeUUID pendingRepair,
-                                                              boolean isTransient,
-                                                              Collection<SSTableReader> sstables,
-                                                              ILifecycleTransaction txn)
-    {
-        UUID originatingHostId = StorageService.instance.getLocalHostUUID();
-        return createWriterForAntiCompaction(cfs,
-                                             compactionFileLocation,
-                                             expectedBloomFilterSize,
-                                             repairedAt,
-                                             pendingRepair,
-                                             isTransient,
-                                             txn,
-                                             minSSTableLevel(sstables),
-                                             originatingHostId,
-                                             MetadataCollector.computeCommitLogIntervals(sstables, originatingHostId),
-                                             SerializationHeader.make(cfs.metadata(), sstables),
-                                             -1);
-    }
-
     /**
-     * Same as {@link #createWriterForAntiCompaction(ColumnFamilyStore, File, int, long, TimeUUID, boolean, Collection, ILifecycleTransaction)},
-     * but with the values that depend only on the input sstables already computed, so a caller creating several writers
-     * over the same inputs pays for them once instead of once per writer.
+     * Creates one of the writers an anticompaction splits its inputs into. The values that depend only on the input
+     * sstables are passed in already computed, so a caller creating several writers over the same inputs pays for them
+     * once instead of once per writer; {@link #antiCompactGroup} is the only such caller.
      */
     private static SSTableWriter createWriterForAntiCompaction(ColumnFamilyStore cfs,
                                                                File compactionFileLocation,
@@ -1900,9 +1876,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                       .setSecondaryIndexGroups(cfs.indexManager.listIndexGroups())
                       .setCompressionDictionaryManager(cfs.compressionDictionaryManager());
 
-        // only the big format sizes its index bookkeeping from the input partition sizes; other formats ignore the hint
-        if (builder instanceof BigTableWriter.Builder)
-            ((BigTableWriter.Builder) builder).setMaxInputPartitionSizeHint(maxInputPartitionSizeHint);
+        builder.setMaxInputPartitionSizeHint(maxInputPartitionSizeHint);
 
         return builder.build(txn, cfs);
     }

@@ -127,6 +127,11 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
         return null;
     }
 
+    /**
+     * @return an on-heap copy of this partition's index block offsets, or {@code null} if it has no index blocks, as
+     *         for a partition carrying only a partition-level deletion. Building the copy is only worthwhile when
+     *         {@link #indexSamples()} is non-null, since that is the only case {@link RowIndexEntry#create} reads it.
+     */
     public int[] offsets()
     {
         return columnIndexCount > 0
@@ -275,8 +280,14 @@ public class BigFormatPartitionWriter extends SortedTablePartitionWriter
     }
 
     @Override
-    public void close()
+    public void releaseBuffers()
     {
         indexOffsets.release();
+    }
+
+    @Override
+    public void close()
+    {
+        releaseBuffers();
     }
 }
