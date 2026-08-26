@@ -1,4 +1,5 @@
 4.0.22
+ * Discard data for a dropped column instead of filtering it by timestamp, which broke compaction (CASSANDRA-21607)
  * Make runWithCompactionsDisabled return non-null on success (CASSANDRA-21527)
  * Validate authz before performing role check in LIST ROLES/PERMISSIONS (CASSANDRA-21560)
  * Ensure transferred_ranges reset on decommision re-attempt when pending ranges cannot be proven continous (CASSANDRA-16290)

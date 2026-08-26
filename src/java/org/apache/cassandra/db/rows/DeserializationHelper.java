@@ -52,6 +52,7 @@ public class DeserializationHelper
     private final ColumnFilter columnsToFetch;
     private ColumnFilter.Tester tester;
 
+    private final TableMetadata metadata;
     private final boolean hasDroppedColumns;
     private final Map<ByteBuffer, DroppedColumn> droppedColumns;
     private DroppedColumn currentDroppedComplex;
@@ -62,6 +63,7 @@ public class DeserializationHelper
         this.flag = flag;
         this.version = version;
         this.columnsToFetch = columnsToFetch;
+        this.metadata = metadata;
         this.droppedColumns = metadata.droppedColumns;
         this.hasDroppedColumns = droppedColumns.size() > 0;
     }
@@ -125,6 +127,19 @@ public class DeserializationHelper
     public void endOfComplexColumn()
     {
         this.tester = null;
+    }
+
+    /**
+     * Returns whether {@code column} was dropped and not re-added.  A re-added column returns false; {@link #isDropped}
+     * filters it by timestamp instead.
+     */
+    public boolean isDroppedColumn(ColumnMetadata column)
+    {
+        if (!hasDroppedColumns)
+            return false;
+
+        ByteBuffer name = column.name.bytes;
+        return droppedColumns.containsKey(name) && metadata.getColumn(name) == null;
     }
 
     public boolean isDropped(Cell<?> cell, boolean isComplex)
