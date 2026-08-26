@@ -640,7 +640,7 @@ public class UnfilteredSerializer
     private void readSimpleColumn(ColumnMetadata column, DataInputPlus in, SerializationHeader header, DeserializationHelper helper, Row.Builder builder, LivenessInfo rowLiveness)
     throws IOException
     {
-        if (helper.includes(column))
+        if (helper.includes(column) && !helper.isDroppedColumn(column))
         {
             Cell<byte[]> cell = Cell.serializer.deserialize(in, rowLiveness, column, header, helper, ByteArrayAccessor.instance);
             if (helper.includes(cell, rowLiveness) && !helper.isDropped(cell, false))
@@ -655,7 +655,7 @@ public class UnfilteredSerializer
     private void readComplexColumn(ColumnMetadata column, DataInputPlus in, SerializationHeader header, DeserializationHelper helper, boolean hasComplexDeletion, Row.Builder builder, LivenessInfo rowLiveness)
     throws IOException
     {
-        if (helper.includes(column))
+        if (helper.includes(column) && !helper.isDroppedColumn(column))
         {
             helper.startOfComplexColumn(column);
             if (hasComplexDeletion)

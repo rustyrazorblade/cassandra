@@ -1,4 +1,5 @@
 4.0.22
+ * Discard data for a dropped column instead of filtering it by timestamp, which broke compaction (CASSANDRA-21607)
  * Fixes for fully-expired SSTable index notification in compaction (CASSANDRA-21577)
  * During streaming Bounds.getNonOverlappingBounds produces incorrect bounds leading to row/counter cache not invalidate correctly (CASSANDRA-21594)
  * Make runWithCompactionsDisabled return non-null on success (CASSANDRA-21527)
