@@ -109,9 +109,7 @@ public class StatefulCursorTest extends CQLTester
 
     /**
      * The cursor's cell-liveness check must agree with the iterator path's oracle,
-     * {@code AbstractCell.hasInvalidDeletions()}, on every combination — including a cell that
-     * declares a TTL with no expiration time, which the previous predicate could not report because
-     * it tested "has an expiration time" where the oracle tests "has a TTL".
+     * {@code AbstractCell.hasInvalidDeletions()}, on every combination of TTL and expiration time.
      */
     @Test
     public void cellDeletionPredicateAgreesWithCellOracle()
@@ -120,8 +118,7 @@ public class StatefulCursorTest extends CQLTester
         ByteBuffer value = Int32Type.instance.decompose(1);
 
         // A Cell cannot hold a negative localExpirationTime: the BufferCell constructor runs it
-        // through Cell.deletionTimeLongToUnsignedInteger, which rejects negatives. So the oracle is
-        // only defined over the values below, and the negative cases are asserted separately.
+        // through Cell.deletionTimeLongToUnsignedInteger, which rejects negatives.
         for (int ttl : new int[]{ Cell.NO_TTL, 1, 100, -1, Integer.MIN_VALUE })
         {
             for (long ldt : new long[]{ Cell.NO_DELETION_TIME, Cell.INVALID_DELETION_TIME, 0, 1,
@@ -134,29 +131,26 @@ public class StatefulCursorTest extends CQLTester
             }
         }
 
-        // the combination the old predicate could never report: its last clause asked whether the
-        // cell had an EXPIRATION TIME, contradicting the ldt == NO_DELETION_TIME it was ANDed with
         assertTrue("a cell with a TTL but no expiration time is invalid",
                    StatefulCursor.hasInvalidCellDeletion(100, Cell.NO_DELETION_TIME));
         assertFalse("a cell with no TTL and no expiration time is the normal live cell",
                     StatefulCursor.hasInvalidCellDeletion(Cell.NO_TTL, Cell.NO_DELETION_TIME));
-        // a negative expiration time cannot occur in a Cell, and off disk it only decodes
-        // alongside a negative TTL, so neither reference can express this pair
+        // Off disk a negative expiration time decodes only alongside a negative TTL, so no Cell
+        // and no real decode produces this pair.
         assertTrue("a negative expiration time is invalid",
                    StatefulCursor.hasInvalidCellDeletion(Cell.NO_TTL, -1));
     }
 
     /**
-     * The row-liveness check has the same oracle mismatch: {@code AbstractRow.hasInvalidDeletions()}
-     * guards with {@code LivenessInfo.isExpiring()}, which is "has a TTL".
+     * The cursor's row-liveness check must agree with the iterator path's oracle,
+     * {@code AbstractRow.hasInvalidDeletions()}, which guards with
+     * {@code LivenessInfo.isExpiring()}, that is "has a TTL".
      */
     @Test
     public void rowLivenessPredicateAgreesWithRowOracle()
     {
         // ExpiringLivenessInfo asserts ttl != NO_TTL && localExpirationTime != NO_EXPIRATION_TIME,
-        // so — as with the cell oracle — the reference type cannot represent the corrupt states the
-        // cursor decodes off disk. Compare against the oracle over what it CAN represent, then
-        // assert the corrupt domain against the specification.
+        // so the oracle cannot hold a TTL beside the no-expiration sentinel.
         for (int ttl : new int[]{ LivenessInfo.NO_TTL, 1, 100, -1, Integer.MIN_VALUE })
         {
             for (long ldt : new long[]{ LivenessInfo.NO_EXPIRATION_TIME, 0, 1, 1_700_000_000L, -1,
@@ -173,8 +167,7 @@ public class StatefulCursorTest extends CQLTester
             }
         }
 
-        // the combination the old predicate could never report, and which no LivenessInfo can hold:
-        // a corrupt negative TTL decoded alongside the no-expiration sentinel
+        // the pair the loop skips: a negative TTL beside the no-expiration sentinel
         assertTrue("row liveness with a negative TTL is invalid",
                    StatefulCursor.hasInvalidRowLiveness(-1, LivenessInfo.NO_EXPIRATION_TIME));
         assertFalse("row liveness with no TTL is not expiring, so there is nothing to validate",
@@ -182,10 +175,9 @@ public class StatefulCursorTest extends CQLTester
     }
 
     /**
-     * When the dropped-column filter discards every remaining column of a row, readCellHeader
-     * surfaces no cell and returns UNFILTERED_END, leaving the cell liveness describing the
-     * DISCARDED cell. Validation keys off exactly that state, so pin it: the drop-filtered row must
-     * report UNFILTERED_END and a surviving row must report a cell state.
+     * The dropped-column filter can discard every remaining column of a row. readCellHeader then
+     * surfaces no cell and returns UNFILTERED_END, leaving the cell liveness of the DISCARDED cell
+     * in place. Validation keys off exactly that state, so this test pins it.
      */
     @Test
     public void readCellHeaderReturnsUnfilteredEndWhenEveryColumnIsDropFiltered() throws Throwable
@@ -194,8 +186,8 @@ public class StatefulCursorTest extends CQLTester
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
-        // Both rows are written below the wall-clock droppedTime recorded by the ALTER, so the drop
-        // filter definitely covers the dropped cell.
+        // Both rows carry a timestamp below the wall-clock droppedTime the ALTER records, so the
+        // drop filter covers the dropped cell.
         // ck 0: only the to-be-dropped column is set, so after the drop the row has no cells left
         execute("INSERT INTO %s (pk, ck, dropped) VALUES (0, 0, 1) USING TIMESTAMP 1000");
         // ck 1: a surviving cell, the control for the same code path
@@ -223,7 +215,7 @@ public class StatefulCursorTest extends CQLTester
 
     /**
      * The column-subset fields are row state. A range tombstone marker has no columns, so reading
-     * one must clear them; otherwise missingColumnsMask() keeps reporting the previous row's subset
+     * one must clear them. Otherwise missingColumnsMask() keeps reporting the previous row's subset
      * while rowColumns() is null.
      */
     @Test
@@ -234,8 +226,8 @@ public class StatefulCursorTest extends CQLTester
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
-        // both columns must appear SOMEWHERE in the sstable, or the header superset is just {a} and
-        // the row below is an all-columns row rather than a subset-encoded one
+        // Both columns must appear SOMEWHERE in the sstable. Otherwise the header superset holds
+        // only {a}, and the row below encodes all columns rather than a subset.
         execute("INSERT INTO %s (pk, ck, a) VALUES (0, 0, 1)");
         execute("INSERT INTO %s (pk, ck, b) VALUES (0, 1, 2)");
         execute("DELETE FROM %s WHERE pk = 0 AND ck > 5");
@@ -274,20 +266,18 @@ public class StatefulCursorTest extends CQLTester
     }
 
     /**
-     * The cell walk must consume exactly the body its row header declared. Nothing else checks that,
-     * so a cell-level desync would run on into the NEXT unfiltered and surface far from its cause —
-     * either as a corruption report naming an unrelated offset or as garbage written to the output.
+     * The cell walk must consume exactly the body its row header declared. Nothing else checks that.
+     * A cell-level desync would run on into the NEXT unfiltered and surface far from its cause: it
+     * would report corruption at an unrelated offset, or write garbage to the output.
      * <p>
-     * Driven through the plain reader rather than {@link StatefulCursor} because the descriptor has
-     * to be supplied: over-declaring {@link UnfilteredDescriptor#size()} by one byte is a desync the
-     * check must catch, and the unmodified descriptor is the control that it does not fire normally.
-     * Off-by-one matters here — the check runs before the next unfiltered's flag byte is consumed —
-     * so a version comparing against the wrong position would fail the control.
+     * The test drives the plain reader rather than {@link StatefulCursor} because it must supply the
+     * descriptor. Over-declaring {@link UnfilteredDescriptor#size()} by one byte is the desync the
+     * check must catch. The check runs before the next unfiltered's flag byte is consumed, so a
+     * comparison against the wrong position would fail the control read.
      * <p>
-     * The desync is reported as a {@link CorruptSSTableException} wrapping the diagnostic, not as a bare
-     * assertion, so it reaches callers through the same path as any other corrupted sstable and fires
-     * whether or not {@code -ea} is on. The cause carries the offsets and the wrapper carries the file
-     * name, so the cause is what this asserts against.
+     * The reader reports the desync as a {@link CorruptSSTableException} wrapping the diagnostic,
+     * not as a bare assertion, so it fires whether or not {@code -ea} is on. The cause carries the
+     * offsets and the wrapper carries the file name.
      */
     @Test
     public void cellWalkMustConsumeExactlyTheDeclaredRowBody() throws Throwable
@@ -309,9 +299,9 @@ public class StatefulCursorTest extends CQLTester
         driveReader(sstable, false);
         assertFalse("the control read must not have marked the sstable suspect", sstable.isMarkedSuspect());
 
-        // No assertion runs inside the try; every check that observes the desync runs after the block.
-        // The catch is narrow to CorruptSSTableException, so any other throwable propagates as itself
-        // instead of being recorded as the expected one.
+        // Every check that observes the desync runs after the try block. The catch is narrow to
+        // CorruptSSTableException, so any other throwable propagates as itself instead of standing
+        // in for the expected one.
         CorruptSSTableException tripped = null;
         try
         {
@@ -335,9 +325,9 @@ public class StatefulCursorTest extends CQLTester
      * Reads every unfiltered of the sstable through the plain cursor reader.
      *
      * @param overDeclareRowBody report each row body as one byte longer than it is. This moves the
-     *                           EXPECTED end where a real desync would move the ACTUAL position; the
-     *                           two meet at the same inequality, which is what makes the {@code ==}
-     *                           comparison observable without needing a corrupt sstable.
+     *                           EXPECTED end where a real desync would move the ACTUAL position.
+     *                           Both reach the same inequality, so the equality check fires without
+     *                           a corrupt sstable.
      */
     private static void driveReader(SSTableReader sstable, boolean overDeclareRowBody) throws Exception
     {
