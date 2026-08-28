@@ -32,8 +32,7 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.TimeUUID;
 
 abstract class AbstractCompactionPipeline extends CompactionInfo.Holder implements AutoCloseable {
-    // Which pipeline each compaction selected, as a delta across one compaction. Read by
-    // CompactionPipelineCounts (test), which documents why supportability alone cannot establish it.
+    // Pipeline selection counts, read only by CompactionPipelineCounts in the test tree.
     private static final LongAdder CURSOR_PIPELINES_CREATED = new LongAdder();
     private static final LongAdder ITERATOR_PIPELINES_CREATED = new LongAdder();
 

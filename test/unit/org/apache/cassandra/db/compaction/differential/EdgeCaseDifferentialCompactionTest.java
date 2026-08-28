@@ -19,30 +19,40 @@
 package org.apache.cassandra.db.compaction.differential;
 
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 import org.junit.Test;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
- * Edge-case corpus for the differential cursor-vs-iterator compaction harness, covering the
- * CURRENTLY SUPPORTED cursor compaction surface (see CursorCompactor.isSupported). Every
- * scenario here must run the cursor path for real — the harness fails loudly on silent
- * fallback. Scenarios for unsupported shapes belong in CursorSupportMatrixTest instead.
+ * Holds the edge-case scenarios that compare cursor compaction against iterator compaction.
  *
- * Every scenario runs the differential at TWO generations (see
- * assertCursorMatchesIteratorAcrossGenerations): gen 2 re-reads genuinely cursor-produced
- * outputs, so every scenario is also decoded from input shapes only a compaction produces. It is
- * not a write-side backstop; gen 1's byte comparison is.
+ * Every scenario here uses a table shape that cursor compaction supports: see
+ * CursorCompactor.isSupported. Every scenario must run the cursor path, and the test harness
+ * fails if the code falls back to the iterator path. Put a scenario for an unsupported shape in
+ * CursorSupportMatrixTest instead.
+ *
+ * Every scenario compacts twice: see assertCursorMatchesIteratorAcrossGenerations. The second
+ * compaction reads the output of the first, which only a compaction can produce, so the test
+ * also reads input shapes that no flush makes. The byte comparison in the first compaction is
+ * what tests the write side.
  */
 public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTester
 {
@@ -50,8 +60,8 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     /**
      * Static-column table where some partitions have NO static values: an empty static row is
      * written for those partitions but must not be counted in stats (totalRows/totalColumnsSet).
-     * Found by the randomized soak; the original staticRows scenario gave every
-     * partition static data and so never produced an empty static row.
+     * The staticRows scenario gives every partition static data, so it never writes an empty
+     * static row.
      */
     @Test
     public void emptyStaticRows() throws Exception
@@ -64,7 +74,6 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         {
             for (long pk = 0; pk < 8; pk++)
             {
-                // only even partitions ever get a static value
                 if (pk % 2 == 0)
                     execute("INSERT INTO %s (pk, s1, ck, v) VALUES (?, ?, ?, ?)", pk, "static" + pk, (long) round, "v" + round);
                 else
@@ -75,18 +84,232 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
 
         CapturedOutput out = assertCursorMatchesIteratorAcrossGenerations(cfs);
 
-        // ABSOLUTE: the empty static rows written for the four odd partitions must not be counted.
-        // 8 partitions x 2 clusterings = 16 regular rows, plus one NON-empty static row for each of
-        // the 4 even partitions = 20. statsSummary carries totalRows, so an over-count shared by both
-        // paths would pass byte-equality and fail here.
+        // The empty static rows of the four odd partitions must not be counted. The correct count
+        // is 20: 8 partitions with 2 clusterings give 16 regular rows, and each of the 4 even
+        // partitions adds one static row that is not empty. If both paths counted the empty rows,
+        // the byte comparison would still pass, and only this test would fail.
         assertEquals("expected a single compaction output", 1, out.sstables.size());
         assertTrue("an absent static row was counted: expected totalRows=20 (16 regular + 4 " +
                    "non-empty static), got: " + out.sstables.get(0).statsSummary,
                    out.sstables.get(0).statsSummary.contains("totalRows=20 "));
-        // totalColumnsSet is unaffected by that defect — an empty static row contributes zero columns —
-        // so pinning it keeps that half of the claim honest: 16 regular v cells + 4 static s1 cells.
+        // An empty static row adds no column, so that fault cannot change totalColumnsSet. Test it
+        // as well, to show the count is right for the other reason: 16 regular v cells and 4
+        // static s1 cells.
         assertTrue("expected totalColumnsSet=20, got: " + out.sstables.get(0).statsSummary,
                    out.sstables.get(0).statsSummary.contains("totalColumnsSet=20 "));
+    }
+
+    /**
+     * Merges multi-cell collections across sstables. It covers:
+     *  - updates of single elements;
+     *  - overwrites of a whole collection, which give a complex deletion and new cells;
+     *  - columns that hold a deletion and no cell;
+     *  - merges of UDT fields.
+     */
+    @Test
+    public void multiCellColumnsAcrossSSTables() throws Exception
+    {
+        String udt = createType("CREATE TYPE %s (a int, b text)");
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, s set<int>, u " + udt + ", v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 4; pk++)
+            for (long ck = 0; ck < 8; ck++)
+                execute("INSERT INTO %s (pk, ck, m, s, u, v) VALUES (?, ?, ?, ?, {a: ?, b: ?}, ?)",
+                        pk, ck, map("k" + ck, ck, "shared", pk), set((int) ck, 7), (int) ck, "b" + ck, "v" + ck);
+        flush();
+
+        // sstable 2 updates single elements, which adds new paths to columns that already exist.
+        for (long pk = 0; pk < 4; pk++)
+            for (long ck = 0; ck < 8; ck += 2)
+            {
+                execute("UPDATE %s SET m[?] = ?, s = s + ? WHERE pk = ? AND ck = ?", "added" + ck, ck * 10, set(99), pk, ck);
+                execute("UPDATE %s SET u.b = ? WHERE pk = ? AND ck = ?", "upd" + ck, pk, ck);
+            }
+        flush();
+
+        // sstable 3 overwrites whole collections, which gives a complex deletion and new cells. It
+        // also deletes a collection without writing a cell, and overwrites elements at paths that
+        // already exist, with newer timestamps.
+        execute("UPDATE %s SET m = ? WHERE pk = ? AND ck = ?", map("fresh", 1L), 0L, 0L);
+        execute("DELETE m FROM %s WHERE pk = ? AND ck = ?", 1L, 2L);
+        execute("UPDATE %s SET m[?] = ? WHERE pk = ? AND ck = ?", "shared", 555L, 2L, 4L);
+        execute("DELETE s FROM %s WHERE pk = ? AND ck = ?", 3L, 6L);
+        flush();
+
+        assertCursorMatchesIterator(cfs);
+    }
+
+    /**
+     * Merges multi-cell columns across sstables whose headers were built against different
+     * TableMetadata versions.
+     *
+     * An ALTER TYPE ADD rebuilds the column through ColumnMetadata.withNewType; see
+     * CASSANDRA-13776. An sstable flushed before that ALTER therefore holds a different
+     * ColumnMetadata instance for one column than an sstable flushed after it, because
+     * SSTableReader.header is built once, when the sstable is opened. The merge must therefore
+     * compare columns by value, and not by reference.
+     *
+     * This test does not use the differential harness, because that harness opens every input
+     * again against the current schema. That would give both inputs the same instance and remove
+     * the condition under test. Only the sstables that were opened first hold different
+     * instances, and those are the ones production compacts.
+     *
+     * The test therefore does three things: it shows that the two instances differ, it runs a
+     * cursor compaction on the sstables as they were opened, and it reads the result with CQL.
+     * Field f2 is a good test value, because sstable 2 never writes it. Only the complex deletion
+     * of the overwrite can remove f2. If the merge loses that deletion, f2 comes back, and no
+     * timestamp can hide that.
+     */
+    @Test
+    public void complexColumnsAcrossTypeAlter() throws Exception
+    {
+        String udt = createType("CREATE TYPE %s (f1 text, f2 text)");
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, u " + udt + ", v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // sstable 1 gets its header from the schema as it is before the ALTER.
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET u.f1 = ?, u.f2 = ?, v = ? WHERE pk = ? AND ck = ?",
+                    "old" + ck, "keepable" + ck, "x" + ck, 1L, ck);
+        flush();
+
+        // This ALTER rebuilds the ColumnMetadata of column u. The route is
+        // TableMetadata.withUpdatedUserType and then withNewType.
+        execute("ALTER TYPE " + KEYSPACE + "." + udt + " ADD f3 text");
+
+        // sstable 2 gets its header from the schema as it is after the ALTER. It overwrites whole
+        // columns, which gives a complex deletion and new cells. One row gets a deletion and no
+        // cell, which makes the merge look for the deletion on the old instance as well.
+        for (long ck = 0; ck < 6; ck += 2)
+            execute("UPDATE %s USING TIMESTAMP 2000 SET u = {f1: ?, f3: ?} WHERE pk = ? AND ck = ?",
+                    "new" + ck, "three" + ck, 1L, ck);
+        execute("DELETE u FROM %s USING TIMESTAMP 2000 WHERE pk = 1 AND ck = 5");
+        flush();
+
+        // The two open sstables must hold different ColumnMetadata instances for column u.
+        List<ColumnMetadata> uInstances = new ArrayList<>();
+        for (SSTableReader r : cfs.getLiveSSTables())
+            for (ColumnMetadata c : r.header.columns(false))
+                if (c.name.toString().equals("u"))
+                    uInstances.add(c);
+        assertEquals("expected one u column per input sstable", 2, uInstances.size());
+        assertNotSame("ALTER TYPE no longer skews header instances — scenario is vacuous",
+                     uInstances.get(0), uInstances.get(1));
+
+        // Compact the sstables as production does, with the two different instances in place.
+        // commitCompaction fails if the cursor path does not run.
+        commitCompaction(cfs, cfs.getLiveSSTables(), true,
+                         cfs.getDefaultGcBefore(FBUtilities.nowInSeconds()));
+
+        // The correct result: an overwritten row loses f2 to the deletion of the overwrite; a row
+        // that was not overwritten keeps f1 and f2; the row that was deleted loses all of u.
+        assertRows(execute("SELECT ck, u.f1, u.f2, u.f3, v FROM %s WHERE pk = 1"),
+                   row(0L, "new0", null, "three0", "x0"),
+                   row(1L, "old1", "keepable1", null, "x1"),
+                   row(2L, "new2", null, "three2", "x2"),
+                   row(3L, "old3", "keepable3", null, "x3"),
+                   row(4L, "new4", null, "three4", "x4"),
+                   row(5L, null, null, null, "x5"));
+    }
+
+    /**
+     * Tests a row deletion and a collection deletion that are exactly equal. They share one USING
+     * TIMESTAMP value, and they are made in the same second, so their local deletion times are
+     * equal as well.
+     *
+     * The iterator keeps a complex deletion only if it supersedes the active deletion: see
+     * Row.Merger.ColumnDataReducer. If the two are equal, the iterator drops the complex deletion.
+     * A merge that instead keeps the deletion when the two are equal writes a spurious
+     * HAS_COMPLEX_DELETION flag and spurious deletion bytes.
+     *
+     * The two deletions go into different sstables, so compaction reconciles them, and not the
+     * memtable.
+     *
+     * The local deletion time comes from the server clock. The loop below reads the times back and
+     * repeats the setup until both statements fall in the same second, so the test is repeatable.
+     */
+    @Test
+    public void rowAndComplexDeletionEqualityTies() throws Exception
+    {
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, v text, " +
+                        "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            cfs.disableAutoCompaction();
+
+            // Data around the deletions, and data they shadow. It gets its own sstable.
+            for (long ck = 0; ck < 4; ck++)
+            {
+                execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?) USING TIMESTAMP 100", 0L, ck, "keep" + ck);
+                execute("UPDATE %s USING TIMESTAMP 100 SET m[?] = ?, v = ? WHERE pk = ? AND ck = ?",
+                        "k" + ck, ck, "old" + ck, 1L, ck);
+            }
+            flush();
+
+            // The collection deletion, alone in its sstable.
+            for (long ck = 0; ck < 4; ck++)
+                execute("DELETE m FROM %s USING TIMESTAMP 10000 WHERE pk = ? AND ck = ?", 1L, ck);
+            flush();
+
+            // The row deletion, with the same USING TIMESTAMP, in a third sstable.
+            for (long ck = 0; ck < 4; ck++)
+                execute("DELETE FROM %s USING TIMESTAMP 10000 WHERE pk = ? AND ck = ?", 1L, ck);
+            flush();
+
+            // The two deletions are equal only if both were made in the same second.
+            Set<Long> ldts = new HashSet<>();
+            for (SSTableReader r : cfs.getLiveSSTables())
+            {
+                long ldt = r.getSSTableMetadata().maxLocalDeletionTime;
+                if (ldt != Long.MAX_VALUE)
+                    ldts.add(ldt);
+            }
+            if (ldts.size() == 1)
+            {
+                assertCursorMatchesIteratorAcrossGenerations(cfs);
+                return;
+            }
+            // The clock passed a second boundary between the two deletes. Build the data again.
+        }
+        fail("could not land both deletions in the same second after 8 attempts");
+    }
+
+    /** Mixes complex deletions with range tombstones. A range delete shadows whole rows, complex
+     *  columns included. A complex deletion shadows the cells of one column. Both are merged
+     *  across sstables. */
+    @Test
+    public void complexDeletionsWithRangeTombstones() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long pk = 0; pk < 3; pk++)
+            for (long ck = 0; ck < 20; ck++)
+                execute("INSERT INTO %s (pk, ck, m, v) VALUES (?, ?, ?, ?)", pk, ck, map("a" + ck, ck, "b", pk), "v" + ck);
+        flush();
+
+        // Range tombstones above rows that hold complex data, and complex deletions inside rows
+        // that survive.
+        execute("DELETE FROM %s WHERE pk = 0 AND ck >= 5 AND ck < 12");
+        execute("UPDATE %s SET m = ? WHERE pk = 0 AND ck = ?", map("replaced", 1L), 2L);
+        execute("DELETE m FROM %s WHERE pk = 1 AND ck = ?", 15L);
+        flush();
+
+        // Newer writes into the deleted ranges, and into paths that the earlier complex deletion
+        // shadows.
+        execute("INSERT INTO %s (pk, ck, m, v) VALUES (?, ?, ?, ?)", 0L, 7L, map("resurrect", 7L), "back");
+        execute("UPDATE %s SET m[?] = ? WHERE pk = 1 AND ck = ?", "post", 999L, 15L);
+        flush();
+
+        assertCursorMatchesIterator(cfs);
     }
 
     /** Reversed clustering order changes on-disk ordering and bound comparisons. */
@@ -272,12 +495,13 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
-     * Partition keys larger than 128 bytes: every other scenario in this suite uses an 8-byte
-     * bigint pk, which never exercises anything beyond the smallest possible key. Partition keys
-     * are length-prefixed with an unsigned SHORT (not a vint), so there is no 128-byte encoding
-     * boundary here the way there is for clustering/cell values — this scenario instead pins
-     * that large (100s-1000s of bytes) partition keys round-trip correctly through the cursor's
-     * partition-key copy/compare/index paths, which nothing else in this suite reaches.
+     * Partition keys of 100s to 1000s of bytes. Every other scenario in this suite uses an 8-byte
+     * bigint pk, which is the smallest possible key.
+     *
+     * A partition key is length-prefixed with an unsigned SHORT, and not with a vint, so it has no
+     * 128-byte encoding boundary. Clustering and cell values do have one. This scenario therefore
+     * pins that a large key round-trips through the cursor's partition-key copy, compare and index
+     * paths, which nothing else in this suite reaches.
      */
     @Test
     public void largePartitionKey() throws Exception
@@ -300,8 +524,8 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         assertEquals("expected four overlapping inputs; a lost flush() would degrade this to a single-sstable rewrite",
                      4, cfs.getLiveSSTables().size());
         CapturedOutput out = assertCursorMatchesIteratorAcrossGenerations(cfs);
-        // and that the keys really are large: shrinking pks would leave the scenario passing while
-        // its name and javadoc still claimed 100s-1000s of bytes
+        // The keys must really be large. A smaller pks array would leave the scenario passing
+        // while its name and javadoc still claim 100s to 1000s of bytes.
         assertTrue("the 1000-byte partition key is not in the output",
                    allJson(out).contains("z".repeat(1000)));
     }
@@ -666,15 +890,16 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
-     * Empty clustering values on a DESC (reversed) clustering column, found by the randomized
-     * soak (seed 99303954147053). Every base type sorts empty before
-     * values, so a reversed column sorts empty AFTER values (ReversedType swaps operands
-     * around the base comparison). The cursor path's raw clustering comparison decided
-     * empty-vs-valued purely from the serialized flag bits, ignoring reversal:
+     * Empty clustering values on a DESC (reversed) clustering column. The randomized soak reaches
+     * this shape with seed 99303954147053.
+     *
+     * Every base type sorts empty before values, so a reversed column sorts empty AFTER values.
+     * ReversedType swaps the operands around the base comparison. A raw clustering comparison that
+     * reads empty-vs-valued from the serialized flag bits alone ignores that reversal, and then:
      *  - same-partition variant: rows with empty and valued clusterings for the SAME pk in
      *    different sstables merge in the wrong order (Data.db divergence — corruption class);
      *  - cross-partition variant: the global covered-clustering max picks the wrong row
-     *    (Statistics.db divergence — what the soak caught).
+     *    (Statistics.db divergence).
      */
     @Test
     public void emptyClusteringValuesDescending() throws Exception
@@ -797,18 +1022,19 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
-     * Row-level TTL (INSERT USING TTL sets liveness TTL + cell TTLs) merged against
-     * cell-level TTL (UPDATE USING TTL sets only cell TTLs) and against plain writes;
-     * includes same-timestamp expiring-vs-expiring writes whose TTLs differ, which
-     * CellLivenessInfo.resolveSameTimestampTie settles on its greater-localDeletionTime branch:
-     * both sides carry one,
-     * so the GREATER wins — here the TTL 100000 cell, written in the EARLIER sstable. The branch
-     * below it (equal
-     * expiration times, differing TTLs, LOWER TTL wins) is NOT covered: expiration is
-     * nowInSec + ttl, so reaching it from CQL against a live clock would need the two
-     * same-timestamp writes separated by EXACTLY the TTL difference in wall-clock seconds. Any
-     * other spacing leaves the expirations differing, and the greater-expiration branch decides
-     * first.
+     * Row-level TTL merged against cell-level TTL and against plain writes. An INSERT USING TTL
+     * sets a liveness TTL and cell TTLs; an UPDATE USING TTL sets only cell TTLs.
+     *
+     * The scenario also writes same-timestamp expiring-vs-expiring pairs whose TTLs differ.
+     * CellLivenessInfo.resolveSameTimestampTie settles those on its greater-localDeletionTime
+     * branch, because both sides carry one. The GREATER wins: here the TTL 100000 cell, written in
+     * the EARLIER sstable.
+     *
+     * The branch below it takes equal expiration times and differing TTLs, and gives the tie to the
+     * LOWER TTL. This scenario does NOT cover it. Expiration is nowInSec + ttl, so reaching that
+     * branch from CQL against a live clock needs the two same-timestamp writes separated by EXACTLY
+     * the TTL difference in wall-clock seconds. Any other spacing leaves the expirations differing,
+     * and the greater-expiration branch decides first.
      */
     @Test
     public void rowAndCellTtlMix() throws Exception
@@ -857,11 +1083,11 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
-     * Expiring-vs-live cells at the SAME timestamp, both directions across sstables: the
-     * CASSANDRA-14592 rule — an expiring (or deleted) cell beats a live one on timestamp
-     * tie regardless of value. Implemented in
-     * CellLivenessInfo.resolveSameTimestampTie's tombstone-or-expiring-beats-live branch; this pins
-     * it at the differential level (timestampTies only covered live-vs-live and delete-vs-live).
+     * Expiring-vs-live cells at the SAME timestamp, in both directions across sstables. The
+     * CASSANDRA-14592 rule gives the tie to an expiring or deleted cell, whatever the values are.
+     * CellLivenessInfo.resolveSameTimestampTie holds that rule in its
+     * tombstone-or-expiring-beats-live branch. The timestampTies scenario covers only live-vs-live
+     * and delete-vs-live, so this scenario is what pins the rule at the differential level.
      */
     @Test
     public void expiringVsLiveTies() throws Exception
@@ -888,16 +1114,19 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
-     * Cell TOMBSTONE vs EXPIRING cell at the SAME timestamp: the shared decision table
+     * Cell TOMBSTONE vs EXPIRING cell at the SAME timestamp. The shared decision table
      * (CellLivenessInfo.resolveSameTimestampTie, which Cells.resolveRegular defers to) gives the
-     * tombstone the tie, BEFORE any localDeletionTime comparison. This is the one same-timestamp pairing where both
-     * sides carry a localExpirationTime (tombstone: deletion second; expiring: expiry
-     * second), so a resolver that classifies "tombstone" by the presence of a
-     * localExpirationTime rather than by the absence of a TTL never reaches that branch and
-     * falls through to the ldt compare,
-     * which the expiring cell's future expiry second wins: deleted data resurrected
-     * until the TTL lapses. Both flush orders and both tombstone shapes
-     * (UPDATE SET v = null, DELETE v) across distinct partitions.
+     * tombstone the tie, BEFORE any localDeletionTime comparison.
+     *
+     * This is the one same-timestamp pairing where both sides carry a localExpirationTime: the
+     * tombstone carries its deletion second, and the expiring cell carries its expiry second. A
+     * resolver that classifies "tombstone" by the presence of a localExpirationTime, rather than by
+     * the absence of a TTL, never reaches that branch. It falls through to the ldt compare, which
+     * the expiring cell's future expiry second wins, and the deleted data comes back until the TTL
+     * lapses.
+     *
+     * The scenario covers both flush orders and both tombstone shapes (UPDATE SET v = null,
+     * DELETE v) across distinct partitions.
      */
     @Test
     public void tombstoneVsExpiringTies() throws Exception
@@ -965,12 +1194,16 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
-     * Fixed-length values LARGER than the cursor's 4KiB copy buffer. A {@code vector<float, 1536>} — a
-     * mainstream embedding width — is 6144 bytes, and unlike a variable-length value it carries no
-     * length vint, so the copy cannot be driven off the wire length. Covers a value spanning several
-     * chunks, one landing exactly on the buffer boundary ({@code vector<float, 1024>} is 4096), a
-     * same-timestamp tie ACROSS sstables so the value also travels through the compactor's temp
-     * buffers rather than straight to the writer, and a null overwrite of an oversized column.
+     * Fixed-length values LARGER than the cursor's 4KiB copy buffer. A {@code vector<float, 1536>}
+     * is 6144 bytes, which is a mainstream embedding width. A fixed-length value carries no length
+     * vint, so the copy cannot be driven off the wire length.
+     *
+     * The scenario covers:
+     *  - a value spanning several chunks;
+     *  - a value landing exactly on the buffer boundary ({@code vector<float, 1024>} is 4096);
+     *  - a same-timestamp tie ACROSS sstables, so the value also travels through the compactor's
+     *    temp buffers, and not straight to the writer;
+     *  - a null overwrite of an oversized column.
      */
     @Test
     public void fixedLengthValuesLargerThanCopyBuffer() throws Exception
@@ -1021,10 +1254,8 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
     }
 
     /**
-     * More than 64 regular columns: rows lacking columns switch from the 64-bit-mask
-     * column-subset encoding to the structurally different large-subset wire format —
-     * byte-compared here for the first time; previously only the old simple-suite
-     * exercised it without comparing the paths against each other.
+     * More than 64 regular columns: a row that lacks columns switches from the 64-bit-mask
+     * column-subset encoding to the structurally different large-subset wire format.
      */
     @Test
     public void over64Columns() throws Exception
@@ -1073,7 +1304,6 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
      * zero-component TOP/BOTTOM bounds, the same empty-prefix region bound-kind comparisons
      * and covered-clustering stats exercise. Open RTs nest with each other, overlap bounded
      * RTs and rows across sstables, and one partition is open-RT-only.
-     * Previously covered only probabilistically by the widened soak.
      */
     @Test
     public void openEndedRangeTombstones() throws Exception
