@@ -199,22 +199,16 @@ public class DeserializationHelper
     }
 
     /**
-     * The drop rule against a horizon read from a {@link #droppedTimeOrMin} array, equivalent to
-     * {@code isDropped(column, timestamp, false)} for the column that horizon came from — for every
-     * input except a column whose recorded {@code droppedTime} is itself {@code Long.MIN_VALUE}, which
-     * {@link #droppedTimeOrMin} cannot distinguish from "no drop record". No schema path produces such a
-     * horizon ({@code AlterTableStatement} uses the schema mutation timestamp, {@code TableMetadata
-     * .Builder.recordColumnDrop} from a CQL DROP uses {@code Long.MAX_VALUE}), so the lossy encoding is
-     * sound in practice — but it IS lossy, which is worth knowing before treating the array as
-     * interchangeable with the map.
+     * The drop rule against a horizon read from a {@link #droppedTimeOrMin} array. Equivalent to
+     * {@code isDropped(column, timestamp, false)} for the column the horizon came from, except for
+     * a column whose recorded {@code droppedTime} is {@code Long.MIN_VALUE}: the array cannot tell
+     * that apart from "no drop record". No schema path records such a drop time
+     * ({@code AlterTableStatement} uses the schema mutation timestamp, a CQL DROP uses
+     * {@code Long.MAX_VALUE}), so the encoding is sound in practice, but it is lossy.
      *
-     * The {@code NO_DROP_HORIZON} test is load-bearing, not defensive. That sentinel is
-     * {@code Long.MIN_VALUE}, which is also {@link LivenessInfo#NO_TIMESTAMP}, so
-     * {@code timestamp <= dropHorizon} alone discards a cell whose timestamp is exactly
-     * {@code Long.MIN_VALUE} on a column that was NEVER dropped — while
-     * {@code UnfilteredSerializer.readSimpleColumn}, which tests {@code dropped != null} first, keeps
-     * it. No sentinel value can avoid this: {@code Long.MIN_VALUE} is the minimum, so there is no
-     * long that makes {@code <=} false for every timestamp.
+     * The {@code NO_DROP_HORIZON} test is required. That sentinel is {@code Long.MIN_VALUE}, so
+     * {@code timestamp <= dropHorizon} alone would discard a cell written at
+     * {@code Long.MIN_VALUE} on a column that was never dropped.
      */
     public static boolean isDroppedAtHorizon(long timestamp, long dropHorizon)
     {

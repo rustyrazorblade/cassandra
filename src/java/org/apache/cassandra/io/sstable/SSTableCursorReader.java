@@ -19,6 +19,7 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
 import com.google.common.collect.ImmutableList;
 
@@ -32,7 +33,6 @@ import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.Cell;
-import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.DeserializationHelper;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.ReusableCellLivenessInfo;
@@ -42,6 +42,7 @@ import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.ResizableByteBuffer;
@@ -81,7 +82,8 @@ public class SSTableCursorReader implements AutoCloseable
         int CELL_END = 1 << 5;
         int TOMBSTONE_START = 1 << 6;
 
-        /** common to rows/tombstones. Call continue(); for next unfiltered, or maybe partition end */
+        /** common to rows and tombstones. Call {@link SSTableCursorReader#continueReading} for the
+         *  next unfiltered, or for the partition end */
         int UNFILTERED_END = 1 << 7;
         /** at {@link UnfilteredSerializer#isEndOfPartition(int)} */
         int PARTITION_END = 1 << 8;
@@ -95,13 +97,26 @@ public class SSTableCursorReader implements AutoCloseable
         }
     }
 
-    /** {@link CellCursor#readCellHeader()} result: no cell surfaced — every remaining
-     *  column in this row was dropped-column filtered */
+    /** {@link CellCursor#readCellHeader()} result: no cell. No column left in this row gives
+     *  one. */
     static final int CELL_NONE_REMAINING = -1;
-    /** {@link CellCursor#readCellHeader()} result: cell surfaced with no value (tombstone) */
+    /** {@link CellCursor#readCellHeader()} result: a cell with no value, that is, a tombstone;
+     *  or a complex column with no cell. */
     static final int CELL_NO_VALUE = 0;
-    /** {@link CellCursor#readCellHeader()} result: cell surfaced with a value */
+    /** {@link CellCursor#readCellHeader()} result: a cell with a value. */
     static final int CELL_HAS_VALUE = 1;
+    /** {@link CellCursor#openNextColumnRun()} result: a column with a cell to read is open. This
+     *  value is outside the range of the three results above, which that method passes through. */
+    static final int COLUMN_RUN_OPEN = 2;
+
+    // If true, a complex column with no cells becomes a position where the cursor stops. See
+    // CellCursor.surfaceDeletionOnlyComplexColumn for what the cursor holds at that position.
+    private boolean pauseAtEmptyComplexColumns;
+
+    public void pauseAtEmptyComplexColumns(boolean pause)
+    {
+        this.pauseAtEmptyComplexColumns = pause;
+    }
 
     public class CellCursor {
         public ReusableLivenessInfo rowLiveness;
@@ -110,48 +125,89 @@ public class SSTableCursorReader implements AutoCloseable
         public int columnsSize;
         public int cellFlags;
         public final ReusableCellLivenessInfo cellLiveness = new ReusableCellLivenessInfo();
-        public CellPath cellPath;
+        // The cell path of the current cell, held as raw bytes in a scratch buffer that only
+        // grows. A length below zero means the cell has no path.
+        public byte[] cellPathBuffer = new byte[32];
+        public int cellPathLength = -1;
+        private ByteBuffer cellPathWindow;
+
+        /**
+         * A ByteBuffer view of the current cell path. The view is valid until the next
+         * readCellHeader call.
+         *
+         * Each CellCursor holds ONE view and returns that same object every time. Compare the
+         * paths of two DIFFERENT cursors only.
+         */
+        public ByteBuffer cellPathWindow()
+        {
+            if (cellPathWindow == null || cellPathWindow.array() != cellPathBuffer)
+                cellPathWindow = ByteBuffer.wrap(cellPathBuffer);
+            cellPathWindow.limit(cellPathLength).position(0);
+            return cellPathWindow;
+        }
+        // State of the current complex column. The deletion is LIVE if the column has no
+        // deletion, and also if the row carries no complex deletion at all.
+        public int remainingCellsInColumn;
+        public final DeletionTime.ReusableDeletionTime complexDeletion = DeletionTime.ReusableDeletionTime.live();
+        // True if the last readCellHeader call gave a cell. It is false at a complex column that
+        // has no cell, and after the CELL_NONE_REMAINING result.
+        public boolean producedCell;
+        private boolean rowHasComplexDeletion;
         public AbstractType<?> cellType;
         public ColumnMetadata cellColumn;
+        // The type that compares the path bytes of the current cell: see
+        // ColumnMetadata.pathNameComparator. It is null for a simple column.
+        public AbstractType<?> cellPathType;
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
+        // One entry per column of columnsArray: the path comparator type of a complex column, or
+        // null for a simple column. Built with cellTypeArray, once per change of the column set.
+        private AbstractType<?>[] pathTypeArray;
         // Parallel to columnsArray: each column's drop horizon, or DeserializationHelper.NO_DROP_HORIZON
-        // if none. That sentinel is Long.MIN_VALUE and so is NOT out of band for a timestamp — the drop
-        // test must go through DeserializationHelper.isDroppedAtHorizon, which checks the sentinel first;
-        // a bare "timestamp <= droppedTimeArray[i]" filters a cell timestamped LivenessInfo.NO_TIMESTAMP
-        // on a column that was never dropped, which the iterator path keeps. Built once per superset
-        // change (see init) so the per-cell drop check is a plain array read instead of a
-        // ByteBuffer-keyed map lookup on sstableHasDroppedColumns tables.
+        // if none. That sentinel is Long.MIN_VALUE, so it is NOT out of band for a timestamp. Run the
+        // drop test through DeserializationHelper.isDroppedAtHorizon, which tests the sentinel first.
+        // A bare "timestamp <= droppedTimeArray[i]" drops a cell timestamped LivenessInfo.NO_TIMESTAMP
+        // on a column that was never dropped, which the iterator path keeps.
         private long[] droppedTimeArray;
+        // The columnsArray index of cellColumn. It is kept for every cell of a complex column, so
+        // the drop test below stays an array read and does not become a lookup per cell.
+        private int cellColumnIndex;
 
         // Remaining PRESENT columns of this row as a bitmask over columnsArray indices.
-        // Garbage-free sparse-row iteration: rows that do not contain every header column
-        // pass the missing-columns mask (or, for >= 64-column supersets, present-mask
-        // words) instead of a freshly allocated Columns subset, so the identity cache
-        // below only rebuilds on a genuine superset change (stable per reader).
+        // A row that does not carry every header column passes this mask, or the present-mask
+        // words for a superset of 64 columns or more. It passes no freshly allocated Columns
+        // subset, so the column identity test in init rebuilds only on a superset change.
         private long presentMask;
-        // >= 64-column supersets: present-mask words (bit i of word i/64 = superset column
-        // i present), walked word by word. Grow-once scratch, consumed destructively.
+        // >= 64-column supersets: present-mask words. Bit i of word i/64 is set if superset
+        // column i is present. The array grows once, and the walk clears the bits it consumes.
         private long[] presentWords;
         private int presentWordsCount;
         private int presentWordIndex;
 
-        void init (Columns columns, long missingColumnsMask, long[] presentColumnsWords, ReusableLivenessInfo rowLiveness)
+        void init (Columns columns, long missingColumnsMask, long[] presentColumnsWords,
+                   boolean rowHasComplexDeletion, ReusableLivenessInfo rowLiveness)
         {
-            // the sstable-scoped dropped-column flag is only sound while the superset comes from
-            // this sstable's header; a schema-derived Columns here would under-filter silently
+            // The dropped-column flag applies to this sstable, not to the table. A column set
+            // taken from the schema would filter too few cells, and would give no error.
             assert columns == serializationHeader.columns(false) || columns == serializationHeader.columns(true)
                  : "cell superset must be one of this sstable's header column sets";
+            this.rowHasComplexDeletion = rowHasComplexDeletion;
+            remainingCellsInColumn = 0;
+            complexDeletion.resetLive();
             if (this.columns != columns)
             {
                 // This will be a problem with changing columns
                 this.columns = columns;
                 columnsArray = columns.toArray(COLUMN_METADATA_TYPE);
                 cellTypeArray = new AbstractType<?>[columnsArray.length];
+                pathTypeArray = new AbstractType<?>[columnsArray.length];
                 droppedTimeArray = sstableHasDroppedColumns ? new long[columnsArray.length] : null;
                 for (int i = 0; i < columnsArray.length; i++)
                 {
                     cellTypeArray[i] = serializationHeader.getType(columnsArray[i]);
+                    pathTypeArray[i] = columnsArray[i].isComplex()
+                                       ? ColumnMetadata.pathNameComparator(columnsArray[i].type)
+                                       : null;
                     if (sstableHasDroppedColumns)
                         droppedTimeArray[i] = deserializationHelper.droppedTimeOrMin(columnsArray[i]);
                 }
@@ -180,28 +236,27 @@ public class SSTableCursorReader implements AutoCloseable
             }
             else
             {
-                // Build the present-columns bitmask from the wire's MISSING-columns mask:
-                //   -1L >>> (64 - n)   is the "n low ones" template (e.g. n=3 -> 0b111): all 64
-                //                      bits set, then shifted so exactly the n column bits remain.
-                //                      n == 0 must be special-cased because Java shifts are mod 64
-                //                      (>>> 64 is a no-op, NOT zero).
-                //   ~missingColumnsMask flips missing->present but also sets every bit ABOVE the
-                //                      column range, so it is ANDed with the template to trim them.
+                // The AND trims bits the flip sets above the column range. columnsSize == 0
+                // needs its own arm: Java shifts are mod 64.
                 presentMask = ~missingColumnsMask & (columnsSize == 0 ? 0 : (-1L >>> (64 - columnsSize)));
             }
             this.rowLiveness = rowLiveness;
             cellFlags = 0;
-            cellPath = null;
+            cellPathLength = -1;
             cellType = null;
+            cellPathType = null;
+            producedCell = false;
         }
 
         public boolean hasNext()
         {
-            return columnsSize >= 64 ? columnsRemain() : presentMask != 0;
+            return remainingCellsInColumn > 0 || columnsRemain();
         }
 
         private boolean columnsRemain()
         {
+            if (columnsSize < 64)
+                return presentMask != 0;
             // advance to the next non-empty word; position is retained across calls
             while (presentWordIndex < presentWordsCount)
             {
@@ -212,20 +267,103 @@ public class SSTableCursorReader implements AutoCloseable
             return false;
         }
 
+        /** Gives a complex column that has no cell a position of its own. At that position
+         *  cellColumn and complexDeletion describe the column, and no cell field is valid. */
+        private int surfaceDeletionOnlyComplexColumn()
+        {
+            producedCell = false;
+            cellPathLength = -1;
+            return CELL_NO_VALUE;
+        }
+
         /**
-         * For Cell deserialization see {@link Cell.Serializer#deserialize}
+         * Moves to the next column of the row that has a cell to read. On the way it consumes the
+         * header of each complex column, which holds a deletion and a cell count. If it returns
+         * {@link #COLUMN_RUN_OPEN}, then {@code remainingCellsInColumn} is above zero.
          *
-         * Dropped-column filtering happens here, mirroring the iterator's deserialization:
-         * cells of a dropped column written at or before the drop are consumed and never
-         * surfaced; the loop advances to the next column in that case. A dropped column
-         * that turns out to be the row's last remaining column leaves NO cell at all for
-         * this position (distinct from a genuine valueless cell/tombstone), which is why
-         * this returns a tri-state rather than a plain hasValue boolean: the caller must
-         * skip straight past the row/unfiltered end rather than stopping at a cell that
-         * doesn't exist.
+         * @return {@link #COLUMN_RUN_OPEN} if a cell is ready to read;
+         *         {@link #CELL_NONE_REMAINING} if the row has no column left;
+         *         {@link #CELL_NO_VALUE} if a complex column with no cells became a position of
+         *         its own: see {@link #surfaceDeletionOnlyComplexColumn}
+         */
+        private int openNextColumnRun() throws IOException
+        {
+            while (remainingCellsInColumn == 0)
+            {
+                if (!columnsRemain())
+                    return CELL_NONE_REMAINING; // the last complex columns held no cells
+                // HOTSPOT: suprisingly expensive
+                int currIndex;
+                if (columnsSize >= 64)
+                {
+                    // columnsRemain left presentWordIndex on a word that has a set bit. The bit
+                    // walk is the same as the walk in the single-mask branch below.
+                    long word = presentWords[presentWordIndex];
+                    currIndex = (presentWordIndex << 6) + Long.numberOfTrailingZeros(word);
+                    presentWords[presentWordIndex] = word & (word - 1);
+                }
+                else
+                {
+                    // Bit i of presentMask is the i-th column of the column set, in the order the
+                    // set gives them. The serializer assigned the bits in that same order, and
+                    // the cells are on disk in that same order. A walk from the lowest bit to the
+                    // highest therefore reads the cells in their disk order.
+                    //   numberOfTrailingZeros gives the index of the lowest set bit, which is the
+                    //     next column that is present;
+                    //   x & (x - 1) clears that bit, because the subtraction borrows through the
+                    //     trailing zeros and the AND then removes both.
+                    currIndex = Long.numberOfTrailingZeros(presentMask);
+                    presentMask &= presentMask - 1;
+                }
+                cellColumnIndex = currIndex;
+                cellColumn = columnsArray[currIndex];
+                cellType = cellTypeArray[currIndex];
+                cellPathType = pathTypeArray[currIndex];
+                if (!cellColumn.isComplex())
+                {
+                    remainingCellsInColumn = 1;
+                    break;
+                }
+                if (rowHasComplexDeletion)
+                {
+                    serializationHeader.readDeletionTime(dataReader, complexDeletion);
+                    // Do what DeserializationHelper.isDroppedComplexDeletion does: drop a complex
+                    // deletion at or before the drop time of its column.
+                    if (sstableHasDroppedColumns
+                        && DeserializationHelper.isDroppedAtHorizon(complexDeletion.markedForDeleteAt(), droppedTimeArray[currIndex]))
+                        complexDeletion.resetLive();
+                }
+                else
+                    complexDeletion.resetLive();
+                remainingCellsInColumn = (int) dataReader.readUnsignedVInt();
+                if (remainingCellsInColumn == 0 && pauseAtEmptyComplexColumns)
+                    return surfaceDeletionOnlyComplexColumn();
+                // A count of zero and no pause: continue to the next column.
+            }
+            return COLUMN_RUN_OPEN;
+        }
+
+        /**
+         * Reads the header of the next cell.
          *
-         * @return 1 if the next cell has a value, 0 if it has none (tombstone), -1 if no
-         *         cell remains in this row (all trailing columns were dropped-filtered)
+         * For the format of one cell, see {@link Cell.Serializer#deserialize}. For a complex
+         * column, see UnfilteredSerializer.readComplexColumn. On disk each complex column holds:
+         * <ul>
+         *   <li>a DeletionTime, but only if the row flag HAS_COMPLEX_DELETION is set;</li>
+         *   <li>a vint cell count;</li>
+         *   <li>the cells, in cell-path order.</li>
+         * </ul>
+         *
+         * This method also applies the dropped-column filter, as the iterator does. It consumes
+         * the cells and the complex deletions of a dropped column and never surfaces them.
+         *
+         * A dropped column can be the last column of the row, and a complex column with no cells
+         * can be the last position. This method then has no cell to give, which is not the same
+         * as a cell with no value.
+         *
+         * @return 1 if the next cell has a value;
+         *         0 if it has no value, that is, a tombstone or a complex column with no cells;
+         *         -1 if the row has no cell left
          */
         int readCellHeader() throws IOException
         {
@@ -233,31 +371,14 @@ public class SSTableCursorReader implements AutoCloseable
 
             for (;;)
             {
-                // HOTSPOT: suprisingly expensive
-                int currIndex;
-                if (columnsSize >= 64)
-                {
-                    // columnsRemain() (via hasNext() above, or the loop-continue path below)
-                    // parked presentWordIndex on a non-empty word; same low-to-high bit walk
-                    // as the single-mask path below
-                    long word = presentWords[presentWordIndex];
-                    currIndex = (presentWordIndex << 6) + Long.numberOfTrailingZeros(word);
-                    presentWords[presentWordIndex] = word & (word - 1);
-                }
-                else
-                {
-                    // Bit i of presentMask corresponds to the i-th column of the superset in
-                    // its iteration order — the SAME order the serializer assigned bits and
-                    // the same order cells appear on disk. Walking bits low-to-high therefore
-                    // visits cells in exactly their on-disk order:
-                    //   numberOfTrailingZeros = index of the lowest set bit (next present column)
-                    //   x & (x - 1)           = clears that lowest set bit (subtracting 1 borrows
-                    //                           through the trailing zeros; the AND kills both)
-                    currIndex = Long.numberOfTrailingZeros(presentMask);
-                    presentMask &= presentMask - 1;
-                }
-                cellColumn = columnsArray[currIndex];
-                cellType = cellTypeArray[currIndex];
+                producedCell = false;
+                int opened = openNextColumnRun();
+                if (opened != COLUMN_RUN_OPEN)
+                    return opened;
+
+                remainingCellsInColumn--;
+                producedCell = true;
+
                 cellFlags = dataReader.readUnsignedByte();
                 // TODO: specialize common case where flags == HAS_VALUE | USE_ROW_TS?
                 boolean hasValue = Cell.Serializer.hasValue(cellFlags);
@@ -276,30 +397,40 @@ public class SSTableCursorReader implements AutoCloseable
                 localDeletionTime = Cell.decodeLocalDeletionTime(localDeletionTime, ttl, deserializationHelper);
 
                 cellLiveness.reset(timestamp, ttl, localDeletionTime);
-                // Complex (multi-cell) columns never reach the cell cursor: CursorCompactor's
-                // unsupportedSchema and unsupportedHeaderColumns gates both reject them before
-                // compaction starts, including a dropped complex column still recorded in an
-                // older sstable's header — see unsupportedHeaderColumns's javadoc for why that
-                // needs its own check. cellPath is therefore always null on this path; assert
-                // the invariant instead of paying a per-cell isComplex() dispatch and a dead
-                // deserialize call.
-                assert !cellColumn.isComplex() : "complex column reached the cell cursor: " + cellColumn;
-                cellPath = null;
-
-                // Equivalent to deserializationHelper.isDropped(cellColumn, timestamp, false), but
-                // via the precomputed per-superset array instead of a ByteBuffer-keyed map lookup
-                // per cell (isDropped's isComplex=false path would look up droppedColumns.get(
-                // column.name.bytes) every time; this reader never primes startOfComplexColumn's
-                // cache, so isComplex=true was never an option here either). isDroppedAtHorizon
-                // carries the sentinel test that keeps the two forms equivalent — see its javadoc.
-                if (sstableHasDroppedColumns && DeserializationHelper.isDroppedAtHorizon(timestamp, droppedTimeArray[currIndex]))
+                if (cellColumn.isComplex())
                 {
-                    // mirror UnfilteredSerializer.readSimpleColumn: cells of a dropped column
-                    // written at or before the drop are discarded on read
+                    // CollectionPathSerializer writes a vint length and then the path bytes. It
+                    // writes that format for every complex column, UDTs included.
+                    int pathLength = dataReader.readUnsignedVInt32();
+                    if (cellPathBuffer.length < pathLength)
+                        cellPathBuffer = new byte[Math.max(pathLength, cellPathBuffer.length * 2)]; // doubles, so the cost is amortized
+                    dataReader.readFully(cellPathBuffer, 0, pathLength);
+                    cellPathLength = pathLength;
+                }
+                else
+                {
+                    cellPathLength = -1;
+                }
+
+                // This test gives the same answer as
+                // deserializationHelper.isDropped(cellColumn, timestamp, false), but it reads a
+                // prepared array instead of a map keyed by ByteBuffer. The map form would look up
+                // droppedColumns.get(column.name.bytes) for every cell. isDroppedAtHorizon holds
+                // the sentinel test that keeps the two forms equal: see its javadoc.
+                if (sstableHasDroppedColumns && DeserializationHelper.isDroppedAtHorizon(timestamp, droppedTimeArray[cellColumnIndex]))
+                {
+                    // Do what UnfilteredSerializer.readSimpleColumn and readComplexColumn do:
+                    // discard a cell of a dropped column that was written at or before the drop.
                     if (hasValue)
                         cellType.skipValue(dataReader);
+                    if (remainingCellsInColumn == 0 && cellColumn.isComplex() && pauseAtEmptyComplexColumns && !complexDeletion.isLive())
+                    {
+                        // The filter dropped every cell of this complex column, but the deletion
+                        // of the column itself survives and must reach the merge.
+                        return surfaceDeletionOnlyComplexColumn();
+                    }
                     if (!hasNext())
-                        return CELL_NONE_REMAINING; // caller must skip past the row/unfiltered end
+                        return CELL_NONE_REMAINING; // the caller must move past the end of the row
                     continue;
                 }
                 return hasValue ? CELL_HAS_VALUE : CELL_NO_VALUE;
@@ -311,12 +442,10 @@ public class SSTableCursorReader implements AutoCloseable
     private final AbstractType<?>[] clusteringColumnTypes;
     private final DeserializationHelper deserializationHelper;
     private final SerializationHeader serializationHeader;
-    // True when a column of THIS sstable's header carries a drop horizon; the helper's
-    // identically-purposed flag is table-scoped, hence the name. Sstable scope is sound because the
-    // cell cursor's superset comes from serializationHeader.columns() — asserted in CellCursor.init
-    // — so a column absent from this header can never reach readCellHeader. Held as a field so an
-    // sstable with no dropped column builds no droppedTimeArray at all (see CellCursor.init) and
-    // costs a boolean field test per cell rather than an array load and a sentinel compare.
+    // True when a column of THIS sstable's header carries a drop horizon. The helper's flag of the
+    // same purpose is table-scoped, which is why the name differs. The sstable scope is sound
+    // because the cell cursor's superset comes from serializationHeader.columns(), which
+    // CellCursor.init asserts, so a column absent from this header never reaches readCellHeader.
     private final boolean sstableHasDroppedColumns;
 
     // need to be closed
@@ -334,21 +463,14 @@ public class SSTableCursorReader implements AutoCloseable
     private int basicUnfilteredFlags = 0;
     private int extendedFlags = 0;
 
-    // Where the unfiltered whose cells are being read must end: dataStart + unfilteredSize, captured
-    // from the descriptor when the header was read. Nothing else checks that the cell walk consumes
-    // exactly the body the header declared, so without this a cell-level desync runs on into the NEXT
-    // unfiltered and surfaces far from its cause.
-    // Only the cell-walk funnel below consumes it, and it is cleared there and on markers. Paths that
-    // end an unfiltered WITHOUT walking cells — a row with no present columns, skipRowCells, a seek —
-    // leave it holding the closed row's end, which is why the check is scoped to that one funnel
-    // rather than applied wherever an unfiltered ends.
+    // Where the unfiltered being read must end: dataStart + unfilteredSize. Paths that end an
+    // unfiltered without walking cells leave it stale, so only the cell-walk funnel checks it.
     private static final long NO_UNFILTERED_END = -1;
     private long unfilteredEnd = NO_UNFILTERED_END;
 
-    // Where the cell walk of the unfiltered currently being read BEGAN, so it can be walked again;
-    // see rewindRowCells. Not derivable from the descriptor: its dataStart() is the start of the row
-    // BODY, which still has previousUnfilteredSize, the liveness, the deletion and the missing-columns
-    // subset ahead of the first cell.
+    // The first cell of the unfiltered being read; see rewindRowCells. The descriptor cannot
+    // give it: dataStart() is the row BODY, ahead of previousUnfilteredSize, the liveness, the
+    // deletion and the missing-columns subset.
     private long unfilteredCellsStart = NO_UNFILTERED_END;
 
     private int state = PARTITION_START;
@@ -440,7 +562,6 @@ public class SSTableCursorReader implements AutoCloseable
             {
                 return corruptSSTable(e);
             }
-            // end of partition
             if (!UnfilteredSerializer.isEndOfPartition(basicUnfilteredFlags)) {
                 throw new IllegalArgumentException("Seeking to a partition at: " + position + " did not result in a valid state");
             }
@@ -514,7 +635,9 @@ public class SSTableCursorReader implements AutoCloseable
         }
 
         staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
-                                 unfilteredDescriptor.presentColumnsWords(), unfilteredDescriptor.livenessInfo());
+                                 unfilteredDescriptor.presentColumnsWords(),
+                                 unfilteredDescriptor.hasComplexDeletion(),
+                                 unfilteredDescriptor.livenessInfo());
         cellCursor = staticRowCellCursor;
         if (!staticRowCellCursor.hasNext())
         {
@@ -561,12 +684,12 @@ public class SSTableCursorReader implements AutoCloseable
         }
     }
 
-    // TODO: move to cell cursor? maybe avoid copy through buffer?
+    // TODO: move to cell cursor?
     private void copyCellContents(DataOutputPlus writer, byte[] transferBuffer, int length) throws IOException
     {
         if (length < 0)
         {
-            // variable length: the wire carries a length vint, which is mirrored to the output
+            // variable length: the wire carries a length vint, and this mirrors it to the output
             try
             {
                 length = dataReader.readUnsignedVInt32();
@@ -584,8 +707,27 @@ public class SSTableCursorReader implements AutoCloseable
                                              length, DatabaseDescriptor.getMaxValueSize()));
             writer.writeUnsignedVInt32(length);
         }
-        // Fixed-length values carry no vint but are not bounded by the transfer buffer either:
-        // valueLengthIfFixed() is 6144 for a vector<float, 1536>. Both cases copy in chunks.
+        // In production every writer is a DataOutputBuffer that holds a heap array. Read the value
+        // bytes straight into that array. This needs no loop for a value that is larger than the
+        // transfer buffer, and such values occur: valueLengthIfFixed is 6144 for a
+        // vector<float, 1536>.
+        //
+        // Catch IOException only. That is what a failed read of the input throws, and the code
+        // above already checks the length. An exception from the growth of the output buffer is a
+        // defect in this process, not damaged data, and it must not mark the sstable as corrupt.
+        if (writer instanceof DataOutputBuffer)
+        {
+            try
+            {
+                ((DataOutputBuffer) writer).readFully(dataReader, length);
+            }
+            catch (IOException e)
+            {
+                corruptSSTable(e);
+            }
+            return;
+        }
+        // Fallback for any other DataOutputPlus: copy in blocks the size of the transfer buffer.
         int remaining = length;
         while (remaining > 0)
         {
@@ -625,7 +767,9 @@ public class SSTableCursorReader implements AutoCloseable
             unfilteredCellsStart = dataReader.getPosition();
 
             rowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
-                               unfilteredDescriptor.presentColumnsWords(), unfilteredDescriptor.livenessInfo());
+                               unfilteredDescriptor.presentColumnsWords(),
+                               unfilteredDescriptor.hasComplexDeletion(),
+                               unfilteredDescriptor.livenessInfo());
             cellCursor = rowCellCursor;
             if (!rowCellCursor.hasNext())
             {
@@ -651,9 +795,9 @@ public class SSTableCursorReader implements AutoCloseable
             int cell = cellCursor.readCellHeader();
             if (cell == CELL_NONE_REMAINING)
             {
-                // no cell surfaced at all (every remaining column was dropped-column
-                // filtered): nothing is current, so advance straight past the would-be
-                // CELL_END stop instead of surfacing a cell-less position
+                // There is no cell. Either the dropped-column filter removed every remaining
+                // column, or the last complex columns held no cells. Nothing is current, so move
+                // past the CELL_END stop and do not give a position that has no cell.
                 checkNextFlagsAfterCellValuesEnd();
                 return continueReading();
             }
@@ -701,7 +845,7 @@ public class SSTableCursorReader implements AutoCloseable
      * };
      * struct range_tombstone_boundary_marker : range_tombstone_marker {
      *   struct delta_deletion_time end_deletion_time;
- *       struct delta_deletion_time start_deletion_time;
+     *   struct delta_deletion_time start_deletion_time;
      * };
      * </pre>
      *
@@ -713,8 +857,9 @@ public class SSTableCursorReader implements AutoCloseable
             if (state != TOMBSTONE_START) throw new IllegalStateException();
             if (!UnfilteredSerializer.isTombstoneMarker(basicUnfilteredFlags)) throw new IllegalStateException();
             unfilteredDescriptor.loadTombstone(dataReader, serializationHeader, basicUnfilteredFlags);
-            // a marker has no cells, and loadTombstone does not set dataStart, so the descriptor still
-            // holds the previous row's — close the window rather than leave that reachable
+            // A marker has no cells, and loadTombstone does not set dataStart, so the descriptor
+            // still holds the previous row's dataStart. Close the window instead of leaving that
+            // value reachable.
             unfilteredEnd = NO_UNFILTERED_END;
             return checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
         }
@@ -940,32 +1085,13 @@ public class SSTableCursorReader implements AutoCloseable
      * Re-positions the cell walk of the row (or static row) that {@code unfilteredDescriptor} describes
      * back to its FIRST cell, so the same cells can be walked a second time.
      *
-     * The descriptor is what makes this possible without re-reading the row header: everything
-     * {@link #readRowHeader} feeds into {@code CellCursor.init} — the column superset, the
-     * missing-columns mask or the present-column words, the row liveness — survives there untouched, so
-     * re-running init restores the walk state readRowHeader left. {@code presentColumnsWords()} is
-     * COPIED into the cursor's own scratch by init rather than walked in place, which is what makes a
-     * second init from the same descriptor sound. Two of {@code CellCursor}'s fields, {@code cellColumn}
-     * and {@code cellLiveness}, are NOT reset by init and so still describe the last cell of the first
-     * walk; nothing reads either before the next {@code readCellHeader} overwrites them
-     * ({@code compareByColumn} refuses any state but {@code CELL_VALUE_START}/{@code CELL_END}).
+     * The position comes from {@link #unfilteredCellsStart}, not from the descriptor's
+     * {@code dataStart()}, which is the start of the row BODY.
      *
-     * The position comes from {@link #unfilteredCellsStart} rather than the descriptor, whose
-     * {@code dataStart()} is the start of the row BODY and so sits ahead of the first cell.
-     * {@code unfilteredEnd} is restored from the descriptor: {@link #checkNextFlagsAfterCellValuesEnd}
-     * clears it when a walk completes, and its cell-desync check needs it on the second walk as much as
-     * on the first.
+     * {@link #basicUnfilteredFlags} and {@link #extendedFlags} are NOT restored. A caller that ends the
+     * second walk without re-reading those bytes must restore them itself.
      *
-     * <b>{@link #basicUnfilteredFlags} and {@link #extendedFlags} are deliberately NOT restored.</b> A
-     * first walk that ran to the end of the row has overwritten them with the NEXT unfiltered's flags,
-     * and this leaves them there. That is sound only because every way out of the second walk re-reads
-     * those same bytes at the same offset before anything consults them — {@code
-     * checkNextFlagsAfterCellValuesEnd} if the cells are walked again, {@code
-     * checkNextFlagsAfterStaticRowOrUnfilteredStart} if {@link #skipRowCells} skips them — so a caller
-     * that ends the second walk any other way has to restore them itself.
-     *
-     * @param isStatic which of the two cell cursors this row's cells are walked with, as
-     *        {@link #readStaticRowHeader} and {@link #readRowHeader} choose it
+     * @param isStatic which of the two cell cursors this row's cells are walked with
      */
     protected int rewindRowCells(UnfilteredDescriptor unfilteredDescriptor, boolean isStatic)
     {
@@ -973,11 +1099,12 @@ public class SSTableCursorReader implements AutoCloseable
         unfilteredEnd = unfilteredDescriptor.dataStart() + unfilteredDescriptor.size();
         CellCursor rewound = isStatic ? staticRowCellCursor : rowCellCursor;
         rewound.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
-                     unfilteredDescriptor.presentColumnsWords(), unfilteredDescriptor.livenessInfo());
+                     unfilteredDescriptor.presentColumnsWords(),
+                     unfilteredDescriptor.hasComplexDeletion(),
+                     unfilteredDescriptor.livenessInfo());
         cellCursor = rewound;
         // Callers only rewind a cursor that WAS in a cell state, which is exactly the state the row
-        // header loaders leave when the row has a present column. No cell surfacing here would mean the
-        // descriptor and the state the caller recorded disagree.
+        // header loaders leave when the row has a present column.
         assert rewound.hasNext() : "rewound a row whose columns are all absent: " + unfilteredDescriptor;
         return state = State.CELL_HEADER_START;
     }
@@ -1041,12 +1168,12 @@ public class SSTableCursorReader implements AutoCloseable
     }
 
     /**
-     * Reads the extended-flags byte for {@code basicFlags} if present, storing it (0 if absent)
-     * in the {@link #extendedFlags} field for the row loader to pick up. Extended flags are only
-     * meaningful on a row (not a marker): {@code IS_STATIC}, and — deprecated since 4.0
-     * (CASSANDRA-11500), reachable only on old Materialized View data — {@code HAS_SHADOWABLE_DELETION}
-     * on either a static or a non-static row. A static row is only legal as the partition's first
-     * unfiltered, hence {@code allowStatic}.
+     * Reads the extended-flags byte for {@code basicFlags} if present, and stores it in the
+     * {@link #extendedFlags} field for the row loader. The field holds 0 if the byte is absent.
+     * Extended flags are meaningful on a row only, never on a marker. They are {@code IS_STATIC},
+     * and {@code HAS_SHADOWABLE_DELETION} on either a static or a non-static row. CASSANDRA-11500
+     * deprecated the second one in 4.0, and only old Materialized View data still carries it.
+     * A static row is legal only as the partition's first unfiltered, hence {@code allowStatic}.
      */
     private void readRowExtendedFlags(int basicFlags, boolean allowStatic, long preFlagsPosition) throws IOException
     {
@@ -1096,14 +1223,12 @@ public class SSTableCursorReader implements AutoCloseable
 
     private int checkNextFlagsAfterCellValuesEnd() throws IOException
     {
-        // The cell walk must have consumed exactly the body the row header declared. Checked here, the
-        // single point at which a cell-value walk COMPLETES, and BEFORE the next unfiltered's flag byte
-        // is read below, so the position is directly comparable. Aborting the compaction is the intended
-        // outcome: a desync means the cells written from here would not match the iterator path's.
+        // The cell walk must have consumed exactly the body the row header declared. Checked here,
+        // before the next unfiltered's flag byte is read, so the two positions are comparable.
         //
-        // A decoder defect is as likely as on-disk damage here, but that's the same ambiguity
-        // UnfilteredSerializer.readRow's own catch (RuntimeException | AssertionError) already accepts;
-        // route through the same corruption handling rather than surface a raw AssertionError.
+        // A decoder defect is as likely as on-disk damage, but UnfilteredSerializer.readRow accepts
+        // the same ambiguity in its catch, so route through corruption handling rather than raise a
+        // raw AssertionError.
         if (dataReader.getPosition() != unfilteredEnd)
             corruptSSTable("cell desync: cells consumed to " + dataReader.getPosition()
                             + ", unfiltered body declared end " + unfilteredEnd);
