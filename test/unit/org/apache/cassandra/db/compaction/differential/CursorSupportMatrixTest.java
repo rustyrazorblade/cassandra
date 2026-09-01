@@ -30,6 +30,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CursorCompactor;
+import org.apache.cassandra.db.repair.ValidationCompactionController;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.notifications.INotificationConsumer;
@@ -425,6 +426,57 @@ public class CursorSupportMatrixTest extends CQLTester
                  cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs), null))
         {
             return CursorCompactor.isSupported(scanners, controller);
+        }
+    }
+
+    /**
+     * {@link #droppedCollectionUnsupportedFromHeaders} pins this hole for the write-path gate
+     * ({@code isSupported}); {@code isValidationSupported} - the read-only gate repair's cursor
+     * validation goes through - has to refuse the exact same input for the exact same reason:
+     * the cursor reader's misparse of a dropped complex/counter column's header framing doesn't
+     * care which path invoked it. Nothing here differentially compares digests (that's
+     * {@code CursorValidationIteratorTest}/{@code DigestingCursorMergeSinkParityTest}'s job) -
+     * this only pins the gate itself, the same way its write-path sibling does.
+     */
+    @Test
+    public void droppedCollectionUnsupportedFromHeadersForValidation() throws Exception
+    {
+        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
+
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        execute("INSERT INTO %s (pk, ck, m, v) VALUES (1, 1, {'a':'b'}, 'x')");
+        flush();
+        execute("INSERT INTO %s (pk, ck, v) VALUES (1, 2, 'y')");
+        flush();
+
+        execute("ALTER TABLE %s DROP m");
+
+        assertFalse("cursor validation must refuse a table whose input headers still carry a " +
+                    "multi-cell column; the cursor cannot parse complex framing",
+                    isValidationSupportedNow(cfs));
+
+        // Positive control, same shape as isSupportedNow's: an equivalent table that never had
+        // the collection, so the rejection above is attributable to the dropped column alone.
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore plain = getCurrentColumnFamilyStore();
+        plain.disableAutoCompaction();
+        execute("INSERT INTO %s (pk, ck, v) VALUES (1, 1, 'x')");
+        flush();
+        execute("INSERT INTO %s (pk, ck, v) VALUES (1, 2, 'y')");
+        flush();
+        assertTrue("expected a plain table with no dropped collection to be cursor-validation-supported",
+                   isValidationSupportedNow(plain));
+    }
+
+    private boolean isValidationSupportedNow(ColumnFamilyStore cfs) throws Exception
+    {
+        Set<SSTableReader> inputs = cfs.getLiveSSTables();
+        try (ValidationCompactionController controller = new ValidationCompactionController(cfs, FBUtilities.nowInSeconds()))
+        {
+            return CursorCompactor.isValidationSupported(inputs, controller);
         }
     }
 

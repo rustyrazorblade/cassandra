@@ -25,6 +25,8 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.LongPredicate;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -607,14 +609,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         this.controller = controller;
         this.type = type;
-        // mirror CompactionIterator.purger(): accord-enabled (and accord-migrating) tables
-        // purge and expire relative to gcBefore — derived from accord's durability bounds by
-        // CompactionTask.getCompactionController — retaining data accord may still read at
-        // earlier timestamps; every nowInSec use below is a purge/expiry decision
-        TableMetadata tableMetadata = controller.cfs.metadata();
-        this.nowInSec = tableMetadata.isAccordEnabled() || tableMetadata.migratingFromAccord()
-                        ? controller.gcBefore
-                        : nowInSec;
+        this.nowInSec = resolveNowInSec(controller, nowInSec);
         this.compactionId = compactionId;
 
         long inputBytes = 0;
@@ -639,14 +634,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         this.activeCompactions.beginCompaction(this); // note that CompactionTask also calls this, but CT only creates CompactionIterator with a NOOP ActiveCompactions
 
         TableMetadata metadata = metadata();
-        // the INPUT headers decide whether static rows can occur in this merge (and the output
-        // header, SerializationHeader.make, is their union): after ALTER TABLE ... DROP of the
-        // last static column, current metadata has no static columns but older sstables
-        // legitimately still carry static rows
-        boolean anyStaticColumns = false;
-        for (SSTableReader sstable : this.sstables)
-            anyStaticColumns |= sstable.header.hasStatic();
-        this.hasStaticColumns = anyStaticColumns;
+        this.hasStaticColumns = anyStaticColumns(this.sstables);
         /**
          * Pipeline should end up similar to the one in {@link CompactionIterator}:
          * [MERGED -> ?TopPartitionTracker -> GarbageSkipper -> Purger -> org.apache.cassandra.db.transform.DuplicateRowChecker -> Abortable] -> next()
@@ -726,10 +714,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         this.controller = controller;
         this.type = type;
-        TableMetadata tableMetadata = controller.cfs.metadata();
-        this.nowInSec = tableMetadata.isAccordEnabled() || tableMetadata.migratingFromAccord()
-                        ? controller.gcBefore
-                        : nowInSec;
+        this.nowInSec = resolveNowInSec(controller, nowInSec);
         this.compactionId = compactionId;
 
         long inputBytes = 0;
@@ -765,10 +750,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         try
         {
             TableMetadata metadata = metadata();
-            boolean anyStaticColumns = false;
-            for (SSTableReader sstable : this.sstables)
-                anyStaticColumns |= sstable.header.hasStatic();
-            this.hasStaticColumns = anyStaticColumns;
+            this.hasStaticColumns = anyStaticColumns(this.sstables);
 
             this.sstableCursors = convertSSTablesToPartialRangeCursors(boundsBySSTable, DatabaseDescriptor.getCompactionReadDiskAccessMode());
             this.sstableCursorsEqualsNext = new boolean[sstables.size()];
@@ -805,6 +787,37 @@ public class CursorCompactor extends CompactionInfo.Holder
     public interface OutputWriterProvider
     {
         SSTableWriter maybeSwitchWriter(DecoratedKey key);
+    }
+
+    /**
+     * Mirrors {@code CompactionIterator.purger()}: accord-enabled (and accord-migrating) tables
+     * purge and expire relative to {@code gcBefore} - derived from accord's durability bounds by
+     * {@code CompactionTask.getCompactionController} - retaining data accord may still read at
+     * earlier timestamps; every {@code nowInSec} use in this class is a purge/expiry decision.
+     * Shared by both constructors: it's the same rule regardless of whether the input is
+     * scanners or a partial-range bounds map.
+     */
+    private static long resolveNowInSec(AbstractCompactionController controller, long nowInSec)
+    {
+        TableMetadata tableMetadata = controller.cfs.metadata();
+        return tableMetadata.isAccordEnabled() || tableMetadata.migratingFromAccord()
+               ? controller.gcBefore
+               : nowInSec;
+    }
+
+    /**
+     * The INPUT headers decide whether static rows can occur in this merge (and the output
+     * header, {@code SerializationHeader.make}, is their union): after {@code ALTER TABLE ... DROP}
+     * of the last static column, current metadata has no static columns but older sstables
+     * legitimately still carry static rows. Shared by both constructors: the rule doesn't depend
+     * on whether the sstables were reached via scanners or a partial-range bounds map.
+     */
+    private static boolean anyStaticColumns(Set<SSTableReader> sstables)
+    {
+        boolean anyStaticColumns = false;
+        for (SSTableReader sstable : sstables)
+            anyStaticColumns |= sstable.header.hasStatic();
+        return anyStaticColumns;
     }
 
     /**
@@ -2316,7 +2329,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             writerRollover();
 
-            ssTableCursorWriter = new SSTableCursorWriter((SortedTableWriter) newWriter);
+            ssTableCursorWriter = SSTableCursorWriter.forCompaction((SortedTableWriter) newWriter);
             ssTableCursorWriter.setFirst(partitionDescriptor.keyBuffer());
         }
         assert ssTableCursorWriter != null;
@@ -2867,10 +2880,8 @@ public class CursorCompactor extends CompactionInfo.Holder
         for (ISSTableScanner scanner : scanners)
             scanner.close();
 
-        StatefulCursor[] cursors = new StatefulCursor[sstables.size()];
-        int i = 0;
-        try
-        {
+        return buildCursorsOrCloseOnFailure(sstables.size(), cursors -> {
+            int i = 0;
             for (ISSTableScanner scanner : scanners)
             {
                 if (scanner instanceof SSTableSimpleScanner)
@@ -2885,26 +2896,34 @@ public class CursorCompactor extends CompactionInfo.Holder
                 }
             }
             assert i == cursors.length : "cursor count " + i + " differs from sstable count " + cursors.length;
-            return cursors;
-        }
-        catch (RuntimeException | Error e)
-        {
-            Throwables.closeNonNullAndAddSuppressed(e, cursors);
-            throw e;
-        }
+        });
     }
 
     private static StatefulCursor[] convertSSTablesToPartialRangeCursors(Map<SSTableReader, List<PartitionPositionBounds>> boundsBySSTable,
                                                                          DiskAccessMode diskAccessMode)
     {
-        StatefulCursor[] cursors = new StatefulCursor[boundsBySSTable.size()];
-        int i = 0;
-        try
-        {
+        return buildCursorsOrCloseOnFailure(boundsBySSTable.size(), cursors -> {
+            int i = 0;
             for (Map.Entry<SSTableReader, List<PartitionPositionBounds>> entry : boundsBySSTable.entrySet())
             {
                 cursors[i++] = new StatefulCursor(entry.getKey(), entry.getValue(), diskAccessMode);
             }
+        });
+    }
+
+    /**
+     * Shared by both cursor-array factories above, which differ only in how they map their
+     * respective source (a set of sstables, or a partial-range bounds map) onto each
+     * {@link StatefulCursor}: allocates a {@code size}-element array, lets {@code populate} fill
+     * it in place, and - if constructing a later element throws - closes every cursor already
+     * opened into it before rethrowing, so a partial failure never leaks open file handles.
+     */
+    private static StatefulCursor[] buildCursorsOrCloseOnFailure(int size, Consumer<StatefulCursor[]> populate)
+    {
+        StatefulCursor[] cursors = new StatefulCursor[size];
+        try
+        {
+            populate.accept(cursors);
             return cursors;
         }
         catch (RuntimeException | Error e)

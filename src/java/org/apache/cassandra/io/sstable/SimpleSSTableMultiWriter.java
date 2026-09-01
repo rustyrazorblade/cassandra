@@ -45,6 +45,18 @@ public class SimpleSSTableMultiWriter implements SSTableMultiWriter
         this.writer = writer;
     }
 
+    /**
+     * The single underlying writer this wraps — for callers that need to drive it more directly
+     * than {@link #append} allows, e.g. constructing an {@code SSTableCursorWriter} for the
+     * memtable cursor flush path, which (unlike compaction's writer, switched explicitly via
+     * {@code CompactionAwareWriter}) has no other way to reach the {@code SortedTableWriter} a
+     * flush's {@code SSTableMultiWriter} abstraction wraps.
+     */
+    public SSTableWriter writer()
+    {
+        return writer;
+    }
+
     public void append(UnfilteredRowIterator partition)
     {
         writer.append(partition);
