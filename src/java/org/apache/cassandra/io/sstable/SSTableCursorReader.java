@@ -62,6 +62,7 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.ROW_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.SEEK;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.STATIC_ROW_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.TOMBSTONE_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
@@ -91,6 +92,8 @@ public class SSTableCursorReader implements AutoCloseable
         int PARTITION_END = 1 << 8;
         /** no segment left to read; EOF for a whole-file cursor */
         int DONE = 1 << 9;
+        /** {@link #seekUnfiltered} has positioned the reader but not yet resolved the flags */
+        int SEEK = 1 << 10;
 
         static boolean isState(int state, int mask) {
             return (state & mask) != 0;
@@ -724,6 +727,39 @@ public class SSTableCursorReader implements AutoCloseable
         if (marker != UnfilteredSerializer.END_OF_PARTITION)
             throw new IOException("Seeking to a partition at: " + position + " did not land after an end-of-partition marker; found 0x"
                                   + Integer.toHexString(marker));
+    }
+
+    /**
+     * Positions the cursor at an unfiltered's flags byte mid-partition (e.g. a BTI row-index
+     * block start) and consumes those flags, leaving the cursor ready for {@link #readRowHeader}
+     * / {@link #readTombstoneMarker} exactly as if it had walked there row by row. No
+     * partition-scoped stream state needs reconstructing: clustering values, liveness and
+     * deletion times are all encoded relative to the serialization HEADER (never running-delta
+     * against preceding unfiltereds), and cell-cursor state is re-initialized per row. The one
+     * piece of logical state a mid-partition position carries — the currently-OPEN range
+     * tombstone — is not recoverable from the data stream at the seek point and must be tracked
+     * by the caller (for BTI, the row index stores it per block:
+     * {@code RowIndexReader.IndexInfo.openDeletion}).
+     */
+    public int seekUnfiltered(long position)
+    {
+        state = SEEK;
+        // partition elements (Unfiltered) have flags
+        dataReader.seek(position);
+        try
+        {
+            // autoContinue: resolve the flags straight to ROW_START/TOMBSTONE_START rather than
+            // stopping at UNFILTERED_END, which describes the end of a previously-read unfiltered
+            // — there is none after a seek
+            checkNextFlagsAfterStaticRowOrUnfilteredStart(true);
+        }
+        catch (IOException e)
+        {
+            return corruptSSTable(e);
+        }
+        if (!isState(state, ROW_START | TOMBSTONE_START | DONE))
+            throw new IllegalStateException("Seeking to an unfiltered at: " + position + " did not result in a valid state: " + state);
+        return state;
     }
 
     // struct partition {

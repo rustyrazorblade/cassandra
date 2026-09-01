@@ -4948,6 +4948,17 @@ public class DatabaseDescriptor
         conf.cursor_flush_enabled = cursor_flush_enabled;
     }
 
+    public static boolean cursorReadsEnabled()
+    {
+        return conf.cursor_reads_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setCursorReadsEnabled(boolean cursor_reads_enabled)
+    {
+        conf.cursor_reads_enabled = cursor_reads_enabled;
+    }
+
     public static boolean enableDropCompactStorage()
     {
         return conf.drop_compact_storage_enabled;
