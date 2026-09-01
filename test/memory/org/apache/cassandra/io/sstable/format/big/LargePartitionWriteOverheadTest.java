@@ -87,7 +87,13 @@ public class LargePartitionWriteOverheadTest
     private static final Logger logger = LoggerFactory.getLogger(LargePartitionWriteOverheadTest.class);
     private static final ThreadMXBean threadMX = (ThreadMXBean) ManagementFactory.getThreadMXBean();
 
-    private static final Path RESULTS_FILE = Paths.get("benchmark-results", "large-partition-write.md");
+    /**
+     * Build output, never a tracked file: a test must not write into the working tree. {@code build/}
+     * is gitignored and {@code ant clean} wipes it, so a run leaves the repository untouched. The
+     * numbers that matter belong in the commit message or on the JIRA, not in a file the suite
+     * rewrites with whatever this machine happened to measure.
+     */
+    private static final Path RESULTS_FILE = Paths.get("build", "test", "large-partition-write.md");
 
     private static final String TABLE_CQL = "CREATE TABLE tbl (k text, c int, v1 text, v2 text, v3 text, v4 text, PRIMARY KEY (k, c))";
     private static final String PARTITION_KEY = "large";
@@ -100,26 +106,6 @@ public class LargePartitionWriteOverheadTest
     private static final int DEFAULT_ROWS = 32768;
     private static final int STRESS_ROWS = 327_680;
     private static final int GIBIBYTE_ROWS = 1_048_576;
-
-    /** Same ASF header the repository's other markdown files carry; {@code ant rat-check} requires it. */
-    private static final String LICENSE_HEADER =
-        "<!--\n" +
-        "# Licensed to the Apache Software Foundation (ASF) under one\n" +
-        "# or more contributor license agreements.  See the NOTICE file\n" +
-        "# distributed with this work for additional information\n" +
-        "# regarding copyright ownership.  The ASF licenses this file\n" +
-        "# to you under the Apache License, Version 2.0 (the\n" +
-        "# \"License\"); you may not use this file except in compliance\n" +
-        "# with the License.  You may obtain a copy of the License at\n" +
-        "#\n" +
-        "#     http://www.apache.org/licenses/LICENSE-2.0\n" +
-        "#\n" +
-        "# Unless required by applicable law or agreed to in writing, software\n" +
-        "# distributed under the License is distributed on an \"AS IS\" BASIS,\n" +
-        "# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n" +
-        "# See the License for the specific language governing permissions and\n" +
-        "# limitations under the License.\n" +
-        "-->\n\n";
 
     private static final List<Result> results = new ArrayList<>();
 
@@ -150,7 +136,6 @@ public class LargePartitionWriteOverheadTest
             return;
 
         StringBuilder sb = new StringBuilder();
-        sb.append(LICENSE_HEADER);
         sb.append("# Large partition write overhead\n\n");
         sb.append("Cost of compacting a single large partition through `BigFormatPartitionWriter`, measured by\n");
         sb.append("`test/memory/org/apache/cassandra/io/sstable/format/big/LargePartitionWriteOverheadTest.java`.\n\n");
@@ -173,7 +158,7 @@ public class LargePartitionWriteOverheadTest
 
         Files.createDirectories(RESULTS_FILE.getParent());
         Files.write(RESULTS_FILE, sb.toString().getBytes(StandardCharsets.UTF_8));
-        logger.info("Wrote {}", RESULTS_FILE.toAbsolutePath());
+        logger.info("Large partition write overhead:\n{}\nAlso written to {}", sb, RESULTS_FILE.toAbsolutePath());
     }
 
     @Test
