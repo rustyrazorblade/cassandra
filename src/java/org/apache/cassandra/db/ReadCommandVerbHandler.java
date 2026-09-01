@@ -23,7 +23,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.CoordinatorBehindException;
@@ -55,14 +54,16 @@ public class ReadCommandVerbHandler implements IVerbHandler<ReadCommand>
 
     public ReadResponse doRead(ReadCommand command, boolean trackRepairedData)
     {
-        ReadResponse response;
-        try (ReadExecutionController controller = command.executionController(trackRepairedData);
-             UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+        // M3.3b-i (CASSANDRA-20428): createResponseLocally's default implementation is exactly the
+        // executeLocally + createResponse pair this replaced (see ReadCommand.createResponseLocally's
+        // own javadoc) -- SinglePartitionReadCommand may additionally attempt a flag-gated transcode
+        // fast path first, falling back to that same default whenever its own gate declines. The
+        // exception types/conditions this method can throw are unchanged either way; doVerb's catch
+        // blocks below do not need to change.
+        try (ReadExecutionController controller = command.executionController(trackRepairedData))
         {
-            response = command.createResponse(iterator, controller.getRepairedDataInfo());
+            return command.createResponseLocally(controller);
         }
-
-        return response;
     }
 
     public void doVerb(Message<ReadCommand> message)
