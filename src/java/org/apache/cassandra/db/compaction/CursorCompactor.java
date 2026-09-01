@@ -455,7 +455,9 @@ public class CursorCompactor extends CompactionInfo.Holder
      *
      * See CASSANDRA-21463.
      */
-    private static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader)
+    // public so the experimental cursor read path (org.apache.cassandra.db.CursorReads) can share
+    // the exact same dropped-complex/counter-header-column gate rather than re-deriving it
+    public static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader)
     {
         // RegularAndStaticColumns iterates statics then regulars, so this covers both
         for (ColumnMetadata column : reader.header.columns())
@@ -2071,6 +2073,19 @@ public class CursorCompactor extends CompactionInfo.Holder
                : 1 + org.apache.cassandra.utils.vint.VIntCoding.numberOfExtraBytesToRead(firstByte);
     }
 
+    /**
+     * Same output column? Sources opened against different TableMetadata versions (a
+     * type-touching ALTER between flushes — the CASSANDRA-13776 shape) carry DIFFERENT
+     * ColumnMetadata instances for the same column in their open-time serialization
+     * headers, so reference identity alone is wrong across sources. Identity stays as the
+     * fast path (always true between cells of one source, and across sources when no
+     * schema change intervened); the fallback compares the name bytes — no allocation.
+     */
+    private static boolean sameColumn(ColumnMetadata a, ColumnMetadata b)
+    {
+        return a == b || (a != null && b != null && a.name.equals(b.name));
+    }
+
     DeletionTime activeOpenRangeDeletion = DeletionTime.LIVE;
     final List<ReusableDeletionTime> openMarkers = new ArrayList<>();
     final ArrayDeque<ReusableDeletionTime> reusableMarkersPool = new ArrayDeque<>();
@@ -2701,8 +2716,12 @@ public class CursorCompactor extends CompactionInfo.Holder
      * {@link ColumnMetadata#cellPathComparator()}, which sets both the cell order that flush
      * writes to disk and the merge grouping of the iterator.
      */
+    // public (was @VisibleForTesting package-private) so the experimental cursor read path
+    // (org.apache.cassandra.db.CursorReadMerger) can share the type-aware cell-path order —
+    // including the UDT-signed-short subtlety below — instead of copying it. Pure static
+    // function; visibility bump only, no behavior change to any existing caller.
     @VisibleForTesting
-    static int comparePaths(ColumnMetadata column, ByteBuffer p1, ByteBuffer p2)
+    public static int comparePaths(ColumnMetadata column, ByteBuffer p1, ByteBuffer p2)
     {
         return comparePaths(column, ColumnMetadata.pathNameComparator(column.type), p1, p2);
     }

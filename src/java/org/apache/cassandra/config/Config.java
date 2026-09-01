@@ -51,6 +51,7 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.AUTOCOMPAC
 import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_AVAILABLE_PROCESSORS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_COMPACTION_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_FLUSH_ENABLED;
+import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_READS_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.FILE_CACHE_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.SKIP_PAXOS_REPAIR_ON_TOPOLOGY_CHANGE;
 import static org.apache.cassandra.config.CassandraRelevantProperties.SKIP_PAXOS_REPAIR_ON_TOPOLOGY_CHANGE_KEYSPACES;
@@ -721,6 +722,12 @@ public class Config
     public boolean cursor_compaction_enabled = CURSOR_COMPACTION_ENABLED.getBoolean();
 
     public boolean cursor_flush_enabled = CURSOR_FLUSH_ENABLED.getBoolean();
+    /**
+     * Experimental (spike): serve the sstable legs of supported single-partition reads through
+     * SSTableCursorReader (see org.apache.cassandra.db.CursorReads). Off by default; queries that
+     * do not pass the CursorReads.isReadSupported gate always use the iterator read path.
+     */
+    public volatile boolean cursor_reads_enabled = CURSOR_READS_ENABLED.getBoolean();
 
     public volatile boolean use_statements_enabled = true;
 
