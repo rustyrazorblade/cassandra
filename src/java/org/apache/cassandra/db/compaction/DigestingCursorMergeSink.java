@@ -387,30 +387,27 @@ public class DigestingCursorMergeSink implements CursorMergeSink
     {
         cellValueScratch.clear();
         int written = cursor.copyCellValue(cellValueScratch, copyColumnValueBuffer);
-        byte[] data = cellValueScratch.getData();
-        int length = cellValueScratch.getLength();
-        if (pendingCellColumn.type.valueLengthIfFixed() >= 0)
-        {
-            pendingCellValue = ByteBuffer.wrap(Arrays.copyOf(data, length));
-        }
-        else
-        {
-            // Variable-length type: copyCellContents wrote [unsigned-vint length][value bytes] -
-            // strip the vint prefix, same as MaterializingCursorMergeSink. The length==0 guard
-            // mirrors the DataOutputBuffer overload below (this path is only reached when the cell
-            // flags claim a value, so the vint prefix is always present, but keep the two overloads
-            // symmetric to avoid a future copy-paste regression).
-            int prefixLength = length == 0 ? 0 : VIntCoding.computeUnsignedVIntSize(ByteBuffer.wrap(data, 0, length), 0);
-            pendingCellValue = ByteBuffer.wrap(Arrays.copyOfRange(data, prefixLength, length));
-        }
+        setPendingCellValueFromBytes(cellValueScratch.getData(), cellValueScratch.getLength());
         return written;
     }
 
     @Override
     public void writeCellValue(DataOutputBuffer tempCellBuffer) throws IOException
     {
-        byte[] data = tempCellBuffer.getData();
-        int length = tempCellBuffer.getLength();
+        setPendingCellValueFromBytes(tempCellBuffer.getData(), tempCellBuffer.getLength());
+    }
+
+    /**
+     * Shared by both {@code writeCellValue} overloads above: each hands this the raw bytes it
+     * wrote its cell value into ({@code cursor.copyCellValue}'s scratch buffer, or the merge
+     * loop's own {@code tempCellBuffer}), and this strips the source's own
+     * {@code [unsigned-vint length][value bytes]} framing for a variable-length type, same as
+     * {@code MaterializingCursorMergeSink}. The {@code length == 0} guard is defensive: both
+     * callers only reach here when the cell flags claim a value, so the vint prefix is always
+     * actually present.
+     */
+    private void setPendingCellValueFromBytes(byte[] data, int length)
+    {
         if (pendingCellColumn.type.valueLengthIfFixed() >= 0)
         {
             pendingCellValue = ByteBuffer.wrap(Arrays.copyOf(data, length));

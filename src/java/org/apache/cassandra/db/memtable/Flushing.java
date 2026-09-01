@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.db.memtable;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -39,11 +41,16 @@ import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.IntervalSet;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.partitions.MemtableCursorFlusher;
 import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.SSTableCursorWriter;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
+import org.apache.cassandra.io.sstable.SimpleSSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.sstable.format.SSTableWriter;
+import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.Clock;
@@ -159,26 +166,10 @@ public class Flushing
             long startCpuTime = ThreadStats.getCurrentThreadCpuTimeNano();
             long startAllocatedBytes = ThreadStats.getCurrentThreadAllocatedBytes();
 
-            // (we can't clear out the map as-we-go to free up memory,
-            //  since the memtable is being used for queries in the "pending flush" category)
-            for (Partition partition : toFlush)
-            {
-                // Each batchlog partition is a separate entry in the log. And for an entry, we only do 2
-                // operations: 1) we insert the entry and 2) we delete it. Further, BL data is strictly local,
-                // we don't need to preserve tombstones for repair. So if both operation are in this
-                // memtable (which will almost always be the case if there is no ongoing failure), we can
-                // just skip the entry (CASSANDRA-4667).
-                if (isBatchLogTable && !partition.partitionLevelDeletion().isLive() && partition.hasRows())
-                    continue;
-
-                if (!partition.isEmpty())
-                {
-                    try (UnfilteredRowIterator iter = partition.unfilteredIterator())
-                    {
-                        writer.append(iter);
-                    }
-                }
-            }
+            if (canUseCursorFlush())
+                writeSortedContentsViaCursor();
+            else
+                writeSortedContentsViaIterator();
 
             if (logCompletion)
             {
@@ -212,6 +203,73 @@ public class Flushing
                 );
                 // Update the metrics
                 metrics.bytesFlushed.inc(bytesFlushed);
+            }
+        }
+
+        /**
+         * Cursor flush needs the single underlying {@link SortedTableWriter} a
+         * {@link SimpleSSTableMultiWriter} wraps, to construct an {@link SSTableCursorWriter}
+         * around it — unlike compaction's writer (switched explicitly via
+         * {@code CompactionAwareWriter}), there's no other seam to reach it through. Any other
+         * {@code SSTableMultiWriter} shape (range-aware/sharded, zero-copy, ...) falls back to
+         * the iterator path; this is a scope decision; there is no correctness reason those
+         * couldn't be supported too, just not exercised yet.
+         */
+        private boolean canUseCursorFlush()
+        {
+            if (!DatabaseDescriptor.cursorFlushEnabled())
+                return false;
+
+            if (!(writer instanceof SimpleSSTableMultiWriter) ||
+                !(((SimpleSSTableMultiWriter) writer).writer() instanceof SortedTableWriter))
+            {
+                if (logger.isDebugEnabled())
+                    logger.debug("Cursor flush for table: {} keyspace: {} is not supported. REASON: " +
+                                 "Unsupported SSTableMultiWriter shape: {}",
+                                 toFlush.metadata().name, toFlush.metadata().keyspace, writer.getClass().getSimpleName());
+                return false;
+            }
+
+            return MemtableCursorFlusher.isSupported(toFlush.metadata(), toFlush.memtable());
+        }
+
+        private void writeSortedContentsViaCursor()
+        {
+            SortedTableWriter<?, ?> sortedWriter = (SortedTableWriter<?, ?>) ((SimpleSSTableMultiWriter) writer).writer();
+            // forFlush: sortedWriter's finish/close is driven by the flush transaction elsewhere,
+            // exactly as it is for the iterator path below (writer.append never finishes/closes
+            // it either) - close() here only releases this cursor's own per-instance state.
+            try (SSTableCursorWriter cursorWriter = SSTableCursorWriter.forFlush(sortedWriter))
+            {
+                new MemtableCursorFlusher(cursorWriter, toFlush.metadata()).flush(toFlush);
+            }
+            catch (IOException e)
+            {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        private void writeSortedContentsViaIterator()
+        {
+            // (we can't clear out the map as-we-go to free up memory,
+            //  since the memtable is being used for queries in the "pending flush" category)
+            for (Partition partition : toFlush)
+            {
+                // Each batchlog partition is a separate entry in the log. And for an entry, we only do 2
+                // operations: 1) we insert the entry and 2) we delete it. Further, BL data is strictly local,
+                // we don't need to preserve tombstones for repair. So if both operation are in this
+                // memtable (which will almost always be the case if there is no ongoing failure), we can
+                // just skip the entry (CASSANDRA-4667).
+                if (isBatchLogTable && !partition.partitionLevelDeletion().isLive() && partition.hasRows())
+                    continue;
+
+                if (!partition.isEmpty())
+                {
+                    try (UnfilteredRowIterator iter = partition.unfilteredIterator())
+                    {
+                        writer.append(iter);
+                    }
+                }
             }
         }
 

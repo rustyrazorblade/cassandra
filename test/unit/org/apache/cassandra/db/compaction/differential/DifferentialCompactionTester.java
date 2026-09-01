@@ -20,7 +20,6 @@ package org.apache.cassandra.db.compaction.differential;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -64,6 +63,7 @@ import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.tools.JsonTransformer;
 import org.apache.cassandra.tools.Util;
+import org.apache.cassandra.utils.DifferentialTestUtils;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.OutputHandler;
 
@@ -705,7 +705,7 @@ public abstract class DifferentialCompactionTester extends CQLTester
             // still localizes divergences to exact offsets.
             boolean digestMode = it.json.startsWith("sha256:");
             if (!digestMode && !it.json.equals(cu.json))
-                fail("LOGICAL divergence in output sstable " + i + " (iterator vs cursor):\n" + firstJsonDiff(it.json, cu.json) +
+                fail("LOGICAL divergence in output sstable " + i + " (iterator vs cursor):\n" + DifferentialTestUtils.firstJsonDiff(it.json, cu.json) +
                      "\niterator stats: " + it.statsSummary + "\ncursor stats:   " + cu.statsSummary);
 
             assertEquals("stats summary divergence in output sstable " + i, it.statsSummary, cu.statsSummary);
@@ -727,10 +727,10 @@ public abstract class DifferentialCompactionTester extends CQLTester
                 }
                 if (!hasA)
                     continue;
-                long firstDiff = firstFileDifference(a, b);
+                long firstDiff = DifferentialTestUtils.firstFileDifference(a, b);
                 if (firstDiff < 0)
                     continue;
-                divergences.add(describeFileDiff(comp, a, b, firstDiff));
+                divergences.add(DifferentialTestUtils.describeFileDiff(comp, a, b, firstDiff));
             }
             if (!divergences.isEmpty())
                 fail("BYTE divergence in output sstable " + i + " (iterator vs cursor):\n" + String.join("\n", divergences) +
@@ -741,78 +741,6 @@ public abstract class DifferentialCompactionTester extends CQLTester
                              " (scale mode; rerun a reduced scenario without scale mode for a row-level diff)",
                              it.json, cu.json);
         }
-    }
-
-    /** Streaming comparison: -1 if byte-identical, else the offset of the first difference
-     *  (the shorter length when one file is a prefix of the other). */
-    private static long firstFileDifference(Path a, Path b)
-    {
-        try (java.io.InputStream ia = new java.io.BufferedInputStream(Files.newInputStream(a), 1 << 16);
-             java.io.InputStream ib = new java.io.BufferedInputStream(Files.newInputStream(b), 1 << 16))
-        {
-            byte[] bufA = new byte[1 << 16];
-            byte[] bufB = new byte[1 << 16];
-            long offset = 0;
-            while (true)
-            {
-                int readA = ia.readNBytes(bufA, 0, bufA.length);
-                int readB = ib.readNBytes(bufB, 0, bufB.length);
-                int common = Math.min(readA, readB);
-                int mismatch = java.util.Arrays.mismatch(bufA, 0, common, bufB, 0, common);
-                if (mismatch >= 0)
-                    return offset + mismatch;
-                if (readA != readB)
-                    return offset + common; // same prefix, different length
-                if (readA == 0)
-                    return -1;
-                offset += readA;
-            }
-        }
-        catch (IOException e)
-        {
-            throw new UncheckedIOException(e);
-        }
-    }
-
-    private static String describeFileDiff(String component, Path a, Path b, long firstDiff)
-    {
-        try
-        {
-            return String.format("  %s: lengths %d vs %d, first divergence at offset %d%n    iterator: %s%n    cursor:   %s",
-                                 component, Files.size(a), Files.size(b), firstDiff,
-                                 hexContext(a, firstDiff), hexContext(b, firstDiff));
-        }
-        catch (IOException e)
-        {
-            throw new UncheckedIOException(e);
-        }
-    }
-
-    private static String hexContext(Path file, long offset) throws IOException
-    {
-        long size = Files.size(file);
-        long from = Math.max(0, offset - 8);
-        int len = (int) Math.min(size - from, 32);
-        byte[] window = new byte[Math.max(len, 0)];
-        try (java.io.InputStream in = Files.newInputStream(file))
-        {
-            ByteStreams.skipFully(in, from);
-            in.readNBytes(window, 0, window.length);
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < window.length; i++)
-        {
-            long abs = from + i;
-            if (abs == offset)
-                sb.append('[');
-            sb.append(String.format("%02x", window[i]));
-            if (abs == offset)
-                sb.append(']');
-            sb.append(' ');
-        }
-        if (from + window.length < size)
-            sb.append("...");
-        return sb.toString();
     }
 
     /**
@@ -889,29 +817,4 @@ public abstract class DifferentialCompactionTester extends CQLTester
         }
     }
 
-    private static String firstJsonDiff(String a, String b)
-    {
-        String[] linesA = a.split("\n", -1);
-        String[] linesB = b.split("\n", -1);
-        int max = Math.max(linesA.length, linesB.length);
-        for (int i = 0; i < max; i++)
-        {
-            String la = i < linesA.length ? linesA[i] : "<missing>";
-            String lb = i < linesB.length ? linesB[i] : "<missing>";
-            if (!la.equals(lb))
-            {
-                StringBuilder sb = new StringBuilder();
-                sb.append("first differing line ").append(i + 1).append(" of ").append(max).append(":\n");
-                for (int j = Math.max(0, i - 2); j < Math.min(max, i + 3); j++)
-                {
-                    String ja = j < linesA.length ? linesA[j] : "<missing>";
-                    String jb = j < linesB.length ? linesB[j] : "<missing>";
-                    sb.append(j == i ? ">>" : "  ").append(" iterator: ").append(ja).append('\n');
-                    sb.append(j == i ? ">>" : "  ").append(" cursor:   ").append(jb).append('\n');
-                }
-                return sb.toString();
-            }
-        }
-        return "(no line diff found despite string inequality — check line endings)";
-    }
 }

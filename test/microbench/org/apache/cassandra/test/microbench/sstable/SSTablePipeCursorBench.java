@@ -51,7 +51,7 @@ public class SSTablePipeCursorBench extends SSTableAbstractPipeBench
     {
         try(SSTableCursorReader cursorReader = SSTableCursorReader.fromDescriptor(desc);
             SortedTableWriter ssTableWriter = (SortedTableWriter) CompactionManager.createWriter(cfs, new org.apache.cassandra.io.util.File(tmpDir), 0, 0, null, false, cursorReader.ssTableReader(), LifecycleTransaction.offline(OperationType.COMPACTION));
-            SSTableCursorWriter cursorWriter = new SSTableCursorWriter(ssTableWriter);){
+            SSTableCursorWriter cursorWriter = SSTableCursorWriter.forCompaction(ssTableWriter);){
             SSTableCursorPipeUtil.copySSTable(cursorReader, cursorWriter);
         }
     }

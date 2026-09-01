@@ -21,7 +21,10 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.util.Arrays;
 
+import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.Columns;
+import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
@@ -218,6 +221,41 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         {
             missingColumnsMask = 0;
         }
+    }
+
+    /**
+     * Memtable-source (write) path: populates just the clustering-key bytes for a regular row
+     * from a live {@link Clustering}. {@link SSTableCursorWriter#writeRowEnd} only reads the
+     * clustering fields off this descriptor for a non-static row (liveness/deletion are passed
+     * to {@code writeRowStart} directly, and column-subset bookkeeping is tracked by the writer
+     * itself as cells are written) — so no other field needs to be populated here.
+     */
+    public void storeRowClustering(Clustering<?> clustering)
+    {
+        storeClustering(ROW_CLUSTERING_KIND, clusteringTypes.length, clustering);
+    }
+
+    /**
+     * Memtable-source (write) path: populates a range-tombstone bound/boundary marker —
+     * clustering bytes plus the deletion time(s) {@link SSTableCursorWriter#writeRangeTombstone}
+     * reads off this descriptor. {@code open} is only consulted for boundary kinds; pass
+     * {@link DeletionTime#LIVE} for plain bounds.
+     * <p>
+     * {@code kind} is taken separately from {@code valuesSource} (rather than reading
+     * {@code valuesSource.kind()}) so a boundary can reuse one side's already-live
+     * {@link org.apache.cassandra.db.ClusteringBound} as the values source under the merged
+     * boundary kind, the same way {@link org.apache.cassandra.db.ClusteringBoundary#create}
+     * does for the iterator path — {@link ClusteringPrefix.Serializer#serializeValuesWithoutSize}
+     * only reads {@code valuesSource}'s size/values, never its own kind.
+     */
+    public void storeMarker(ClusteringPrefix.Kind kind, ClusteringPrefix<?> valuesSource, DeletionTime close, DeletionTime open)
+    {
+        storeClustering((byte) kind.ordinal(), valuesSource.size(), valuesSource);
+        deletionTime.reset(close);
+        if (kind.isBoundary())
+            deletionTime2.reset(open);
+        else
+            deletionTime2.resetLive();
     }
 
     public void resetUnfiltered()
