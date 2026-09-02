@@ -180,7 +180,7 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("-c", "--kubeconfig", help="Path to a different kubeconfig.")
     parser.add_argument("-x", "--kubecontext", help="Use a different Kubernetes context.")
     parser.add_argument("-i", "--url", help="Jenkins url. Suitable when kubectl access in not available. Can also be specified via the JENKINS_URL environment variable (and in .build/.run-ci.env)")
-    parser.add_argument("-u", "--user", help="Jenkins user. Can also be specified via the JENKINS_USER environment variable (and in .build/.run-ci.env)")
+    parser.add_argument("-u", "--user", help="Jenkins user. Can also be specified via the JENKINS_USER environment variable (and in .build/.run-ci.env). The password is read from JENKINS_PASSWORD if set, otherwise prompted for")
     parser.add_argument("-r", "--repository", default=DEFAULT_REPO_URL, help="Repository URL. Defaults to current tracking remote.")
     parser.add_argument("-b", "--branch", default=DEFAULT_REPO_BRANCH, help="Repository branch. Defaults to current branch.")
     parser.add_argument("-p", "--profile", choices=['packaging','skinny','pre-commit','pre-commit w/ upgrades','post-commit','custom'], default=DEFAULT_PROFILE, help="CI pipeline profile. Defaults to skinny.")
@@ -298,7 +298,7 @@ def get_jenkins(k8s_client: client.CoreV1Api, args, kube_ns: str) -> Tuple[str, 
     user = args.user if args.user else "admin"
     ip = args.url if args.url else get_jenkins_ip(k8s_client, kube_ns)
 
-    password = prompt_for_password() if args.user \
+    password = (os.environ.get("JENKINS_PASSWORD") or prompt_for_password()) if args.user \
         else run_kubectl_command(kubeconfig, kubecontext, kube_ns, ["exec", DEFAULT_POD_NAME, "--", "cat", "/run/secrets/additional/chart-admin-password"])
     # Initialize Jenkins API clien
     server = jenkins.Jenkins(f"http://{ip}", username=user, password=password)
