@@ -36,6 +36,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 import com.codahale.metrics.Timer;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -533,7 +534,8 @@ public class RepairCoordinator implements Runnable, ProgressEventNotifier, Repai
                 .pooled("Repair#" + state.cmd, state.options.getJobThreads());
     }
 
-    private static void addRangeToNeighbors(Map<Pair<Set<InetAddressAndPort>, Set<InetAddressAndPort>>, CommonRange> neighborRanges,
+    @VisibleForTesting
+    static void addRangeToNeighbors(Map<Pair<Set<InetAddressAndPort>, Set<InetAddressAndPort>>, CommonRange> neighborRanges,
                                             Range<Token> range,
                                             EndpointsForRange neighbors)
     {
