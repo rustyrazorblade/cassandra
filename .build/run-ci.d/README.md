@@ -14,7 +14,7 @@ options:
   -x KUBECONTEXT, --kubecontext KUBECONTEXT
                         Use a different Kubernetes context.
   -i URL, --url URL     Jenkins url. Suitable when kubectl access in not available. Can also be specified via the JENKINS_URL environment variable (and in .build/.run-ci.env)
-  -u USER, --user USER  Jenkins user. Can also be specified via the JENKINS_USER environment variable (and in .build/.run-ci.env)
+  -u USER, --user USER  Jenkins user. Can also be specified via the JENKINS_USER environment variable (and in .build/.run-ci.env). Password read from JENKINS_PASSWORD if set, else prompted
   -r REPOSITORY, --repository REPOSITORY
                         Repository URL. Defaults to current tracking remote.
   -b BRANCH, --branch BRANCH
