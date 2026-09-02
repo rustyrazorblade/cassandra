@@ -680,7 +680,7 @@ commitlog_disk_access_mode: legacy
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
-# compaction_read_disk_access_mode: auto
+compaction_read_disk_access_mode: direct
 
 # Set the disk access mode for writing compressed SSTables during background operations
 # (compaction, streaming, cleanup, repair, etc.). The allowed values are:
@@ -691,7 +691,7 @@ commitlog_disk_access_mode: legacy
 # data typically benefits from page cache for subsequent reads (workloads that
 # rarely read recently-flushed data, e.g. write-heavy time series, may see less
 # benefit from caching flush output).
-# background_write_disk_access_mode: standard
+background_write_disk_access_mode: direct
 
 # Size of the in-memory staging buffer for Direct IO background writes. Trades off syscall
 # frequency against per-flush blocking latency on the compaction thread.
