@@ -25,6 +25,7 @@ import java.util.Set;
 
 import org.junit.Test;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
@@ -34,9 +35,10 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
+import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -88,6 +90,16 @@ public class CursorPartialRangeGateTest extends CQLTester
         return Collections.singletonList(new Range<>(min, tokens.get(tokens.size() / 2)));
     }
 
+    /**
+     * Whether the gate can accept any compaction at all under the running configuration. The cursor
+     * path writes the BIG format only, and {@code test/conf/latest_diff.yaml} selects BTI, so an
+     * assertion that the gate opens has to read the format rather than assume it.
+     */
+    private static boolean cursorSupportsSelectedFormat()
+    {
+        return DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat;
+    }
+
     private boolean isSupportedOver(ColumnFamilyStore cfs, List<Range<Token>> ranges) throws Exception
     {
         Set<SSTableReader> inputs = cfs.getLiveSSTables();
@@ -104,8 +116,8 @@ public class CursorPartialRangeGateTest extends CQLTester
     public void aFullRangeCompactionIsSupported() throws Exception
     {
         ColumnFamilyStore cfs = twoSSTablesOfManyPartitions();
-        assertTrue("a full-range compaction must be cursor-supported",
-                   isSupportedOver(cfs, fullRange(cfs)));
+        assertEquals("a full-range compaction is cursor-supported whenever the selected format is",
+                     cursorSupportsSelectedFormat(), isSupportedOver(cfs, fullRange(cfs)));
     }
 
     /**
@@ -142,9 +154,9 @@ public class CursorPartialRangeGateTest extends CQLTester
     public void aPartialRangeCompactionIsSupported() throws Exception
     {
         ColumnFamilyStore cfs = twoSSTablesOfManyPartitions();
-        assertTrue("a partial-range compaction must be cursor-supported: a shard task whose sstables "
-                   + "straddle a shard boundary would otherwise fall back to the iterator path",
-                   isSupportedOver(cfs, halfRange(cfs)));
+        assertEquals("a partial-range compaction is cursor-supported whenever the selected format is: a shard "
+                     + "task whose sstables straddle a shard boundary would otherwise fall back to the iterator path",
+                     cursorSupportsSelectedFormat(), isSupportedOver(cfs, halfRange(cfs)));
     }
 
 }

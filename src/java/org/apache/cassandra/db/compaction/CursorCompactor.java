@@ -1313,7 +1313,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         if (winnerValueLocation() == ValueLocation.IN_SOURCE)
             ssTableCursorWriter.writeCellValue(cellWinner.source, copyColumnValueBuffer);
         else
-            ssTableCursorWriter.writeCellValue(cellWinner.buffer);
+            ssTableCursorWriter.writeCellValue(cellWinner.buffer, tempCellValueLength1);
     }
 
     /**
@@ -1404,16 +1404,24 @@ public class CursorCompactor extends CompactionInfo.Holder
                 throw new IllegalStateException("tempCellBuffer should be null if cellSource has a value to be read.");
             tempCellBuffer1.clear();
             cellWinner.source.copyCellValue(tempCellBuffer1, copyColumnValueBuffer);
+            tempCellValueLength1 = cellWinner.source.lastCellValueLength();
             cellWinner.buffer = tempCellBuffer1; // assume cell1 is going to be bigger
         }
         else if (cellWinner.buffer == null)
+        {
             tempCellBuffer1.clear(); // potential trash value in buffer1
+            tempCellValueLength1 = 0;
+        }
         else if (cellWinner.buffer != tempCellBuffer1)
             throw new IllegalStateException("tempCellBuffer should be tempCellBuffer1 if cellSource has been read.");
 
         tempCellBuffer2.clear();
+        tempCellValueLength2 = 0;
         if (challenger.state() == CELL_VALUE_START)
+        {
             challenger.copyCellValue(tempCellBuffer2, copyColumnValueBuffer);
+            tempCellValueLength2 = challenger.lastCellValueLength();
+        }
 
         // These buffers hold the wire form: a variable-length type prefixes its value with a length
         // vint, and the reference compares the raw value bytes. Skip the vint, or a lexicographic
@@ -1431,9 +1439,22 @@ public class CursorCompactor extends CompactionInfo.Holder
         DataOutputBuffer swap = tempCellBuffer1;
         tempCellBuffer1 = tempCellBuffer2;
         tempCellBuffer2 = swap;
+        int swapLength = tempCellValueLength1;
+        tempCellValueLength1 = tempCellValueLength2;
+        tempCellValueLength2 = swapLength;
         cellWinner.buffer = tempCellBuffer1;
         return true;
     }
+
+    /**
+     * The raw value bytes each temp buffer holds, tracked in step with the buffers themselves so
+     * that the swap above keeps them paired. {@code tempCellValueLength1} is the winner's, because
+     * {@link CellWinner#buffer} is {@code tempCellBuffer1} whenever it is set. The collection
+     * guardrails measure a value this way; the buffer's own length also counts the leading vint of a
+     * variable-length type.
+     */
+    private int tempCellValueLength1;
+    private int tempCellValueLength2;
 
     /**
      * Reports where the winning cell's value is, and fails if the source state and the buffer
