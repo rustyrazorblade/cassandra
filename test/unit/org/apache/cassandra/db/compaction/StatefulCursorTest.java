@@ -19,22 +19,34 @@
 package org.apache.cassandra.db.compaction;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 
 import org.junit.Test;
 
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
+import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.PartitionDescriptor;
 import org.apache.cassandra.io.sstable.SSTableCursorReader;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.schema.ColumnMetadata;
 
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
@@ -51,6 +63,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /** Unit tests for cursor-read defects that the differential harness cannot isolate. */
 public class StatefulCursorTest extends CQLTester
@@ -58,21 +71,23 @@ public class StatefulCursorTest extends CQLTester
     /** Hooks for {@link #drive}, so the cursor-driving tests share one state machine. */
     private interface CursorVisitor
     {
+        default void onPartition(StatefulCursor cursor) {}
         default void onRow(StatefulCursor cursor) {}
         default void onTombstone(StatefulCursor cursor) {}
         /** @param state what readCellHeader returned; UNFILTERED_END means no cell was surfaced */
         default void onCellHeader(StatefulCursor cursor, int state) {}
     }
 
-    /** Drives the cursor over the whole sstable, calling back at rows, markers and cell headers. */
+    /** Drives the cursor over the whole sstable, calling back at partitions, rows, markers and cell headers. */
     private static void drive(StatefulCursor cursor, CursorVisitor visitor)
     {
-        int state = cursor.readPartitionHeader();
+        int state = cursor.state();
         while (!isState(state, DONE))
         {
             if (isState(state, PARTITION_START))
             {
                 state = cursor.readPartitionHeader();
+                visitor.onPartition(cursor);
             }
             else if (isState(state, STATIC_ROW_START))
             {
@@ -365,6 +380,214 @@ public class StatefulCursorTest extends CQLTester
                 else
                     state = reader.continueReading();
             }
+        }
+    }
+
+    // BOUNDED CURSORS
+
+    /** Twenty single-row partitions in one sstable, so a token range can pick an interior run of them. */
+    private SSTableReader twentyPartitionSSTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck int, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long pk = 0; pk < 20; pk++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, 0, 'v')", pk);
+        flush();
+        return cfs.getLiveSSTables().iterator().next();
+    }
+
+    /** The sstable's partition keys in file order, read by the iterator path. */
+    private static List<DecoratedKey> keysInFileOrder(SSTableReader sstable)
+    {
+        List<DecoratedKey> keys = new ArrayList<>();
+        try (ISSTableScanner scanner = sstable.getScanner())
+        {
+            while (scanner.hasNext())
+            {
+                try (UnfilteredRowIterator partition = scanner.next())
+                {
+                    keys.add(partition.partitionKey());
+                }
+            }
+        }
+        return keys;
+    }
+
+    /** The pk values a cursor over {@code bounds} gives, then its DONE-time byte count and position. */
+    private static List<Long> pksRead(SSTableReader sstable, Collection<PartitionPositionBounds> bounds, long[] bytesReadAndPosition)
+    {
+        List<Long> pks = new ArrayList<>();
+        try (StatefulCursor cursor = new StatefulCursor(sstable, bounds, DiskAccessMode.standard))
+        {
+            drive(cursor, new CursorVisitor()
+            {
+                public void onPartition(StatefulCursor c)
+                {
+                    pks.add(pkOf(c.currPartition().key()));
+                }
+            });
+            assertEquals(DONE, cursor.state());
+            bytesReadAndPosition[0] = cursor.bytesRead();
+            bytesReadAndPosition[1] = cursor.position();
+        }
+        return pks;
+    }
+
+    private static long pkOf(DecoratedKey key)
+    {
+        return LongType.instance.compose(key.getKey());
+    }
+
+    private static List<Long> pksOf(List<DecoratedKey> keys, int fromInclusive, int toExclusive)
+    {
+        List<Long> pks = new ArrayList<>();
+        for (DecoratedKey key : keys.subList(fromInclusive, toExclusive))
+            pks.add(pkOf(key));
+        return pks;
+    }
+
+    /** The token range (keys[fromExclusive], keys[toInclusive]], which holds keys fromExclusive+1 .. toInclusive. */
+    private static Range<Token> rangeAfter(List<DecoratedKey> keys, int fromExclusive, int toInclusive)
+    {
+        return new Range<>(keys.get(fromExclusive).getToken(), keys.get(toInclusive).getToken());
+    }
+
+    /** The bounds an SSTableSimpleScanner over {@code ranges} would read, which the cursor must honour. */
+    @SafeVarargs
+    private static List<PartitionPositionBounds> boundsFor(SSTableReader sstable, Range<Token>... ranges)
+    {
+        List<PartitionPositionBounds> bounds = sstable.getPositionsForRanges(Arrays.asList(ranges));
+        assertEquals("expected one data-file segment per range", ranges.length, bounds.size());
+        for (PartitionPositionBounds b : bounds)
+        {
+            assertTrue("expected a segment that starts after the file start: " + b.lowerPosition, b.lowerPosition > 0);
+            assertTrue("expected a segment that ends before the file end: " + b.upperPosition,
+                       b.upperPosition < sstable.uncompressedLength());
+        }
+        return bounds;
+    }
+
+    /**
+     * A cursor over one interior segment reads exactly the partitions inside it. It reads nothing
+     * before the start, nothing past the end, and counts only the segment's bytes as read.
+     */
+    @Test
+    public void boundedCursorReadsExactlyItsSegment() throws Throwable
+    {
+        SSTableReader sstable = twentyPartitionSSTable();
+        List<DecoratedKey> keys = keysInFileOrder(sstable);
+        assertEquals(20, keys.size());
+
+        List<PartitionPositionBounds> bounds = boundsFor(sstable, rangeAfter(keys, 4, 12));
+        long[] bytesReadAndPosition = new long[2];
+        assertEquals(pksOf(keys, 5, 13), pksRead(sstable, bounds, bytesReadAndPosition));
+
+        PartitionPositionBounds segment = bounds.get(0);
+        assertEquals("bytesRead must count the segment only", segment.upperPosition - segment.lowerPosition, bytesReadAndPosition[0]);
+        assertEquals("the cursor must stop at the segment end", segment.upperPosition, bytesReadAndPosition[1]);
+    }
+
+    /**
+     * Several segments of one sstable are walked in order. Nothing between them is read, nothing
+     * inside them is skipped, and the byte count sums the segments only.
+     */
+    @Test
+    public void boundedCursorWalksSegmentsInOrder() throws Throwable
+    {
+        SSTableReader sstable = twentyPartitionSSTable();
+        List<DecoratedKey> keys = keysInFileOrder(sstable);
+
+        List<PartitionPositionBounds> bounds = boundsFor(sstable,
+                                                         rangeAfter(keys, 1, 4),
+                                                         rangeAfter(keys, 9, 14),
+                                                         rangeAfter(keys, 16, 18));
+        List<Long> expected = new ArrayList<>();
+        expected.addAll(pksOf(keys, 2, 5));
+        expected.addAll(pksOf(keys, 10, 15));
+        expected.addAll(pksOf(keys, 17, 19));
+
+        long[] bytesReadAndPosition = new long[2];
+        assertEquals(expected, pksRead(sstable, bounds, bytesReadAndPosition));
+
+        long segmentBytes = 0;
+        for (PartitionPositionBounds b : bounds)
+            segmentBytes += b.upperPosition - b.lowerPosition;
+        assertEquals("bytesRead must not count the gaps between segments", segmentBytes, bytesReadAndPosition[0]);
+        assertEquals("the cursor must stop at the last segment's end", bounds.get(2).upperPosition, bytesReadAndPosition[1]);
+    }
+
+    /**
+     * The whole file as one explicit segment reads the same as the unbounded cursor, which is what
+     * a full-range scanner now hands the compactor. The existing suite covers the unbounded form.
+     */
+    @Test
+    public void wholeFileSegmentMatchesTheUnboundedCursor() throws Throwable
+    {
+        SSTableReader sstable = twentyPartitionSSTable();
+        List<Long> expected = pksOf(keysInFileOrder(sstable), 0, 20);
+
+        long[] unbounded = new long[2];
+        assertEquals(expected, pksRead(sstable, null, unbounded));
+
+        long[] bounded = new long[2];
+        List<PartitionPositionBounds> wholeFile = Collections.singletonList(new PartitionPositionBounds(0, sstable.uncompressedLength()));
+        assertEquals(expected, pksRead(sstable, wholeFile, bounded));
+
+        assertEquals(sstable.uncompressedLength(), unbounded[0]);
+        assertEquals(unbounded[0], bounded[0]);
+        assertEquals(unbounded[1], bounded[1]);
+    }
+
+    /** A scanner over a range the sstable does not cover has no bounds. The cursor is DONE at birth. */
+    @Test
+    public void noSegmentsGiveACursorThatIsDone() throws Throwable
+    {
+        SSTableReader sstable = twentyPartitionSSTable();
+        long[] bytesReadAndPosition = new long[2];
+        assertEquals(Collections.emptyList(), pksRead(sstable, Collections.emptyList(), bytesReadAndPosition));
+        assertEquals(0, bytesReadAndPosition[0]);
+    }
+
+    /**
+     * A segment start inside a partition is not a partition boundary. The byte before it is the
+     * high byte of the key length here, not an end-of-partition marker, so the seek must refuse.
+     */
+    @Test
+    public void aSegmentStartInsideAPartitionIsCorrupt() throws Throwable
+    {
+        SSTableReader sstable = twentyPartitionSSTable();
+        List<DecoratedKey> keys = keysInFileOrder(sstable);
+        PartitionPositionBounds segment = boundsFor(sstable, rangeAfter(keys, 4, 12)).get(0);
+        List<PartitionPositionBounds> misaligned =
+            Collections.singletonList(new PartitionPositionBounds(segment.lowerPosition + 1, segment.upperPosition));
+        try (StatefulCursor cursor = new StatefulCursor(sstable, misaligned, DiskAccessMode.standard))
+        {
+            fail("expected a seek into the middle of a partition to be refused; got state " + cursor.state());
+        }
+        catch (CorruptSSTableException expected)
+        {
+            assertTrue(expected.getMessage() + " / " + expected.getCause(),
+                       String.valueOf(expected.getCause()).contains("end-of-partition marker"));
+        }
+    }
+
+    /** Segments out of order or overlapping break the scanner contract, and the cursor refuses them as the scanner does. */
+    @Test
+    public void overlappingSegmentsAreRefused() throws Throwable
+    {
+        SSTableReader sstable = twentyPartitionSSTable();
+        List<DecoratedKey> keys = keysInFileOrder(sstable);
+        List<PartitionPositionBounds> overlapping = Arrays.asList(boundsFor(sstable, rangeAfter(keys, 4, 12)).get(0),
+                                                                  boundsFor(sstable, rangeAfter(keys, 8, 15)).get(0));
+        try
+        {
+            pksRead(sstable, overlapping, new long[2]);
+            fail("expected overlapping segments to be refused");
+        }
+        catch (IllegalArgumentException expected)
+        {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("non-overlapping"));
         }
     }
 }

@@ -20,6 +20,7 @@ package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collection;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -41,6 +42,7 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.SerializationHelper;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -87,7 +89,7 @@ public class SSTableCursorReader implements AutoCloseable
         int UNFILTERED_END = 1 << 7;
         /** at {@link UnfilteredSerializer#isEndOfPartition(int)} */
         int PARTITION_END = 1 << 8;
-        /** EOF */
+        /** no segment left to read; EOF for a whole-file cursor */
         int DONE = 1 << 9;
 
         static boolean isState(int state, int mask) {
@@ -528,26 +530,48 @@ public class SSTableCursorReader implements AutoCloseable
     // deletion and the missing-columns subset.
     private long unfilteredCellsStart = NO_UNFILTERED_END;
 
-    private int state = PARTITION_START;
+    // The [start, end) data-file segments this cursor reads, in ascending order. Each starts and
+    // ends on a partition boundary. The cursor is DONE once the last one is read, EOF or not.
+    private final PartitionPositionBounds[] segments;
+    private int segmentIndex;
+    private long segmentStart;
+    private long segmentEnd;
+    private long bytesReadInPreviousSegments;
+
+    private int state;
 
     public static SSTableCursorReader fromDescriptor(Descriptor desc) throws IOException
     {
         TableMetadata metadata = Util.metadataFromSSTable(desc);
         SSTableReader reader = SSTableReader.openNoValidation(null, desc, TableMetadataRef.forOfflineTools(metadata));
-        return new SSTableCursorReader(reader, metadata, reader.ref(), null);
+        return new SSTableCursorReader(reader, metadata, reader.ref(), null, null);
     }
 
     public SSTableCursorReader(SSTableReader reader)
     {
-        this(reader, reader.metadata(), null, null);
+        this(reader, reader.metadata(), null, null, null);
     }
 
     public SSTableCursorReader(SSTableReader reader, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, diskAccessMode);
+        this(reader, reader.metadata(), null, null, diskAccessMode);
     }
 
-    private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef, DiskAccessMode diskAccessMode)
+    /**
+     * A cursor over the given ranges of uncompressed positions, under the contract of
+     * {@link org.apache.cassandra.io.sstable.format.SSTableSimpleScanner}: each range starts and
+     * ends on a partition boundary, and the ranges are non-overlapping and ascending.
+     *
+     * @param bounds the segments to read, or null for the whole file
+     */
+    public SSTableCursorReader(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
+    {
+        this(reader, reader.metadata(), null, bounds, diskAccessMode);
+    }
+
+    /** @param bounds the segments to read, or null for the whole file */
+    private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
+                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
     {
         ssTableReader = reader;
         ssTableReaderRef = readerRef;
@@ -569,6 +593,19 @@ public class SSTableCursorReader implements AutoCloseable
         // ALTER TABLE ... DROP of the last static column, current metadata has no static
         // columns but older sstables legitimately still carry static rows
         hasStaticColumns = serializationHeader.hasStatic();
+
+        segments = bounds == null
+                   ? new PartitionPositionBounds[]{ new PartitionPositionBounds(0, dataReader.length()) }
+                   : bounds.toArray(new PartitionPositionBounds[0]);
+        try
+        {
+            state = advanceSegment();
+        }
+        catch (RuntimeException | Error e)
+        {
+            dataReader.close();
+            throw e;
+        }
     }
 
     @Override
@@ -596,6 +633,77 @@ public class SSTableCursorReader implements AutoCloseable
     {
         basicUnfilteredFlags = 0;
         extendedFlags = 0;
+    }
+
+    /**
+     * The state after an end-of-partition marker: the next partition of this segment, the first
+     * partition of the next segment, or DONE.
+     */
+    private int afterPartitionEnd()
+    {
+        return dataReader.getPosition() < segmentEnd ? PARTITION_START : advanceSegment();
+    }
+
+    /**
+     * Enters the next segment that has bytes, as {@code SSTableSimpleScanner.advanceRange} does,
+     * and leaves the reader at its first partition.
+     *
+     * @return PARTITION_START, or DONE when no segment is left
+     */
+    private int advanceSegment()
+    {
+        while (segmentIndex < segments.length)
+        {
+            PartitionPositionBounds next = segments[segmentIndex++];
+            if (segmentEnd > next.lowerPosition)
+                throw new IllegalArgumentException("Ranges supplied to SSTableCursorReader must be non-overlapping and in ascending order.");
+            if (next.upperPosition < next.lowerPosition)
+                throw new IllegalArgumentException("A range supplied to SSTableCursorReader ends before it starts: "
+                                                   + next.lowerPosition + " > " + next.upperPosition);
+            // An empty range carries no partition. Skip it WITHOUT touching segmentStart, segmentEnd
+            // or the byte accounting: bytesRead() is bytesReadInPreviousSegments plus the progress
+            // through the current segment, so moving those to a range the reader never visits makes
+            // the count go backwards. The scanner avoids this by seeking to the empty range's start;
+            // not seeking is cheaper and reads nothing outside a range this cursor covers.
+            if (next.lowerPosition == next.upperPosition)
+                continue;
+
+            bytesReadInPreviousSegments += segmentEnd - segmentStart;
+            segmentStart = next.lowerPosition;
+            segmentEnd = next.upperPosition;
+            try
+            {
+                seekPartition(segmentStart);
+            }
+            catch (IOException e)
+            {
+                return corruptSSTable(e);
+            }
+            return PARTITION_START;
+        }
+        return DONE;
+    }
+
+    /**
+     * Seeks to the start of a partition. Every partition but the file's first follows an
+     * end-of-partition marker, and reading that byte leaves the reader at the partition start.
+     */
+    private void seekPartition(long position) throws IOException
+    {
+        if (position == 0)
+        {
+            if (dataReader.getPosition() != 0)
+                dataReader.seek(0);
+            return;
+        }
+        dataReader.seek(position - 1);
+        // The exact byte, not isEndOfPartition, which is (b & 1) != 0 and so accepts 128 of the 256
+        // values. The writer emits END_OF_PARTITION alone for this marker, so the stronger test
+        // costs nothing and rejects a mis-sized bound that happens to land on an odd byte.
+        int marker = dataReader.readUnsignedByte();
+        if (marker != UnfilteredSerializer.END_OF_PARTITION)
+            throw new IOException("Seeking to a partition at: " + position + " did not land after an end-of-partition marker; found 0x"
+                                  + Integer.toHexString(marker));
     }
 
     // struct partition {
@@ -1165,7 +1273,7 @@ public class SSTableCursorReader implements AutoCloseable
         switch (state)
         {
             case PARTITION_END:
-                state = dataReader.isEOF() ? DONE : PARTITION_START;
+                state = afterPartitionEnd();
                 break;
             case UNFILTERED_END:
                 if (UnfilteredSerializer.isEndOfPartition(basicUnfilteredFlags))
@@ -1199,8 +1307,7 @@ public class SSTableCursorReader implements AutoCloseable
         basicUnfilteredFlags = dataReader.readUnsignedByte();
         if (UnfilteredSerializer.isEndOfPartition(basicUnfilteredFlags))
         {
-            state = !autoContinue ? PARTITION_END :
-                                    dataReader.isEOF() ? DONE : PARTITION_START;
+            state = !autoContinue ? PARTITION_END : afterPartitionEnd();
         }
         else
         {
@@ -1309,7 +1416,7 @@ public class SSTableCursorReader implements AutoCloseable
     {
         if (UnfilteredSerializer.isEndOfPartition(basicUnfilteredFlags))
         {
-            return dataReader.isEOF() ? DONE : PARTITION_START;
+            return afterPartitionEnd();
         }
         else if (UnfilteredSerializer.isRow(basicUnfilteredFlags))
         {
@@ -1332,6 +1439,12 @@ public class SSTableCursorReader implements AutoCloseable
 
     public long position() {
         return dataReader.getFilePointer();
+    }
+
+    /** Bytes read of the segments, as {@code SSTableSimpleScanner.getBytesScanned} counts them: a seek between segments counts nothing. */
+    public long bytesRead()
+    {
+        return bytesReadInPreviousSegments + dataReader.getFilePointer() - segmentStart;
     }
 
     public long uncompressedLength()

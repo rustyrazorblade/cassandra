@@ -29,6 +29,7 @@ import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +66,7 @@ import org.apache.cassandra.io.sstable.SSTableCursorReader;
 import org.apache.cassandra.io.sstable.SSTableCursorWriter;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableSimpleScanner;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
 import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.io.sstable.format.Version;
@@ -173,15 +175,20 @@ public class CursorCompactor extends CompactionInfo.Holder
         return true;
     }
 
-    /** True if any scanner reads a partial range, or holds an sstable the cursor path cannot read. */
+    /** True if any scanner reads a partial range the cursor cannot bound, or holds an sstable the cursor path cannot read. */
     private static boolean unsupportedScanners(TableMetadata metadata, AbstractCompactionStrategy.ScannerList scanners)
     {
         for (ISSTableScanner scanner : scanners.scanners)
         {
-            // TODO: implement partial range reader
-            if (!scanner.isFullRange())
+            // A cursor reads the data-file segments an SSTableSimpleScanner was built over, so a
+            // partial range of that scanner is fine. Every other scanner selects partitions by
+            // token as it iterates, and the cursor has no such filter.
+            //
+            // The instanceof comes first on purpose: isFullRange() calls hasNext(), which seeks to
+            // the scanner's first range, and there is no reason to seek for a scanner we accept.
+            if (!(scanner instanceof SSTableSimpleScanner) && !scanner.isFullRange())
             {
-                logDebugReason(metadata, "Partial scanners are not supported.");
+                logDebugReason(metadata, "Partial scanners are supported only for SSTableSimpleScanner. scanner=", () -> scanner);
                 return true;
             }
             if (unsupportedSSTables(metadata, scanner))
@@ -2308,6 +2315,10 @@ public class CursorCompactor extends CompactionInfo.Holder
      * In cursor compaction, scanners are only used for metadata; closing them avoids holding redundant file
      * descriptors and prevents conflicts when scan and non-scan readers for the same file share thread-local
      * buffer state on the same thread.
+     * <p>
+     * An {@link SSTableSimpleScanner} hands its data-file segments to the cursor, so a scanner over part of an
+     * sstable gives a cursor over that part. Any other scanner passed {@link #unsupportedScanners}, so it is a
+     * full-range one, and each of its sstables gets a whole-file cursor.
      */
     private static StatefulCursor[] convertScannersToCursors(List<ISSTableScanner> scanners, ImmutableSet<SSTableReader> sstables,
                                                              DiskAccessMode diskAccessMode)
@@ -2319,8 +2330,20 @@ public class CursorCompactor extends CompactionInfo.Holder
         int i = 0;
         try
         {
-            for (SSTableReader reader : sstables)
-                cursors[i++] = new StatefulCursor(reader, diskAccessMode);
+            for (ISSTableScanner scanner : scanners)
+            {
+                if (scanner instanceof SSTableSimpleScanner)
+                {
+                    SSTableReader reader = Iterables.getOnlyElement(scanner.getBackingSSTables());
+                    cursors[i++] = new StatefulCursor(reader, ((SSTableSimpleScanner) scanner).positionBounds(), diskAccessMode);
+                }
+                else
+                {
+                    for (SSTableReader reader : scanner.getBackingSSTables())
+                        cursors[i++] = new StatefulCursor(reader, diskAccessMode);
+                }
+            }
+            assert i == cursors.length : "cursor count " + i + " differs from sstable count " + cursors.length;
             return cursors;
         }
         catch (RuntimeException | Error e)
