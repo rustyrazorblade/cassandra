@@ -21,6 +21,7 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 
 import org.apache.cassandra.config.Config.DiskAccessMode;
@@ -59,7 +60,6 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.ROW_START;
-import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.SEEK;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.STATIC_ROW_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.TOMBSTONE_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
@@ -90,8 +90,6 @@ public class SSTableCursorReader implements AutoCloseable
         /** EOF */
         int DONE = 1 << 9;
 
-        /* Special case for seeking in file */
-        int SEEK = 1 << 10;
         static boolean isState(int state, int mask) {
             return (state & mask) != 0;
         }
@@ -463,6 +461,9 @@ public class SSTableCursorReader implements AutoCloseable
             // CollectionPathSerializer writes a vint length and then the path bytes. It writes that
             // format for every complex column, UDTs included.
             int pathLength = dataReader.readUnsignedVInt32();
+            // The reference, ByteBufferUtil.readWithVIntLength, rejects a negative length.
+            // Unchecked, it would size the buffer below and index into it.
+            validateClusteringValueLength(pathLength);
             if (cellPathBuffer.length < pathLength)
                 cellPathBuffer = new byte[Math.max(pathLength, cellPathBuffer.length * 2)]; // doubles, so the cost is amortized
             dataReader.readFully(cellPathBuffer, 0, pathLength);
@@ -595,52 +596,6 @@ public class SSTableCursorReader implements AutoCloseable
     {
         basicUnfilteredFlags = 0;
         extendedFlags = 0;
-    }
-
-    public int seekPartition(long position)
-    {
-        state = SEEK;
-        if (position == 0)
-        {
-            dataReader.seek(position);
-            state = PARTITION_START;
-        }
-        else {
-            // verify partition start is after a partition end marker
-            dataReader.seek(position - 1);
-            try
-            {
-                basicUnfilteredFlags = dataReader.readUnsignedByte();
-            }
-            catch (Exception e)
-            {
-                return corruptSSTable(e);
-            }
-            if (!UnfilteredSerializer.isEndOfPartition(basicUnfilteredFlags)) {
-                throw new IllegalArgumentException("Seeking to a partition at: " + position + " did not result in a valid state");
-            }
-            state = dataReader.isEOF() ? DONE : PARTITION_START;
-        }
-        resetOnPartitionStart();
-        return state;
-    }
-
-    public int seekUnfiltered(long position)
-    {
-        state = SEEK;
-        // partition elements (Unfiltered) have flags
-        dataReader.seek(position);
-        int state = 0;
-        try
-        {
-            state = checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
-        }
-        catch (IOException e)
-        {
-            return corruptSSTable(e);
-        }
-        if (!isState(state , ROW_START | TOMBSTONE_START | DONE)) throw new IllegalStateException();
-        return state;
     }
 
     // struct partition {
@@ -987,9 +942,29 @@ public class SSTableCursorReader implements AutoCloseable
 
         flushFixedLengthRun(dataReader, clustering, fixedLengthClusteringLength);
         int varLength = dataReader.readUnsignedVInt32();
+        validateClusteringValueLength(varLength);
         clustering.writeUnsignedVInt(varLength);
         clustering.loadPart(dataReader, varLength);
         return 0;
+    }
+
+    /**
+     * Rejects a clustering value length the wire cannot have produced honestly. Both checks mirror
+     * AbstractType.read, the reference for this format. readUnsignedVInt32 can return a negative
+     * int, which is why the first check exists: an unchecked negative length reaches
+     * {@link java.io.DataInput#skipBytes} as a silent no-op, and a buffer sizer as a defect.
+     *
+     * <p>Every caller of this walk wraps it and reports a {@code CorruptSSTableException}.
+     */
+    @VisibleForTesting
+    static void validateClusteringValueLength(int length) throws IOException
+    {
+        if (length < 0)
+            throw new IOException("Corrupt (negative) clustering value length encountered: " + length);
+        if (length > DatabaseDescriptor.getMaxValueSize())
+            throw new IOException(String.format("Corrupt clustering value length %d encountered, as it exceeds the maximum of %d, " +
+                                                "which is set via max_value_size in cassandra.yaml",
+                                                length, DatabaseDescriptor.getMaxValueSize()));
     }
 
     private static void skipClustering(RandomAccessReader dataReader, AbstractType<?>[] types, int clusteringColumnsBound) throws IOException
@@ -1009,8 +984,16 @@ public class SSTableCursorReader implements AutoCloseable
             if ((clusteringBlockHeader & 0b11) == 0)
             {
                 AbstractType<?> type = types[clusteringIndex];
-                int len = type.isValueLengthFixed() ? type.valueLengthIfFixed() : dataReader.readUnsignedVInt32();
-                dataReader.skipBytes(len);
+                int len = type.valueLengthIfFixed();
+                if (!type.isValueLengthFixed())
+                {
+                    len = dataReader.readUnsignedVInt32();
+                    validateClusteringValueLength(len);
+                }
+                // skipBytesFully, not skipBytes: skipBytes clamps at EOF and returns how far it
+                // got, so a corrupt length would leave the walk reading a value's own bytes as the
+                // next block header, with nothing downstream to notice.
+                dataReader.skipBytesFully(len);
             }
             clusteringBlockHeader = clusteringBlockHeader >>> 2;
         }

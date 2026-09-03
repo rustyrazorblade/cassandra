@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.function.LongPredicate;
+import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
@@ -81,6 +82,8 @@ import static org.apache.cassandra.db.ClusteringPrefix.Kind.EXCL_END_BOUND;
 import static org.apache.cassandra.db.ClusteringPrefix.Kind.EXCL_END_INCL_START_BOUNDARY;
 import static org.apache.cassandra.db.ClusteringPrefix.Kind.EXCL_START_BOUND;
 import static org.apache.cassandra.db.ClusteringPrefix.Kind.INCL_END_BOUND;
+import static org.apache.cassandra.config.Config.PaxosStatePurging.legacy;
+import static org.apache.cassandra.config.DatabaseDescriptor.paxosStatePurging;
 import static org.apache.cassandra.db.ClusteringPrefix.Kind.INCL_END_EXCL_START_BOUNDARY;
 import static org.apache.cassandra.db.ClusteringPrefix.Kind.INCL_START_BOUND;
 import static org.apache.cassandra.db.rows.CellLivenessInfo.Resolution.LEFT;
@@ -131,13 +134,13 @@ public class CursorCompactor extends CompactionInfo.Holder
         // BTI index writing is not supported yet
         if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat))
         {
-            logDebugReason(metadata, "Only the BIG sstable output format is supported. format=", DatabaseDescriptor.getSelectedSSTableFormat());
+            logDebugReason(metadata, "Only the BIG sstable output format is supported. format=", DatabaseDescriptor::getSelectedSSTableFormat);
             return false;
         }
         // TODO: Implement CompactionIterator.GarbageSkipper like functionality
         if (controller.tombstoneOption != CompactionParams.TombstoneOption.NONE)
         {
-            logDebugReason(metadata, "Garbage skipping not implemented. controller.tombstoneOption=", controller.tombstoneOption);
+            logDebugReason(metadata, "Garbage skipping not implemented. controller.tombstoneOption=", () -> controller.tombstoneOption);
             return false;
         }
         // Only ColumnFamilyStore.forceCompactionKeysIgnoringGcGrace puts a key in this set, and its
@@ -152,6 +155,14 @@ public class CursorCompactor extends CompactionInfo.Holder
         // The set is per-table and lives for the whole force compaction, so a background compaction
         // that starts inside that window falls back as well. The gate is coarse, but it falls back
         // to the reference implementation, so it costs throughput and not correctness.
+        // CompactionIterator swaps in PaxosPurger for system.paxos when paxos state purging is not
+        // legacy. This path has one purger and cannot, so it declines the table and the iterator
+        // path takes it.
+        if (isPaxos(controller.cfs) && paxosStatePurging() != legacy)
+        {
+            logDebugReason(metadata, "Non-legacy paxos state purging on system.paxos is not supported. paxosStatePurging=", DatabaseDescriptor::paxosStatePurging);
+            return false;
+        }
         if (controller.cfs.shouldIgnoreGcGraceForAnyKey())
         {
             logDebugReason(metadata, "Ignoring gc_grace_seconds for a key is not supported (nodetool forcecompact).");
@@ -186,7 +197,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             Version version = reader.descriptor.version;
             if (!version.isLatestVersion())
             {
-                logDebugReason(metadata, "Older sstable versions are not supported. version=", version);
+                logDebugReason(metadata, "Older sstable versions are not supported. version=", () -> version);
                 return true;
             }
             if (unsupportedHeaderColumns(metadata, reader))
@@ -202,13 +213,13 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         if (!metadata.partitioner.supportsReusableKeys())
         {
-            logDebugReason(metadata, "Incompatible partitioner, does not support reusable keys:", metadata.partitioner.getClass().getSimpleName());
+            logDebugReason(metadata, "Incompatible partitioner, does not support reusable keys:", () -> metadata.partitioner.getClass().getSimpleName());
             return true;
         }
 
         if (metadata.indexes.size() != 0)
         {
-            logDebugReason(metadata, "Additional indexes are not supported. metadata.indexes=", metadata.indexes);
+            logDebugReason(metadata, "Additional indexes are not supported. metadata.indexes=", () -> metadata.indexes);
             return true;
         }
 
@@ -224,7 +235,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             if (column.isCounterColumn())
             {
-                logDebugReason(metadata, "Counter columns are not supported. column=", column);
+                logDebugReason(metadata, "Counter columns are not supported. column=", () -> column);
                 return true;
             }
         }
@@ -313,7 +324,13 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             if (isDroppedMultiCellOrCounterColumn(metadata, column, reader.header.getType(column)))
             {
-                logDebugReason(metadata, "A multi-cell or counter column dropped from the schema is still carried in the header of " + reader.descriptor + ", which the cursor path does not yet cover. column=", column);
+                LOGGER.atDebug()
+                      .setMessage("Cursor compaction for table: {} keyspace: {} is not supported. REASON: A multi-cell or counter column dropped from the schema is still carried in the header of {}, which the cursor path does not yet cover. column={}")
+                      .addArgument(metadata.name)
+                      .addArgument(metadata.keyspace)
+                      .addArgument(() -> reader.descriptor)
+                      .addArgument(() -> column)
+                      .log();
                 return true;
             }
         }
@@ -340,13 +357,18 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /**
-     * The {@code detail} is appended to the reason. Passing it separately keeps the caller from
-     * building a string the logger may discard.
+     * The {@code detail} is appended to the reason. It is a supplier so the caller never computes a
+     * value the logger discards.
      */
-    private static void logDebugReason(TableMetadata metadata, String reason, Object detail)
+    private static void logDebugReason(TableMetadata metadata, String reason, Supplier<?> detail)
     {
-        LOGGER.debug("Cursor compaction for table: {} keyspace: {} is not supported. REASON: {}{}",
-                     metadata.name, metadata.keyspace, reason, detail);
+        LOGGER.atDebug()
+              .setMessage("Cursor compaction for table: {} keyspace: {} is not supported. REASON: {}{}")
+              .addArgument(metadata.name)
+              .addArgument(metadata.keyspace)
+              .addArgument(reason)
+              .addArgument(detail)
+              .log();
     }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CursorCompactor.class.getName());
@@ -1500,10 +1522,6 @@ public class CursorCompactor extends CompactionInfo.Holder
      */
     private boolean mergeRangeTombstones(int rangeTombstoneMergeLimit, DeletionTime partitionDeletion, boolean isFirstUnfiltered) throws IOException
     {
-        if (rangeTombstoneMergeLimit == 0)
-        {
-            throw new IllegalStateException();
-        }
         rangeTombstonesMergeCounters[rangeTombstoneMergeLimit - 1]++;
         DeletionTime previousDeletionTimeInMerged = DeletionTime.LIVE;
         if (activeOpenRangeDeletion != DeletionTime.LIVE) {
@@ -1979,10 +1997,8 @@ public class CursorCompactor extends CompactionInfo.Holder
     private int prepareAndSortCellsForMerge(int rowMergeLimit, int prevCellMergeLimit)
     {
         COLUMN_SORT.sortPerturbed(sstableCursors, sstableCursorsEqualsNext, prevCellMergeLimit, rowMergeLimit);
-        // next row/partition/done
-        if (sstableCursors[0].state() == UNFILTERED_END)
-            return 0;
-
+        // The row's cells are done: the lead cursor is at the next row, partition or EOF. Read
+        // state() once; it validates the current cell when corrupt-tombstone validation is on.
         int state = sstableCursors[0].state();
         if (isState(state, UNFILTERED_END | CELL_HEADER_START))
             return 0;
@@ -2019,7 +2035,8 @@ public class CursorCompactor extends CompactionInfo.Holder
      * @return the comparison, or {@link #NO_TERMINAL_DECISION} when both cursors are live and the
      *         caller must compare them itself
      */
-    private static int compareByTerminalState(int s1, int s2, int terminalState)
+    @VisibleForTesting
+    static int compareByTerminalState(int s1, int s2, int terminalState)
     {
         if (s1 == terminalState && s2 == terminalState) return 0;
         if (s1 == terminalState) return 1;
@@ -2028,7 +2045,8 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /** Outside the range of any real comparison, so it cannot collide with one. */
-    private static final int NO_TERMINAL_DECISION = Integer.MIN_VALUE;
+    @VisibleForTesting
+    static final int NO_TERMINAL_DECISION = Integer.MIN_VALUE;
 
     private static int compareByPartitionKey(StatefulCursor c1, StatefulCursor c2)
     {
@@ -2221,19 +2239,9 @@ public class CursorCompactor extends CompactionInfo.Holder
         this.targetDirectory = targetDirectory;
     }
 
-    public long[] getMergedParitionsCounts()
-    {
-        return partitionMergeCounters;
-    }
-
     public long[] getMergedRowsCounts()
     {
         return rowMergeCounters;
-    }
-
-    public long[] getMergedCellsCounts()
-    {
-        return cellMergeCounters;
     }
 
     public long getTotalSourceCQLRows()
@@ -2338,15 +2346,24 @@ public class CursorCompactor extends CompactionInfo.Holder
             activeCompactions.finishCompaction(this);
         }
 
-        if (LOGGER.isInfoEnabled())
-        {
-            LOGGER.info("Compaction ended {}: { data bytes read = {}, data bytes written = {}, " +
-                        " input (keys = {}, rows = {}, cells = {}), " +
-                        " output (keys = {}, rows = {}, cells = {})}",
-                        this.compactionId, getTotalBytesScanned(), totalDataBytesWritten,
-                        mergeHistogramToString(partitionMergeCounters), mergeHistogramToString(rowMergeCounters), mergeHistogramToString(cellMergeCounters),
-                        sumHistogram(partitionMergeCounters), sumHistogram(rowMergeCounters), sumHistogram(cellMergeCounters));
-        }
+        // Every argument is a supplier: the builder is a no-op when INFO is off, so none of these
+        // histograms is built or summed unless the line is actually logged.
+        LOGGER.atInfo()
+              .setMessage("Compaction ended {}: { data bytes read = {}, data bytes written = {}, input (keys = {}, static rows = {}, rows = {}, range tombstones = {}, cells = {}), output (keys = {}, static rows = {}, rows = {}, range tombstones = {}, cells = {})}")
+              .addArgument(compactionId)
+              .addArgument(this::getTotalBytesScanned)
+              .addArgument(() -> totalDataBytesWritten)
+              .addArgument(() -> mergeHistogramToString(partitionMergeCounters))
+              .addArgument(() -> mergeHistogramToString(staticRowMergeCounters))
+              .addArgument(() -> mergeHistogramToString(rowMergeCounters))
+              .addArgument(() -> mergeHistogramToString(rangeTombstonesMergeCounters))
+              .addArgument(() -> mergeHistogramToString(cellMergeCounters))
+              .addArgument(() -> sumHistogram(partitionMergeCounters))
+              .addArgument(() -> sumHistogram(staticRowMergeCounters))
+              .addArgument(() -> sumHistogram(rowMergeCounters))
+              .addArgument(() -> sumHistogram(rangeTombstonesMergeCounters))
+              .addArgument(() -> sumHistogram(cellMergeCounters))
+              .log();
     }
 
 }
