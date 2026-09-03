@@ -153,70 +153,81 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
             deletionTime.resetLive();
         }
         useColumnsWords = false;
-        if (!UnfilteredSerializer.hasAllColumns(flags))
-        {
-            if (rowColumns.size() < 64)
-            {
-                // Columns.Serializer.deserializeSubset would build a Columns per row, so decode
-                // its wire format here: an unsigned vint bitmask of the missing superset columns.
-                // rowColumns stays the superset, and consumers filter with missingColumnsMask().
-                long encoded = dataReader.readUnsignedVInt();
-                // Mirrors the corruption check in Columns.Serializer.deserializeSubset.
-                if ((encoded >>> rowColumns.size()) != 0)
-                    throw new IOException("Invalid Columns subset bytes; too many bits set: " + Long.toBinaryString(encoded));
-                missingColumnsMask = encoded;
-            }
-            else
-            {
-                // Wire format per Columns.Serializer.serializeLargeSubset: an unsigned vint delta
-                // of supersetCount - presentCount, then one unsigned vint superset index per
-                // column. The indices name the present columns when presentCount is under half
-                // the superset, and the missing columns otherwise. Decoding into reusable mask
-                // words leaves rowColumns as the superset, so CellCursor never rebuilds its
-                // per-superset arrays.
-                long encoded = dataReader.readUnsignedVInt();
-                int supersetCount = rowColumns.size();
-                if (encoded > supersetCount)
-                    throw new IOException("Invalid large Columns subset: missing count " + encoded + " of " + supersetCount);
-                int delta = (int) encoded;
-                int columnCount = supersetCount - delta;
-                int nWords = (supersetCount + 63) >>> 6;
-                if (presentColumnsWords == null || presentColumnsWords.length < nWords)
-                    presentColumnsWords = new long[nWords];
-                if (columnCount < supersetCount / 2)
-                {
-                    // Present-index mode.
-                    java.util.Arrays.fill(presentColumnsWords, 0, nWords, 0L);
-                    for (int i = 0; i < columnCount; i++)
-                    {
-                        int idx = dataReader.readUnsignedVInt32();
-                        if (idx < 0 || idx >= supersetCount)
-                            throw new IOException("Invalid large Columns subset: present index " + idx + " of " + supersetCount);
-                        presentColumnsWords[idx >>> 6] |= 1L << (idx & 63);
-                    }
-                }
-                else
-                {
-                    // Missing-index mode: the last word starts trimmed to the column range.
-                    // A delta of 0 clears nothing and leaves every column present.
-                    java.util.Arrays.fill(presentColumnsWords, 0, nWords, -1L);
-                    if ((supersetCount & 63) != 0)
-                        presentColumnsWords[nWords - 1] = -1L >>> (64 - (supersetCount & 63));
-                    for (int i = 0; i < delta; i++)
-                    {
-                        int idx = dataReader.readUnsignedVInt32();
-                        if (idx < 0 || idx >= supersetCount)
-                            throw new IOException("Invalid large Columns subset: missing index " + idx + " of " + supersetCount);
-                        presentColumnsWords[idx >>> 6] &= ~(1L << (idx & 63));
-                    }
-                }
-                useColumnsWords = true;
-                missingColumnsMask = 0;
-            }
-        }
-        else
-        {
+        if (UnfilteredSerializer.hasAllColumns(flags))
             missingColumnsMask = 0;
+        else if (rowColumns.size() < 64)
+            readSmallColumnsSubset(dataReader);
+        else
+            readLargeColumnsSubset(dataReader);
+    }
+
+    /**
+     * Columns.Serializer.deserializeSubset would build a Columns per row, so decode its wire format
+     * here: an unsigned vint bitmask of the missing superset columns. rowColumns stays the superset,
+     * and consumers filter with missingColumnsMask().
+     */
+    private void readSmallColumnsSubset(RandomAccessReader dataReader) throws IOException
+    {
+        long encoded = dataReader.readUnsignedVInt();
+        // Mirrors the corruption check in Columns.Serializer.deserializeSubset.
+        if ((encoded >>> rowColumns.size()) != 0)
+            throw new IOException("Invalid Columns subset bytes; too many bits set: " + Long.toBinaryString(encoded));
+        missingColumnsMask = encoded;
+    }
+
+    /**
+     * Wire format per Columns.Serializer.serializeLargeSubset: an unsigned vint delta of
+     * supersetCount - presentCount, then one unsigned vint superset index per column. The indices
+     * name the present columns when presentCount is under half the superset, and the missing
+     * columns otherwise. Decoding into reusable mask words leaves rowColumns as the superset, so
+     * CellCursor never rebuilds its per-superset arrays.
+     */
+    private void readLargeColumnsSubset(RandomAccessReader dataReader) throws IOException
+    {
+        long encoded = dataReader.readUnsignedVInt();
+        int supersetCount = rowColumns.size();
+        if (encoded > supersetCount)
+            throw new IOException("Invalid large Columns subset: missing count " + encoded + " of " + supersetCount);
+
+        int delta = (int) encoded;
+        int columnCount = supersetCount - delta;
+        int nWords = (supersetCount + 63) >>> 6;
+        if (presentColumnsWords == null || presentColumnsWords.length < nWords)
+            presentColumnsWords = new long[nWords];
+
+        if (columnCount < supersetCount / 2)
+            readPresentColumnIndexes(dataReader, supersetCount, nWords, columnCount);
+        else
+            readMissingColumnIndexes(dataReader, supersetCount, nWords, delta);
+
+        useColumnsWords = true;
+        missingColumnsMask = 0;
+    }
+
+    private void readPresentColumnIndexes(RandomAccessReader dataReader, int supersetCount, int nWords, int columnCount) throws IOException
+    {
+        java.util.Arrays.fill(presentColumnsWords, 0, nWords, 0L);
+        for (int i = 0; i < columnCount; i++)
+        {
+            int idx = dataReader.readUnsignedVInt32();
+            if (idx < 0 || idx >= supersetCount)
+                throw new IOException("Invalid large Columns subset: present index " + idx + " of " + supersetCount);
+            presentColumnsWords[idx >>> 6] |= 1L << (idx & 63);
+        }
+    }
+
+    /** The last word starts trimmed to the column range. A delta of 0 clears nothing. */
+    private void readMissingColumnIndexes(RandomAccessReader dataReader, int supersetCount, int nWords, int delta) throws IOException
+    {
+        java.util.Arrays.fill(presentColumnsWords, 0, nWords, -1L);
+        if ((supersetCount & 63) != 0)
+            presentColumnsWords[nWords - 1] = -1L >>> (64 - (supersetCount & 63));
+        for (int i = 0; i < delta; i++)
+        {
+            int idx = dataReader.readUnsignedVInt32();
+            if (idx < 0 || idx >= supersetCount)
+                throw new IOException("Invalid large Columns subset: missing index " + idx + " of " + supersetCount);
+            presentColumnsWords[idx >>> 6] &= ~(1L << (idx & 63));
         }
     }
 

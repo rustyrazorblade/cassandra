@@ -108,6 +108,9 @@ public class SSTableCursorReader implements AutoCloseable
     /** {@link CellCursor#openNextColumnRun()} result: a column with a cell to read is open. This
      *  value is outside the range of the three results above, which that method passes through. */
     static final int COLUMN_RUN_OPEN = 2;
+    /** {@link CellCursor#discardDroppedCell(boolean)} result: read the next cell. Never returned
+     *  to a caller of {@link CellCursor#readCellHeader()}, so it sits outside their range. */
+    private static final int CELL_DROPPED_CONTINUE = 3;
 
     // If true, a complex column with no cells becomes a position where the cursor stops. See
     // CellCursor.surfaceDeletionOnlyComplexColumn for what the cursor holds at that position.
@@ -184,6 +187,55 @@ public class SSTableCursorReader implements AutoCloseable
         private int presentWordsCount;
         private int presentWordIndex;
 
+        /**
+         * Rebuilds the per-superset arrays for a new column set. Only a changed superset pays for
+         * this, so the usual row reuses the arrays.
+         */
+        private void rebuildColumnArrays(Columns columns)
+        {
+            // This will be a problem with changing columns
+            this.columns = columns;
+            columnsArray = columns.toArray(COLUMN_METADATA_TYPE);
+            cellTypeArray = new AbstractType<?>[columnsArray.length];
+            pathTypeArray = new AbstractType<?>[columnsArray.length];
+            droppedTimeArray = sstableHasDroppedColumns ? new long[columnsArray.length] : null;
+            for (int i = 0; i < columnsArray.length; i++)
+            {
+                cellTypeArray[i] = serializationHeader.getType(columnsArray[i]);
+                pathTypeArray[i] = columnsArray[i].isComplex()
+                                   ? ColumnMetadata.pathNameComparator(columnsArray[i].type)
+                                   : null;
+                if (sstableHasDroppedColumns)
+                    droppedTimeArray[i] = deserializationHelper.droppedTimeOrMin(columnsArray[i]);
+            }
+            columnsSize = columns.size();
+        }
+
+        /**
+         * Prepares the word-mask walk over a superset of 64 columns or more. The descriptor decoded
+         * the large-subset wire format into {@code presentColumnsWords}; null means every column is
+         * present.
+         */
+        private void initPresentWords(long[] presentColumnsWords)
+        {
+            int nWords = (columnsSize + 63) >>> 6;
+            if (presentWords == null || presentWords.length < nWords)
+                presentWords = new long[nWords]; // grow-once, amortized zero
+            presentWordsCount = nWords;
+            presentWordIndex = 0;
+            if (presentColumnsWords != null)
+            {
+                System.arraycopy(presentColumnsWords, 0, presentWords, 0, nWords);
+            }
+            else
+            {
+                java.util.Arrays.fill(presentWords, 0, nWords, -1L);
+                if ((columnsSize & 63) != 0)
+                    presentWords[nWords - 1] = -1L >>> (64 - (columnsSize & 63));
+            }
+            presentMask = 0;
+        }
+
         void init (Columns columns, long missingColumnsMask, long[] presentColumnsWords,
                    boolean rowHasComplexDeletion, ReusableLivenessInfo rowLiveness)
         {
@@ -195,51 +247,15 @@ public class SSTableCursorReader implements AutoCloseable
             remainingCellsInColumn = 0;
             complexDeletion.resetLive();
             if (this.columns != columns)
-            {
-                // This will be a problem with changing columns
-                this.columns = columns;
-                columnsArray = columns.toArray(COLUMN_METADATA_TYPE);
-                cellTypeArray = new AbstractType<?>[columnsArray.length];
-                pathTypeArray = new AbstractType<?>[columnsArray.length];
-                droppedTimeArray = sstableHasDroppedColumns ? new long[columnsArray.length] : null;
-                for (int i = 0; i < columnsArray.length; i++)
-                {
-                    cellTypeArray[i] = serializationHeader.getType(columnsArray[i]);
-                    pathTypeArray[i] = columnsArray[i].isComplex()
-                                       ? ColumnMetadata.pathNameComparator(columnsArray[i].type)
-                                       : null;
-                    if (sstableHasDroppedColumns)
-                        droppedTimeArray[i] = deserializationHelper.droppedTimeOrMin(columnsArray[i]);
-                }
-                columnsSize = columns.size();
-            }
+                rebuildColumnArrays(columns);
+
             if (columnsSize >= 64)
-            {
-                // word-mask walk over the superset; the descriptor decoded the large-subset
-                // wire format into presentColumnsWords (null = all columns present)
-                int nWords = (columnsSize + 63) >>> 6;
-                if (presentWords == null || presentWords.length < nWords)
-                    presentWords = new long[nWords]; // grow-once, amortized zero
-                presentWordsCount = nWords;
-                presentWordIndex = 0;
-                if (presentColumnsWords != null)
-                {
-                    System.arraycopy(presentColumnsWords, 0, presentWords, 0, nWords);
-                }
-                else
-                {
-                    java.util.Arrays.fill(presentWords, 0, nWords, -1L);
-                    if ((columnsSize & 63) != 0)
-                        presentWords[nWords - 1] = -1L >>> (64 - (columnsSize & 63));
-                }
-                presentMask = 0;
-            }
+                initPresentWords(presentColumnsWords);
             else
-            {
-                // The AND trims bits the flip sets above the column range. columnsSize == 0
-                // needs its own arm: Java shifts are mod 64.
+                // The AND trims bits the flip sets above the column range. columnsSize == 0 needs
+                // its own arm: Java shifts are mod 64.
                 presentMask = ~missingColumnsMask & (columnsSize == 0 ? 0 : (-1L >>> (64 - columnsSize)));
-            }
+
             this.rowLiveness = rowLiveness;
             cellFlags = 0;
             cellPathLength = -1;
@@ -293,28 +309,7 @@ public class SSTableCursorReader implements AutoCloseable
                 if (!columnsRemain())
                     return CELL_NONE_REMAINING; // the last complex columns held no cells
                 // HOTSPOT: suprisingly expensive
-                int currIndex;
-                if (columnsSize >= 64)
-                {
-                    // columnsRemain left presentWordIndex on a word that has a set bit. The bit
-                    // walk is the same as the walk in the single-mask branch below.
-                    long word = presentWords[presentWordIndex];
-                    currIndex = (presentWordIndex << 6) + Long.numberOfTrailingZeros(word);
-                    presentWords[presentWordIndex] = word & (word - 1);
-                }
-                else
-                {
-                    // Bit i of presentMask is the i-th column of the column set, in the order the
-                    // set gives them. The serializer assigned the bits in that same order, and
-                    // the cells are on disk in that same order. A walk from the lowest bit to the
-                    // highest therefore reads the cells in their disk order.
-                    //   numberOfTrailingZeros gives the index of the lowest set bit, which is the
-                    //     next column that is present;
-                    //   x & (x - 1) clears that bit, because the subtraction borrows through the
-                    //     trailing zeros and the AND then removes both.
-                    currIndex = Long.numberOfTrailingZeros(presentMask);
-                    presentMask &= presentMask - 1;
-                }
+                int currIndex = takeNextPresentColumn();
                 cellColumnIndex = currIndex;
                 cellColumn = columnsArray[currIndex];
                 cellType = cellTypeArray[currIndex];
@@ -324,23 +319,53 @@ public class SSTableCursorReader implements AutoCloseable
                     remainingCellsInColumn = 1;
                     break;
                 }
-                if (rowHasComplexDeletion)
-                {
-                    serializationHeader.readDeletionTime(dataReader, complexDeletion);
-                    // Do what DeserializationHelper.isDroppedComplexDeletion does: drop a complex
-                    // deletion at or before the drop time of its column.
-                    if (sstableHasDroppedColumns
-                        && DeserializationHelper.isDroppedAtHorizon(complexDeletion.markedForDeleteAt(), droppedTimeArray[currIndex]))
-                        complexDeletion.resetLive();
-                }
-                else
-                    complexDeletion.resetLive();
+                readComplexDeletion(currIndex);
                 remainingCellsInColumn = (int) dataReader.readUnsignedVInt();
                 if (remainingCellsInColumn == 0 && pauseAtEmptyComplexColumns)
                     return surfaceDeletionOnlyComplexColumn();
                 // A count of zero and no pause: continue to the next column.
             }
             return COLUMN_RUN_OPEN;
+        }
+
+        /**
+         * Takes the next present column out of the walk and returns its superset index.
+         *
+         * <p>Bit i is the i-th column of the column set, in the order the set gives them. The
+         * serializer assigned the bits in that same order, and the cells are on disk in that same
+         * order, so a walk from the lowest bit to the highest reads the cells in their disk order.
+         * numberOfTrailingZeros gives the lowest set bit, and {@code x & (x - 1)} clears it,
+         * because the subtraction borrows through the trailing zeros and the AND removes both.
+         */
+        private int takeNextPresentColumn()
+        {
+            if (columnsSize < 64)
+            {
+                int currIndex = Long.numberOfTrailingZeros(presentMask);
+                presentMask &= presentMask - 1;
+                return currIndex;
+            }
+            // columnsRemain left presentWordIndex on a word that has a set bit.
+            long word = presentWords[presentWordIndex];
+            int currIndex = (presentWordIndex << 6) + Long.numberOfTrailingZeros(word);
+            presentWords[presentWordIndex] = word & (word - 1);
+            return currIndex;
+        }
+
+        /** Reads a complex column's own deletion, or clears it when the row carries none. */
+        private void readComplexDeletion(int currIndex) throws IOException
+        {
+            if (!rowHasComplexDeletion)
+            {
+                complexDeletion.resetLive();
+                return;
+            }
+            serializationHeader.readDeletionTime(dataReader, complexDeletion);
+            // Do what DeserializationHelper.isDroppedComplexDeletion does: drop a complex deletion
+            // at or before the drop time of its column.
+            if (sstableHasDroppedColumns
+                && DeserializationHelper.isDroppedAtHorizon(complexDeletion.markedForDeleteAt(), droppedTimeArray[currIndex]))
+                complexDeletion.resetLive();
         }
 
         /**
@@ -379,62 +404,91 @@ public class SSTableCursorReader implements AutoCloseable
                 remainingCellsInColumn--;
                 producedCell = true;
 
-                cellFlags = dataReader.readUnsignedByte();
-                // TODO: specialize common case where flags == HAS_VALUE | USE_ROW_TS?
-                boolean hasValue = Cell.Serializer.hasValue(cellFlags);
-                boolean isDeleted = Cell.Serializer.isDeleted(cellFlags);
-                boolean isExpiring = Cell.Serializer.isExpiring(cellFlags);
-                boolean useRowTimestamp = Cell.Serializer.useRowTimestamp(cellFlags);
-                boolean useRowTTL = Cell.Serializer.useRowTTL(cellFlags);
-
-                long timestamp = useRowTimestamp ? rowLiveness.timestamp() : serializationHeader.readTimestamp(dataReader);
-
-                long localDeletionTime = useRowTTL
-                                         ? rowLiveness.localExpirationTime()
-                                         : (isDeleted || isExpiring ? serializationHeader.readLocalDeletionTime(dataReader) : Cell.NO_DELETION_TIME);
-
-                int ttl = useRowTTL ? rowLiveness.ttl() : (isExpiring ? serializationHeader.readTTL(dataReader) : Cell.NO_TTL);
-                localDeletionTime = Cell.decodeLocalDeletionTime(localDeletionTime, ttl, deserializationHelper);
-
-                cellLiveness.reset(timestamp, ttl, localDeletionTime);
-                if (cellColumn.isComplex())
-                {
-                    // CollectionPathSerializer writes a vint length and then the path bytes. It
-                    // writes that format for every complex column, UDTs included.
-                    int pathLength = dataReader.readUnsignedVInt32();
-                    if (cellPathBuffer.length < pathLength)
-                        cellPathBuffer = new byte[Math.max(pathLength, cellPathBuffer.length * 2)]; // doubles, so the cost is amortized
-                    dataReader.readFully(cellPathBuffer, 0, pathLength);
-                    cellPathLength = pathLength;
-                }
-                else
-                {
-                    cellPathLength = -1;
-                }
+                long timestamp = readCellLiveness();
+                readCellPath();
 
                 // This test gives the same answer as
                 // deserializationHelper.isDropped(cellColumn, timestamp, false), but it reads a
                 // prepared array instead of a map keyed by ByteBuffer. The map form would look up
                 // droppedColumns.get(column.name.bytes) for every cell. isDroppedAtHorizon holds
                 // the sentinel test that keeps the two forms equal: see its javadoc.
-                if (sstableHasDroppedColumns && DeserializationHelper.isDroppedAtHorizon(timestamp, droppedTimeArray[cellColumnIndex]))
-                {
-                    // Do what UnfilteredSerializer.readSimpleColumn and readComplexColumn do:
-                    // discard a cell of a dropped column that was written at or before the drop.
-                    if (hasValue)
-                        cellType.skipValue(dataReader);
-                    if (remainingCellsInColumn == 0 && cellColumn.isComplex() && pauseAtEmptyComplexColumns && !complexDeletion.isLive())
-                    {
-                        // The filter dropped every cell of this complex column, but the deletion
-                        // of the column itself survives and must reach the merge.
-                        return surfaceDeletionOnlyComplexColumn();
-                    }
-                    if (!hasNext())
-                        return CELL_NONE_REMAINING; // the caller must move past the end of the row
-                    continue;
-                }
-                return hasValue ? CELL_HAS_VALUE : CELL_NO_VALUE;
+                boolean hasValue = Cell.Serializer.hasValue(cellFlags);
+                if (!sstableHasDroppedColumns || !DeserializationHelper.isDroppedAtHorizon(timestamp, droppedTimeArray[cellColumnIndex]))
+                    return hasValue ? CELL_HAS_VALUE : CELL_NO_VALUE;
+
+                int dropped = discardDroppedCell(hasValue);
+                if (dropped != CELL_DROPPED_CONTINUE)
+                    return dropped;
             }
+        }
+
+        /**
+         * Reads the cell's flags, timestamp, TTL and local deletion time into {@link #cellLiveness}.
+         *
+         * @return the cell's timestamp, which the dropped-column filter also needs
+         */
+        private long readCellLiveness() throws IOException
+        {
+            cellFlags = dataReader.readUnsignedByte();
+            // TODO: specialize common case where flags == HAS_VALUE | USE_ROW_TS?
+            boolean isDeleted = Cell.Serializer.isDeleted(cellFlags);
+            boolean isExpiring = Cell.Serializer.isExpiring(cellFlags);
+            boolean useRowTimestamp = Cell.Serializer.useRowTimestamp(cellFlags);
+            boolean useRowTTL = Cell.Serializer.useRowTTL(cellFlags);
+
+            long timestamp = useRowTimestamp ? rowLiveness.timestamp() : serializationHeader.readTimestamp(dataReader);
+
+            long localDeletionTime = useRowTTL
+                                     ? rowLiveness.localExpirationTime()
+                                     : (isDeleted || isExpiring ? serializationHeader.readLocalDeletionTime(dataReader) : Cell.NO_DELETION_TIME);
+
+            int ttl = useRowTTL ? rowLiveness.ttl() : (isExpiring ? serializationHeader.readTTL(dataReader) : Cell.NO_TTL);
+            localDeletionTime = Cell.decodeLocalDeletionTime(localDeletionTime, ttl, deserializationHelper);
+
+            cellLiveness.reset(timestamp, ttl, localDeletionTime);
+            return timestamp;
+        }
+
+        /**
+         * Reads the cell path of a complex column, growing the buffer when it must.  A simple
+         * column has no path and takes a length of -1.
+         */
+        private void readCellPath() throws IOException
+        {
+            if (!cellColumn.isComplex())
+            {
+                cellPathLength = -1;
+                return;
+            }
+            // CollectionPathSerializer writes a vint length and then the path bytes. It writes that
+            // format for every complex column, UDTs included.
+            int pathLength = dataReader.readUnsignedVInt32();
+            if (cellPathBuffer.length < pathLength)
+                cellPathBuffer = new byte[Math.max(pathLength, cellPathBuffer.length * 2)]; // doubles, so the cost is amortized
+            dataReader.readFully(cellPathBuffer, 0, pathLength);
+            cellPathLength = pathLength;
+        }
+
+        /**
+         * Discards a cell of a dropped column that was written at or before the drop, as
+         * UnfilteredSerializer.readSimpleColumn and readComplexColumn do.
+         *
+         * @return {@link #CELL_DROPPED_CONTINUE} when the caller must read the next cell, else the
+         *         state to return to the caller's caller
+         */
+        private int discardDroppedCell(boolean hasValue) throws IOException
+        {
+            if (hasValue)
+                cellType.skipValue(dataReader);
+            if (remainingCellsInColumn == 0 && cellColumn.isComplex() && pauseAtEmptyComplexColumns && !complexDeletion.isLive())
+            {
+                // The filter dropped every cell of this complex column, but the deletion of the
+                // column itself survives and must reach the merge.
+                return surfaceDeletionOnlyComplexColumn();
+            }
+            if (!hasNext())
+                return CELL_NONE_REMAINING; // the caller must move past the end of the row
+            return CELL_DROPPED_CONTINUE;
         }
     }
 
@@ -889,39 +943,53 @@ public class SSTableCursorReader implements AutoCloseable
             // };
             if (clusteringIndex % 32 == 0)
             {
-                if (fixedLengthClusteringLength != 0) {
-                    clustering.loadPart(dataReader, fixedLengthClusteringLength);
-                    fixedLengthClusteringLength = 0;
-                }
+                fixedLengthClusteringLength = flushFixedLengthRun(dataReader, clustering, fixedLengthClusteringLength);
                 clusteringBlockHeader = dataReader.readUnsignedVInt();
                 clustering.writeUnsignedVInt(clusteringBlockHeader);
             }
 
             // load value if present
             if ((clusteringBlockHeader & 0b11) == 0)
-            {
-                AbstractType<?> type = types[clusteringIndex];
-                if (type.isValueLengthFixed())
-                {
-                    fixedLengthClusteringLength += type.valueLengthIfFixed();
-                }
-                else
-                {
-                    if (fixedLengthClusteringLength != 0) {
-                        clustering.loadPart(dataReader, fixedLengthClusteringLength);
-                        fixedLengthClusteringLength = 0;
-                    }
-                    int varLength = dataReader.readUnsignedVInt32();
-                    clustering.writeUnsignedVInt(varLength);
-                    clustering.loadPart(dataReader, varLength);
-                }
-            }
+                fixedLengthClusteringLength = readClusteringValue(dataReader, clustering, types[clusteringIndex], fixedLengthClusteringLength);
+
             clusteringBlockHeader = clusteringBlockHeader >>> 2;
         }
-        if (fixedLengthClusteringLength != 0) clustering.loadPart(dataReader, fixedLengthClusteringLength);
+        flushFixedLengthRun(dataReader, clustering, fixedLengthClusteringLength);
         if (clusteringBlockHeader != 0) {
             throw new IOException("Clustering block upper bits (those not associated with keys) expected to be 0:" + clusteringBlockHeader);
         }
+    }
+
+    /**
+     * Copies the pending run of fixed-length components in one read. They are adjacent on disk, so
+     * the run is only broken by a variable-length component or by a block boundary.
+     *
+     * @return the new pending run length, always 0
+     */
+    private static int flushFixedLengthRun(RandomAccessReader dataReader, ResizableByteBuffer clustering, int fixedLengthClusteringLength) throws IOException
+    {
+        if (fixedLengthClusteringLength != 0)
+            clustering.loadPart(dataReader, fixedLengthClusteringLength);
+        return 0;
+    }
+
+    /**
+     * Reads one present clustering component. A fixed-length component joins the pending run; a
+     * variable-length one flushes the run first, because its length vint sits between them.
+     *
+     * @return the pending fixed-length run after this component
+     */
+    private static int readClusteringValue(RandomAccessReader dataReader, ResizableByteBuffer clustering,
+                                           AbstractType<?> type, int fixedLengthClusteringLength) throws IOException
+    {
+        if (type.isValueLengthFixed())
+            return fixedLengthClusteringLength + type.valueLengthIfFixed();
+
+        flushFixedLengthRun(dataReader, clustering, fixedLengthClusteringLength);
+        int varLength = dataReader.readUnsignedVInt32();
+        clustering.writeUnsignedVInt(varLength);
+        clustering.loadPart(dataReader, varLength);
+        return 0;
     }
 
     private static void skipClustering(RandomAccessReader dataReader, AbstractType<?>[] types, int clusteringColumnsBound) throws IOException
