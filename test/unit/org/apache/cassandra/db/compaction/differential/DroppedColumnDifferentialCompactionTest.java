@@ -294,4 +294,79 @@ public class DroppedColumnDifferentialCompactionTest extends DifferentialCompact
         update.row(0L).timestamp(LivenessInfo.NO_TIMESTAMP).add("v1", value);
         new Mutation(update.build()).apply();
     }
+
+    /**
+     * Drop and re-add of a SET column. Every existing scenario here uses {@code text},
+     * {@code bigint} or {@code map<text, bigint>}, so the complex arm of
+     * {@code CursorCompactor.isDroppedMultiCellOrCounterColumn} was only ever reached with a map.
+     */
+    @Test
+    public void droppedThenReaddedSetColumn() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, s set<text>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 10; ck++)
+        {
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (0, ?, ?)", ck, ck);
+            execute("DELETE s FROM %s WHERE pk = 0 AND ck = ?", ck);
+        }
+        flush();
+
+        alterTable("ALTER TABLE %s DROP s");
+        alterTable("ALTER TABLE %s ADD s set<text>");
+
+        for (long ck = 5; ck < 15; ck++)
+        {
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (0, ?, ?)", ck, ck + 100);
+            execute("UPDATE %s SET s = s + {'after-readd'} WHERE pk = 0 AND ck = ?", ck);
+        }
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        assertEquals("elements written after the re-add must survive",
+                     10, countOccurrences(json, "\"after-readd\""));
+    }
+
+    /**
+     * Drop and re-add of a LIST column. A list's cell paths are timeuuids rather than values, so
+     * its dropped-column handling reaches the same code with a different path type.
+     */
+    @Test
+    public void droppedThenReaddedListColumn() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, l list<text>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 10; ck++)
+        {
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (0, ?, ?)", ck, ck);
+            execute("DELETE l FROM %s WHERE pk = 0 AND ck = ?", ck);
+        }
+        flush();
+
+        alterTable("ALTER TABLE %s DROP l");
+        alterTable("ALTER TABLE %s ADD l list<text>");
+
+        for (long ck = 5; ck < 15; ck++)
+        {
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (0, ?, ?)", ck, ck + 100);
+            execute("UPDATE %s SET l = l + ['after-readd'] WHERE pk = 0 AND ck = ?", ck);
+        }
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        assertEquals("elements written after the re-add must survive",
+                     10, countOccurrences(json, cellValue("after-readd")));
+    }
+
+    /*
+     * There is no drop-and-re-add scenario for a non-frozen UDT column: ALTER TABLE ... DROP
+     * rejects one outright, "Cannot drop non-frozen column %s of user type %s"
+     * (AlterTableStatement.DropColumns.dropColumn). The UDT arm of
+     * CursorCompactor.isDroppedMultiCellOrCounterColumn is therefore only reachable through a
+     * dropped non-frozen COLLECTION, which the two scenarios above cover.
+     */
 }

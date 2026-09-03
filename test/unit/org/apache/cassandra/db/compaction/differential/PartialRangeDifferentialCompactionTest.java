@@ -116,4 +116,73 @@ public class PartialRangeDifferentialCompactionTest extends DifferentialCompacti
         assertTrue("the output must hold exactly the partitions inside the range; got: " + out.sstables.get(0).statsSummary,
                    out.sstables.get(0).statsSummary.contains(expectedRows));
     }
+
+    /**
+     * The same partial-range shape over a table carrying complex columns. Both scenarios in this
+     * class, and CursorPartialRangeGateTest, use a {@code (pk, ck, v1, v2)} table with no
+     * collection, so the interaction between a shard boundary and a complex column was untested
+     * even though this branch adds both.
+     *
+     * A segment boundary falls on a partition boundary, never inside a row, so a complex column
+     * must never be split across segments. This pins that: the output holds every element of every
+     * partition inside the range, and none from outside it.
+     */
+    @Test
+    public void tokenSubrangeOfSSTablesHoldingComplexColumns() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, s set<text>, " +
+                    "l list<text>, v2 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < PARTITIONS; pk++)
+                for (long ck = 0; ck < ROWS_PER_PARTITION; ck++)
+                    execute("UPDATE %s SET m = m + ?, s = s + ?, l = l + ?, v2 = ? " +
+                            "WHERE pk = ? AND ck = ?",
+                            map("k" + round, "mv-" + round + '-' + pk + '-' + ck),
+                            set("sv-" + round + '-' + pk),
+                            list("lv-" + round + '-' + pk + '-' + ck),
+                            "round-" + round + '-' + ck, pk, ck);
+            flush();
+        }
+        assertEquals(3, cfs.getLiveSSTables().size());
+
+        List<DecoratedKey> keys = keysInFileOrder(cfs.getLiveSSTables().iterator().next());
+        assertEquals(PARTITIONS, keys.size());
+        Range<Token> range = new Range<>(keys.get(4).getToken(), keys.get(13).getToken());
+        int partitionsInRange = 9;
+
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+        {
+            List<PartitionPositionBounds> bounds = sstable.getPositionsForRanges(Collections.singleton(range));
+            assertEquals("expected one segment per sstable", 1, bounds.size());
+            assertTrue("the segment must start after the file start, or the scanner is not partial",
+                       bounds.get(0).lowerPosition > 0);
+            assertTrue("the segment must end before the file end, or the scanner is not partial",
+                       bounds.get(0).upperPosition < sstable.uncompressedLength());
+        }
+
+        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), taskOver(range));
+
+        assertEquals("expected a single compaction output", 1, out.sstables.size());
+        String expectedRows = "totalRows=" + (partitionsInRange * ROWS_PER_PARTITION) + ' ';
+        assertTrue("the output must hold exactly the partitions inside the range; got: "
+                   + out.sstables.get(0).statsSummary,
+                   out.sstables.get(0).statsSummary.contains(expectedRows));
+
+        // Every partition inside the range keeps all three rounds of its map entries, and no
+        // partition outside it contributes any.
+        String json = allJson(out);
+        for (int i = 0; i < PARTITIONS; i++)
+        {
+            boolean inRange = i > 4 && i <= 13;
+            long pk = keys.get(i).getKey().duplicate().getLong();
+            for (int round = 0; round < 3; round++)
+                assertEquals("map cells for pk " + pk + " round " + round,
+                             inRange ? ROWS_PER_PARTITION : 0,
+                             countOccurrences(json, "\"mv-" + round + '-' + pk + '-'));
+        }
+    }
 }

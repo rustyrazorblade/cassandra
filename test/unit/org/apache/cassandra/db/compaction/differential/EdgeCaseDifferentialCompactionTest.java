@@ -1571,4 +1571,324 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         uuid.flip();
         return uuid;
     }
+
+    /**
+     * The empty-collection assignment, {@code SET l = []} and {@code SET m = {}}: a complex
+     * deletion with no cells behind it. The set form was covered; the list and map forms were not.
+     */
+    @Test
+    public void emptyCollectionAssignments() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, l list<text>, m map<text, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET l = l + ['doomed-l'], m = m + {'k': 'doomed-m'}, " +
+                    "v = ? WHERE pk = 0 AND ck = ?", "row" + ck, ck);
+        flush();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 2000 SET l = [], m = {} WHERE pk = 0 AND ck = ?", ck);
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        assertEquals("the empty-list assignment must shadow the earlier element",
+                     0, countOccurrences(json, cellValue("doomed-l")));
+        assertEquals("the empty-map assignment must shadow the earlier entry",
+                     0, countOccurrences(json, cellValue("doomed-m")));
+        for (long ck = 0; ck < 6; ck++)
+            assertEquals("row column missing at ck " + ck, 1, countOccurrences(json, cellValue("row" + ck)));
+    }
+
+    /**
+     * A map key past the 128-byte boundary where the cell path's length vint grows from one byte to
+     * two, and a key just below it. The longest key elsewhere in the suite is about 114 bytes, so
+     * the two-byte form was never written.
+     */
+    @Test
+    public void mapKeysAcrossTheVintLengthBoundary() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        String shortKey = repeat('s', 127);
+        String longKey = repeat('l', 128);
+        String longerKey = repeat('x', 5000);
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m[?] = ?, m[?] = ?, m[?] = ?, v = ? " +
+                    "WHERE pk = 0 AND ck = ?",
+                    shortKey, "under" + ck, longKey, "at" + ck, longerKey, "over" + ck, "row" + ck, ck);
+        flush();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 2000 SET m[?] = ? WHERE pk = 0 AND ck = ?",
+                    longKey, "rewritten" + ck, ck);
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        for (long ck = 0; ck < 6; ck++)
+        {
+            assertTrue("a 127-byte key must survive, ck " + ck, json.contains(cellValue("under" + ck)));
+            assertTrue("a 5000-byte key must survive, ck " + ck, json.contains(cellValue("over" + ck)));
+            assertTrue("the 128-byte key must take the newer value, ck " + ck,
+                       json.contains(cellValue("rewritten" + ck)));
+            assertFalse("the 128-byte key kept its older value, ck " + ck,
+                        json.contains(cellValue("at" + ck)));
+        }
+    }
+
+    /** Multi-byte map keys, so the cell path's byte comparison is not an ASCII comparison. */
+    @Test
+    public void nonAsciiMapKeysMergeAcrossSSTables() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        // Chosen so UTF-8 byte order and Java char order disagree, and so one key is a byte-prefix
+        // of another.
+        String[] keys = { "é", "é", "中文", "中", "😀", "z" };
+
+        for (long ck = 0; ck < 6; ck++)
+        {
+            for (int i = 0; i < keys.length; i++)
+                execute("UPDATE %s USING TIMESTAMP 1000 SET m[?] = ? WHERE pk = 0 AND ck = ?",
+                        keys[i], "first" + i + "-" + ck, ck);
+            execute("UPDATE %s USING TIMESTAMP 1000 SET v = ? WHERE pk = 0 AND ck = ?", "row" + ck, ck);
+        }
+        flush();
+
+        for (long ck = 0; ck < 6; ck++)
+            for (int i = 0; i < keys.length; i += 2)
+                execute("UPDATE %s USING TIMESTAMP 2000 SET m[?] = ? WHERE pk = 0 AND ck = ?",
+                        keys[i], "second" + i + "-" + ck, ck);
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        for (long ck = 0; ck < 6; ck++)
+            for (int i = 0; i < keys.length; i++)
+                if (i % 2 == 0)
+                {
+                    assertTrue("rewritten multi-byte key lost its newer value, key " + i + " ck " + ck,
+                               json.contains(cellValue("second" + i + "-" + ck)));
+                    assertFalse("rewritten multi-byte key kept its older value, key " + i + " ck " + ck,
+                                json.contains(cellValue("first" + i + "-" + ck)));
+                }
+                else
+                {
+                    assertTrue("untouched multi-byte key lost its value, key " + i + " ck " + ck,
+                               json.contains(cellValue("first" + i + "-" + ck)));
+                }
+    }
+
+    /**
+     * Negative {@code int32} map keys merged in a real compaction. Int32Type does not sort in
+     * unsigned byte order, so a cursor comparing paths as raw bytes orders these wrongly.
+     * CursorCellPathOrderingTest pins comparePaths directly, but no compaction ever merged two
+     * sstables holding the same negatively-keyed entry.
+     */
+    @Test
+    public void negativeIntegerMapKeysMergeAcrossSSTables() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<int, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        int[] keys = { Integer.MIN_VALUE, -1000, -1, 0, 1, Integer.MAX_VALUE };
+
+        for (long ck = 0; ck < 6; ck++)
+        {
+            for (int i = 0; i < keys.length; i++)
+                execute("UPDATE %s USING TIMESTAMP 1000 SET m[?] = ? WHERE pk = 0 AND ck = ?",
+                        keys[i], "first" + i + "-" + ck, ck);
+            execute("UPDATE %s USING TIMESTAMP 1000 SET v = ? WHERE pk = 0 AND ck = ?", "row" + ck, ck);
+        }
+        flush();
+
+        for (long ck = 0; ck < 6; ck++)
+            for (int i = 0; i < keys.length; i += 2)
+                execute("UPDATE %s USING TIMESTAMP 2000 SET m[?] = ? WHERE pk = 0 AND ck = ?",
+                        keys[i], "second" + i + "-" + ck, ck);
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        for (long ck = 0; ck < 6; ck++)
+            for (int i = 0; i < keys.length; i++)
+                if (i % 2 == 0)
+                {
+                    assertTrue("rewritten negative key lost its newer value, key " + keys[i] + " ck " + ck,
+                               json.contains(cellValue("second" + i + "-" + ck)));
+                    assertFalse("rewritten negative key kept its older value, key " + keys[i] + " ck " + ck,
+                                json.contains(cellValue("first" + i + "-" + ck)));
+                }
+                else
+                {
+                    assertTrue("untouched negative key lost its value, key " + keys[i] + " ck " + ck,
+                               json.contains(cellValue("first" + i + "-" + ck)));
+                }
+    }
+
+    /**
+     * Nested collections, which appear nowhere in the deterministic corpus: only the fuzz generator
+     * can produce one, by chance. The inner collection is frozen, so it is one opaque value inside
+     * the outer collection's cell, and the outer collection is still multi-cell.
+     */
+    @Test
+    public void nestedCollectionsAcrossSSTables() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, frozen<list<int>>>, " +
+                    "l list<frozen<set<int>>>, s set<frozen<map<text, int>>>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m = m + {'a': [1, 2, 3]}, " +
+                    "l = l + [{4, 5}], s = s + {{'n': 6}}, v = ? WHERE pk = 0 AND ck = ?",
+                    "row" + ck, ck);
+        flush();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 2000 SET m = m + {'a': [7, 8]}, " +
+                    "l = l + [{9}] WHERE pk = 0 AND ck = ?", ck);
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        for (long ck = 0; ck < 6; ck++)
+            assertEquals("row column missing at ck " + ck, 1, countOccurrences(json, cellValue("row" + ck)));
+        assertEquals("the rewritten nested map entry must merge to one cell per row",
+                     6, countOccurrences(json, "\"a\""));
+    }
+
+    /**
+     * A complex deletion sitting INSIDE a range tombstone that opens before it and closes after it.
+     * Every other scenario places its complex deletions outside the range tombstone's span, and the
+     * scenarios with overlapping or open-ended range tombstones use tables with no collection.
+     */
+    @Test
+    public void complexDeletionBracketedByARangeTombstone() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 12; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ?, v = ? WHERE pk = 0 AND ck = ?",
+                    "cell" + ck, "row" + ck, ck);
+        flush();
+
+        // The complex deletion at ck = 5 sits strictly inside the range below.
+        execute("DELETE m FROM %s USING TIMESTAMP 2000 WHERE pk = 0 AND ck = 5");
+        flush();
+
+        execute("DELETE FROM %s USING TIMESTAMP 3000 WHERE pk = 0 AND ck >= 2 AND ck < 8");
+        flush();
+
+        // A resurrecting write above the range tombstone, inside its span, so the merge must order
+        // the range tombstone, the complex deletion and this cell against each other.
+        execute("UPDATE %s USING TIMESTAMP 4000 SET m['k'] = ?, v = ? WHERE pk = 0 AND ck = 5",
+                "resurrected", "row-resurrected");
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        for (long ck = 2; ck < 8; ck++)
+            assertFalse("a cell under the range tombstone survived at ck " + ck,
+                        json.contains(cellValue("cell" + ck)));
+        for (long ck = 0; ck < 2; ck++)
+            assertTrue("a cell outside the range tombstone was lost at ck " + ck,
+                       json.contains(cellValue("cell" + ck)));
+        for (long ck = 8; ck < 12; ck++)
+            assertTrue("a cell outside the range tombstone was lost at ck " + ck,
+                       json.contains(cellValue("cell" + ck)));
+        assertTrue("the write above the range tombstone must survive",
+                   json.contains(cellValue("resurrected")));
+    }
+
+    /**
+     * A whole-UDT column delete compared through the differential harness. The one existing
+     * scenario that deletes a UDT column deliberately bypasses the harness and checks through CQL,
+     * and the wide-table deletion loop strides past every UDT column onto maps.
+     */
+    @Test
+    public void wholeUdtColumnDeleteAcrossSSTables() throws Exception
+    {
+        String udt = createType("CREATE TYPE %s (f1 text, f2 text)");
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, u " + udt + ", v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET u.f1 = ?, u.f2 = ?, v = ? WHERE pk = 0 AND ck = ?",
+                    "doomed1-" + ck, "doomed2-" + ck, "row" + ck, ck);
+        flush();
+
+        for (long ck = 0; ck < 6; ck += 2)
+            execute("DELETE u FROM %s USING TIMESTAMP 2000 WHERE pk = 0 AND ck = ?", ck);
+        flush();
+
+        String json = allJson(assertCursorMatchesIterator(cfs));
+        for (long ck = 0; ck < 6; ck++)
+        {
+            boolean deleted = ck % 2 == 0;
+            assertEquals("UDT field f1 at ck " + ck, deleted ? 0 : 1,
+                         countOccurrences(json, cellValue("doomed1-" + ck)));
+            assertEquals("UDT field f2 at ck " + ck, deleted ? 0 : 1,
+                         countOccurrences(json, cellValue("doomed2-" + ck)));
+            assertEquals("row column missing at ck " + ck, 1, countOccurrences(json, cellValue("row" + ck)));
+        }
+    }
+
+    /**
+     * A frozen collection deleted and a frozen collection expiring by TTL. frozenCollections covers
+     * a delete of the frozen MAP column only, and no frozen collection anywhere carries a TTL.
+     */
+    @Test
+    public void frozenCollectionDeleteAndTtl() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, fs frozen<set<text>>, " +
+                    "fl frozen<list<text>>, v text, PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET fs = {'doomed-fs'}, fl = ['doomed-fl'], v = ? " +
+                    "WHERE pk = 0 AND ck = ?", "row" + ck, ck);
+        flush();
+
+        for (long ck = 0; ck < 3; ck++)
+            execute("DELETE fs FROM %s USING TIMESTAMP 2000 WHERE pk = 0 AND ck = ?", ck);
+        for (long ck = 3; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 2000 AND TTL 1 SET fl = ['expiring-fl'] WHERE pk = 0 AND ck = ?", ck);
+        flush();
+
+        long pinnedNow = FBUtilities.nowInSeconds() + 60;
+        assertSomethingExpiredAt(cfs, pinnedNow);
+        String json = allJson(assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(),
+                                                          taskWithFixedNow(pinnedNow),
+                                                          cfs.getDefaultGcBefore(pinnedNow)));
+        assertEquals("the deleted frozen set must not survive in the rows that deleted it",
+                     3, countOccurrences(json, "doomed-fs"));
+        assertEquals("the expired frozen list must not survive",
+                     0, countOccurrences(json, "expiring-fl"));
+        for (long ck = 0; ck < 6; ck++)
+            assertEquals("row column missing at ck " + ck, 1, countOccurrences(json, cellValue("row" + ck)));
+    }
+
+    /** {@code "c".repeat(n)}, spelled out because this suite targets a source level without it. */
+    private static String repeat(char c, int n)
+    {
+        StringBuilder sb = new StringBuilder(n);
+        for (int i = 0; i < n; i++)
+            sb.append(c);
+        return sb.toString();
+    }
 }
