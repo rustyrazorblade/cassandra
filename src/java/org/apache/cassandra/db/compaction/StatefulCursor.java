@@ -78,6 +78,14 @@ class StatefulCursor extends SSTableCursorReader
 
     public int readPartitionHeader()
     {
+        // A range never spans a partition, so one left open belongs to the partition that ended.
+        // Reporting it here names that partition; carrying the flag forward would blame the next
+        // partition's first start bound instead, and would hide an unmatched close in it.
+        // currPartition still holds the partition that just ended; the swap below moves it to prev.
+        if (isOpenRangeTombstonePresent)
+            corruptSSTable("Partition ended with an open range tombstone marker: " + currPartition.key());
+        isOpenRangeTombstonePresent = false;
+
         swapCurrAndPrevPartition();
         int state = readPartitionHeader(currPartition);
 
@@ -292,14 +300,14 @@ class StatefulCursor extends SSTableCursorReader
     private void validateRowDeletionTime()
     {
         if (!unfiltered.deletionTime().validate())
-            reportInvalid("rowDeletion="+currPartition.deletionTime().toString());
+            reportInvalid("rowDeletion="+unfiltered.deletionTime().toString());
     }
 
     private void validateInvalidTombstoneDeletion()
     {
         validateRowDeletionTime();
         if (unfiltered.isBoundary() && !unfiltered.deletionTime2().validate())
-            reportInvalid("rowDeletion2="+currPartition.deletionTime().toString());
+            reportInvalid("rowDeletion2="+unfiltered.deletionTime2().toString());
     }
 
     private void validateInvalidCellDeletion()

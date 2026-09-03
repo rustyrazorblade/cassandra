@@ -495,7 +495,9 @@ public class SSTableCursorWriter implements AutoCloseable
         // row then writes a deletion, LIVE ones included, as UnfilteredSerializer does. The flags
         // byte leads the row, so the loop must set the flag before this method writes anything.
         boolean hasComplexDeletion = rowHasComplexDeletion;
-        long cellSectionLength = rowBuffer.getLength() + sizeComplexMarkerHeaders(hasComplexDeletion);
+        // Must run before anything is written and before writeRowCellSection: it sets the row
+        // flags and closes the marker whose end offset that method reads.
+        long cellSectionLength = rowBuffer.getLength() + closeComplexMarkers(hasComplexDeletion);
 
         writeRowColumnsSubset(columnsLength);
         assert isStatic || dataWriter.position() == rowStartPosition
@@ -559,20 +561,29 @@ public class SSTableCursorWriter implements AutoCloseable
         }
     }
 
-    /** The count of markers that have no cell. totalColumnsSet does not count them. */
+    /**
+     * The count of markers that have no cell. totalColumnsSet does not count them.
+     *
+     * <p>Set by {@link #closeComplexMarkers}, read by {@link #writeRowEnd} after it. Both live in
+     * the same row write, so nothing else may read this.
+     */
     private int deletionOnlyMarkers;
 
     /**
-     * Sizes the header bytes each complex marker adds before its cells, because the row-size vint
-     * counts them. Sets HAS_COMPLEX_DELETION first: the flags byte leads the row, so it must be set
-     * before anything is written.
+     * Closes the open complex marker, sets HAS_COMPLEX_DELETION, counts the deletion-only markers,
+     * and measures the header bytes each marker adds before its cells. {@link #writeRowEnd} must
+     * call this before it writes anything and before {@link #writeRowCellSection}, which reads the
+     * marker end offsets this closes.
      *
-     * <p>One marker with a non-live deletion sets the flag. Every complex column of the row then
-     * writes a deletion, LIVE ones included, as UnfilteredSerializer does.
+     * <p>The flag has to be set here rather than later, because the flags byte leads the row. One
+     * marker with a non-live deletion sets it, and every complex column of the row then writes a
+     * deletion, LIVE ones included, as UnfilteredSerializer does.
+     *
+     * <p>The row-size vint counts the header bytes, hence the measurement.
      *
      * @return the bytes to add to the cell section length
      */
-    private long sizeComplexMarkerHeaders(boolean hasComplexDeletion) throws IOException
+    private long closeComplexMarkers(boolean hasComplexDeletion)
     {
         deletionOnlyMarkers = 0;
         if (complexMarkerCount == 0)
