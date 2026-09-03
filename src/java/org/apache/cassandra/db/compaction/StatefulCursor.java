@@ -78,8 +78,8 @@ class StatefulCursor extends SSTableCursorReader
     {
         super(reader, bounds, diskAccessMode);
         // A deletion-only complex column must reach the merge as a position of its own, so that
-        // its column-level deletion reaches the output.
-        pauseAtEmptyComplexColumns(true);
+        // its column-level deletion reaches the output. pauseAtEmptyComplexColumns defaults to
+        // true on SSTableCursorReader for exactly this reason; no override needed here.
         currPartition = new PartitionDescriptor(reader.getPartitioner().createReusableKey(0));
         prevPartition = new PartitionDescriptor(reader.getPartitioner().createReusableKey(0));
         unfiltered = new UnfilteredDescriptor(reader.header.clusteringTypes().toArray(AbstractType[]::new));

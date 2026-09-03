@@ -150,12 +150,29 @@ public class ComplexColumnCursorReadTest extends CQLTester
     /** Cursor side: same canonical records by driving SSTableCursorReader directly. */
     private static List<String> cursorRecords(SSTableReader sstable) throws Exception
     {
+        return cursorRecords(sstable, true);
+    }
+
+    /**
+     * @param explicitlyEnablePause if false, drive the reader with whatever
+     *                              {@code pauseAtEmptyComplexColumns} ships as by default,
+     *                              without touching the setter. This is how {@code StatefulCursor}
+     *                              drives the reader in production: see
+     *                              {@link #deletionOnlyComplexColumnsSurfaceWithoutExplicitPause}.
+     */
+    private static List<String> cursorRecords(SSTableReader sstable, boolean explicitlyEnablePause) throws Exception
+    {
         List<String> out = new ArrayList<>();
         try (SSTableCursorReader cursor = new SSTableCursorReader(sstable))
         {
             // Without this pause, the cursor side loses the CPLX record of a complex column
-            // that has no cells.
-            cursor.pauseAtEmptyComplexColumns(true);
+            // that has no cells. The field already defaults to true, and StatefulCursor (the
+            // only production caller) relies on that default rather than calling this setter.
+            // This explicit call only pins the setter's own contract for a caller that does flip
+            // it by hand; see deletionOnlyComplexColumnsSurfaceWithoutExplicitPause for the test
+            // that actually matches StatefulCursor's behavior.
+            if (explicitlyEnablePause)
+                cursor.pauseAtEmptyComplexColumns(true);
 
             PartitionDescriptor pHeader = new PartitionDescriptor(sstable.getPartitioner().createReusableKey(0));
             UnfilteredDescriptor rHeader = new UnfilteredDescriptor(sstable.header.clusteringTypes().toArray(AbstractType[]::new));
@@ -250,13 +267,18 @@ public class ComplexColumnCursorReadTest extends CQLTester
 
     private void assertCursorReadsMatch() throws Exception
     {
+        assertCursorReadsMatch(true);
+    }
+
+    private void assertCursorReadsMatch(boolean explicitlyEnablePause) throws Exception
+    {
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         flush();
         assertEquals("expected exactly one sstable", 1, cfs.getLiveSSTables().size());
         SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
 
         List<String> expected = iteratorRecords(sstable);
-        List<String> actual = cursorRecords(sstable);
+        List<String> actual = cursorRecords(sstable, explicitlyEnablePause);
 
         // The scenario must give complex columns and cells that hold a path.
         assertTrue("scenario produced no complex column records",
@@ -406,6 +428,12 @@ public class ComplexColumnCursorReadTest extends CQLTester
         assertCursorReadsMatch();
     }
 
+    /**
+     * A caller that explicitly enables {@code pauseAtEmptyComplexColumns} still sees the CPLX record
+     * of a deletion-only complex column. No production caller does this today — {@code StatefulCursor}
+     * relies on the field's default instead, which {@link #deletionOnlyComplexColumnsSurfaceWithoutExplicitPause}
+     * pins — but the setter is public API on the raw reader and must keep working for a caller that uses it directly.
+     */
     @Test
     public void deletionOnlyComplexColumns() throws Exception
     {
@@ -424,6 +452,30 @@ public class ComplexColumnCursorReadTest extends CQLTester
         execute("DELETE zz FROM %s WHERE pk = ? AND ck = ?", 1L, 100L);
 
         assertCursorReadsMatch();
+    }
+
+    /**
+     * Pins the behavior {@code StatefulCursor} actually relies on: the raw reader's
+     * {@code pauseAtEmptyComplexColumns} field defaults to true, so a caller that never touches
+     * the setter still sees the CPLX record of a deletion-only complex column. Same scenario as
+     * {@link #deletionOnlyComplexColumns}, but without that test's explicit
+     * {@code pauseAtEmptyComplexColumns(true)} call. If the default ever regresses to false, this
+     * is the test that catches it; {@link #deletionOnlyComplexColumns} would still pass.
+     */
+    @Test
+    public void deletionOnlyComplexColumnsSurfaceWithoutExplicitPause() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, a text, b bigint, zz map<text, bigint>, " +
+                    "PRIMARY KEY (pk, ck))");
+        getCurrentColumnFamilyStore().disableAutoCompaction();
+
+        for (long ck = 0; ck < 8; ck++)
+            execute("INSERT INTO %s (pk, ck, a, b, zz) VALUES (?, ?, ?, ?, ?)", 1L, ck, "a" + ck, ck, map("m" + ck, ck));
+        for (long ck = 0; ck < 8; ck += 2)
+            execute("DELETE zz FROM %s WHERE pk = ? AND ck = ?", 1L, ck);
+        execute("DELETE zz FROM %s WHERE pk = ? AND ck = ?", 1L, 100L);
+
+        assertCursorReadsMatch(false);
     }
 
     @Test

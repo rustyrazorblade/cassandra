@@ -373,6 +373,72 @@ public class MaterializedViewDifferentialCompactionTest extends DifferentialComp
     }
 
     /**
+     * Strict liveness must drop a row when the merged winner of a complex cell is dead, and the two
+     * cells come from different sstables. {@link #strictLivenessAccountsForComplexColumnDeletion}
+     * is one sstable and short-circuits on a dead complex deletion, so it never enters the
+     * {@code cellMergeLimit > 1} resolve loop in {@code anyMergedCellDeadAtNow}.
+     * <p>
+     * The dropped row has a live map cell in the first sstable and a tombstone on the same path in
+     * the second. No complex deletion: that branch would skip the loop again. The control row has
+     * two live cells on the same path and must be kept.
+     */
+    @Test
+    public void strictLivenessAccountsForMergedComplexCell() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, m map<text, bigint>, PRIMARY KEY (pk, ck))");
+        String view = createView("CREATE MATERIALIZED VIEW %s AS SELECT pk, ck, v1, v2, m FROM %s " +
+                                 "WHERE pk IS NOT NULL AND ck IS NOT NULL AND v1 IS NOT NULL " +
+                                 "PRIMARY KEY (v1, pk, ck)");
+        ColumnFamilyStore viewCfs = getColumnFamilyStore(KEYSPACE, view);
+        viewCfs.disableAutoCompaction();
+        assertTrue("v1 is a base non-PK column in the view PK, so the view must enforce strict liveness",
+                   viewCfs.metadata().enforceStrictLiveness());
+
+        execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (1, 1, 5, 'normal')");
+        flush(KEYSPACE, view);
+
+        long nowInSec = FBUtilities.nowInSeconds();
+        TableMetadata metadata = viewCfs.metadata();
+        ColumnMetadata mapColumn = metadata.getColumn(ByteBufferUtil.bytes("m"));
+
+        Row.Builder droppedA = livenessFreeViewRow(2L, 2L);
+        addLiveCell(droppedA, metadata, "v2", "droppedByMergedTombstone");
+        addMapCell(droppedA, mapColumn, "k", 100L, 1L);
+        applyViewRow(viewCfs, 7L, droppedA.build());
+
+        Row.Builder keptA = livenessFreeViewRow(3L, 3L);
+        addLiveCell(keptA, metadata, "v2", "keptMergedComplex");
+        addMapCell(keptA, mapColumn, "k", 100L, 2L);
+        applyViewRow(viewCfs, 7L, keptA.build());
+        flush(KEYSPACE, view);
+
+        Row.Builder droppedB = livenessFreeViewRow(2L, 2L);
+        addMapTombstone(droppedB, mapColumn, "k", 200L, nowInSec);
+        applyViewRow(viewCfs, 7L, droppedB.build());
+
+        Row.Builder keptB = livenessFreeViewRow(3L, 3L);
+        addMapCell(keptB, mapColumn, "k", 200L, 3L);
+        applyViewRow(viewCfs, 7L, keptB.build());
+        flush(KEYSPACE, view);
+
+        assertEquals("the constructed rows must reach the compaction merge from their own sstables",
+                     3, viewCfs.getLiveSSTables().size());
+        assertSomethingExpiredAt(viewCfs, nowInSec);
+        assertTrue("the map cell tombstone must NOT be purgeable, or the purger removes it before the "
+                   + "merge decides the row and it cannot decide a strict-liveness drop on its own",
+                   nowInSec >= viewCfs.getDefaultGcBefore(FBUtilities.nowInSeconds()));
+
+        CapturedOutput out = assertCursorMatchesIterator(viewCfs);
+        String json = allJson(out);
+        assertEquals("the two-source row whose merged map cell is a tombstone survived strict liveness: " + json,
+                     0, countOccurrences(json, cellValue("droppedByMergedTombstone")));
+        assertEquals("the two-source row with two live map cells lost its cell: " + json,
+                     1, countOccurrences(json, cellValue("keptMergedComplex")));
+        assertEquals("the view-maintained row is missing: " + json,
+                     1, countOccurrences(json, cellValue("normal")));
+    }
+
+    /**
      * Another way the reference's {@code hasDeletion(nowInSec)} guard opens for a row strict liveness
      * then drops: not through a cell, but because the PURGER cleared the row's liveness or its row
      * deletion. Whichever it cleared was, before it ran, a term of the merged row's
@@ -468,6 +534,18 @@ public class MaterializedViewDifferentialCompactionTest extends DifferentialComp
     private void addCellTombstone(Row.Builder builder, TableMetadata metadata, String column, long nowInSec)
     {
         builder.addCell(BufferCell.tombstone(metadata.getColumn(ByteBufferUtil.bytes(column)), 200L, nowInSec));
+    }
+
+    private void addMapCell(Row.Builder builder, ColumnMetadata mapColumn, String key, long timestamp, long value)
+    {
+        builder.addCell(BufferCell.live(mapColumn, timestamp, LongType.instance.decompose(value),
+                                        CellPath.create(UTF8Type.instance.decompose(key))));
+    }
+
+    private void addMapTombstone(Row.Builder builder, ColumnMetadata mapColumn, String key, long timestamp, long nowInSec)
+    {
+        builder.addCell(BufferCell.tombstone(mapColumn, timestamp, nowInSec,
+                                             CellPath.create(UTF8Type.instance.decompose(key))));
     }
 
     private void applyViewRow(ColumnFamilyStore viewCfs, long v1, Row row)

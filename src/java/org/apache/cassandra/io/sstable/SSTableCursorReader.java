@@ -114,7 +114,12 @@ public class SSTableCursorReader implements AutoCloseable
 
     // If true, a complex column with no cells becomes a position where the cursor stops. See
     // CellCursor.surfaceDeletionOnlyComplexColumn for what the cursor holds at that position.
-    private boolean pauseAtEmptyComplexColumns;
+    //
+    // Defaults to true: a deletion-only complex column must reach any consumer that merges or
+    // writes rows, or the column-level deletion silently disappears. Turn this off only for a
+    // pure consumption walk that has no use for a position carrying no cell, such as an
+    // allocation microbenchmark.
+    private boolean pauseAtEmptyComplexColumns = true;
 
     public void pauseAtEmptyComplexColumns(boolean pause)
     {
@@ -171,10 +176,10 @@ public class SSTableCursorReader implements AutoCloseable
         // null for a simple column. Built with cellTypeArray, once per change of the column set.
         private AbstractType<?>[] pathTypeArray;
         // Parallel to columnsArray: each column's drop horizon, or DeserializationHelper.NO_DROP_HORIZON
-        // if none. That sentinel is Long.MIN_VALUE, so it is NOT out of band for a timestamp. Run the
-        // drop test through DeserializationHelper.isDroppedAtHorizon, which tests the sentinel first.
-        // A bare "timestamp <= droppedTimeArray[i]" drops a cell timestamped LivenessInfo.NO_TIMESTAMP
-        // on a column that was never dropped, which the iterator path keeps.
+        // if none. Null when this sstable has no dropped column. Read it only through isDroppedAt,
+        // which holds both the null guard and the sentinel test. A bare
+        // "timestamp <= droppedTimeArray[i]" drops a cell timestamped LivenessInfo.NO_TIMESTAMP on a
+        // column that was never dropped, which the iterator path keeps.
         private long[] droppedTimeArray;
         // The columnsArray index of cellColumn. It is kept for every cell of a complex column, so
         // the drop test below stays an array read and does not become a lookup per cell.
@@ -297,6 +302,23 @@ public class SSTableCursorReader implements AutoCloseable
         }
 
         /**
+         * The dropped-column filter for one decoded timestamp. Gives the same answer as
+         * {@code deserializationHelper.isDropped(columnsArray[columnIndex], timestamp, ...)}, and as
+         * {@code isDroppedComplexDeletion} for a complex deletion, but reads the prepared
+         * {@link #droppedTimeArray} instead of a map keyed by ByteBuffer, which would be a lookup
+         * per cell. {@link DeserializationHelper#isDroppedAtHorizon} holds the sentinel test that
+         * keeps the two forms equal: see its javadoc.
+         *
+         * The {@code sstableHasDroppedColumns} test is required, not an optimization:
+         * {@link #droppedTimeArray} is null when this sstable's header has no dropped column.
+         */
+        private boolean isDroppedAt(long timestamp, int columnIndex)
+        {
+            return sstableHasDroppedColumns
+                   && DeserializationHelper.isDroppedAtHorizon(timestamp, droppedTimeArray[columnIndex]);
+        }
+
+        /**
          * Moves to the next column of the row that has a cell to read. On the way it consumes the
          * header of each complex column, which holds a deletion and a cell count. If it returns
          * {@link #COLUMN_RUN_OPEN}, then {@code remainingCellsInColumn} is above zero.
@@ -324,7 +346,7 @@ public class SSTableCursorReader implements AutoCloseable
                     break;
                 }
                 readComplexDeletion(currIndex);
-                remainingCellsInColumn = (int) dataReader.readUnsignedVInt();
+                remainingCellsInColumn = dataReader.readUnsignedVInt32();
                 if (remainingCellsInColumn == 0 && pauseAtEmptyComplexColumns)
                     return surfaceDeletionOnlyComplexColumn();
                 // A count of zero and no pause: continue to the next column.
@@ -367,8 +389,7 @@ public class SSTableCursorReader implements AutoCloseable
             serializationHeader.readDeletionTime(dataReader, complexDeletion);
             // Do what DeserializationHelper.isDroppedComplexDeletion does: drop a complex deletion
             // at or before the drop time of its column.
-            if (sstableHasDroppedColumns
-                && DeserializationHelper.isDroppedAtHorizon(complexDeletion.markedForDeleteAt(), droppedTimeArray[currIndex]))
+            if (isDroppedAt(complexDeletion.markedForDeleteAt(), currIndex))
                 complexDeletion.resetLive();
         }
 
@@ -411,13 +432,8 @@ public class SSTableCursorReader implements AutoCloseable
                 long timestamp = readCellLiveness();
                 readCellPath();
 
-                // This test gives the same answer as
-                // deserializationHelper.isDropped(cellColumn, timestamp, false), but it reads a
-                // prepared array instead of a map keyed by ByteBuffer. The map form would look up
-                // droppedColumns.get(column.name.bytes) for every cell. isDroppedAtHorizon holds
-                // the sentinel test that keeps the two forms equal: see its javadoc.
                 boolean hasValue = Cell.Serializer.hasValue(cellFlags);
-                if (!sstableHasDroppedColumns || !DeserializationHelper.isDroppedAtHorizon(timestamp, droppedTimeArray[cellColumnIndex]))
+                if (!isDroppedAt(timestamp, cellColumnIndex))
                     return hasValue ? CELL_HAS_VALUE : CELL_NO_VALUE;
 
                 int dropped = discardDroppedCell(hasValue);
@@ -846,7 +862,11 @@ public class SSTableCursorReader implements AutoCloseable
         // Catch IOException only. That is what a failed read of the input throws, and the code
         // above already checks the length. An exception from the growth of the output buffer is a
         // defect in this process, not damaged data, and it must not mark the sstable as corrupt.
-        if (writer instanceof DataOutputBuffer)
+        //
+        // hasArray() guards against a direct-backed DataOutputBuffer: readFully requires a heap
+        // array, so a direct-backed instance falls through to the transfer-buffer loop below
+        // instead of taking this fast path unsafely.
+        if (writer instanceof DataOutputBuffer && ((DataOutputBuffer) writer).hasArray())
         {
             try
             {
@@ -867,7 +887,7 @@ public class SSTableCursorReader implements AutoCloseable
             {
                 dataReader.readFully(transferBuffer, 0, chunk);
             }
-            catch (Exception e)
+            catch (IOException e)
             {
                 corruptSSTable(e);
             }

@@ -260,7 +260,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     /**
      * Rejects a dropped column that an sstable header still lists.
      *
-     * <h2>What this gate decides</h2>
+     * WHAT THIS GATE DECIDES
      *
      * {@link #unsupportedSchema} sees only the columns the table has now. A drop removes the column
      * from {@link TableMetadata#regularAndStaticColumns()}. Each sstable written before the drop
@@ -271,58 +271,48 @@ public class CursorCompactor extends CompactionInfo.Holder
      * The output has a slot for such a column either way. {@code SerializationHeader.make} builds
      * the output header from the headers of the input sstables, not from the current schema.
      *
-     * <h2>Support matrix</h2>
+     * SUPPORT MATRIX, which path runs per dropped column shape
      *
-     * <table>
-     * <caption>Which path runs, per dropped column shape</caption>
-     * <tr><th>Shape</th><th>Path</th><th>State</th></tr>
+     *   dropped SIMPLE column                     cursor    SUPPORTED
+     *   dropped MULTI-CELL column, re-added       cursor    SUPPORTED
+     *   dropped MULTI-CELL column, still dropped  iterator  NOT SUPPORTED here, and BROKEN there
+     *   dropped COUNTER column                    iterator  NOT SUPPORTED here
      *
-     * <tr><td>Dropped SIMPLE column</td><td>cursor</td>
-     * <td>SUPPORTED. The gate never fires. Covered by
-     * {@code DroppedColumnDifferentialCompactionTest}.</td></tr>
+     * A dropped SIMPLE column never fires the gate, and
+     * {@code DroppedColumnDifferentialCompactionTest} covers it. Neither does a re-added multi-cell
+     * column, because the gate tests {@code metadata.getColumn(name) == null} and a re-add puts the
+     * column back in the schema; {@code droppedThenReaddedComplexColumnDeletionNotResurrected}
+     * covers that. A dropped COUNTER column has no cursor support at all: {@link #mergeCells} throws
+     * for a counter cell, and {@link #unsupportedSchema} rejects a counter the schema still has. The
+     * iterator path handles it. The remaining shape, a multi-cell column still out of the schema, is
+     * the reason this gate exists.
      *
-     * <tr><td>Dropped MULTI-CELL column, re-added to the schema</td><td>cursor</td>
-     * <td>SUPPORTED. The gate tests {@code metadata.getColumn(name) == null}, and a re-added column
-     * is back in the schema, so it does not fire. Covered by
-     * {@code droppedThenReaddedComplexColumnDeletionNotResurrected}.</td></tr>
-     *
-     * <tr><td>Dropped MULTI-CELL column, still out of the schema</td><td>iterator</td>
-     * <td>NOT SUPPORTED here, and BROKEN there. See below.</td></tr>
-     *
-     * <tr><td>Dropped COUNTER column</td><td>iterator</td>
-     * <td>NOT SUPPORTED here. The cursor path has no counter merge at all: {@link #mergeCells}
-     * throws for a counter cell, and {@link #unsupportedSchema} rejects a counter the schema still
-     * has. The iterator path handles it.</td></tr>
-     * </table>
-     *
-     * <h2>The dropped multi-cell case, and why the fallback target is not safe either</h2>
+     * THE DROPPED MULTI-CELL CASE, AND WHY THE FALLBACK TARGET IS NOT SAFE EITHER
      *
      * The cursor reads, merges and writes complex framing correctly, so this gate is NOT about
      * parsing. It is closed because of the state of the fallback target.
      *
      * The drop filter is gated on the timestamp, not on the column, so a cell written above the
      * drop time survives the read. What happens next depends on the data:
-     * <ul>
-     *   <li>every cell and complex deletion at or below the drop time: the iterator compacts
-     *       normally and the filter removes the data. The fallback costs throughput only;</li>
-     *   <li>any cell above the drop time: the ITERATOR fails. It throws a NullPointerException,
-     *       for a regular column and for a static one alike. The one exception is a table whose
-     *       dropped column was its ONLY static column: {@code UnfilteredRowIterators.mergeStaticRows}
-     *       returns {@code Rows.EMPTY_STATIC_ROW} on an empty column set, so it discards the whole
-     *       static block before it builds a merger, and no exception is thrown. The table cannot
-     *       compact on either path, and closing this gate only chooses which path fails. See
-     *       CASSANDRA-21607.</li>
-     * </ul>
+     *
+     *   - every cell and complex deletion at or below the drop time: the iterator compacts normally
+     *     and the filter removes the data. The fallback costs throughput only.
+     *   - any cell above the drop time: the ITERATOR fails. It throws a NullPointerException, for a
+     *     regular column and for a static one alike. The one exception is a table whose dropped
+     *     column was its ONLY static column: {@code UnfilteredRowIterators.mergeStaticRows} returns
+     *     {@code Rows.EMPTY_STATIC_ROW} on an empty column set, so it discards the whole static
+     *     block before it builds a merger, and no exception is thrown. The table cannot compact on
+     *     either path, and closing this gate only chooses which path fails. See CASSANDRA-21607.
      *
      * A surviving cell is also data that a later re-add of the column must not bring back, which is
      * the second half of CASSANDRA-21607. Note that the re-added row of the matrix above inherits
      * that: both paths carry such a cell once the column is back in the schema.
      *
-     * <b>Open this gate to multi-cell columns once CASSANDRA-21607 is fixed</b>, that is, once the
-     * read filter discards a dropped column's cells whatever their timestamp. Parity with the
-     * iterator path needs no further work in this class. It needs a reference that does not fail.
+     * OPEN THIS GATE TO MULTI-CELL COLUMNS ONCE CASSANDRA-21607 IS FIXED, that is, once the read
+     * filter discards a dropped column's cells whatever their timestamp. Parity with the iterator
+     * path needs no further work in this class. It needs a reference that does not fail.
      *
-     * <h2>The fallback is permanent for this table</h2>
+     * THE FALLBACK IS PERMANENT FOR THIS TABLE
      *
      * A drop cannot be undone in the headers, and no compaction clears it.
      * {@code SerializationHeader.make} builds the output header as the union of the INPUT headers'

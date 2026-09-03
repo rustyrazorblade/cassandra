@@ -202,15 +202,23 @@ public class DataOutputBuffer extends BufferedDataOutputStreamPlus
     }
 
     /**
+     * True if this buffer holds a heap array, the precondition {@link #readFully} and
+     * {@link #getData()} both require. This class allocates such a buffer by default. Note that
+     * {@link #scratchBuffer} does NOT meet it: it allocates off heap unless
+     * {@code cassandra.dob.allocate_type} says otherwise.
+     */
+    public boolean hasArray()
+    {
+        return buffer.hasArray();
+    }
+
+    /**
      * Reads {@code length} bytes from {@code in} directly into the array of this buffer.
      *
      * This makes one copy. A call to {@code in.readFully(byte[])} and then to
      * {@link #write(byte[], int, int)} makes two, because it copies through a transfer buffer.
      *
-     * Use this method only on a buffer that holds a heap array. This class allocates such a buffer
-     * by default, and {@link #getData()} has the same condition. Note that
-     * {@link #scratchBuffer} does NOT meet it: it allocates off heap unless
-     * {@code cassandra.dob.allocate_type} says otherwise.
+     * Use this method only on a buffer that holds a heap array: check {@link #hasArray()} first.
      */
     public void readFully(DataInputPlus in, int length) throws IOException
     {

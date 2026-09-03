@@ -19,6 +19,7 @@
 package org.apache.cassandra.db.compaction.differential;
 
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -26,11 +27,21 @@ import java.util.Set;
 
 import org.junit.Test;
 
+import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.marshal.LongType;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.rows.BTreeRow;
+import org.apache.cassandra.db.rows.BufferCell;
+import org.apache.cassandra.db.rows.CellPath;
+import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -310,6 +321,152 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         flush();
 
         assertCursorMatchesIterator(cfs);
+    }
+
+    /**
+     * Merges list cells across sstables. List paths are timeuuids and sort by timestamp, not by
+     * bytes. CQL prepend vs append is the ordinary merge. ck=99 holds two crafted paths that invert
+     * byte order vs timeuuid order; CQL does not emit that pair.
+     */
+    @Test
+    public void listCellsAcrossSSTables() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, l list<text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        TableMetadata metadata = cfs.metadata();
+
+        for (long ck = 0; ck < 4; ck++)
+        {
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 0L, ck, "v" + ck);
+            execute("UPDATE %s SET l = l + ? WHERE pk = ? AND ck = ?", list("a", "b"), 0L, ck);
+        }
+        // v only: an INSERT of the list would add a complex deletion that shadows the crafted cells.
+        execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 0L, 99L, "crafted");
+        applyListCell(metadata, 0L, 99L, listTimeUuid(0xFFFFFFFF00001001L), "byte-high", 1000L);
+        flush();
+
+        for (long ck = 0; ck < 4; ck++)
+            execute("UPDATE %s SET l = ? + l WHERE pk = ? AND ck = ?", list("x"), 0L, ck);
+        applyListCell(metadata, 0L, 99L, listTimeUuid(0x0000000000001002L), "time-high", 1000L);
+        flush();
+
+        CapturedOutput out = assertCursorMatchesIterator(cfs);
+        String json = allJson(out);
+        assertEquals("crafted list cell missing: " + json, 1, countOccurrences(json, cellValue("byte-high")));
+        assertEquals("crafted list cell missing: " + json, 1, countOccurrences(json, cellValue("time-high")));
+    }
+
+    /**
+     * Same-timestamp live map cells. mergeCells COMPARE copies collection values through
+     * tempCellBuffer, skips the length vint, then Arrays.compareUnsigned. timestampTies covers
+     * that rule only for simple cells. text values so {@code valueLengthIfFixed()} is negative.
+     */
+    @Test
+    public void mapValueTiesAtSameTimestamp() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 5; ck++)
+        {
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ?, v = ? WHERE pk = ? AND ck = ?",
+                    "cmp-aaa" + ck, "keep1-" + ck, 1L, ck);
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ?, v = ? WHERE pk = ? AND ck = ?",
+                    "stay-zzz" + ck, "keep2-" + ck, 2L, ck);
+        }
+        execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ?, v = ? WHERE pk = 3 AND ck = 5",
+                "ts-old", "keep-ts");
+        execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ?, v = ? WHERE pk = 4 AND ck = 6",
+                "tie-same", "keep-tie");
+        flush();
+
+        for (long ck = 0; ck < 5; ck++)
+        {
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ? WHERE pk = ? AND ck = ?",
+                    "cmp-zzz" + ck, 1L, ck);
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ? WHERE pk = ? AND ck = ?",
+                    "late-aaa" + ck, 2L, ck);
+        }
+        execute("UPDATE %s USING TIMESTAMP 2000 SET m['k'] = ? WHERE pk = 3 AND ck = 5", "ts-new");
+        execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ? WHERE pk = 4 AND ck = 6", "tie-same");
+        flush();
+
+        CapturedOutput out = assertCursorMatchesIterator(cfs);
+        String json = allJson(out);
+        for (long ck = 0; ck < 5; ck++)
+        {
+            assertTrue("greater map value must win the same-timestamp COMPARE at ck " + ck,
+                       json.contains(cellValue("cmp-zzz" + ck)));
+            assertFalse("lesser map value won the same-timestamp COMPARE at ck " + ck,
+                        json.contains(cellValue("cmp-aaa" + ck)));
+            assertTrue("greater map value already in the first sstable must be kept at ck " + ck,
+                       json.contains(cellValue("stay-zzz" + ck)));
+            assertFalse("later lesser map value replaced the first sstable at ck " + ck,
+                        json.contains(cellValue("late-aaa" + ck)));
+        }
+        assertTrue("later timestamp must win the control row", json.contains(cellValue("ts-new")));
+        assertFalse("earlier timestamp won the control row", json.contains(cellValue("ts-old")));
+        assertEquals("the equal-value tie dropped the map cell",
+                     1, countOccurrences(json, cellValue("tie-same")));
+    }
+
+    /**
+     * A TTL on one map entry expires against a second sstable that holds the same path. The expired
+     * winner becomes a tombstone and shadows the older live cell. Pathological tests TTL whole
+     * INSERT windows, not one element.
+     */
+    @Test
+    public void mapElementTtlAcrossSSTables() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET v = ? WHERE pk = 1 AND ck = ?", "rowkeep" + ck, ck);
+        for (long ck = 0; ck < 3; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 SET m['k'] = ? WHERE pk = 1 AND ck = ?",
+                    "live-drop" + ck, ck);
+        for (long ck = 3; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 1000 AND TTL 1 SET m['k'] = ? WHERE pk = 1 AND ck = ?",
+                    "ttl-old" + ck, ck);
+        flush();
+
+        for (long ck = 0; ck < 3; ck++)
+            execute("UPDATE %s USING TIMESTAMP 2000 AND TTL 1 SET m['k'] = ? WHERE pk = 1 AND ck = ?",
+                    "expiring-drop" + ck, ck);
+        for (long ck = 3; ck < 6; ck++)
+            execute("UPDATE %s USING TIMESTAMP 2000 SET m['k'] = ? WHERE pk = 1 AND ck = ?",
+                    "live-keep" + ck, ck);
+        flush();
+
+        long pinnedNow = FBUtilities.nowInSeconds() + 60;
+        assertSomethingExpiredAt(cfs, pinnedNow);
+        CapturedOutput out = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(),
+                                                         taskWithFixedNow(pinnedNow),
+                                                         cfs.getDefaultGcBefore(pinnedNow));
+        String json = allJson(out);
+        for (long ck = 0; ck < 3; ck++)
+        {
+            assertFalse("expired map cell did not shadow the older live value at ck " + ck,
+                        json.contains(cellValue("live-drop" + ck)));
+            assertFalse("expired map cell kept its value at ck " + ck,
+                        json.contains(cellValue("expiring-drop" + ck)));
+        }
+        for (long ck = 3; ck < 6; ck++)
+        {
+            assertTrue("later live map cell must survive an older TTL at ck " + ck,
+                       json.contains(cellValue("live-keep" + ck)));
+            assertFalse("older TTL map cell survived against a later live cell at ck " + ck,
+                        json.contains(cellValue("ttl-old" + ck)));
+        }
+        for (long ck = 0; ck < 6; ck++)
+            assertEquals("keep-column missing at ck " + ck, 1, countOccurrences(json, cellValue("rowkeep" + ck)));
     }
 
     /** Reversed clustering order changes on-disk ordering and bound comparisons. */
@@ -1393,5 +1550,25 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         }
 
         assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    private void applyListCell(TableMetadata metadata, long pk, long ck, ByteBuffer path, String value, long timestamp)
+    {
+        ColumnMetadata column = metadata.getColumn(ByteBufferUtil.bytes("l"));
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(Clustering.make(LongType.instance.decompose(ck)));
+        builder.addCell(BufferCell.live(column, timestamp, UTF8Type.instance.decompose(value),
+                                        CellPath.create(path)));
+        new Mutation(PartitionUpdate.singleRowUpdate(metadata, LongType.instance.decompose(pk), builder.build())).apply();
+    }
+
+    /** Same construction as CursorCellPathOrderingTest.timeUuid. */
+    private static ByteBuffer listTimeUuid(long msb)
+    {
+        ByteBuffer uuid = ByteBuffer.allocate(16);
+        uuid.putLong(msb);
+        uuid.putLong(0x8080808080808080L);
+        uuid.flip();
+        return uuid;
     }
 }
