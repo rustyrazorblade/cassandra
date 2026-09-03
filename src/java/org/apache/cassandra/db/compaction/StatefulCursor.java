@@ -279,34 +279,34 @@ class StatefulCursor extends SSTableCursorReader
         return state;
     }
 
+    /**
+     * Reports a corrupt value. The table, the key and the reader are always this cursor's own, so
+     * a caller supplies only the message.
+     */
+    private void reportInvalid(String message)
+    {
+        UnfilteredValidation.handleInvalid(ssTableReader().metadata(), currPartition.key(), ssTableReader(), message);
+    }
+
+    /** The row path and the tombstone path both start with this check. */
+    private void validateRowDeletionTime()
+    {
+        if (!unfiltered.deletionTime().validate())
+            reportInvalid("rowDeletion="+currPartition.deletionTime().toString());
+    }
+
     private void validateInvalidTombstoneDeletion()
     {
-        if (!unfiltered.deletionTime().validate()) {
-            UnfilteredValidation.handleInvalid(
-                ssTableReader().metadata(),
-                currPartition.key(),
-                ssTableReader(),
-                "rowDeletion="+currPartition.deletionTime().toString());
-        }
-        if (unfiltered.isBoundary() && !unfiltered.deletionTime2().validate()) {
-            UnfilteredValidation.handleInvalid(
-                ssTableReader().metadata(),
-                currPartition.key(),
-                ssTableReader(),
-                "rowDeletion2="+currPartition.deletionTime().toString());
-        }
+        validateRowDeletionTime();
+        if (unfiltered.isBoundary() && !unfiltered.deletionTime2().validate())
+            reportInvalid("rowDeletion2="+currPartition.deletionTime().toString());
     }
 
     private void validateInvalidCellDeletion()
     {
         ReusableCellLivenessInfo cellLiveness = cellCursor().cellLiveness;
-        if (hasInvalidCellDeletion(cellLiveness.ttl(), cellLiveness.localDeletionTime())) {
-            UnfilteredValidation.handleInvalid(
-            ssTableReader().metadata(),
-            currPartition.key(),
-            ssTableReader(),
-            "cellLiveness="+cellLiveness);
-        }
+        if (hasInvalidCellDeletion(cellLiveness.ttl(), cellLiveness.localDeletionTime()))
+            reportInvalid("cellLiveness="+cellLiveness);
     }
 
     /**
@@ -331,32 +331,15 @@ class StatefulCursor extends SSTableCursorReader
 
     private void validateInvalidRowDeletion()
     {
-        if (!unfiltered.deletionTime().validate()) {
-            UnfilteredValidation.handleInvalid(
-                ssTableReader().metadata(),
-                currPartition.key(),
-                ssTableReader(),
-                "rowDeletion="+currPartition.deletionTime().toString());
-        }
+        validateRowDeletionTime();
         ReusableLivenessInfo livenessInfo = unfiltered.livenessInfo();
-        if (hasInvalidRowLiveness(livenessInfo.ttl(), livenessInfo.localExpirationTime())) {
-            UnfilteredValidation.handleInvalid(
-                ssTableReader().metadata(),
-                currPartition.key(),
-                ssTableReader(),
-                "rowLiveness="+livenessInfo.toString());
-        }
-
+        if (hasInvalidRowLiveness(livenessInfo.ttl(), livenessInfo.localExpirationTime()))
+            reportInvalid("rowLiveness="+livenessInfo.toString());
     }
 
     private void validateInvalidPartitionDeletion()
     {
-        if (!currPartition.deletionTime().validate()) {
-            UnfilteredValidation.handleInvalid(
-                ssTableReader().metadata(),
-                currPartition.key(),
-                ssTableReader(),
-                "partitionLevelDeletion="+currPartition.deletionTime().toString());
-        }
+        if (!currPartition.deletionTime().validate())
+            reportInvalid("partitionLevelDeletion="+currPartition.deletionTime().toString());
     }
 }
