@@ -25,7 +25,6 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.function.LongPredicate;
-import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
@@ -136,13 +135,15 @@ public class CursorCompactor extends CompactionInfo.Holder
         // BTI index writing is not supported yet
         if (!(DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat))
         {
-            logDebugReason(metadata, "Only the BIG sstable output format is supported. format=", DatabaseDescriptor::getSelectedSSTableFormat);
+            LOGGER.debug("Cursor compaction is not supported for {}.{}: only the BIG sstable output format is supported, not {}",
+                         metadata.keyspace, metadata.name, DatabaseDescriptor.getSelectedSSTableFormat());
             return false;
         }
         // TODO: Implement CompactionIterator.GarbageSkipper like functionality
         if (controller.tombstoneOption != CompactionParams.TombstoneOption.NONE)
         {
-            logDebugReason(metadata, "Garbage skipping not implemented. controller.tombstoneOption=", () -> controller.tombstoneOption);
+            LOGGER.debug("Cursor compaction is not supported for {}.{}: garbage skipping is not implemented, controller.tombstoneOption={}",
+                         metadata.keyspace, metadata.name, controller.tombstoneOption);
             return false;
         }
         // Only ColumnFamilyStore.forceCompactionKeysIgnoringGcGrace puts a key in this set, and its
@@ -162,12 +163,14 @@ public class CursorCompactor extends CompactionInfo.Holder
         // path takes it.
         if (isPaxos(controller.cfs) && paxosStatePurging() != legacy)
         {
-            logDebugReason(metadata, "Non-legacy paxos state purging on system.paxos is not supported. paxosStatePurging=", DatabaseDescriptor::paxosStatePurging);
+            LOGGER.debug("Cursor compaction is not supported for {}.{}: non-legacy paxos state purging on system.paxos is not supported, paxosStatePurging={}",
+                         metadata.keyspace, metadata.name, DatabaseDescriptor.paxosStatePurging());
             return false;
         }
         if (controller.cfs.shouldIgnoreGcGraceForAnyKey())
         {
-            logDebugReason(metadata, "Ignoring gc_grace_seconds for a key is not supported (nodetool forcecompact).");
+            LOGGER.debug("Cursor compaction is not supported for {}.{}: ignoring gc_grace_seconds for a key is not supported (nodetool forcecompact)",
+                         metadata.keyspace, metadata.name);
             return false;
         }
         LOGGER.debug("Cursor compaction for table: {} keyspace: {} is supported.", metadata.name, metadata.keyspace);
@@ -188,7 +191,8 @@ public class CursorCompactor extends CompactionInfo.Holder
             // the scanner's first range, and there is no reason to seek for a scanner we accept.
             if (!(scanner instanceof SSTableSimpleScanner) && !scanner.isFullRange())
             {
-                logDebugReason(metadata, "Partial scanners are supported only for SSTableSimpleScanner. scanner=", () -> scanner);
+                LOGGER.debug("Cursor compaction is not supported for {}.{}: partial scanners are supported only for SSTableSimpleScanner, not {}",
+                             metadata.keyspace, metadata.name, scanner);
                 return true;
             }
             if (unsupportedSSTables(metadata, scanner))
@@ -204,7 +208,8 @@ public class CursorCompactor extends CompactionInfo.Holder
             Version version = reader.descriptor.version;
             if (!version.isLatestVersion())
             {
-                logDebugReason(metadata, "Older sstable versions are not supported. version=", () -> version);
+                LOGGER.debug("Cursor compaction is not supported for {}.{}: sstable version {} is not the latest",
+                             metadata.keyspace, metadata.name, version);
                 return true;
             }
             if (unsupportedHeaderColumns(metadata, reader))
@@ -220,13 +225,15 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         if (!metadata.partitioner.supportsReusableKeys())
         {
-            logDebugReason(metadata, "Incompatible partitioner, does not support reusable keys:", () -> metadata.partitioner.getClass().getSimpleName());
+            LOGGER.debug("Cursor compaction is not supported for {}.{}: partitioner {} does not support reusable keys",
+                         metadata.keyspace, metadata.name, metadata.partitioner.getClass().getSimpleName());
             return true;
         }
 
         if (metadata.indexes.size() != 0)
         {
-            logDebugReason(metadata, "Additional indexes are not supported. metadata.indexes=", () -> metadata.indexes);
+            LOGGER.debug("Cursor compaction is not supported for {}.{}: additional indexes are not supported, metadata.indexes={}",
+                         metadata.keyspace, metadata.name, metadata.indexes);
             return true;
         }
 
@@ -242,7 +249,8 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             if (column.isCounterColumn())
             {
-                logDebugReason(metadata, "Counter columns are not supported. column=", () -> column);
+                LOGGER.debug("Cursor compaction is not supported for {}.{}: counter columns are not supported, column={}",
+                             metadata.keyspace, metadata.name, column);
                 return true;
             }
         }
@@ -355,27 +363,6 @@ public class CursorCompactor extends CompactionInfo.Holder
         boolean isMultiCellOrCounter = column.isComplex() || column.isCounterColumn()
                                       || (diskType != null && (diskType.isMultiCell() || diskType.isCounter()));
         return isMultiCellOrCounter && metadata.getColumn(column.name) == null;
-    }
-
-    private static void logDebugReason(TableMetadata metadata, String reason)
-    {
-        LOGGER.debug("Cursor compaction for table: {} keyspace: {} is not supported. REASON: {}",
-                     metadata.name, metadata.keyspace, reason);
-    }
-
-    /**
-     * The {@code detail} is appended to the reason. It is a supplier so the caller never computes a
-     * value the logger discards.
-     */
-    private static void logDebugReason(TableMetadata metadata, String reason, Supplier<?> detail)
-    {
-        LOGGER.atDebug()
-              .setMessage("Cursor compaction for table: {} keyspace: {} is not supported. REASON: {}{}")
-              .addArgument(metadata.name)
-              .addArgument(metadata.keyspace)
-              .addArgument(reason)
-              .addArgument(detail)
-              .log();
     }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CursorCompactor.class.getName());
@@ -1313,7 +1300,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         if (winnerValueLocation() == ValueLocation.IN_SOURCE)
             ssTableCursorWriter.writeCellValue(cellWinner.source, copyColumnValueBuffer);
         else
-            ssTableCursorWriter.writeCellValue(cellWinner.buffer);
+            ssTableCursorWriter.writeCellValue(cellWinner.buffer, tempCellValueLength1);
     }
 
     /**
@@ -1404,16 +1391,24 @@ public class CursorCompactor extends CompactionInfo.Holder
                 throw new IllegalStateException("tempCellBuffer should be null if cellSource has a value to be read.");
             tempCellBuffer1.clear();
             cellWinner.source.copyCellValue(tempCellBuffer1, copyColumnValueBuffer);
+            tempCellValueLength1 = cellWinner.source.lastCellValueLength();
             cellWinner.buffer = tempCellBuffer1; // assume cell1 is going to be bigger
         }
         else if (cellWinner.buffer == null)
+        {
             tempCellBuffer1.clear(); // potential trash value in buffer1
+            tempCellValueLength1 = 0;
+        }
         else if (cellWinner.buffer != tempCellBuffer1)
             throw new IllegalStateException("tempCellBuffer should be tempCellBuffer1 if cellSource has been read.");
 
         tempCellBuffer2.clear();
+        tempCellValueLength2 = 0;
         if (challenger.state() == CELL_VALUE_START)
+        {
             challenger.copyCellValue(tempCellBuffer2, copyColumnValueBuffer);
+            tempCellValueLength2 = challenger.lastCellValueLength();
+        }
 
         // These buffers hold the wire form: a variable-length type prefixes its value with a length
         // vint, and the reference compares the raw value bytes. Skip the vint, or a lexicographic
@@ -1431,9 +1426,22 @@ public class CursorCompactor extends CompactionInfo.Holder
         DataOutputBuffer swap = tempCellBuffer1;
         tempCellBuffer1 = tempCellBuffer2;
         tempCellBuffer2 = swap;
+        int swapLength = tempCellValueLength1;
+        tempCellValueLength1 = tempCellValueLength2;
+        tempCellValueLength2 = swapLength;
         cellWinner.buffer = tempCellBuffer1;
         return true;
     }
+
+    /**
+     * The raw value bytes each temp buffer holds, tracked in step with the buffers themselves so
+     * that the swap above keeps them paired. {@code tempCellValueLength1} is the winner's, because
+     * {@link CellWinner#buffer} is {@code tempCellBuffer1} whenever it is set. The collection
+     * guardrails measure a value this way; the buffer's own length also counts the leading vint of a
+     * variable-length type.
+     */
+    private int tempCellValueLength1;
+    private int tempCellValueLength2;
 
     /**
      * Reports where the winning cell's value is, and fails if the source state and the buffer

@@ -26,6 +26,7 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.agrona.collections.IntArrayList;
 
+import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
@@ -49,7 +50,9 @@ import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.Ref;
 
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_ALL_COLUMNS;
@@ -107,11 +110,35 @@ public class SSTableCursorWriter implements AutoCloseable
     private int[] markerCellCount = new int[COMPLEX_MARKERS_INITIAL];
     private long[] markerDeletionMfda = new long[COMPLEX_MARKERS_INITIAL];
     private long[] markerDeletionLdt = new long[COMPLEX_MARKERS_INITIAL];
+    private ColumnMetadata[] markerColumn = new ColumnMetadata[COMPLEX_MARKERS_INITIAL];
+    // What Guardrails.collectionSize and Guardrails.itemsPerCollection measure: the size and the
+    // count of the LIVE cells of the column, as ComplexColumnData.purge(PURGE_ALL, nowInSec) leaves
+    // them. Both stay zero while the guardrails are off.
+    private long[] markerLiveDataSize = new long[COMPLEX_MARKERS_INITIAL];
+    private int[] markerLiveCellCount = new int[COMPLEX_MARKERS_INITIAL];
     private final DeletionTime.ReusableDeletionTime reusableMarkerDeletion = DeletionTime.ReusableDeletionTime.live();
     // True if any complex column of this row has a non-live merged deletion. startComplexColumn keeps
     // it current, so writeRowEnd sets HAS_COMPLEX_DELETION without a second walk of the markers.
     private boolean rowHasComplexDeletion;
     private ColumnMetadata lastCellColumn;
+
+    // SortedTableWriter applies these two in guardCollectionSize, once per row per complex column.
+    // The cursor writer never builds a Row, so it measures the column while it writes the cells.
+    //
+    // Everything here costs nothing while both guardrails are off, which is the shipped default:
+    // collectionGuardsDisabled is then true, and no cell touches the two marker totals.
+    private final boolean collectionGuardsDisabled;
+    private final long collectionSizeWarn = Guardrails.collectionSize.warnValue(null);
+    private final long itemsPerCollectionWarn = Guardrails.itemsPerCollection.warnValue(null);
+    // The partition being written, kept for the guardrail message. writePartitionStart owns it.
+    private byte[] partitionKey;
+    private int partitionKeyLength;
+    // Read once per row, so that every cell of the row judges expiry against one instant.
+    private long nowInSec;
+    // True while the current complex column is a collection the guardrails measure.
+    private boolean markerIsGuardedCollection;
+    // True while the cell being written is a live cell of such a column.
+    private boolean cellCountsTowardsCollection;
 
     private final ColumnMetadata[] staticColumns;
     private final ColumnMetadata[] regularColumns;
@@ -142,6 +169,11 @@ public class SSTableCursorWriter implements AutoCloseable
         regularColumns = serializationHeader.columns(false).toArray(EMPTY_COL_META);
         this.cursorIndexWriter = new BigCursorIndexWriter((BigTableWriter.IndexWriter) indexWriter,
                                                            this.deletionTimeSerializer);
+        // Same two conditions SortedTableWriter settles once, in its own constructor and in
+        // guardCollectionSize: both guardrails off, or a system keyspace.
+        this.collectionGuardsDisabled =
+            (!Guardrails.collectionSize.enabled() && !Guardrails.itemsPerCollection.enabled())
+            || SchemaConstants.isSystemKeyspace(ssTableWriter.metadata().keyspace);
     }
 
     public SSTableCursorWriter(SortedTableWriter<?,?> ssTableWriter)
@@ -179,6 +211,8 @@ public class SSTableCursorWriter implements AutoCloseable
     {
         openMarker.resetLive();
 
+        this.partitionKey = partitionKey;
+        this.partitionKeyLength = partitionKeyLength;
         partitionStart = dataWriter.position();
         previousUnfilteredStart = partitionStart;
         writePartitionHeader(partitionKey, partitionKeyLength, partitionDeletionTime);
@@ -233,6 +267,71 @@ public class SSTableCursorWriter implements AutoCloseable
         metadataCollector.addCellPerPartitionCount();
     }
 
+    /**
+     * The fixed part of {@link org.apache.cassandra.db.rows.AbstractCell#dataSize()}: a timestamp, a
+     * TTL and a local deletion time. The value and the cell path are added as they are written.
+     */
+    private static final int CELL_FIXED_DATA_SIZE = TypeSizes.LONG_SIZE + TypeSizes.INT_SIZE + TypeSizes.LONG_SIZE;
+
+    /** Prepares the collection guardrails for one row. Costs nothing while they are off. */
+    private void startCollectionGuards()
+    {
+        markerIsGuardedCollection = false;
+        cellCountsTowardsCollection = false;
+        if (!collectionGuardsDisabled)
+            nowInSec = FBUtilities.nowInSeconds();
+    }
+
+    /**
+     * Applies {@code collection_size} and {@code items_per_collection} to every collection of the
+     * row that is about to be written, as
+     * {@link SortedTableWriter#addRow} does through {@code guardCollectionSize}.
+     *
+     * <p>Call this after {@code closeComplexMarkers}, which closes the last marker, and before the
+     * row reaches the data file, so that a failing guardrail stops the write as it does on the
+     * iterator path.
+     */
+    private void guardCollectionSizes(ClusteringDescriptor rHeader)
+    {
+        if (collectionGuardsDisabled || complexMarkerCount == 0)
+            return;
+
+        for (int i = 0; i < complexMarkerCount; i++)
+        {
+            ColumnMetadata column = markerColumn[i];
+            if (!column.type.isCollection() || !column.type.isMultiCell())
+                continue;
+
+            long size = markerLiveDataSize[i];
+            int count = markerLiveCellCount[i];
+            if (size <= collectionSizeWarn && count <= itemsPerCollectionWarn)
+                continue;
+            if (!Guardrails.collectionSize.triggersOn(size, null)
+                && !Guardrails.itemsPerCollection.triggersOn(count, null))
+                continue;
+
+            String message = String.format("%s in row %s in table %s",
+                                           column.name.toString(),
+                                           primaryKeyLiteral(rHeader),
+                                           ssTableWriter.metadata());
+            Guardrails.collectionSize.guard(size, message, true, null);
+            Guardrails.itemsPerCollection.guard(count, message, true, null);
+        }
+    }
+
+    /**
+     * The primary key of the row being written, in CQL form, for a guardrail message. Deserialising
+     * the clustering costs, so only the cold path above calls this.
+     */
+    private String primaryKeyLiteral(ClusteringDescriptor rHeader)
+    {
+        Clustering<?> clustering = rHeader == null
+                                   ? Clustering.STATIC_CLUSTERING
+                                   : (Clustering<?>) rHeader.toClusteringPrefix(ssTableWriter.metadata().comparator.subtypes());
+        return ssTableWriter.metadata()
+                            .primaryKeyAsCQLLiteral(ByteBuffer.wrap(partitionKey, 0, partitionKeyLength), clustering);
+    }
+
     private void guardPartitionThreshold(Threshold guardrail, byte[] partitionKey, int partitionKeyLength, long size)
     {
         if (guardrail.triggersOn(size, null))
@@ -269,6 +368,7 @@ public class SSTableCursorWriter implements AutoCloseable
         lastCellColumn = null;
         columnsWrittenCount = 0;
         missingColumns.clear();
+        startCollectionGuards();
         writeRowEnd(null, false);
 
         cursorIndexWriter.staticRowWritten(dataWriter.position());
@@ -298,6 +398,7 @@ public class SSTableCursorWriter implements AutoCloseable
         missingColumns.clear();
         rowBuffer.clear();
         columnsWrittenCount = 0;
+        startCollectionGuards();
         nextCellIndex = 0;
         complexMarkerCount = 0;
         rowHasComplexDeletion = false;
@@ -387,12 +488,24 @@ public class SSTableCursorWriter implements AutoCloseable
             markerCellCount = Arrays.copyOf(markerCellCount, n);
             markerDeletionMfda = Arrays.copyOf(markerDeletionMfda, n);
             markerDeletionLdt = Arrays.copyOf(markerDeletionLdt, n);
+            markerColumn = Arrays.copyOf(markerColumn, n);
+            markerLiveDataSize = Arrays.copyOf(markerLiveDataSize, n);
+            markerLiveCellCount = Arrays.copyOf(markerLiveCellCount, n);
         }
         markerStartOffset[complexMarkerCount] = rowBuffer.getLength();
         markerEndOffset[complexMarkerCount] = -1;
         markerCellCount[complexMarkerCount] = 0;
         markerDeletionMfda[complexMarkerCount] = mergedDeletion.markedForDeleteAt();
         markerDeletionLdt[complexMarkerCount] = mergedDeletion.localDeletionTime();
+        markerColumn[complexMarkerCount] = column;
+        // ComplexColumnData.dataSize opens with complexDeletion.dataSize, which DeletionTime fixes
+        // at 12 for a live deletion as well as a real one.
+        markerLiveDataSize[complexMarkerCount] = DeletionTime.LIVE.dataSize();
+        markerLiveCellCount[complexMarkerCount] = 0;
+        // guardCollectionSize measures a multi-cell collection and nothing else, so a non-frozen UDT
+        // is out.
+        markerIsGuardedCollection = !collectionGuardsDisabled
+                                    && column.type.isCollection() && column.type.isMultiCell();
         rowHasComplexDeletion |= !mergedDeletion.isLive();
         complexMarkerCount++;
         lastCellColumn = column;
@@ -423,6 +536,10 @@ public class SSTableCursorWriter implements AutoCloseable
      *  then the path bytes. */
     public void writeCellPath(byte[] pathBuffer, int pathLength) throws IOException
     {
+        // CellPath.dataSize is the sum of the raw component bytes, which for one component is the
+        // path length itself.
+        if (cellCountsTowardsCollection)
+            markerLiveDataSize[complexMarkerCount - 1] += pathLength;
         rowBuffer.writeUnsignedVInt32(pathLength);
         rowBuffer.write(pathBuffer, 0, pathLength);
     }
@@ -437,6 +554,14 @@ public class SSTableCursorWriter implements AutoCloseable
             if (!ColumnMetadata.sameName(lastCellColumn, cellColumn))
                 throw new IllegalStateException("complex cell without startComplexColumn: " + cellColumn);
             markerCellCount[complexMarkerCount - 1]++;
+            // A tombstone and a lapsed TTL both survive this far, and neither one counts: the
+            // reference purges the column with DeletionPurger.PURGE_ALL before it measures.
+            cellCountsTowardsCollection = markerIsGuardedCollection && cellLiveness.isLive(nowInSec);
+            if (cellCountsTowardsCollection)
+            {
+                markerLiveCellCount[complexMarkerCount - 1]++;
+                markerLiveDataSize[complexMarkerCount - 1] += CELL_FIXED_DATA_SIZE;
+            }
         }
         else
         {
@@ -444,6 +569,7 @@ public class SSTableCursorWriter implements AutoCloseable
             advanceColumnSubset(cellColumn);
             lastCellColumn = cellColumn;
             columnsWrittenCount++;
+            cellCountsTowardsCollection = false;
         }
         writeCellHeader(cellFlags, cellLiveness, rowBuffer);
     }
@@ -473,11 +599,20 @@ public class SSTableCursorWriter implements AutoCloseable
 
     public int writeCellValue(SSTableCursorReader cursor, byte[] copyColumnValueBuffer) throws IOException
     {
-        return cursor.copyCellValue(rowBuffer, copyColumnValueBuffer);
+        int state = cursor.copyCellValue(rowBuffer, copyColumnValueBuffer);
+        if (cellCountsTowardsCollection)
+            markerLiveDataSize[complexMarkerCount - 1] += cursor.lastCellValueLength();
+        return state;
     }
 
-    public void writeCellValue(DataOutputBuffer tempCellBuffer) throws IOException
+    /**
+     * @param rawValueLength the value bytes the buffer holds, without the length vint that a
+     *                       variable-length type puts ahead of them
+     */
+    public void writeCellValue(DataOutputBuffer tempCellBuffer, int rawValueLength) throws IOException
     {
+        if (cellCountsTowardsCollection)
+            markerLiveDataSize[complexMarkerCount - 1] += rawValueLength;
         rowBuffer.write(tempCellBuffer.getData(), 0, tempCellBuffer.getLength());
     }
 
@@ -498,6 +633,7 @@ public class SSTableCursorWriter implements AutoCloseable
         // Must run before anything is written and before writeRowCellSection: it sets the row
         // flags and closes the marker whose end offset that method reads.
         long cellSectionLength = rowBuffer.getLength() + closeComplexMarkers(hasComplexDeletion);
+        guardCollectionSizes(rHeader);
 
         writeRowColumnsSubset(columnsLength);
         assert isStatic || dataWriter.position() == rowStartPosition

@@ -132,6 +132,10 @@ public class SSTableCursorReader implements AutoCloseable
         // grows. A length below zero means the cell has no path.
         public byte[] cellPathBuffer = new byte[32];
         public int cellPathLength = -1;
+        // Raw value bytes of the cell that copyCellValue last copied, without the length vint that
+        // a variable-length type puts on the wire. Guardrails.collectionSize measures a collection
+        // with Cell.dataSize, which counts the value this way.
+        public int cellValueLength;
         private ByteBuffer cellPathWindow;
 
         /**
@@ -773,6 +777,15 @@ public class SSTableCursorReader implements AutoCloseable
         }
     }
 
+    /**
+     * Raw value bytes of the cell that {@link #copyCellValue} last copied, without the length vint
+     * that a variable-length type puts on the wire. Valid until the next call.
+     */
+    public int lastCellValueLength()
+    {
+        return cellCursor.cellValueLength;
+    }
+
     public int copyCellValue(DataOutputPlus writer, byte[] buffer) throws IOException
     {
         if (state != CELL_VALUE_START) throw new IllegalStateException();
@@ -824,6 +837,7 @@ public class SSTableCursorReader implements AutoCloseable
                                              length, DatabaseDescriptor.getMaxValueSize()));
             writer.writeUnsignedVInt32(length);
         }
+        cellCursor.cellValueLength = length;
         // In production every writer is a DataOutputBuffer that holds a heap array. Read the value
         // bytes straight into that array. This needs no loop for a value that is larger than the
         // transfer buffer, and such values occur: valueLengthIfFixed is 6144 for a

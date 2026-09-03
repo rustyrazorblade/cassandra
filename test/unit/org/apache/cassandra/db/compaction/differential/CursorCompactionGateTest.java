@@ -39,12 +39,13 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.schema.CompactionParams.TombstoneOption;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 
 /**
  * Pins the arms of {@code CursorCompactor.isSupported} that decide on the COMPACTION rather than on
@@ -81,6 +82,16 @@ public class CursorCompactionGateTest extends CQLTester
         return cfs;
     }
 
+    /**
+     * Whether the gate can accept any compaction at all under the running configuration. The cursor
+     * path writes the BIG format only, and {@code test/conf/latest_diff.yaml} selects BTI, so an
+     * assertion that the gate opens has to read the format rather than assume it.
+     */
+    private static boolean cursorSupportsSelectedFormat()
+    {
+        return DatabaseDescriptor.getSelectedSSTableFormat() instanceof BigFormat;
+    }
+
     private boolean isSupportedWith(ColumnFamilyStore cfs, TombstoneOption tombstoneOption) throws Exception
     {
         Set<SSTableReader> inputs = cfs.getLiveSSTables();
@@ -100,8 +111,8 @@ public class CursorCompactionGateTest extends CQLTester
     @Test
     public void aPlainTwoSSTableCompactionIsSupported() throws Exception
     {
-        assertTrue("expected a plain two-sstable compaction to be cursor-supported",
-                   isSupportedWith(twoSSTableTable(), TombstoneOption.NONE));
+        assertEquals("a plain two-sstable compaction is cursor-supported whenever the selected format is",
+                     cursorSupportsSelectedFormat(), isSupportedWith(twoSSTableTable(), TombstoneOption.NONE));
     }
 
     /**
@@ -133,17 +144,19 @@ public class CursorCompactionGateTest extends CQLTester
         originalPurging = DatabaseDescriptor.paxosStatePurging();
         ColumnFamilyStore cfs = twoSSTableTable();
 
+        boolean expected = cursorSupportsSelectedFormat();
+
         DatabaseDescriptor.setPaxosStatePurging(PaxosStatePurging.legacy);
-        assertTrue("an ordinary table is unaffected by legacy paxos purging",
-                   isSupportedWith(cfs, TombstoneOption.NONE));
+        assertEquals("an ordinary table is unaffected by legacy paxos purging",
+                     expected, isSupportedWith(cfs, TombstoneOption.NONE));
 
         DatabaseDescriptor.setPaxosStatePurging(PaxosStatePurging.gc_grace);
-        assertTrue("an ordinary table is not system.paxos, so the paxos gate must not close on it",
-                   isSupportedWith(cfs, TombstoneOption.NONE));
+        assertEquals("an ordinary table is not system.paxos, so the paxos gate must not close on it",
+                     expected, isSupportedWith(cfs, TombstoneOption.NONE));
 
         DatabaseDescriptor.setPaxosStatePurging(PaxosStatePurging.repaired);
-        assertTrue("an ordinary table is not system.paxos, so the paxos gate must not close on it",
-                   isSupportedWith(cfs, TombstoneOption.NONE));
+        assertEquals("an ordinary table is not system.paxos, so the paxos gate must not close on it",
+                     expected, isSupportedWith(cfs, TombstoneOption.NONE));
     }
 
     /** One sstable of twenty partitions, so a token range can select an interior run of them. */
@@ -193,7 +206,8 @@ public class CursorCompactionGateTest extends CQLTester
         {
             for (ISSTableScanner scanner : scanners.scanners)
                 assertFalse("the range must give a partial scanner, or this test proves nothing", scanner.isFullRange());
-            assertTrue("a partial SSTableSimpleScanner must be cursor-supported", CursorCompactor.isSupported(scanners, controller));
+            assertEquals("a partial SSTableSimpleScanner is cursor-supported whenever the selected format is",
+                         cursorSupportsSelectedFormat(), CursorCompactor.isSupported(scanners, controller));
         }
     }
 
