@@ -494,51 +494,10 @@ public class SSTableCursorWriter implements AutoCloseable
         // One marker with a non-live deletion sets HAS_COMPLEX_DELETION. Every complex column of the
         // row then writes a deletion, LIVE ones included, as UnfilteredSerializer does. The flags
         // byte leads the row, so the loop must set the flag before this method writes anything.
-        long cellSectionLength = rowBuffer.getLength();
         boolean hasComplexDeletion = rowHasComplexDeletion;
-        // The count of markers that have no cell. totalColumnsSet below does not count them.
-        int deletionOnlyMarkers = 0;
-        if (complexMarkerCount > 0)
-        {
-            closeOpenComplexMarker();
-            if (hasComplexDeletion)
-                rowFlags |= UnfilteredSerializer.HAS_COMPLEX_DELETION;
+        long cellSectionLength = rowBuffer.getLength() + sizeComplexMarkerHeaders(hasComplexDeletion);
 
-            for (int i = 0; i < complexMarkerCount; i++)
-            {
-                if (hasComplexDeletion)
-                {
-                    reusableMarkerDeletion.reset(markerDeletionMfda[i], markerDeletionLdt[i]);
-                    cellSectionLength += deletionTimeWrittenSize(reusableMarkerDeletion);
-                }
-                cellSectionLength += TypeSizes.sizeofUnsignedVInt(markerCellCount[i]);
-                if (markerCellCount[i] == 0)
-                    deletionOnlyMarkers++;
-            }
-        }
-
-        if (columnsWrittenCount == columnsLength)
-        {
-            rowFlags |= HAS_ALL_COLUMNS;
-        }
-        else if (columnsWrittenCount == 0) {
-            // Same as Columns.serializer.serializeSubset(Columns.NONE, serializationHeader.columns(isStatic), rowHeaderBuffer)
-            if (columnsLength < 64) {
-                // all the bits are set, because all the columns are missing, value is always positive
-                rowHeaderBuffer.writeUnsignedVInt(-1L >>> (64 - columnsLength));
-            }
-            else {
-                // large-subset form: all columns are missing, so no index follows the count
-                rowHeaderBuffer.writeUnsignedVInt32(columnsLength);
-            }
-        }
-        else if (columnsWrittenCount < columnsLength)
-        {
-            for (; nextCellIndex < columnsLength; nextCellIndex++)
-                missingColumns.addInt(nextCellIndex);
-
-            encodeColumnsSubset(missingColumns, columnsLength, rowHeaderBuffer);
-        }
+        writeRowColumnsSubset(columnsLength);
         assert isStatic || dataWriter.position() == rowStartPosition
                : "dataWriter moved between writeRowStart and writeRowEnd: " + rowStartPosition + " != " + dataWriter.position();
         long unfilteredStartPosition = rowStartPosition;
@@ -566,31 +525,7 @@ public class SSTableCursorWriter implements AutoCloseable
         dataWriter.writeUnsignedVInt32(Math.toIntExact(rowHeaderBuffer.getLength() + cellSectionLength));
 
         dataWriter.write(rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
-        byte[] rowData = rowBuffer.getData();
-        if (complexMarkerCount > 0)
-        {
-            // Write the blocks of rowBuffer, and the header of each marker between them.
-            int pos = 0;
-            for (int i = 0; i < complexMarkerCount; i++)
-            {
-                int start = markerStartOffset[i];
-                dataWriter.write(rowData, pos, start - pos);
-                if (hasComplexDeletion)
-                {
-                    reusableMarkerDeletion.reset(markerDeletionMfda[i], markerDeletionLdt[i]);
-                    writeDeletionTime(reusableMarkerDeletion, dataWriter);
-                }
-                dataWriter.writeUnsignedVInt32(markerCellCount[i]);
-                int end = markerEndOffset[i];
-                dataWriter.write(rowData, start, end - start);
-                pos = end;
-            }
-            dataWriter.write(rowData, pos, rowBuffer.getLength() - pos);
-        }
-        else
-        {
-            dataWriter.write(rowData, 0, rowBuffer.getLength());
-        }
+        writeRowCellSection(hasComplexDeletion);
 
         long unfilteredEndPosition = getPosition();
 
@@ -622,6 +557,100 @@ public class SSTableCursorWriter implements AutoCloseable
         {
             updateMetadataAndIndexBlock(rHeader, unfilteredStartPosition, unfilteredEndPosition, updateClusteringMetadata);
         }
+    }
+
+    /** The count of markers that have no cell. totalColumnsSet does not count them. */
+    private int deletionOnlyMarkers;
+
+    /**
+     * Sizes the header bytes each complex marker adds before its cells, because the row-size vint
+     * counts them. Sets HAS_COMPLEX_DELETION first: the flags byte leads the row, so it must be set
+     * before anything is written.
+     *
+     * <p>One marker with a non-live deletion sets the flag. Every complex column of the row then
+     * writes a deletion, LIVE ones included, as UnfilteredSerializer does.
+     *
+     * @return the bytes to add to the cell section length
+     */
+    private long sizeComplexMarkerHeaders(boolean hasComplexDeletion) throws IOException
+    {
+        deletionOnlyMarkers = 0;
+        if (complexMarkerCount == 0)
+            return 0;
+
+        closeOpenComplexMarker();
+        if (hasComplexDeletion)
+            rowFlags |= UnfilteredSerializer.HAS_COMPLEX_DELETION;
+
+        long headerLength = 0;
+        for (int i = 0; i < complexMarkerCount; i++)
+        {
+            if (hasComplexDeletion)
+            {
+                reusableMarkerDeletion.reset(markerDeletionMfda[i], markerDeletionLdt[i]);
+                headerLength += deletionTimeWrittenSize(reusableMarkerDeletion);
+            }
+            headerLength += TypeSizes.sizeofUnsignedVInt(markerCellCount[i]);
+            if (markerCellCount[i] == 0)
+                deletionOnlyMarkers++;
+        }
+        return headerLength;
+    }
+
+    /** Records which of the row's columns were written, either as a flag or as a subset encoding. */
+    private void writeRowColumnsSubset(int columnsLength) throws IOException
+    {
+        if (columnsWrittenCount == columnsLength)
+        {
+            rowFlags |= HAS_ALL_COLUMNS;
+            return;
+        }
+        if (columnsWrittenCount == 0)
+        {
+            // Same as Columns.serializer.serializeSubset(Columns.NONE, serializationHeader.columns(isStatic), rowHeaderBuffer)
+            if (columnsLength < 64)
+                // all the bits are set, because all the columns are missing, value is always positive
+                rowHeaderBuffer.writeUnsignedVInt(-1L >>> (64 - columnsLength));
+            else
+                // large-subset form: all columns are missing, so no index follows the count
+                rowHeaderBuffer.writeUnsignedVInt32(columnsLength);
+            return;
+        }
+        if (columnsWrittenCount < columnsLength)
+        {
+            for (; nextCellIndex < columnsLength; nextCellIndex++)
+                missingColumns.addInt(nextCellIndex);
+
+            encodeColumnsSubset(missingColumns, columnsLength, rowHeaderBuffer);
+        }
+    }
+
+    /** Writes the blocks of rowBuffer, and the header of each complex marker between them. */
+    private void writeRowCellSection(boolean hasComplexDeletion) throws IOException
+    {
+        byte[] rowData = rowBuffer.getData();
+        if (complexMarkerCount == 0)
+        {
+            dataWriter.write(rowData, 0, rowBuffer.getLength());
+            return;
+        }
+
+        int pos = 0;
+        for (int i = 0; i < complexMarkerCount; i++)
+        {
+            int start = markerStartOffset[i];
+            dataWriter.write(rowData, pos, start - pos);
+            if (hasComplexDeletion)
+            {
+                reusableMarkerDeletion.reset(markerDeletionMfda[i], markerDeletionLdt[i]);
+                writeDeletionTime(reusableMarkerDeletion, dataWriter);
+            }
+            dataWriter.writeUnsignedVInt32(markerCellCount[i]);
+            int end = markerEndOffset[i];
+            dataWriter.write(rowData, start, end - start);
+            pos = end;
+        }
+        dataWriter.write(rowData, pos, rowBuffer.getLength() - pos);
     }
 
     /**
