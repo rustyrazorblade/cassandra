@@ -42,13 +42,12 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * A partial-range scanner no longer forces the iterator path.
+ * The cursor path accepts a partial-range scanner.
  * <p>
  * UCS with {@code parallelize_output_shards: true} splits one pick into a task per output shard,
  * each with its own token range. An sstable lying wholly inside a shard yields a full-range
- * scanner; one straddling a shard boundary yields a partial one. The gate used to refuse the whole
- * task for the second case, so on a large table, where most sstables span several shards, most
- * tasks ran the iterator path silently.
+ * scanner; one straddling a shard boundary yields a partial one. On a large table most sstables
+ * span several shards, so most tasks carry a partial scanner.
  */
 public class CursorPartialRangeGateTest extends CQLTester
 {

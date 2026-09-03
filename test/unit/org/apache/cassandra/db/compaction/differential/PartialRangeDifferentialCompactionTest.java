@@ -118,10 +118,9 @@ public class PartialRangeDifferentialCompactionTest extends DifferentialCompacti
     }
 
     /**
-     * The same partial-range shape over a table carrying complex columns. Both scenarios in this
-     * class, and CursorPartialRangeGateTest, use a {@code (pk, ck, v1, v2)} table with no
-     * collection, so the interaction between a shard boundary and a complex column was untested
-     * even though this branch adds both.
+     * The same partial-range shape over a table carrying complex columns. The other scenario here,
+     * and CursorPartialRangeGateTest, use a {@code (pk, ck, v1, v2)} table with no collection, so
+     * this is where a shard boundary meets a complex column.
      *
      * A segment boundary falls on a partition boundary, never inside a row, so a complex column
      * must never be split across segments. This pins that: the output holds every element of every

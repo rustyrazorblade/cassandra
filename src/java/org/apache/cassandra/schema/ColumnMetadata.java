@@ -346,10 +346,6 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
      * Two sstables opened against different {@code TableMetadata} versions can hold different
      * instances for one column. An ALTER that changes a type between two flushes causes this; see
      * CASSANDRA-13776. A test of the references alone is therefore wrong across sstables.
-     *
-     * The reference test stays as the fast path. It is always true within one sstable, and across
-     * sstables when no schema change occurred. If it fails, this method compares the name bytes,
-     * which allocates nothing.
      */
     public static boolean sameName(ColumnMetadata a, ColumnMetadata b)
     {

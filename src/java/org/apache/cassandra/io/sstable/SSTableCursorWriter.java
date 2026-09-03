@@ -273,7 +273,7 @@ public class SSTableCursorWriter implements AutoCloseable
      */
     private static final int CELL_FIXED_DATA_SIZE = TypeSizes.LONG_SIZE + TypeSizes.INT_SIZE + TypeSizes.LONG_SIZE;
 
-    /** Prepares the collection guardrails for one row. Costs nothing while they are off. */
+    /** Prepares the collection guardrails for one row. */
     private void startCollectionGuards()
     {
         markerIsGuardedCollection = false;
@@ -320,8 +320,7 @@ public class SSTableCursorWriter implements AutoCloseable
     }
 
     /**
-     * The primary key of the row being written, in CQL form, for a guardrail message. Deserialising
-     * the clustering costs, so only the cold path above calls this.
+     * The primary key of the row being written, in CQL form, for a guardrail message.
      */
     private String primaryKeyLiteral(ClusteringDescriptor rHeader)
     {
@@ -359,7 +358,7 @@ public class SSTableCursorWriter implements AutoCloseable
         rowFlags = UnfilteredSerializer.EXTENSION_FLAG;
         rowExtendedFlags = UnfilteredSerializer.IS_STATIC;
         columns = staticColumns;
-        // TODO: this case may not need the row buffers. The gain is probably small.
+        // TODO: this case may not need the row buffers.
         rowHeaderBuffer.clear();
         rowHeaderBuffer.writeUnsignedVInt(0L); // previousUnfilteredSize, always 0 for a static row
         rowBuffer.clear();

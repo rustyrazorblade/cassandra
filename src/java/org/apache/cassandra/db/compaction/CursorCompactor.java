@@ -841,8 +841,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /**
-     * The merged row's liveness and deletion. One instance, reused for every row, so the row merge
-     * allocates nothing.
+     * The merged row's liveness and deletion. One instance, reused for every row.
      */
     private static final class MergedRow
     {
@@ -1294,8 +1293,8 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /**
-     * The winning cell of one merge group, and where its value is.  One instance, reused for every
-     * group, so {@link #mergeCells} allocates nothing per cell.
+     * The winning cell of one merge group, and where its value is. One instance, reused for every
+     * group.
      */
     private static final class CellWinner
     {

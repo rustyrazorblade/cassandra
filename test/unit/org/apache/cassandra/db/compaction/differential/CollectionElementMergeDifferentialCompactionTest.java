@@ -31,15 +31,14 @@ import static org.junit.Assert.assertTrue;
  * Element-level operations on a collection, which the rest of this package leaves almost entirely
  * untested.
  *
- * Before these scenarios, no test in the tree wrote a set or list element tombstone at all: the
- * statement forms that produce one — {@code s = s - {...}}, {@code l = l - [...]},
- * {@code DELETE l[i]}, {@code m = m - {k}} — appeared nowhere. Only {@code DELETE m[k]} was used,
- * so the element-tombstone arm of the cell merge was exercised for maps and for nothing else.
+ * A set or list element tombstone reaches the cell merge only through {@code s = s - {...}},
+ * {@code l = l - [...]}, {@code DELETE l[i]} or {@code m = m - {k}}. A map key tombstone also
+ * comes from {@code DELETE m[k]}.
  *
- * Two live cells at the SAME path in different sstables were also unexercised for sets and lists,
- * because every whole-collection write emits a complex deletion that shadows the older cells
- * instead of reconciling them. The cursor's cell-level timestamp compare therefore never ran for
- * those types.
+ * Two live cells at the SAME path in different sstables reach the cell-level timestamp compare
+ * only when no complex deletion sits between them. A whole-collection write emits one, which
+ * shadows the older cell instead of reconciling it, so the adding forms above are what put two
+ * live cells at one path.
  *
  * Each scenario asserts absolutely which cells survived. The differential harness proves the two
  * paths agree; it cannot see a rule they both get wrong.
@@ -107,8 +106,8 @@ public class CollectionElementMergeDifferentialCompactionTest extends Differenti
 
     /**
      * Two LIVE set element cells at the same path in different sstables, with no complex deletion
-     * between them. Every other scenario in the package writes whole collections, whose complex
-     * deletion shadows the older cell, so this compare never ran for a set.
+     * between them. A whole-collection write emits a deletion that shadows the older cell, so only
+     * the adding form reaches the cell-level compare.
      */
     @Test
     public void setLiveCellsAtOnePathWithNoInterveningDeletion() throws Exception
