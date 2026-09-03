@@ -19,6 +19,8 @@
 package org.apache.cassandra.db.compaction.differential;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
 import org.junit.After;
@@ -28,11 +30,17 @@ import org.apache.cassandra.config.Config.PaxosStatePurging;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CursorCompactor;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.CompactionParams.TombstoneOption;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertFalse;
@@ -136,5 +144,139 @@ public class CursorCompactionGateTest extends CQLTester
         DatabaseDescriptor.setPaxosStatePurging(PaxosStatePurging.repaired);
         assertTrue("an ordinary table is not system.paxos, so the paxos gate must not close on it",
                    isSupportedWith(cfs, TombstoneOption.NONE));
+    }
+
+    /** One sstable of twenty partitions, so a token range can select an interior run of them. */
+    private ColumnFamilyStore twentyPartitionTable()
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long pk = 0; pk < 20; pk++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, 1, 'x')", pk);
+        flush();
+        return cfs;
+    }
+
+    /** The token range (keys[4], keys[12]] of the sstable's keys in file order: an interior run of eight partitions. */
+    private static Range<Token> interiorRange(SSTableReader sstable)
+    {
+        List<DecoratedKey> keys = new ArrayList<>();
+        try (ISSTableScanner scanner = sstable.getScanner())
+        {
+            while (scanner.hasNext())
+            {
+                try (UnfilteredRowIterator partition = scanner.next())
+                {
+                    keys.add(partition.partitionKey());
+                }
+            }
+        }
+        return new Range<>(keys.get(4).getToken(), keys.get(12).getToken());
+    }
+
+    /**
+     * A UCS shard task hands the strategy a token range, and an sstable that straddles the shard
+     * boundary gets a partial scanner. The cursor reads that scanner's data-file segments, so the
+     * gate must accept it rather than fall the whole task back to the iterator.
+     */
+    @Test
+    public void aPartialRangeSimpleScannerIsSupported() throws Exception
+    {
+        ColumnFamilyStore cfs = twentyPartitionTable();
+        Set<SSTableReader> inputs = cfs.getLiveSSTables();
+        Range<Token> range = interiorRange(inputs.iterator().next());
+        try (CompactionController controller = new CompactionController(cfs, inputs, FBUtilities.nowInSeconds(),
+                                                                        null, TombstoneOption.NONE);
+             AbstractCompactionStrategy.ScannerList scanners =
+                 cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs), Collections.singleton(range)))
+        {
+            for (ISSTableScanner scanner : scanners.scanners)
+                assertFalse("the range must give a partial scanner, or this test proves nothing", scanner.isFullRange());
+            assertTrue("a partial SSTableSimpleScanner must be cursor-supported", CursorCompactor.isSupported(scanners, controller));
+        }
+    }
+
+    /**
+     * Only an SSTableSimpleScanner carries data-file bounds. A partial scanner of any other kind
+     * filters by token as it iterates, which the cursor cannot, so the gate must still refuse it.
+     */
+    @Test
+    public void aPartialScannerWithoutPositionBoundsIsUnsupported() throws Exception
+    {
+        ColumnFamilyStore cfs = twentyPartitionTable();
+        Set<SSTableReader> inputs = cfs.getLiveSSTables();
+        try (CompactionController controller = new CompactionController(cfs, inputs, FBUtilities.nowInSeconds(),
+                                                                        null, TombstoneOption.NONE);
+             AbstractCompactionStrategy.ScannerList scanners =
+                 cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs), null))
+        {
+            List<ISSTableScanner> partial = new ArrayList<>();
+            for (ISSTableScanner scanner : scanners.scanners)
+                partial.add(new PartialScannerWithoutBounds(scanner));
+            assertFalse("a partial scanner that is not an SSTableSimpleScanner must fall back",
+                        CursorCompactor.isSupported(new AbstractCompactionStrategy.ScannerList(partial), controller));
+        }
+    }
+
+    /** Delegates everything to a real full-range scanner and claims a partial range. */
+    private static final class PartialScannerWithoutBounds implements ISSTableScanner
+    {
+        private final ISSTableScanner delegate;
+
+        PartialScannerWithoutBounds(ISSTableScanner delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        public boolean isFullRange()
+        {
+            return false;
+        }
+
+        public long getLengthInBytes()
+        {
+            return delegate.getLengthInBytes();
+        }
+
+        public long getCompressedLengthInBytes()
+        {
+            return delegate.getCompressedLengthInBytes();
+        }
+
+        public long getCurrentPosition()
+        {
+            return delegate.getCurrentPosition();
+        }
+
+        public long getBytesScanned()
+        {
+            return delegate.getBytesScanned();
+        }
+
+        public Set<SSTableReader> getBackingSSTables()
+        {
+            return delegate.getBackingSSTables();
+        }
+
+        public TableMetadata metadata()
+        {
+            return delegate.metadata();
+        }
+
+        public boolean hasNext()
+        {
+            return delegate.hasNext();
+        }
+
+        public UnfilteredRowIterator next()
+        {
+            return delegate.next();
+        }
+
+        public void close()
+        {
+            delegate.close();
+        }
     }
 }
