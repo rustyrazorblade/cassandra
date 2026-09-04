@@ -213,11 +213,6 @@ public class CompressedSequentialWriter extends SequentialWriter
 
     /**
      * Compresses, writes and checksums one filled chunk buffer.
-     *
-     * Taking the source as an argument rather than reading {@link #buffer} lets a subclass run this
-     * against a slot the producer has already released, which is what moving the work to another
-     * thread requires. For the synchronous path {@code src} is always {@code buffer}, and the
-     * {@code toWrite == src} fix-up below then restores the position {@code current()} reads.
      */
     protected void flushData(ByteBuffer src)
     {
