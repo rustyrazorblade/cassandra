@@ -70,7 +70,7 @@ public class CompactionWritePathBench extends CompactionBench
     @Param("50")
     int repeatPercent = 50;
 
-    /** Selects AsyncCompressedSequentialWriter, which swaps chunk buffers instead of clearing one. */
+    /** Runs compression and the write off the compaction thread. */
     @Param("false")
     boolean asyncWriter = false;
 
