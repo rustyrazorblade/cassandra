@@ -83,6 +83,8 @@ accord:
     # operation that waits for local durability (e.g. DROP TABLE of an accord table) waits for an incidental flush
     durability_flush_interval: 5s
 
+async_compaction_writer_enabled: false
+
 memtable:
     configurations:
         skiplist:

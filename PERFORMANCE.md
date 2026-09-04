@@ -168,6 +168,31 @@ compactions, which never used to happen.
 Intervals overlap, so on a single compaction the two are equivalent; the pool's cost would show
 only under concurrency, which this harness does not exercise.
 
+### Final, both paths
+
+One thread per writer, 4 MiB pool, 1 s periodic force. Both arms in one invocation.
+
+| path | baseline | now | improvement |
+|---|---|---|---|
+| cursor | 15809 +/- 565 ms, 287 MiB/s | 5952 +/- 179 ms, 763 MiB/s | +165.6% |
+| iterator | 18476 +/- 600 ms, 246 MiB/s | 9129 +/- 145 ms, 498 MiB/s | +102.4% |
+
+Cassandra's own log for the same runs: 4.396 GiB to 4.398 GiB in 8,961 ms and 9,190 ms.
+
+### Compaction suite with the flag on
+
+All 40 classes in `test/unit/org/apache/cassandra/db/compaction/`, 354 tests, with
+`async_compaction_writer_enabled: true`. Five failures in two classes, and both reproduce
+with the flag off, so the writer introduces none:
+
+| | flag on | flag off |
+|---|---|---|
+| CompactionsBytemanTest | 4 fail of 6 | 4 fail of 6, identical messages |
+| CompactionControllerTest.testIgnoreOverlapsUCSFalse | timeout | timeout |
+
+This is the first run to exercise the writer through anticompaction, cleanup, cancellation
+and early open rather than a unit harness.
+
 ### Summary across phases, cursor path
 
 | | ms/op | MiB/s | improvement over baseline |
