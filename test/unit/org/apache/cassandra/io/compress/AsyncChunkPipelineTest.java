@@ -46,9 +46,9 @@ import static org.junit.Assert.assertEquals;
  * and the compression metadata byte for byte, which is the only assertion that would catch a slot
  * being reused too early, released twice, or handed on with the wrong position.
  */
-public class AsyncCompressedSequentialWriterTest
+public class AsyncChunkPipelineTest
 {
-    private static final int SLOTS = 4;   // deliberately small so the pool wraps repeatedly
+    private static final int SLOTS = 4;
 
     @BeforeClass
     public static void setupDD()
@@ -105,6 +105,40 @@ public class AsyncCompressedSequentialWriterTest
         compare(params, name + "_manyChunks", DEFAULT_CHUNK_LENGTH * (SLOTS * 3) + 101, false);
     }
 
+    /**
+     * The same comparison against the O_DIRECT writer. Compression and CRC cost the same however the
+     * bytes reach the disk, so that path takes the pipeline too, and it has to produce the same file.
+     */
+    @Test
+    public void directIoMatchesSynchronousWriter() throws IOException
+    {
+        CompressionParams params = CompressionParams.lz4();
+        compareDirect(params, "direct_tiny", 25);
+        compareDirect(params, "direct_aligned", DEFAULT_CHUNK_LENGTH);
+        compareDirect(params, "direct_manyChunks", DEFAULT_CHUNK_LENGTH * (SLOTS * 3) + 101);
+    }
+
+    private void compareDirect(CompressionParams params, String name, int bytes) throws IOException
+    {
+        byte[] payload = payload(bytes, false);
+
+        File syncData = FileUtils.createTempFile(name + "_sync", ".db");
+        File asyncData = FileUtils.createTempFile(name + "_async", ".db");
+        File syncMeta = new File(syncData.absolutePath() + ".metadata");
+        File asyncMeta = new File(asyncData.absolutePath() + ".metadata");
+
+        long syncPosition = write(new DirectCompressedSequentialWriter(syncData, syncMeta, null,
+                                                                       SequentialWriterOption.DEFAULT, params,
+                                                                       collector(), null, 0), payload);
+        long asyncPosition = write(new DirectCompressedSequentialWriter(asyncData, asyncMeta, null,
+                                                                        SequentialWriterOption.DEFAULT, params,
+                                                                        collector(), null, asyncBytes(params)), payload);
+
+        assertEquals(name + ": reported position differs", syncPosition, asyncPosition);
+        assertArrayEquals(name + ": data file differs", readAll(syncData), readAll(asyncData));
+        assertArrayEquals(name + ": compression metadata differs", readAll(syncMeta), readAll(asyncMeta));
+    }
+
     private void compare(CompressionParams params, String name, int bytes, boolean incompressible)
     throws IOException
     {
@@ -129,10 +163,16 @@ public class AsyncCompressedSequentialWriterTest
                                               collector());
     }
 
-    private AsyncCompressedSequentialWriter newAsync(File data, File meta, CompressionParams params)
+    private CompressedSequentialWriter newAsync(File data, File meta, CompressionParams params)
     {
-        return new AsyncCompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT, params,
-                                                   collector(), null, SLOTS);
+        return new CompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT, params,
+                                              collector(), null, asyncBytes(params));
+    }
+
+    /** Deliberately small, so the slot pool wraps repeatedly during a run. */
+    private static int asyncBytes(CompressionParams params)
+    {
+        return SLOTS * params.chunkLength();
     }
 
     private static MetadataCollector collector()

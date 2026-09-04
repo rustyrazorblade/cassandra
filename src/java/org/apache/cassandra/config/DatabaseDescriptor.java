@@ -4930,6 +4930,17 @@ public class DatabaseDescriptor
         conf.async_compaction_writer_enabled = async_compaction_writer_enabled;
     }
 
+    public static int getAsyncCompactionWriterFsyncIntervalMillis()
+    {
+        return conf.async_compaction_writer_fsync_interval.toMilliseconds();
+    }
+
+    @VisibleForTesting
+    public static void setAsyncCompactionWriterFsyncInterval(String interval)
+    {
+        conf.async_compaction_writer_fsync_interval = new DurationSpec.IntMillisecondsBound(interval);
+    }
+
     public static int getAsyncCompactionWriterBufferInBytes()
     {
         return conf.async_compaction_writer_buffer.toBytes();

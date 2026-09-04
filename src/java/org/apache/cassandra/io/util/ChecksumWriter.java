@@ -102,6 +102,32 @@ public class ChecksumWriter
         }
     }
 
+    /**
+     * Folds a chunk and its already-computed CRC into the full-file checksum.
+     *
+     * For callers that compute the chunk CRC on another thread. Same bytes, same order as
+     * {@link #appendDirect} with checksumIncrementalResult true: the chunk, then the four CRC bytes.
+     * incrementalChecksum is not touched, so it stays usable by callers that do not split the work.
+     */
+    public void appendPrecomputed(ByteBuffer bb, int chunkCrc)
+    {
+        try
+        {
+            fullChecksum.update(bb.duplicate());
+
+            ByteBuffer crcBytes = ByteBuffer.allocate(4);
+            crcBytes.putInt(chunkCrc);
+            assert crcBytes.arrayOffset() == 0;
+            fullChecksum.update(crcBytes.array(), 0, 4);
+
+            writeIncrementalInt(chunkCrc);
+        }
+        catch (IOException e)
+        {
+            throw new IOError(e);
+        }
+    }
+
     public void writeFullChecksum(@Nonnull File digestFile)
     {
         try (FileOutputStreamPlus fos = new FileOutputStreamPlus(digestFile))

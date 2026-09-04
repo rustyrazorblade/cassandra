@@ -28,7 +28,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.io.DirectIoSupport;
-import org.apache.cassandra.io.compress.AsyncCompressedSequentialWriter;
 import org.apache.cassandra.io.compress.CompressedSequentialWriter;
 import org.apache.cassandra.io.compress.DirectCompressedSequentialWriter;
 import org.apache.cassandra.io.compress.ICompressor;
@@ -108,6 +107,13 @@ public class DataComponent
         {
             CompressionParams compressionParams = buildCompressionParams(metadata, operationType, flushCompression);
 
+            // Independent of each other: direct IO decides how the bytes reach the disk, the async
+            // budget decides which thread compresses and checksums them. Compression is the same CPU
+            // cost either way, so both paths take the pipeline.
+            int asyncBufferBytes = DatabaseDescriptor.asyncCompactionWriterEnabled()
+                                   ? DatabaseDescriptor.getAsyncCompactionWriterBufferInBytes()
+                                   : 0;
+
             if (DatabaseDescriptor.getBackgroundWriteDiskAccessMode() == DiskAccessMode.direct
                 && isDirectWriteSupported(operationType))
             {
@@ -117,18 +123,8 @@ public class DataComponent
                                                             options,
                                                             compressionParams,
                                                             metadataCollector,
-                                                            compressionDictionaryManager);
-            }
-            else if (DatabaseDescriptor.asyncCompactionWriterEnabled())
-            {
-                return new AsyncCompressedSequentialWriter(descriptor.fileFor(Components.DATA),
-                                                           descriptor.fileFor(Components.COMPRESSION_INFO),
-                                                           descriptor.fileFor(Components.DIGEST),
-                                                           options,
-                                                           compressionParams,
-                                                           metadataCollector,
-                                                           compressionDictionaryManager,
-                                                           DatabaseDescriptor.getAsyncCompactionWriterBufferInBytes());
+                                                            compressionDictionaryManager,
+                                                            asyncBufferBytes);
             }
             else
             {
@@ -138,7 +134,8 @@ public class DataComponent
                                                       options,
                                                       compressionParams,
                                                       metadataCollector,
-                                                      compressionDictionaryManager);
+                                                      compressionDictionaryManager,
+                                                      asyncBufferBytes);
             }
         }
         else

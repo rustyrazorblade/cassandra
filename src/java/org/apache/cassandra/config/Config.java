@@ -738,6 +738,16 @@ public class Config
      */
     public DataStorageSpec.IntMebibytesBound async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound("4MiB");
 
+    /**
+     * How often the async compressed writer forces its data file.
+     *
+     * Unlike trickle_fsync_interval this is a period, not a byte count. The byte interval exists to
+     * cap how long the writing thread stalls inside one force; nothing writes on that thread here,
+     * so what the period actually bounds is how much is left for the blocking force at commit.
+     * Setting it to 0 disables the background force entirely, leaving that one force to do all of it.
+     */
+    public volatile DurationSpec.IntMillisecondsBound async_compaction_writer_fsync_interval = new DurationSpec.IntMillisecondsBound("1s");
+
     public volatile boolean use_statements_enabled = true;
 
     /**

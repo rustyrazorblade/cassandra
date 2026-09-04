@@ -80,7 +80,7 @@ accord:
     command_store_shard_count: 4
     shutdown_grace_period: 120s
 
-async_compaction_writer_enabled: false
+async_compaction_writer_enabled: true
 
 memtable:
     configurations:
