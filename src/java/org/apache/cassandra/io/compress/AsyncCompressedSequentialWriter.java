@@ -51,28 +51,16 @@ import static org.apache.cassandra.utils.Throwables.merge;
  * A {@link CompressedSequentialWriter} that runs compress, write and checksum away from the thread
  * producing the data.
  *
- * In multiple tests, the write side is between 30-40% of a compaction thread's CPU, and 77% of that
- * is compression and CRC. The producer fills a chunk-sized slot, hands it on and takes a fresh one;
- * slots rotate between two bounded queues, so the pool is the back-pressure. When every slot is in
- * flight the producer waits, which is the correct signal that the compressor or the disk is the
- * limit.
+ * In multiple tests with fast disks, the write side is between 30-40% of a compaction thread's CPU,
+ * and approximately 75% of that is compression and CRC. This moves compression to a separate thread
+ * and uses a ring buffer to build a pipeline that signficiantly improves throughput.
  *
- * One thread per writer, not a shared pool. A pool caps total compression bandwidth at its thread
- * count, and the path this replaces has no such cap: the synchronous writer compresses on the
- * producer's own thread, so every writer gets a core's worth. Since
- * {@code DataComponent.buildWriter} routes memtable flushes, stream receivers, scrub and index
- * builds through here as well as compactions, a pool would also queue a flush behind compactions,
- * which never happened before.
- *
- * Ordering needs no protocol: one consumer means chunks are processed in queue order, and
- * {@code chunkOffset}, {@code chunkCount}, the compression metadata and the compressed scratch
- * buffer are touched only on that thread.
  */
 public class AsyncCompressedSequentialWriter extends CompressedSequentialWriter
 {
     private static final Logger logger = LoggerFactory.getLogger(AsyncCompressedSequentialWriter.class);
 
-    /** Sentinel that ends the writer loop. Never compressed or written. */
+    /** Sentinel that ends the writer loop. Never compressed or written. Carries no state, safe to share */
     private static final ByteBuffer POISON = ByteBuffer.allocate(0);
 
     /** How often the background force runs. Bounds only the tail doPrepare has to cover. */
