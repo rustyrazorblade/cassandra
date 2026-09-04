@@ -41,8 +41,8 @@ import static org.junit.Assert.assertTrue;
  * before ALTER TABLE DROP therefore carries a timestamp strictly below droppedTime. A write
  * that must survive the drop uses an explicit far-future USING TIMESTAMP.
  *
- * droppedComplexColumnSurvivingCells is @Ignore'd on CASSANDRA-21607: the iterator path throws for
- * that shape, so the harness cannot produce a reference run.
+ * One scenario here is @Ignore'd on CASSANDRA-21607. See droppedComplexColumnSurvivingCells:
+ * this branch must not merge before that fix does.
  */
 public class DroppedColumnDifferentialCompactionTest extends DifferentialCompactionTester
 {
@@ -166,9 +166,9 @@ public class DroppedColumnDifferentialCompactionTest extends DifferentialCompact
      * DifferentialCompactionTester.compactPath, before the cursor path is reached. No change to the cursor
      * path can make this scenario pass.
      *
-     * CASSANDRA-21607 fixes this by discarding a column that is dropped and not re-added, whatever
-     * the cell timestamps are, so the merge never sees it and both paths agree. Remove the @Ignore
-     * once that lands.
+     * BLOCKED: do not merge this branch until CASSANDRA-21607 merges. Remove the @Ignore then. The fix
+     * makes the read discard a column that is dropped and not re-added, whatever the cell timestamps are,
+     * so the merge never sees it and both paths agree.
      */
     @Ignore("Blocked on CASSANDRA-21607")
     @Test

@@ -28,6 +28,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.io.DirectIoSupport;
+import org.apache.cassandra.io.compress.AsyncCompressedSequentialWriter;
 import org.apache.cassandra.io.compress.CompressedSequentialWriter;
 import org.apache.cassandra.io.compress.DirectCompressedSequentialWriter;
 import org.apache.cassandra.io.compress.ICompressor;
@@ -117,6 +118,17 @@ public class DataComponent
                                                             compressionParams,
                                                             metadataCollector,
                                                             compressionDictionaryManager);
+            }
+            else if (DatabaseDescriptor.asyncCompactionWriterEnabled())
+            {
+                return new AsyncCompressedSequentialWriter(descriptor.fileFor(Components.DATA),
+                                                           descriptor.fileFor(Components.COMPRESSION_INFO),
+                                                           descriptor.fileFor(Components.DIGEST),
+                                                           options,
+                                                           compressionParams,
+                                                           metadataCollector,
+                                                           compressionDictionaryManager,
+                                                           DatabaseDescriptor.getAsyncCompactionWriterBufferInBytes());
             }
             else
             {
