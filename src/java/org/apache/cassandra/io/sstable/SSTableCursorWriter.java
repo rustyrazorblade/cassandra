@@ -358,7 +358,7 @@ public class SSTableCursorWriter implements AutoCloseable
         rowFlags = UnfilteredSerializer.EXTENSION_FLAG;
         rowExtendedFlags = UnfilteredSerializer.IS_STATIC;
         columns = staticColumns;
-        // TODO: this case may not need the row buffers.
+        // TODO: this case may not need the row buffers. The gain is probably small.
         rowHeaderBuffer.clear();
         rowHeaderBuffer.writeUnsignedVInt(0L); // previousUnfilteredSize, always 0 for a static row
         rowBuffer.clear();

@@ -4919,6 +4919,28 @@ public class DatabaseDescriptor
         conf.cursor_compaction_enabled = cursor_compaction_enabled;
     }
 
+    public static boolean asyncCompactionWriterEnabled()
+    {
+        return conf.async_compaction_writer_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setAsyncCompactionWriterEnabled(boolean async_compaction_writer_enabled)
+    {
+        conf.async_compaction_writer_enabled = async_compaction_writer_enabled;
+    }
+
+    public static int getAsyncCompactionWriterBufferInBytes()
+    {
+        return conf.async_compaction_writer_buffer.toBytes();
+    }
+
+    @VisibleForTesting
+    public static void setAsyncCompactionWriterBuffer(String size)
+    {
+        conf.async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound(size);
+    }
+
     public static boolean enableDropCompactStorage()
     {
         return conf.drop_compact_storage_enabled;
