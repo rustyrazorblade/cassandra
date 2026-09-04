@@ -297,7 +297,7 @@ public class CompressedSequentialWriter extends SequentialWriter
     {
         ChunkPrep prep = new ChunkPrep();
         compressChunk(src, compressed, prep);
-        emitChunk(prep, src, null);
+        emitChunk(prep, src);
     }
 
     /** What compressing a chunk produced: which buffer to write, and the two lengths. */
@@ -362,9 +362,8 @@ public class CompressedSequentialWriter extends SequentialWriter
      * Every field touched here is order-dependent -- chunkOffset, chunkCount, the offsets table, the
      * full-file checksum -- so this runs on one thread, in chunk order.
      *
-     * @param chunkCrc the chunk CRC if it was computed elsewhere, or null to compute it here
      */
-    protected void emitChunk(ChunkPrep prep, ByteBuffer src, Integer chunkCrc)
+    protected void emitChunk(ChunkPrep prep, ByteBuffer src)
     {
         // resetAndTruncate leaves fchannel.position() past EOF after its verification reads + truncate;
         // re-seek so the next chunk lands at chunkOffset. No-op under linear writes.
@@ -377,10 +376,7 @@ public class CompressedSequentialWriter extends SequentialWriter
         metadataWriter.addOffset(chunkOffset);
         chunkCount++;
 
-        if (chunkCrc == null)
-            writeChunk(prep.toWrite);
-        else
-            writeChunk(prep.toWrite, chunkCrc);
+        writeChunk(prep.toWrite);
 
         lastFlushOffset = uncompressedSize;
 
@@ -391,20 +387,6 @@ public class CompressedSequentialWriter extends SequentialWriter
         chunkOffset += prep.compressedLength + 4;
         if (runPostFlush != null)
             runPostFlush.accept(getLastFlushOffset());
-    }
-
-    /** As {@link #writeChunk(ByteBuffer)}, but with the chunk CRC already computed. */
-    protected void writeChunk(ByteBuffer toWrite, int chunkCrc)
-    {
-        try
-        {
-            crcMetadata.appendPrecomputed(toWrite, chunkCrc);
-            gatheringWrite(toWrite);
-        }
-        catch (IOException e)
-        {
-            throw new FSWriteError(e, getPath());
-        }
     }
 
     private void gatheringWrite(ByteBuffer toWrite) throws IOException

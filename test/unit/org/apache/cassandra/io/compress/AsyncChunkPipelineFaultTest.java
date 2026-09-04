@@ -223,14 +223,6 @@ public class AsyncChunkPipelineFaultTest
             super.writeChunk(toWrite);
         }
 
-        /** The async path computes the chunk CRC on a compressor thread and calls this overload. */
-        @Override
-        protected void writeChunk(java.nio.ByteBuffer toWrite, int chunkCrc)
-        {
-            failIfDue();
-            super.writeChunk(toWrite, chunkCrc);
-        }
-
         private void failIfDue()
         {
             if (++chunk == failAt)
