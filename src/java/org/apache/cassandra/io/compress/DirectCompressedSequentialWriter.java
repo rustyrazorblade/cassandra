@@ -266,34 +266,6 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         stagedChunkBoundaries.offerLong(uncompressedSize);
     }
 
-    /**
-     * As {@link #writeChunk(ByteBuffer)}, but the chunk CRC was computed on a compressor thread.
-     * appendPrecomputed routes it through the same {@code writeIncrementalInt} seam, so it lands in
-     * the aligned buffer rather than on the channel, exactly as the inline path does.
-     */
-    @Override
-    protected void writeChunk(ByteBuffer toWrite, int chunkCrc)
-    {
-        Preconditions.checkState(!dataFinalized, "writeChunk after finalizeDataFile() under O_DIRECT");
-
-        Preconditions.checkArgument(toWrite.position() == 0,
-                                    "writeChunk requires a flipped buffer (position == 0), got position=%s",
-                                    toWrite.position());
-
-        int chunkLength = toWrite.remaining();
-
-        writeToAlignedBuffer(toWrite);
-
-        // writeToAlignedBuffer drained toWrite; rewind so the full-file checksum can re-read it.
-        toWrite.rewind();
-        crcMetadata.appendPrecomputed(toWrite, chunkCrc);
-
-        actualDataSize = chunkOffset + chunkLength + CRC_LENGTH;
-
-        stagedChunkBoundaries.offerLong(actualDataSize);
-        stagedChunkBoundaries.offerLong(uncompressedSize);
-    }
-
     private void writeToAlignedBuffer(ByteBuffer data)
     {
         int dataLength = data.remaining();
