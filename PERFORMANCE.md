@@ -193,6 +193,47 @@ with the flag off, so the writer introduces none:
 This is the first run to exercise the writer through anticompaction, cleanup, cancellation
 and early open rather than a unit harness.
 
+### Compressor fan-out: tried, reverted
+
+Compression was spread across a shared pool sized to cores, with a reorder ring at the writer
+thread keeping the file in order. It was slower on both paths and was reverted.
+
+| path | original | single writer thread | fan-out |
+|---|---|---|---|
+| cursor | 15809 ms, 287 MiB/s | 5952 ms, 763 MiB/s | 6789 +/- 141 ms, 669 MiB/s |
+| iterator | 18476 ms, 246 MiB/s | 9129 ms, 498 MiB/s | 10102 +/- 293 ms, 450 MiB/s |
+
+Against the single writer thread that is -12.3% and -9.6%, intervals not overlapping.
+
+Two things follow. The write path was not compression-bound on one thread; if it had been,
+spreading compression across cores would have helped. And the likely cost is the handoff, not
+the idea: the single-writer version blocks in `filled.poll`, which wakes the instant a chunk is
+offered, whereas the reorder ring has no blocking primitive and the writer slept 200 microseconds
+between checks. At ~25k chunks/s that is a lot of added latency, on both sides, since the
+producer's wait has the same granularity.
+
+Making the ring handoff signalling rather than polling and re-measuring is the open question. It
+was not pursued.
+
+### Direct IO
+
+The pipeline was a subclass of CompressedSequentialWriter, so DataComponent had to choose between
+it and DirectCompressedSequentialWriter; direct IO won that branch and enabling both settings gave
+neither the pipeline nor a warning. Compression and CRC cost the same however the bytes reach the
+disk, so the pipeline is now a collaborator both writers own.
+
+Figures after that refactor, one writer thread, on the rebased branch:
+
+| path | original | now | improvement |
+|---|---|---|---|
+| cursor | 15809 +/- 565 ms, 287 MiB/s | 6272 +/- 175 ms, 724 MiB/s | +152.1% |
+| iterator | 18476 +/- 600 ms, 246 MiB/s | 9424 +/- 84 ms, 482 MiB/s | +96.1% |
+
+That is 5.1% and 3.1% below the earlier single-writer run. The cursor difference is inside the
+intervals; the iterator one is not. Two things changed at once -- the rebase onto eb9853dbd5 and
+the collaborator indirection -- so the 3% is not attributed. Neither should cost that much, so it
+may be drift on a machine that has been running benchmarks all day.
+
 ### Summary across phases, cursor path
 
 | | ms/op | MiB/s | improvement over baseline |

@@ -25,23 +25,18 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.function.LongConsumer;
-import java.util.zip.CRC32;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.schema.CompressionParams;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
-import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
 import static org.apache.cassandra.utils.Throwables.merge;
 
 /**
@@ -69,48 +64,21 @@ class AsyncChunkPipeline
     /** How long shutdown waits for the writer thread before giving up and logging. */
     private static final long QUIESCE_MILLIS = 30_000L;
 
-    /** One chunk on its way from the producer, through a compressor, to the writer. */
-    private static final class Pending
-    {
-        final CompressedSequentialWriter.ChunkPrep prep = new CompressedSequentialWriter.ChunkPrep();
-        ByteBuffer src;
-        ByteBuffer out;
-        int crc;
-        Throwable error;
-    }
-
-    /**
-     * Compression runs here, on as many threads as there are cores. Compression is CPU-bound, so
-     * cores is the real ceiling however many writers are open; sizing to anything smaller would cap
-     * total compression below what the synchronous path gives, since that compresses on the
-     * producer's own thread.
-     */
-    private static final class Compressors
-    {
-        static final ExecutorPlus instance =
-            executorFactory().pooled("CompactionCompressor", Math.max(2, FBUtilities.getAvailableProcessors()));
-    }
+    /** How long the writer waits for a chunk before looking for other work, such as a force. */
+    private static final long POLL_MILLIS = 200L;
 
     private final CompressedSequentialWriter owner;
 
     /** Slots the producer may take. */
     private final ArrayBlockingQueue<ByteBuffer> free;
 
-    /** Compressed-output buffers, one per chunk in flight. */
-    private final ArrayBlockingQueue<ByteBuffer> spare;
-
-    /**
-     * Chunks whose compression has finished, indexed by sequence number. The writer takes them in
-     * sequence order, which is what keeps the file in order while compression runs out of order.
-     */
-    private final AtomicReferenceArray<Pending> ready;
-    private final int ringSize;
+    /** Filled chunks, in order. */
+    private final ArrayBlockingQueue<ByteBuffer> filled;
 
     private final Thread writer;
 
     private final BufferType bufferType;
     private final int chunkLength;
-    private final int compressedLength;
     private final int slotCount;
 
     /** Slots in existence. Grown lazily, so a writer holds only what its pipeline depth needed. */
@@ -162,16 +130,12 @@ class AsyncChunkPipeline
         this.owner = owner;
         this.chunkLength = parameters.chunkLength();
         this.bufferType = parameters.getSstableCompressor().preferredBufferType();
-        this.compressedLength = parameters.getSstableCompressor().initialCompressedBufferLength(chunkLength);
         // Derive the slot count from a byte budget: the runway that matters is bytes in flight, and
         // a fixed count would scale it with the table's chunk length.
         this.slotCount = Math.max(2, bufferBytes / chunkLength);
         this.free = new ArrayBlockingQueue<>(slotCount);
-        this.spare = new ArrayBlockingQueue<>(slotCount);
-        // Wider than the slot pool, so the producer's back-pressure stops it wrapping onto an entry
-        // the writer has not taken yet.
-        this.ringSize = slotCount + 2;
-        this.ready = new AtomicReferenceArray<>(ringSize);
+        // +1 so the queue can never reject: the producer holds one slot while offering another.
+        this.filled = new ArrayBlockingQueue<>(slotCount + 1);
         // The writer already allocated one chunk buffer and installed it as its staging buffer, and
         // the first swap returns it here, so it counts against the budget.
         this.allocated = 1;
@@ -250,50 +214,13 @@ class AsyncChunkPipeline
         }
     }
 
-    /**
-     * Hands a filled chunk to a compressor thread.
-     *
-     * The compressed output buffer is taken here, on the producer, so the slot pool alone bounds how
-     * many chunks are in flight; a compressor never waits for one.
-     */
+    /** Hands a filled chunk to the writer thread. */
     void submit(ByteBuffer outgoing)
     {
         ensureStarted();
-        long seq = submitted++;
-
-        Pending pending = new Pending();
-        pending.src = outgoing;
-        pending.out = takeSpare();
-        int idx = (int) (seq % ringSize);
-
-        try
-        {
-            Compressors.instance.execute(() -> {
-                try
-                {
-                    owner.compressChunk(pending.src, pending.out, pending.prep);
-
-                    CRC32 crc = new CRC32();
-                    crc.update(pending.prep.toWrite.duplicate());
-                    pending.crc = (int) crc.getValue();
-                }
-                catch (Throwable t)
-                {
-                    // Publish anyway. The writer takes chunks strictly in sequence, so a chunk that
-                    // never arrives stalls the file rather than failing it.
-                    pending.error = t;
-                }
-                finally
-                {
-                    ready.set(idx, pending);
-                }
-            });
-        }
-        catch (Throwable t)
-        {
-            pending.error = t;
-            ready.set(idx, pending);
-        }
+        submitted++;
+        if (!filled.offer(outgoing))
+            throw new IllegalStateException("async writer queue full; slot accounting is wrong");
     }
 
     /** Fires the early-open callback with what the writer has actually made durable. */
@@ -375,76 +302,56 @@ class AsyncChunkPipeline
     // ------------------------------------------------------------------ writer thread
 
     /**
-     * Takes chunks in sequence order and does everything order-dependent: the offsets table,
-     * chunkOffset, the full-file checksum and the channel write. Compression has already happened,
-     * on whichever compressor thread got there first.
+     * Compresses, checksums and writes each chunk in turn.
+     *
+     * One consumer is what keeps the file in order: chunkOffset, chunkCount, the offsets table, the
+     * full-file checksum and the compressed scratch buffer are touched only here.
      */
     private void writerLoop()
     {
-        long next = 0;
-
         while (true)
         {
-            int idx = (int) (next % ringSize);
-            Pending pending = ready.get(idx);
-
-            if (pending == null)
-            {
-                if (forcePending)
-                    backgroundForce();
-
-                if (shutdown && next >= submittedAtShutdown)
-                    return;
-
-                try
-                {
-                    Thread.sleep(0, 200_000);
-                }
-                catch (InterruptedException e)
-                {
-                    failure.compareAndSet(null, e);
-                    return;
-                }
-                continue;
-            }
-
-            ready.set(idx, null);
-
+            ByteBuffer slot;
             try
             {
-                if (pending.error != null)
-                    failure.compareAndSet(null, pending.error);
-                else
+                slot = filled.poll(POLL_MILLIS, TimeUnit.MILLISECONDS);
+            }
+            catch (InterruptedException e)
+            {
+                // Nothing interrupts this thread today, but exiting without latching would freeze
+                // `completed` and leave the producer waiting for a chunk that will never land.
+                failure.compareAndSet(null, e);
+                return;
+            }
+
+            if (slot != null)
+            {
+                try
                 {
-                    owner.emitChunk(pending.prep, pending.src, pending.crc);
-                    bytesWritten += pending.prep.uncompressedLength;
+                    owner.flushData(slot);
+                    bytesWritten += slot.position();
                     durableOffset = owner.getLastFlushOffset();
                     estimatedOnDisk = owner.chunkOffsetSnapshot();
                 }
+                catch (Throwable t)
+                {
+                    failure.compareAndSet(null, t);
+                }
+                finally
+                {
+                    slot.clear();
+                    free.offer(slot);
+                    completed++;
+                }
             }
-            catch (Throwable t)
+            else if (shutdown && completed >= submittedAtShutdown)
             {
-                failure.compareAndSet(null, t);
-            }
-            finally
-            {
-                pending.src.clear();
-                free.offer(pending.src);
-                pending.out.clear();
-                spare.offer(pending.out);
-                next++;
-                completed++;
+                return;
             }
 
             if (forcePending)
                 backgroundForce();
         }
-    }
-
-    private ByteBuffer takeSpare()
-    {
-        ByteBuffer b = spare.poll();
-        return b != null ? b : bufferType.allocate(compressedLength);
     }
 
     /**
@@ -525,18 +432,9 @@ class AsyncChunkPipeline
     /** Frees every buffer the pipeline owns. Only safe once {@link #stillRunning} is false. */
     Throwable releaseBuffers(Throwable accumulate)
     {
-        List<ByteBuffer> remaining = new ArrayList<>(slotCount * 2);
+        List<ByteBuffer> remaining = new ArrayList<>(slotCount);
         free.drainTo(remaining);
-        spare.drainTo(remaining);
-        // Anything a compressor published that the writer never took.
-        for (int i = 0; i < ringSize; i++)
-        {
-            Pending p = ready.getAndSet(i, null);
-            if (p == null)
-                continue;
-            if (p.src != null) remaining.add(p.src);
-            if (p.out != null) remaining.add(p.out);
-        }
+        filled.drainTo(remaining);
         for (ByteBuffer slot : remaining)
         {
             try
