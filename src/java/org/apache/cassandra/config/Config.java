@@ -719,6 +719,25 @@ public class Config
 
     public boolean cursor_compaction_enabled = CURSOR_COMPACTION_ENABLED.getBoolean();
 
+    /**
+     * Hands each filled chunk buffer to a pool of reusable slots so the compressed write path can be
+     * decoupled from the thread producing the data. Experimental; off by default.
+     */
+    public boolean async_compaction_writer_enabled = false;
+
+    /**
+     * Memory the async compressed writer keeps in flight per open data file.
+     *
+     * The slot count is derived from this and the table's chunk_length_in_kb, not configured
+     * directly. The pool is the producer's runway, so what has to be held constant is the bytes it
+     * can absorb before the producer stalls; a fixed slot count would instead make the runway swing
+     * with an unrelated schema property, giving a 64 KiB table four times the runway of a 16 KiB one.
+     *
+     * 4 MiB is about 10 ms of runway at the rates this path now reaches. 256 KiB, the old
+     * sixteen-slot default at a 16 KiB chunk, was 0.6 ms and the producer felt every hiccup.
+     */
+    public DataStorageSpec.IntMebibytesBound async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound("4MiB");
+
     public volatile boolean use_statements_enabled = true;
 
     /**

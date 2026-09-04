@@ -691,6 +691,15 @@ commitlog_disk_access_mode: legacy
 # Experimental.  New garbage free compaction path.  Does not yet support collections, counters, BTI.
 cursor_compaction_enabled: false
 
+# Experimental.  Hands each filled chunk buffer to a pool of reusable slots so the compressed
+# write path can be decoupled from the thread producing the data.
+async_compaction_writer_enabled: false
+
+# Memory the async compressed writer keeps in flight per open data file. The slot count is
+# derived from this and the table's chunk_length_in_kb, so the runway stays constant in bytes
+# whatever chunk length a table uses. Off heap when the compressor prefers direct buffers.
+# async_compaction_writer_buffer: 4MiB
+
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
