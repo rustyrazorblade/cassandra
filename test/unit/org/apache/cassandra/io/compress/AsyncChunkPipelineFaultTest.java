@@ -53,7 +53,7 @@ import static org.junit.Assert.fail;
  * The chunk indices are chosen around the pool boundary. A slot lost on an exception path does not
  * show up until the pool drains, which is exactly at the boundary.
  */
-public class AsyncCompressedSequentialWriterFaultTest
+public class AsyncChunkPipelineFaultTest
 {
     private static final int CHUNK = 1 << 14;      // 16 KiB, the default chunk length
     private static final int SLOTS = 4;
@@ -111,7 +111,7 @@ public class AsyncCompressedSequentialWriterFaultTest
         File data = FileUtils.createTempFile("asyncFaultControl", ".db");
         File meta = new File(data.absolutePath() + ".metadata");
 
-        AsyncCompressedSequentialWriter writer = newWriter(data, meta);
+        CompressedSequentialWriter writer = newWriter(data, meta);
         try
         {
             writeChunks(writer, SLOTS * 3);
@@ -120,7 +120,7 @@ public class AsyncCompressedSequentialWriterFaultTest
         finally
         {
             settle(writer);
-            assertFalse("writer thread outlived the writer", writer.writerRunning());
+            assertFalse("writer thread outlived the writer", writer.pipeline.stillRunning());
         }
         assertTrue("no data written", data.length() > 0);
     }
@@ -132,7 +132,7 @@ public class AsyncCompressedSequentialWriterFaultTest
         File data = FileUtils.createTempFile("asyncFault" + failAtChunk, ".db");
         File meta = new File(data.absolutePath() + ".metadata");
 
-        AsyncCompressedSequentialWriter writer = newWriter(data, meta);
+        CompressedSequentialWriter writer = newWriter(data, meta);
         Throwable thrown = null;
         try
         {
@@ -165,7 +165,7 @@ public class AsyncCompressedSequentialWriterFaultTest
         }
 
         settle(writer);
-        assertFalse("writer thread outlived the writer", writer.writerRunning());
+        assertFalse("writer thread outlived the writer", writer.pipeline.stillRunning());
     }
 
     /**
@@ -205,7 +205,7 @@ public class AsyncCompressedSequentialWriterFaultTest
     }
 
     /** Fails the channel write rather than the compressor, at a chosen chunk. */
-    private static class FailingWriteWriter extends AsyncCompressedSequentialWriter
+    private static class FailingWriteWriter extends CompressedSequentialWriter
     {
         private final int failAt;
         private int chunk = 0;
@@ -219,9 +219,22 @@ public class AsyncCompressedSequentialWriterFaultTest
         @Override
         protected void writeChunk(java.nio.ByteBuffer toWrite)
         {
+            failIfDue();
+            super.writeChunk(toWrite);
+        }
+
+        /** The async path computes the chunk CRC on a compressor thread and calls this overload. */
+        @Override
+        protected void writeChunk(java.nio.ByteBuffer toWrite, int chunkCrc)
+        {
+            failIfDue();
+            super.writeChunk(toWrite, chunkCrc);
+        }
+
+        private void failIfDue()
+        {
             if (++chunk == failAt)
                 throw new org.apache.cassandra.io.FSWriteError(new IOException("injected write failure"), getPath());
-            super.writeChunk(toWrite);
         }
     }
 
@@ -234,7 +247,7 @@ public class AsyncCompressedSequentialWriterFaultTest
         File data = FileUtils.createTempFile("asyncFaultSlots", ".db");
         File meta = new File(data.absolutePath() + ".metadata");
 
-        AsyncCompressedSequentialWriter writer = newWriter(data, meta);
+        CompressedSequentialWriter writer = newWriter(data, meta);
         try
         {
             writeChunks(writer, SLOTS * 3);
@@ -248,12 +261,12 @@ public class AsyncCompressedSequentialWriterFaultTest
 
         // Slots are allocated on demand, so the pool holds what was actually handed out less the
         // one still installed as the staging buffer.
-        int expected = writer.allocatedSlots() - 1;
+        int expected = writer.pipeline.allocatedSlots() - 1;
         long deadline = System.nanoTime() + 10_000_000_000L;
-        while (writer.freeSlotCount() < expected && System.nanoTime() < deadline)
+        while (writer.pipeline.freeSlotCount() < expected && System.nanoTime() < deadline)
             Thread.sleep(10);
 
-        assertEquals("a slot leaked on the failure path", expected, writer.freeSlotCount());
+        assertEquals("a slot leaked on the failure path", expected, writer.pipeline.freeSlotCount());
     }
 
     private static boolean isOrCauses(Throwable t, Class<?> type)
@@ -264,17 +277,17 @@ public class AsyncCompressedSequentialWriterFaultTest
         return false;
     }
 
-    private static void settle(AsyncCompressedSequentialWriter writer)
+    private static void settle(CompressedSequentialWriter writer)
     {
         long deadline = System.nanoTime() + 10_000_000_000L;
-        while (writer.writerRunning() && System.nanoTime() < deadline)
+        while (writer.pipeline.stillRunning() && System.nanoTime() < deadline)
         {
             try { Thread.sleep(10); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
         }
     }
 
-    private static void writeChunks(AsyncCompressedSequentialWriter writer, int chunks) throws IOException
+    private static void writeChunks(CompressedSequentialWriter writer, int chunks) throws IOException
     {
         byte[] block = new byte[CHUNK];
         for (int i = 0; i < block.length; i++)
@@ -284,7 +297,7 @@ public class AsyncCompressedSequentialWriterFaultTest
             writer.write(block, 0, block.length);
     }
 
-    private AsyncCompressedSequentialWriter newWriter(File data, File meta)
+    private CompressedSequentialWriter newWriter(File data, File meta)
     {
         Map<String, String> opts = ImmutableMap.of();
         // Built by class name so CompressionParams instantiates it the way production does.
@@ -292,8 +305,8 @@ public class AsyncCompressedSequentialWriterFaultTest
                                                          opts,
                                                          CHUNK,
                                                          CompressionParams.DEFAULT_MIN_COMPRESS_RATIO);
-        return new AsyncCompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT,
-                                                   params, collector(), null, BUFFER_BYTES);
+        return new CompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT,
+                                              params, collector(), null, BUFFER_BYTES);
     }
 
     private static MetadataCollector collector()

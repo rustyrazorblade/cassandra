@@ -100,7 +100,25 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
                                             MetadataCollector sstableMetadataCollector,
                                             @Nullable CompressionDictionaryManager compressionDictionaryManager)
     {
-        super(file, offsetsFile, digestFile, option, parameters, sstableMetadataCollector, compressionDictionaryManager, ExtendedOpenOption.DIRECT);
+        this(file, offsetsFile, digestFile, option, parameters, sstableMetadataCollector, compressionDictionaryManager, 0);
+    }
+
+    /**
+     * @param asyncBufferBytes bytes the write path may keep in flight off the calling thread, or 0
+     *                         to compress and write inline. Compression and CRC are the same CPU cost
+     *                         under O_DIRECT as anywhere else, so this path wants it just as much.
+     */
+    public DirectCompressedSequentialWriter(File file,
+                                            File offsetsFile,
+                                            @Nullable File digestFile,
+                                            SequentialWriterOption option,
+                                            CompressionParams parameters,
+                                            MetadataCollector sstableMetadataCollector,
+                                            @Nullable CompressionDictionaryManager compressionDictionaryManager,
+                                            int asyncBufferBytes)
+    {
+        super(file, offsetsFile, digestFile, option, parameters, sstableMetadataCollector,
+              compressionDictionaryManager, asyncBufferBytes, ExtendedOpenOption.DIRECT);
 
         // super() opened the O_DIRECT FileChannel and allocated parent buffers; if anything below throws
         // the caller never gets a reference to clean them up, so abort the txn proxy ourselves.
@@ -184,6 +202,10 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
             return;
 
         doFlush(0);
+        // With a pipeline that flush only submits. The padding and truncate below size the file, so
+        // every chunk has to be staged in the aligned buffer before they run.
+        if (pipeline != null)
+            pipeline.drain();
         flushFinalWithPadding();
         dataFinalized = true;
     }
@@ -237,6 +259,34 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         // writeToAlignedBuffer drained toWrite; rewind so appendDirect can re-read it for the CRC.
         toWrite.rewind();
         crcMetadata.appendDirect(toWrite, true);
+
+        actualDataSize = chunkOffset + chunkLength + CRC_LENGTH;
+
+        stagedChunkBoundaries.offerLong(actualDataSize);
+        stagedChunkBoundaries.offerLong(uncompressedSize);
+    }
+
+    /**
+     * As {@link #writeChunk(ByteBuffer)}, but the chunk CRC was computed on a compressor thread.
+     * appendPrecomputed routes it through the same {@code writeIncrementalInt} seam, so it lands in
+     * the aligned buffer rather than on the channel, exactly as the inline path does.
+     */
+    @Override
+    protected void writeChunk(ByteBuffer toWrite, int chunkCrc)
+    {
+        Preconditions.checkState(!dataFinalized, "writeChunk after finalizeDataFile() under O_DIRECT");
+
+        Preconditions.checkArgument(toWrite.position() == 0,
+                                    "writeChunk requires a flipped buffer (position == 0), got position=%s",
+                                    toWrite.position());
+
+        int chunkLength = toWrite.remaining();
+
+        writeToAlignedBuffer(toWrite);
+
+        // writeToAlignedBuffer drained toWrite; rewind so the full-file checksum can re-read it.
+        toWrite.rewind();
+        crcMetadata.appendPrecomputed(toWrite, chunkCrc);
 
         actualDataSize = chunkOffset + chunkLength + CRC_LENGTH;
 

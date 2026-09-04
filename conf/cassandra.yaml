@@ -700,6 +700,13 @@ async_compaction_writer_enabled: false
 # whatever chunk length a table uses. Off heap when the compressor prefers direct buffers.
 # async_compaction_writer_buffer: 4MiB
 
+# How often the async compressed writer forces its data file. A period, not a byte count:
+# trickle_fsync_interval caps how long the writing thread stalls inside one force, and nothing
+# writes on that thread here, so what this bounds is how much is left for the blocking force at
+# commit. 0 disables the background force and leaves that one force to do all of it.
+# Min unit: ms
+# async_compaction_writer_fsync_interval: 1s
+
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
