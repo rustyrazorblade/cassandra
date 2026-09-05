@@ -24,10 +24,12 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.util.ArrayDeque;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.IntFunction;
+import java.util.function.LongConsumer;
 
 import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
@@ -166,6 +168,51 @@ public class DirectStreamingConnectionFactory
                     {
                         count += buffer.position();
                         doFlush(0);
+                    }
+                    return count;
+                }
+
+                // TODO (future): support RateLimiter
+                @Override
+                public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+                {
+                    long count = 0;
+                    try
+                    {
+                        for (Section section : sections)
+                        {
+                            long position = section.start;
+                            long remaining = section.length();
+                            while (remaining > 0)
+                            {
+                                if (!buffer.hasRemaining())
+                                    doFlush(0);
+
+                                int limit = buffer.limit();
+                                buffer.limit((int) Math.min(buffer.position() + remaining, limit));
+                                int read;
+                                try
+                                {
+                                    read = file.read(buffer, position);
+                                }
+                                finally
+                                {
+                                    buffer.limit(limit);
+                                }
+                                if (read < 0)
+                                    throw new IOException("Unexpected end of file at position " + position);
+
+                                position += read;
+                                remaining -= read;
+                                count += read;
+                                progress.accept(read);
+                                doFlush(0);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        file.close();
                     }
                     return count;
                 }
