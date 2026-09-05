@@ -1379,11 +1379,11 @@ public class CursorCompactor extends CompactionInfo.Holder
     private boolean probeGroupHasDeadCell(int rowMergeLimit, int cellMergeLimit, DeletionTime rowActiveDeletion)
     {
         SSTableCursorReader.CellCursor leadCellCursor = sstableCursors[0].cellCursor();
-        if (leadCellCursor.cellColumn.isComplex())
+        if (leadCellCursor.cellColumn().isComplex())
         {
-            if (!ColumnMetadata.sameName(probeComplexColumn, leadCellCursor.cellColumn))
+            if (!ColumnMetadata.sameName(probeComplexColumn, leadCellCursor.cellColumn()))
             {
-                probeComplexColumn = leadCellCursor.cellColumn;
+                probeComplexColumn = leadCellCursor.cellColumn();
                 foldAndClampComplexDeletion(rowMergeLimit, probeComplexColumn, rowActiveDeletion, probeComplexDeletion);
             }
             if (!probeComplexDeletion.isLive())
@@ -1392,14 +1392,14 @@ public class CursorCompactor extends CompactionInfo.Holder
         // The producedCell test guards the read below: a deletion-only position (see mergeCells) has
         // no valid cell fields, because cellLiveness still holds the values of an earlier cell. A
         // live complex deletion above zero cells has nothing left to decide.
-        if (!leadCellCursor.producedCell)
+        if (!leadCellCursor.cellProduced())
             return false;
 
         // The column is simple, or it is complex with a live deletion. Its cells alone decide it.
-        ReusableCellLivenessInfo winner = leadCellCursor.cellLiveness;
+        ReusableCellLivenessInfo winner = leadCellCursor.cellLiveness();
         for (int i = 1; i < cellMergeLimit; i++)
         {
-            ReusableCellLivenessInfo challenger = sstableCursors[i].cellCursor().cellLiveness;
+            ReusableCellLivenessInfo challenger = sstableCursors[i].cellCursor().cellLiveness();
             if (CellLivenessInfo.resolve(winner, challenger) == RIGHT)
                 winner = challenger;
         }
@@ -1472,7 +1472,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             StatefulCursor c = sstableCursors[i];
             if (isState(c.state(), CELL_VALUE_START | CELL_END)
-                && ColumnMetadata.sameName(c.cellCursor().cellColumn, column))
+                && ColumnMetadata.sameName(c.cellCursor().cellColumn(), column))
             {
                 DeletionTime d = c.cellCursor().complexDeletion;
                 if (d.supersedes(scratch))
@@ -1550,14 +1550,14 @@ public class CursorCompactor extends CompactionInfo.Holder
         // -> the latest data.
         StatefulCursor firstSource = sstableCursors[0];
         SSTableCursorReader.CellCursor firstCursor = firstSource.cellCursor();
-        cellWinner.set(firstSource, firstCursor, firstCursor.cellLiveness);
+        cellWinner.set(firstSource, firstCursor, firstCursor.cellLiveness());
 
-        if (firstCursor.cellColumn.isCounterColumn())
+        if (firstCursor.cellColumn().isCounterColumn())
             return mergeCounterCells(cellMergeLimit, activeDeletion, rowLiveness, isRowDropped, isStatic);
 
         // All cells in this group have the same column, because the group is the merge minimum.
         // The winner changes below, but the column does not.
-        final boolean isComplexColumn = firstCursor.cellColumn.isComplex();
+        final boolean isComplexColumn = firstCursor.cellColumn().isComplex();
 
         DeletionTime effectiveDeletion = activeDeletion;
         if (isComplexColumn)
@@ -1566,13 +1566,13 @@ public class CursorCompactor extends CompactionInfo.Holder
             // The streams are in column order, this column is the merge minimum, and a
             // deletion-only position sorts before the cells. The merged deletion is therefore
             // known before the first cell of the column is written.
-            if (!ColumnMetadata.sameName(currentComplexColumn, firstCursor.cellColumn))
-                isRowDropped = startNewComplexColumn(rowMergeLimit, firstCursor.cellColumn, activeDeletion, isRowDropped, isStatic);
+            if (!ColumnMetadata.sameName(currentComplexColumn, firstCursor.cellColumn()))
+                isRowDropped = startNewComplexColumn(rowMergeLimit, firstCursor.cellColumn(), activeDeletion, isRowDropped, isStatic);
             // The shadow deletion is non-live only if it superseded the active deletion at the fold.
             if (!shadowComplexDeletion.isLive())
                 effectiveDeletion = shadowComplexDeletion;
 
-            if (!firstCursor.producedCell)
+            if (!firstCursor.cellProduced())
             {
                 // A deletion-only group. The fold above already used its deletion.
                 return isRowDropped;
@@ -1593,7 +1593,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             partitionTombstoneCount++;
 
         /** {@link Cell.Serializer#serialize} */
-        int cellFlags = applyExpiredTtl(cellWinner.cursor.cellFlags);
+        int cellFlags = applyExpiredTtl(cellWinner.cursor.cellFlags());
 
         if (effectiveDeletion.deletesCellAt(cellWinner.liveness.timestamp())
             || purger.shouldPurge(cellWinner.liveness, nowInSec))
@@ -1613,9 +1613,9 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         // The winner's own cursor supplies the column. The name test in writeCellHeader needs that
         // instance.
-        ssTableCursorWriter.writeCellHeader(cellFlags, cellWinner.liveness, cellWinner.cursor.cellColumn);
+        ssTableCursorWriter.writeCellHeader(cellFlags, cellWinner.liveness, cellWinner.cursor.cellColumn());
         if (isComplexColumn)
-            ssTableCursorWriter.writeCellPath(cellWinner.cursor.cellPathBuffer, cellWinner.cursor.cellPathLength);
+            ssTableCursorWriter.writeCellPath(cellWinner.cursor.cellPathBuffer(), cellWinner.cursor.cellPathLength());
         if (!Cell.Serializer.hasValue(cellFlags))
             return;
 
@@ -1674,7 +1674,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             StatefulCursor challenger = sstableCursors[i];
             SSTableCursorReader.CellCursor challengerCursor = challenger.cellCursor();
-            ReusableCellLivenessInfo challengerLiveness = challengerCursor.cellLiveness;
+            ReusableCellLivenessInfo challengerLiveness = challengerCursor.cellLiveness();
 
             Resolution resolution = CellLivenessInfo.resolve(cellWinner.liveness, challengerLiveness);
             if (resolution == LEFT)
@@ -1736,7 +1736,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         // vint, and the reference compares the raw value bytes. Skip the vint, or a lexicographic
         // compare orders by length first.
         int skip1 = 0, skip2 = 0;
-        if (cellWinner.cursor.cellType.valueLengthIfFixed() < 0)
+        if (cellWinner.cursor.cellType().valueLengthIfFixed() < 0)
         {
             skip1 = tempCellBuffer1.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer1.getData()[0]);
             skip2 = tempCellBuffer2.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer2.getData()[0]);
@@ -1858,7 +1858,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     private boolean mergeCounterCells(int cellMergeLimit, DeletionTime activeDeletion, LivenessInfo rowLiveness,
                                       boolean isRowDropped, boolean isStatic) throws IOException
     {
-        ColumnMetadata column = sstableCursors[0].cellCursor().cellColumn;
+        ColumnMetadata column = sstableCursors[0].cellCursor().cellColumn();
         // tombstone fold: the surviving-tombstone winner's liveness/flags (references into
         // the owning cursor's reusables — stable until that cursor reads its next cell)
         ReusableCellLivenessInfo tombstoneLiveness = null;
@@ -1871,7 +1871,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             StatefulCursor source = sstableCursors[i];
             SSTableCursorReader.CellCursor cc = source.cellCursor();
-            ReusableCellLivenessInfo liveness = cc.cellLiveness;
+            ReusableCellLivenessInfo liveness = cc.cellLiveness();
 
             if (activeDeletion.deletesCellAt(liveness.timestamp()))
             {
@@ -1890,7 +1890,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                 if (resolution == RIGHT)
                 {
                     tombstoneLiveness = liveness;
-                    tombstoneFlags = cc.cellFlags;
+                    tombstoneFlags = cc.cellFlags();
                     // counter tombstones normally carry no value, but the serializers
                     // preserve one faithfully when present (hasValue is recomputed from the
                     // bytes, Cell.Serializer.serialize) — dropping it while the flags still
@@ -1931,7 +1931,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                         tempCellValueLength1 = tempCellValueLength2;
                         tempCellValueLength2 = swapLength;
                         tombstoneLiveness = liveness;
-                        tombstoneFlags = cc.cellFlags;
+                        tombstoneFlags = cc.cellFlags();
                     }
                 }
                 else if (source.state() == CELL_VALUE_START)
@@ -2652,16 +2652,16 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         SSTableCursorReader.CellCursor cc1 = c1.cellCursor();
         SSTableCursorReader.CellCursor cc2 = c2.cellCursor();
-        int byColumn = cc1.cellColumn.compareTo(cc2.cellColumn);
-        if (byColumn != 0 || !cc1.cellColumn.isComplex())
+        int byColumn = cc1.cellColumn().compareTo(cc2.cellColumn());
+        if (byColumn != 0 || !cc1.cellColumn().isComplex())
             return byColumn;
         // The two cursors are at the same complex column. A deletion-only position has no cell,
         // and sorts before every cell, so the deletion sources of the column come first.
-        if (!cc1.producedCell || !cc2.producedCell)
-            return Boolean.compare(cc1.producedCell, cc2.producedCell);
+        if (!cc1.cellProduced() || !cc2.cellProduced())
+            return Boolean.compare(cc1.cellProduced(), cc2.cellProduced());
         // The cell cursor resolves cellPathType once per column. Pass it here, because this
         // comparator runs once per cell per source.
-        return comparePaths(cc1.cellColumn, cc1.cellPathType, cc1.cellPathWindow(), cc2.cellPathWindow());
+        return comparePaths(cc1.cellColumn(), cc1.cellPathType(), cc1.cellPathWindow(), cc2.cellPathWindow());
     }
 
     /**

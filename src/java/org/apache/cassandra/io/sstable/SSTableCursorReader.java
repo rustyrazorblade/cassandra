@@ -173,6 +173,19 @@ public class SSTableCursorReader implements AutoCloseable
         // The type that compares the path bytes of the current cell: see
         // ColumnMetadata.pathNameComparator. It is null for a simple column.
         public AbstractType<?> cellPathType;
+
+        // Accessors over the cell state above. The merge loop reads the cell through these rather
+        // than through the fields, so the same walk can later run over a source that is not this
+        // class. Names match CursorReads.MergeLeg where it has a counterpart.
+        public ColumnMetadata cellColumn() { return cellColumn; }
+        public ReusableCellLivenessInfo cellLiveness() { return cellLiveness; }
+        public boolean cellProduced() { return producedCell; }
+        public int cellFlags() { return cellFlags; }
+        public AbstractType<?> cellType() { return cellType; }
+        public AbstractType<?> cellPathType() { return cellPathType; }
+        public byte[] cellPathBuffer() { return cellPathBuffer; }
+        public int cellPathLength() { return cellPathLength; }
+
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
         // One entry per column of columnsArray: the path comparator type of a complex column, or
