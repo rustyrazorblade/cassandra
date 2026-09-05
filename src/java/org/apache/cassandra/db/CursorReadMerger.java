@@ -20,10 +20,7 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -41,6 +38,7 @@ import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.io.sstable.ClusteringDescriptor;
+import org.apache.cassandra.io.sstable.OpenRangeDeletions;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -114,7 +112,7 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  * ({@code CursorReads.MergeLeg.seekForMerge}), and its open-range-tombstone deletion at the
  * seek point ({@code IndexInfo.openDeletion} — the exact payload
  * {@code ForwardIndexedReader.setForSlice} seeds per leg on the iterator path) is seeded into
- * {@link #openMarkers} by this constructor, so cross-leg reconciliation of range tombstones
+ * {@code openRanges} by this constructor, so cross-leg reconciliation of range tombstones
  * spanning the seek points stays exact. Per-leg seek points may be MISALIGNED (different floor
  * blocks per leg, or unseeked BIG legs mixed in): that is safe because every leg's post-seek
  * stream contains all of that leg's elements strictly after the slice start (its floor block's
@@ -394,13 +392,9 @@ final class CursorReadMerger
      *  deletion when one supersedes it — compaction's activeDeletion, verbatim. */
     private DeletionTime activeDeletion;
 
-    // Range-tombstone open-marker set — the copy-adapted shape of CursorCompactor:1465-1695
-    // (RangeTombstoneMarker.Merger semantics: the merged stream emits a marker exactly where the
-    // supersedes-max over the per-source open deletions changes). Since M2.2 the set starts
-    // seeded with each seeked leg's open deletion at its seek point (see the constructor).
-    private DeletionTime activeOpenRangeDeletion = DeletionTime.LIVE;
-    private final List<DeletionTime.ReusableDeletionTime> openMarkers = new ArrayList<>();
-    private final ArrayDeque<DeletionTime.ReusableDeletionTime> reusableMarkersPool = new ArrayDeque<>();
+    // Range-tombstone open-marker set, shared with CursorCompactor. Since M2.2 it starts seeded
+    // with each seeked leg's open deletion at its seek point (see the constructor).
+    private final OpenRangeDeletions openRanges = new OpenRangeDeletions();
 
     /** M2.2: the merged open-range-tombstone deletion at the merge's START position — the
      *  supersedes-max over the legs' row-index seek seeds after the partition-deletion filter
@@ -501,16 +495,16 @@ final class CursorReadMerger
         {
             DeletionTime seed = leg.mergeSeekOpenMarker();
             if (seed != null)
-                addOpenRangeDeletion(seed);
+                openRanges.open(seed, mergedPartitionDeletion);
         }
         // a seeded open supersedes the partition deletion by the filter above, so it is the
         // active shadowing deletion at merge start — the same formula mergeUnfiltereds applies
         // after every marker group
-        if (activeOpenRangeDeletion != DeletionTime.LIVE)
-            activeDeletion = activeOpenRangeDeletion;
-        this.openMarkerAtMergeStart = activeOpenRangeDeletion == DeletionTime.LIVE
+        if (openRanges.active() != DeletionTime.LIVE)
+            activeDeletion = openRanges.active();
+        this.openMarkerAtMergeStart = openRanges.active() == DeletionTime.LIVE
                                       ? null
-                                      : CursorReads.copyOf(activeOpenRangeDeletion);
+                                      : CursorReads.copyOf(openRanges.active());
     }
 
     /** See {@link #openMarkerAtMergeStart} — consumed by {@code CursorReads.mergeLegs} for the
@@ -595,9 +589,9 @@ final class CursorReadMerger
             else if (minimum.isStartBound() || minimum.isEndBound() || minimum.isBoundary())
             {
                 mergeMarkerGroup(mergeLimit);
-                activeDeletion = activeOpenRangeDeletion == DeletionTime.LIVE
+                activeDeletion = openRanges.active() == DeletionTime.LIVE
                                  ? mergedPartitionDeletion
-                                 : activeOpenRangeDeletion;
+                                 : openRanges.active();
             }
             else
             {
@@ -1255,12 +1249,12 @@ final class CursorReadMerger
     private void mergeMarkerGroup(int rangeTombstoneMergeLimit) throws IOException
     {
         DeletionTime previousDeletionInMerged = DeletionTime.LIVE;
-        if (activeOpenRangeDeletion != DeletionTime.LIVE)
-            previousDeletionInMerged = reusableCopy(activeOpenRangeDeletion);
+        if (openRanges.active() != DeletionTime.LIVE)
+            previousDeletionInMerged = openRanges.copyOf(openRanges.active());
         try
         {
             updateOpenMarkers(rangeTombstoneMergeLimit);
-            DeletionTime newDeletionInMerged = activeOpenRangeDeletion;
+            DeletionTime newDeletionInMerged = openRanges.active();
 
             // The group's clustering values are decoded AT MOST ONCE per group and shared between
             // the validation gate's position and the emitted marker's prefix — only the prefix
@@ -1314,116 +1308,16 @@ final class CursorReadMerger
         finally
         {
             if (previousDeletionInMerged != DeletionTime.LIVE)
-                reusableMarkersPool.offer((DeletionTime.ReusableDeletionTime) previousDeletionInMerged);
+                openRanges.recycle((DeletionTime.ReusableDeletionTime) previousDeletionInMerged);
         }
     }
 
-    /** Copy-adapt of CursorCompactor.updateOpenMarkers: RangeTombstoneMarker.Merger's
-     *  updateOpenMarkers, plus the close-must-match-an-open sanity check. */
+    /** Feeds the group's merged markers to the shared open set. */
     private void updateOpenMarkers(int rangeTombstoneMergeLimit)
     {
         for (int i = 0; i < rangeTombstoneMergeLimit; i++)
-        {
-            UnfilteredDescriptor marker = legs[i].unfiltered();
-            if (marker.isStartBound())
-            {
-                addOpenRangeDeletion(marker.deletionTime());
-            }
-            else if (marker.isEndBound())
-            {
-                removeOpenRangeDeletion(marker.deletionTime(), marker);
-            }
-            else if (marker.isBoundary())
-            {
-                removeOpenRangeDeletion(marker.deletionTime(), marker);
-                addOpenRangeDeletion(marker.deletionTime2());
-            }
-            else
-            {
-                throw new IllegalStateException("Unexpected bound type:" + marker.clusteringKind());
-            }
-        }
-
-        if (activeOpenRangeDeletion == null)
-            recalculateActiveOpen();
-    }
-
-    private void recalculateActiveOpen()
-    {
-        // the active open was invalidated by a close matching it: scan the set for the new max
-        int size = openMarkers.size();
-        if (size == 0)
-        {
-            activeOpenRangeDeletion = DeletionTime.LIVE;
-            return;
-        }
-        DeletionTime maxOpenDeletion = openMarkers.get(0);
-        for (int i = 1; i < size; i++)
-        {
-            DeletionTime openDeletion = openMarkers.get(i);
-            if (openDeletion.supersedes(maxOpenDeletion))
-                maxOpenDeletion = openDeletion;
-        }
-        activeOpenRangeDeletion = maxOpenDeletion;
-    }
-
-    private void addOpenRangeDeletion(DeletionTime openRangeDeletion)
-    {
-        // markers shadowed by the partition-level deletion never surface in the merged stream
-        // (RangeTombstoneMarker.Merger's partition-deletion filter)
-        if (!mergedPartitionDeletion.isLive() && !openRangeDeletion.supersedes(mergedPartitionDeletion))
-            return;
-
-        DeletionTime.ReusableDeletionTime reusable = reusableCopy(openRangeDeletion);
-        openMarkers.add(reusable);
-        if (activeOpenRangeDeletion != null && // invalidated by a remove: full rescan pending
-            (activeOpenRangeDeletion == DeletionTime.LIVE || reusable.supersedes(activeOpenRangeDeletion)))
-            activeOpenRangeDeletion = reusable;
-    }
-
-    private void removeOpenRangeDeletion(DeletionTime closeRangeDeletion, UnfilteredDescriptor marker)
-    {
-        // symmetric with addOpenRangeDeletion's partition-deletion filter (a close's deletion
-        // always equals its open's)
-        if (!mergedPartitionDeletion.isLive() && !closeRangeDeletion.supersedes(mergedPartitionDeletion))
-            return;
-
-        int size = openMarkers.size();
-        int j = 0;
-        DeletionTime.ReusableDeletionTime matched = null;
-        for (; j < size; j++)
-        {
-            matched = openMarkers.get(j);
-            if (matched.equals(closeRangeDeletion))
-                break;
-        }
-        if (j == size)
-            throw new IllegalStateException("Expected an open marker for this closing marker:" + marker);
-
-        reusableMarkersPool.offer(matched);
-        if (activeOpenRangeDeletion == matched)
-            activeOpenRangeDeletion = null; // trigger recalculation
-        if (size == 1)
-        {
-            openMarkers.clear();
-        }
-        else
-        {
-            // avoid the array copy: swap in the last element
-            DeletionTime.ReusableDeletionTime last = openMarkers.remove(size - 1);
-            if (j != size - 1)
-                openMarkers.set(j, last);
-        }
-    }
-
-    private DeletionTime.ReusableDeletionTime reusableCopy(DeletionTime deletionTime)
-    {
-        DeletionTime.ReusableDeletionTime reusable = reusableMarkersPool.pollLast();
-        if (reusable == null)
-            reusable = DeletionTime.ReusableDeletionTime.copy(deletionTime);
-        else
-            reusable.reset(deletionTime);
-        return reusable;
+            openRanges.apply(legs[i].unfiltered(), mergedPartitionDeletion);
+        openRanges.settle();
     }
 
     /**
