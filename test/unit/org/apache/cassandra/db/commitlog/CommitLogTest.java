@@ -59,6 +59,7 @@ import org.junit.runners.Parameterized.Parameters;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.Config.DiskFailurePolicy;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
@@ -824,6 +825,91 @@ public abstract class CommitLogTest
         replayer.replayFiles(files);
 
         assertEquals(cellCount, replayer.cells);
+    }
+
+    /**
+     * A mutation that over-states its serialized size leaves a tail in its commit log slot that it did not
+     * write. The entry must still replay, and the entries after it with it.
+     */
+    @Test
+    public void replayEntryWithPaddedTail() throws IOException
+    {
+        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        CommitLog.instance.add(new OverstatedSizeMutation(Iterables.getOnlyElement(
+            new RowUpdateBuilder(cfs.metadata(), 0, "k1").clustering("bytes")
+                                                         .add("val", bytes("this is a string"))
+                                                         .build()
+                                                         .getPartitionUpdates())));
+
+        CommitLog.instance.add(new RowUpdateBuilder(cfs.metadata(), 0, "k2").clustering("bytes")
+                                                                           .add("val", bytes("this is a string"))
+                                                                           .build());
+        CommitLog.instance.sync(true);
+
+        SimpleCountingReplayer replayer = new SimpleCountingReplayer(CommitLog.instance, CommitLogPosition.NONE, cfs.metadata());
+        List<String> activeSegments = CommitLog.instance.getActiveSegmentNames();
+        assertFalse(activeSegments.isEmpty());
+        File[] files = new File(CommitLog.instance.segmentManager.storageDirectory).tryList((file, name) -> activeSegments.contains(name));
+        replayer.replayFiles(files);
+
+        assertEquals(2, replayer.cells);
+    }
+
+    /**
+     * Claims eight bytes more than it serializes, so the commit log allocates a slot the mutation cannot fill.
+     */
+    private static class OverstatedSizeMutation extends Mutation
+    {
+        OverstatedSizeMutation(PartitionUpdate update)
+        {
+            super(update);
+        }
+
+        @Override
+        public int serializedSize(int version)
+        {
+            return super.serializedSize(version) + 8;
+        }
+    }
+
+    /**
+     * Batch and group sync promise that add does not return until the entry is on disk. Periodic makes no
+     * such promise, and the difference is what the sync mode is for, so the assertion follows the mode.
+     *
+     * Replay reads copies rather than the live segments, because the data bytes reach the page cache as
+     * soon as they are written and a copy would see them whatever the mode. What distinguishes the modes
+     * is the sync marker: without it the reader cannot know how long the section is, so an unsynced entry
+     * is invisible to replay even though its bytes are in the file.
+     */
+    @Test
+    public void addIsDurableWhenTheSyncModeSaysSo() throws Exception
+    {
+        CommitLog.instance.resetUnsafe(true);
+        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+        Mutation mutation = new RowUpdateBuilder(cfs.metadata(), 0, "durability")
+                            .clustering("bytes")
+                            .add("val", bytes("this is a string"))
+                            .build();
+
+        CommitLog.instance.add(mutation);
+
+        Config.CommitLogSync mode = DatabaseDescriptor.getCommitLogSync();
+        File scratch = new File(CommitLog.instance.segmentManager.storageDirectory, "durability-" + mode);
+        int beforeSync = countReplayed(cfs, CommitLogPropertyFixture.copyActiveSegments(scratch));
+        if (mode != Config.CommitLogSync.periodic)
+            assertEquals("add returned under " + mode + " sync but the entry was not durable",
+                         1, beforeSync);
+
+        CommitLog.instance.sync(true);
+        assertEquals("the entry was not durable even after an explicit sync",
+                     1, countReplayed(cfs, CommitLogPropertyFixture.copyActiveSegments(scratch)));
+    }
+
+    private int countReplayed(ColumnFamilyStore cfs, File[] files) throws IOException
+    {
+        SimpleCountingReplayer replayer = new SimpleCountingReplayer(CommitLog.instance, CommitLogPosition.NONE, cfs.metadata());
+        replayer.replayFiles(files);
+        return replayer.cells;
     }
 
     @Test

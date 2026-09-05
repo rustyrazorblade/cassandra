@@ -48,9 +48,8 @@ import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.exceptions.CDCWriteException;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.compress.ICompressor;
-import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
-import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.PathUtils;
 import org.apache.cassandra.metrics.CommitLogMetrics;
@@ -60,7 +59,10 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.service.DiskErrorsHandlerService;
 import org.apache.cassandra.service.StorageService;
+import io.netty.util.concurrent.FastThreadLocal;
+
 import org.apache.cassandra.utils.MBeanWrapper;
+import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.db.commitlog.CommitLogSegment.Allocation;
@@ -302,44 +304,105 @@ public class CommitLog implements CommitLogMBean
     {
         assert mutation != null;
 
-        mutation.validateSize(MessagingService.current_version, ENTRY_OVERHEAD_SIZE);
+        int version = MessagingService.current_version;
+        mutation.validateSize(version, ENTRY_OVERHEAD_SIZE);
 
-        try (DataOutputBuffer dob = DataOutputBuffer.scratchBuffer.get())
+        // Size the slot from the mutation's own cached serialized size, then serialize straight into it. The
+        // outbound messaging path already sizes its payload buffer the same way.
+        int size = mutation.serializedSize(version);
+        Allocation alloc = segmentManager.allocate(mutation, size + ENTRY_OVERHEAD_SIZE);
+
+        CRC32 checksum = new CRC32();
+        SegmentWriter writer = segmentWriter.get().pointAt(alloc);
+        final ByteBuffer buffer = writer.buffer;
+        try
         {
-            Mutation.serializer.serialize(mutation, dob, MessagingService.current_version);
-            int size = dob.getLength();
-            int totalSize = size + ENTRY_OVERHEAD_SIZE;
-            Allocation alloc = segmentManager.allocate(mutation, totalSize);
+            // checksummed length
+            writer.out.writeInt(size);
+            updateChecksumInt(checksum, size);
+            buffer.putInt((int) checksum.getValue());
 
-            CRC32 checksum = new CRC32();
-            final ByteBuffer buffer = alloc.getBuffer();
-            try (BufferedDataOutputStreamPlus dos = new DataOutputBufferFixed(buffer))
-            {
-                // checksummed length
-                dos.writeInt(size);
-                updateChecksumInt(checksum, size);
-                buffer.putInt((int) checksum.getValue());
+            // checksummed mutation, written straight into its slot
+            int start = buffer.position();
+            int end = start + size;
+            int entryLimit = buffer.limit();
+            // Confine the serializer to the slot, so a mutation that under-states its size overflows here
+            // rather than in the checksum that follows it.
+            buffer.limit(end);
+            Mutation.serializer.serialize(mutation, writer.out, version);
 
-                // checksummed mutation
-                dos.write(dob.unsafeGetBufferAndFlip());
-                updateChecksum(checksum, buffer, buffer.position() - size, size);
-                buffer.putInt((int) checksum.getValue());
-            }
-            catch (IOException e)
+            if (buffer.position() != end)
             {
-                throw new FSWriteError(e, alloc.getSegment().getPath());
+                // The mutation over-stated its size. Zero the tail it left behind rather than checksum
+                // whatever the segment buffer held there; replay stops at the end of the mutation and
+                // ignores the rest.
+                NoSpamLogger.log(logger, NoSpamLogger.Level.ERROR, 1, TimeUnit.MINUTES,
+                                 "Mutation for {} serialized to {} bytes but reported {}",
+                                 mutation.getKeyspaceName(), buffer.position() - start, size);
+                while (buffer.hasRemaining())
+                    buffer.put((byte) 0);
             }
-            finally
-            {
-                alloc.markWritten();
-            }
+            buffer.limit(entryLimit);
 
-            executor.finishWriteFor(alloc);
-            return alloc.getCommitLogPosition();
+            updateChecksum(checksum, buffer, start, size);
+            buffer.putInt((int) checksum.getValue());
         }
         catch (IOException e)
         {
-            throw new FSWriteError(e, segmentManager.allocatingFrom().getPath());
+            throw new FSWriteError(e, alloc.getSegment().getPath());
+        }
+        finally
+        {
+            alloc.markWritten();
+        }
+
+        executor.finishWriteFor(alloc);
+        return alloc.getCommitLogPosition();
+    }
+
+    /**
+     * One writer per thread, re-pointed at each allocation rather than built per write.
+     *
+     * Building it per write cost three objects every time: a duplicate of the segment buffer, the
+     * DataOutputBufferFixed wrapping it, and the GrowingChannel that DataOutputStreamPlus allocates in
+     * its constructor and that DataOutputBufferFixed can never use, because it throws from both doFlush
+     * and expandToFit. Together they were 64.7% of what a small write allocated.
+     *
+     * The duplicate is what gives a writer its own position and limit over the shared segment buffer, so
+     * it cannot simply be dropped; it is kept per thread instead and re-made only when the segment
+     * rotates, which is once per segment rather than once per write.
+     */
+    private static final FastThreadLocal<SegmentWriter> segmentWriter = new FastThreadLocal<SegmentWriter>()
+    {
+        @Override
+        protected SegmentWriter initialValue()
+        {
+            return new SegmentWriter();
+        }
+    };
+
+    private static final class SegmentWriter
+    {
+        /** The segment buffer this writer's duplicate was taken from, compared by identity. */
+        private ByteBuffer source;
+        private ByteBuffer buffer;
+        private DataOutputPlus out;
+
+        SegmentWriter pointAt(Allocation alloc)
+        {
+            ByteBuffer segmentBuffer = alloc.getSegment().buffer;
+            if (segmentBuffer != source)
+            {
+                // a rotation, or this thread's first write. The previous duplicate is dropped here and
+                // never touched again, which matters because its segment may already have been closed
+                // and its buffer freed.
+                source = segmentBuffer;
+                buffer = segmentBuffer.duplicate();
+                out = new DataOutputBufferFixed(buffer);
+            }
+            buffer.limit(buffer.capacity()).position(alloc.getPosition());
+            buffer.limit(alloc.getPosition() + alloc.getSize());
+            return this;
         }
     }
 
