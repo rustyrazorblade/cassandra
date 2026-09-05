@@ -180,11 +180,14 @@ public class CassandraCompressedStreamWriterTest
     public void chunkSizeDecidesHowManyWritesASectionTakes() throws IOException
     {
         int original = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
         try
         {
             List<PartitionPositionBounds> sections = StreamingTestFixture.wholeFile(sstable);
             long onTheWire = header(sstable, sections).size();
 
+            // the window has to make room first: a chunk larger than it is refused
+            DatabaseDescriptor.setStreamSendWindowInBytes((int) onTheWire + (2 << 20));
             DatabaseDescriptor.setStreamChunkSizeInBytes((int) onTheWire + (1 << 20));
             StreamingTestFixture.CapturingChannel large = StreamingTestFixture.captureChannel(writer(sstable, sections, session()));
 
@@ -199,6 +202,7 @@ public class CassandraCompressedStreamWriterTest
         finally
         {
             DatabaseDescriptor.setStreamChunkSizeInBytes(original);
+            DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
         }
     }
 
