@@ -49,9 +49,8 @@ import static org.junit.Assert.assertTrue;
 /**
  * Replay against a schema that no longer matches the bytes on disk.
  *
- * Both cases pass every checksum. The entry is intact; it is the schema that moved, which is what makes
- * these the two branches in CommitLogReader.readMutation that the checksum cannot protect. It is also
- * the largest uncovered method in the package.
+ * The entry passes every checksum. It is intact; it is the schema that moved. That is the one class of
+ * damage the checksum cannot protect against.
  *
  * The property is that such an entry is never applied, and never costs the entries written around it.
  */

@@ -21,13 +21,10 @@ package org.apache.cassandra.db.commitlog;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
-import javax.crypto.Cipher;
 
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -38,34 +35,16 @@ import org.junit.runners.Parameterized.Parameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
-import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
-import org.apache.cassandra.db.marshal.BytesType;
-import org.apache.cassandra.io.compress.DeflateCompressor;
-import org.apache.cassandra.io.compress.LZ4Compressor;
-import org.apache.cassandra.io.compress.ZstdCompressor;
-import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.security.CipherFactory;
 import org.apache.cassandra.security.EncryptionContext;
-import org.apache.cassandra.security.EncryptionContextGenerator;
-import org.apache.cassandra.utils.AbstractTypeGenerators;
-import org.apache.cassandra.utils.AbstractTypeGenerators.TypeGenBuilder;
-import org.apache.cassandra.utils.CassandraGenerators;
-import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
 import org.quicktheories.impl.JavaRandom;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 
 /**
  * Everything written to the commit log comes back out of it, unchanged and in order.
@@ -78,8 +57,8 @@ import static org.junit.Assert.assertTrue;
  * Mutations are compared by their serialized bytes rather than by object equality, because a replayed
  * mutation is a fresh object graph and Mutation has no value equality.
  *
- * Each parameterization asserts which segment implementation actually ran. A configuration that quietly
- * fell back to the memory-mapped path would otherwise report six passes for one code path.
+ * Each parameterization asserts which segment class actually ran. A configuration that quietly fell back
+ * to another segment type would otherwise pass as coverage it does not have.
  *
  * What this test cannot see:
  *
@@ -91,7 +70,7 @@ import static org.junit.Assert.assertTrue;
  *   segment holds.
  */
 @RunWith(Parameterized.class)
-public class CommitLogRoundTripPropertyTest
+public class CommitLogRoundTripPropertyTest extends SegmentParameterizedBase
 {
     private static final Logger logger = LoggerFactory.getLogger(CommitLogRoundTripPropertyTest.class);
 
@@ -103,62 +82,31 @@ public class CommitLogRoundTripPropertyTest
     private static final int TABLES = 8;
     private static final List<TableMetadata> TABLES_GENERATED = new ArrayList<>(TABLES);
 
-    private final Class<? extends CommitLogSegment> expectedSegmentType;
-
     public CommitLogRoundTripPropertyTest(ParameterizedClass commitLogCompression,
                                           EncryptionContext encryptionContext,
+                                          Config.DiskAccessMode diskAccessMode,
                                           Class<? extends CommitLogSegment> expectedSegmentType)
     {
-        this.expectedSegmentType = expectedSegmentType;
-        DatabaseDescriptor.setCommitLogCompression(commitLogCompression);
-        DatabaseDescriptor.setEncryptionContext(encryptionContext);
-        DatabaseDescriptor.initializeCommitLogDiskAccessMode();
+        super(commitLogCompression, encryptionContext, diskAccessMode, expectedSegmentType);
     }
 
-    @Parameters(name = "{2}")
+    @Parameters(name = "{3}")
     public static Collection<Object[]> generateData() throws Exception
     {
-        return Arrays.asList(new Object[][]
-                             {
-                             { null, EncryptionContextGenerator.createDisabledContext(), MemoryMappedSegment.class },
-                             { null, newEncryptionContext(), EncryptedSegment.class },
-                             { new ParameterizedClass(LZ4Compressor.class.getName(), Collections.emptyMap()),
-                               EncryptionContextGenerator.createDisabledContext(), CompressedSegment.class },
-                             { new ParameterizedClass(DeflateCompressor.class.getName(), Collections.emptyMap()),
-                               EncryptionContextGenerator.createDisabledContext(), CompressedSegment.class },
-                             { new ParameterizedClass(ZstdCompressor.class.getName(), Collections.emptyMap()),
-                               EncryptionContextGenerator.createDisabledContext(), CompressedSegment.class }
-                             });
-    }
-
-    private static EncryptionContext newEncryptionContext() throws Exception
-    {
-        EncryptionContext context = EncryptionContextGenerator.createContext(true);
-        CipherFactory cipherFactory = new CipherFactory(context.getTransparentDataEncryptionOptions());
-        Cipher cipher = cipherFactory.getEncryptor(context.getTransparentDataEncryptionOptions().cipher,
-                                                   context.getTransparentDataEncryptionOptions().key_alias);
-        return EncryptionContextGenerator.createContext(cipher.getIV(), true);
+        return CommitLogPropertyFixture.segmentParameterizations();
     }
 
     @BeforeClass
     public static void beforeClass()
     {
-        KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
-        SchemaLoader.prepareServer();
-
-        long schemaSeed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
-        logger.info("schema seed={}, examples={}, mutations per example={}", schemaSeed, EXAMPLES, MUTATIONS);
-        JavaRandom random = new JavaRandom(schemaSeed);
-        for (int i = 0; i < TABLES; i++)
-            TABLES_GENERATED.add(CommitLogPropertyFixture.generateTable(KEYSPACE, random, i));
-
-        SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1),
-                                    TABLES_GENERATED.toArray(new TableMetadata[0]));
+        TABLES_GENERATED.addAll(CommitLogPropertyFixture.prepareKeyspace(logger, KEYSPACE, TABLES));
+        logger.info("examples={}, mutations per example={}", EXAMPLES, MUTATIONS);
     }
 
     @Before
     public void before() throws IOException
     {
+        applySegmentConfiguration();
         CommitLog.instance.resetUnsafe(true);
     }
 
@@ -181,10 +129,7 @@ public class CommitLogRoundTripPropertyTest
             }
             CommitLog.instance.sync(true);
 
-            // configuration hides coverage: prove the parameterization selected the segment it names
-            CommitLogSegment segment = CommitLog.instance.segmentManager.allocatingFrom();
-            assertEquals("this parameterization did not run the segment type it names",
-                         expectedSegmentType, segment.getClass());
+            assertSegmentType();
 
             List<ByteBuffer> replayed = CommitLogPropertyFixture.replay(metadata, CommitLogPosition.NONE);
             List<ByteBuffer> expected = new ArrayList<>(written.size());

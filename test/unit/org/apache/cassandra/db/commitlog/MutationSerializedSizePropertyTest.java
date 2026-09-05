@@ -54,15 +54,14 @@ import static org.junit.Assert.assertTrue;
  * Every caller that sizes a buffer from the prediction and then fills it by serializing depends on this,
  * and the commit log is where a disagreement becomes a corrupt entry rather than a wasted byte.
  *
- * The property is checked at every messaging version, because the size is memoised per version and a
- * version added later can memoise a size the serializer for that version does not write.
+ * The property is checked at more than one messaging version, because a mutation caches its size per
+ * version. A version added later can cache a size its own serializer does not write.
  *
  * What this test cannot see:
  *
  * - Multi-cell collections and UDTs. RowUpdateBuilder takes a Java collection for those, not the raw
  *   buffer the type generator produces, so the generated types are frozen here. Frozen collections,
- *   tuples, UDTs and vectors are covered. The multi-cell paths reach the same serializers through the
- *   round-trip property, which drives CQL statements instead.
+ *   tuples, UDTs and vectors are covered.
  * - Composite partition keys. One partition key column per generated table; see generateUpdate.
  * - Counters. Their serialized form depends on the local counter context rather than the generated value.
  * - The cached serialization path. Below {@code cassandra.cacheable_mutation_size_limit_bytes} a mutation

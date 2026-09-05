@@ -29,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -36,10 +37,8 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.Mutation;
-import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.quicktheories.impl.JavaRandom;
 
@@ -49,15 +48,16 @@ import static org.junit.Assert.assertTrue;
 /**
  * Concurrent writers lose nothing, duplicate nothing, and never produce a half-written entry.
  *
- * This is the largest hole in the commit log suite. One test in the whole package drives add from more
- * than one thread, and it is the one that fails on this machine. Everything the write path does to stay
- * correct under concurrency is therefore unexercised: the compare-and-set loop in
- * CommitLogSegment.allocate, the OpOrder barrier that keeps sync from reading a slot a writer is still
- * filling, and the segment switch that happens while other threads are mid-allocation.
+ * Driving add from many threads at once exercises:
+ * <ul>
+ * <li>the compare-and-set loop in CommitLogSegment.allocate;</li>
+ * <li>the OpOrder barrier that keeps sync from reading a slot a writer is still filling;</li>
+ * <li>the segment switch that happens while other threads are mid-allocation.</li>
+ * </ul>
  *
- * Mutations are compared as a multiset rather than a list. Interleaved writers land in whatever order the
- * allocator gives them, so order across threads carries no information; count does. A duplicated entry
- * and a lost entry both show up as a count that does not match, which is the failure worth catching.
+ * The test compares mutations as a multiset, not a list. Interleaved writers land in whatever order the
+ * allocator gives them, so order across threads carries no information; a count that does not match
+ * catches both a lost entry and a duplicated one.
  */
 public class CommitLogConcurrencyPropertyTest
 {
@@ -65,11 +65,7 @@ public class CommitLogConcurrencyPropertyTest
 
     private static final String KEYSPACE = "commitlog_concurrency_property";
 
-    /**
-     * Each example spawns threads and writes a few hundred entries, so it costs far more than a
-     * single-threaded one. A twentieth of the shared example count keeps the class in the same runtime
-     * bracket as the rest of the suite.
-     */
+    /** A twentieth of the shared count keeps this class in the same runtime bracket as the rest of the suite. */
     private static final int EXAMPLES =
         Math.max(1, CassandraRelevantProperties.TEST_COMMITLOG_EXAMPLES.getInt() / 20);
     private static final int PER_THREAD =
@@ -82,18 +78,8 @@ public class CommitLogConcurrencyPropertyTest
     @BeforeClass
     public static void beforeClass()
     {
-        KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
-        SchemaLoader.prepareServer();
-
-        long schemaSeed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
-        logger.info("schema seed={}, examples={}, threads={}, mutations per thread={}",
-                    schemaSeed, EXAMPLES, THREADS, PER_THREAD);
-        JavaRandom random = new JavaRandom(schemaSeed);
-        for (int i = 0; i < TABLES; i++)
-            TABLES_GENERATED.add(CommitLogPropertyFixture.generateTable(KEYSPACE, random, i));
-
-        SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1),
-                                    TABLES_GENERATED.toArray(new TableMetadata[0]));
+        TABLES_GENERATED.addAll(CommitLogPropertyFixture.prepareKeyspace(logger, KEYSPACE, TABLES));
+        logger.info("examples={}, threads={}, mutations per thread={}", EXAMPLES, THREADS, PER_THREAD);
     }
 
     @Before
@@ -106,30 +92,88 @@ public class CommitLogConcurrencyPropertyTest
     @Test
     public void concurrentWritersLoseNothing() throws Throwable
     {
-        new CommitLogSeedRunner(EXAMPLES).run(seed -> runConcurrent(seed, false));
+        new CommitLogSeedRunner(EXAMPLES).run(seed -> runConcurrent(seed, false, false));
     }
 
     /**
-     * The same, with a thread syncing throughout. A sync that reads a slot while its writer is still
-     * filling it would write a truncated entry, and the entry would come back missing or damaged.
+     * Every entry comes back exactly once while another thread syncs throughout. A sync that reads a slot
+     * a writer is still filling would write a truncated entry. That entry comes back missing or damaged.
      */
     @Test
     public void concurrentWritersAndSyncLoseNothing() throws Throwable
     {
-        new CommitLogSeedRunner(EXAMPLES).run(seed -> runConcurrent(seed, true));
+        new CommitLogSeedRunner(EXAMPLES).run(seed -> runConcurrent(seed, true, false));
     }
 
-    private static void runConcurrent(long seed, boolean syncThroughout) throws Throwable
+    /**
+     * Every entry comes back exactly once while another thread rotates the segment throughout. Rotation is
+     * where a writer's cached duplicate of the segment buffer is rebuilt, and the writers have to cross
+     * that boundary mid-batch for the rebuild to be exercised under concurrency at all.
+     */
+    @Test
+    public void concurrentWritersAndRotationLoseNothing() throws Throwable
+    {
+        new CommitLogSeedRunner(EXAMPLES).run(seed -> runConcurrent(seed, true, true));
+    }
+
+    private static void runConcurrent(long seed, boolean syncThroughout, boolean rotateThroughout) throws Throwable
     {
         CommitLog.instance.resetUnsafe(true);
 
         Random workload = new Random(seed);
         TableMetadata metadata = TABLES_GENERATED.get(workload.nextInt(TABLES));
 
-        // built before the threads start, so the measured window holds nothing but add and so the
-        // expected multiset is known exactly
-        List<List<Mutation>> perThread = new ArrayList<>(THREADS);
         Map<ByteBuffer, Integer> expected = new HashMap<>();
+        List<List<Mutation>> perThread = buildBatches(seed, metadata, expected);
+
+        List<Throwable> failures = new CopyOnWriteArrayList<>();
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(THREADS);
+        AtomicBoolean writing = new AtomicBoolean(true);
+        AtomicInteger rotations = new AtomicInteger();
+        List<Thread> threads = new ArrayList<>(THREADS + 2);
+
+        for (int t = 0; t < THREADS; t++)
+            threads.add(writer(perThread.get(t), t, start, done, failures));
+        if (syncThroughout)
+            threads.add(background("commitlog-syncer", start, writing, failures,
+                                   () -> CommitLog.instance.sync(true)));
+        if (rotateThroughout)
+            threads.add(background("commitlog-rotator", start, writing, failures, () -> {
+                AbstractCommitLogSegmentManager manager = CommitLog.instance.segmentManager;
+                manager.advanceAllocatingFrom(manager.allocatingFrom());
+                rotations.incrementAndGet();
+            }));
+        for (Thread thread : threads)
+            thread.start();
+
+        start.countDown();
+        assertTrue("writers did not finish within a minute", done.await(1, TimeUnit.MINUTES));
+        writing.set(false);
+        for (Thread thread : threads)
+            thread.join(TimeUnit.MINUTES.toMillis(1));
+
+        if (!failures.isEmpty())
+            throw failures.get(0);
+
+        CommitLog.instance.sync(true);
+
+        if (rotateThroughout)
+        {
+            assertTrue("the rotation thread never advanced the segment", rotations.get() > 0);
+            assertTrue("rotating left the writers in a single segment",
+                       CommitLog.instance.getActiveSegmentNames().size() > 1);
+        }
+
+        assertReplayedMatches(metadata, expected);
+    }
+
+    private static List<List<Mutation>> buildBatches(long seed, TableMetadata metadata,
+                                                     Map<ByteBuffer, Integer> expected)
+    {
+        // Built before the threads start, so the threads run nothing but add and the expected multiset is
+        // known exactly.
+        List<List<Mutation>> perThread = new ArrayList<>(THREADS);
         for (int t = 0; t < THREADS; t++)
         {
             JavaRandom random = new JavaRandom(seed + t);
@@ -142,65 +186,57 @@ public class CommitLogConcurrencyPropertyTest
             }
             perThread.add(batch);
         }
+        return perThread;
+    }
 
-        List<Throwable> failures = new CopyOnWriteArrayList<>();
-        CountDownLatch start = new CountDownLatch(1);
-        CountDownLatch done = new CountDownLatch(THREADS);
-        List<Thread> threads = new ArrayList<>(THREADS + 1);
+    private static Thread writer(List<Mutation> batch, int index, CountDownLatch start, CountDownLatch done,
+                                 List<Throwable> failures)
+    {
+        return new Thread(() -> {
+            try
+            {
+                start.await();
+                for (Mutation mutation : batch)
+                    CommitLog.instance.add(mutation);
+            }
+            catch (Throwable e)
+            {
+                failures.add(e);
+            }
+            finally
+            {
+                done.countDown();
+            }
+        }, "commitlog-writer-" + index);
+    }
 
-        for (int t = 0; t < THREADS; t++)
-        {
-            List<Mutation> batch = perThread.get(t);
-            Thread thread = new Thread(() -> {
-                try
+    /**
+     * Repeats {@code action} from the moment the writers start until they have all finished. It runs at
+     * least once, so a test can assert the action happened however fast the writers were.
+     */
+    private static Thread background(String name, CountDownLatch start, AtomicBoolean writing,
+                                     List<Throwable> failures, ThrowingRunnable action)
+    {
+        return new Thread(() -> {
+            try
+            {
+                start.await();
+                do
                 {
-                    start.await();
-                    for (Mutation mutation : batch)
-                        CommitLog.instance.add(mutation);
+                    action.run();
                 }
-                catch (Throwable e)
-                {
-                    failures.add(e);
-                }
-                finally
-                {
-                    done.countDown();
-                }
-            }, "commitlog-writer-" + t);
-            threads.add(thread);
-            thread.start();
-        }
+                while (writing.get());
+            }
+            catch (Throwable e)
+            {
+                failures.add(e);
+            }
+        }, name);
+    }
 
-        AtomicBoolean syncing = new AtomicBoolean(syncThroughout);
-        if (syncThroughout)
-        {
-            Thread syncer = new Thread(() -> {
-                try
-                {
-                    start.await();
-                    while (syncing.get())
-                        CommitLog.instance.sync(true);
-                }
-                catch (Throwable e)
-                {
-                    failures.add(e);
-                }
-            }, "commitlog-syncer");
-            threads.add(syncer);
-            syncer.start();
-        }
-
-        start.countDown();
-        assertTrue("writers did not finish within a minute", done.await(1, TimeUnit.MINUTES));
-        syncing.set(false);
-        for (Thread thread : threads)
-            thread.join(TimeUnit.MINUTES.toMillis(1));
-
-        if (!failures.isEmpty())
-            throw failures.get(0);
-
-        CommitLog.instance.sync(true);
-
+    private static void assertReplayedMatches(TableMetadata metadata, Map<ByteBuffer, Integer> expected)
+    throws IOException
+    {
         Map<ByteBuffer, Integer> replayed = new HashMap<>();
         for (ByteBuffer mutation : CommitLogPropertyFixture.replay(metadata, CommitLogPosition.NONE))
             replayed.merge(mutation, 1, Integer::sum);
@@ -211,5 +247,10 @@ public class CommitLogConcurrencyPropertyTest
         assertEquals("the multiset of entries that came back differs from the one written, schema:\n"
                      + metadata.toCqlString(true, false, false),
                      expected, replayed);
+    }
+
+    private interface ThrowingRunnable
+    {
+        void run() throws Exception;
     }
 }

@@ -30,11 +30,9 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.quicktheories.impl.JavaRandom;
 
@@ -74,17 +72,8 @@ public class CommitLogArchiveRoundTripTest
     @BeforeClass
     public static void beforeClass()
     {
-        KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
-        SchemaLoader.prepareServer();
-
-        long schemaSeed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
-        logger.info("schema seed={}, examples={}", schemaSeed, EXAMPLES);
-        JavaRandom random = new JavaRandom(schemaSeed);
-        for (int i = 0; i < TABLES; i++)
-            TABLES_GENERATED.add(CommitLogPropertyFixture.generateTable(KEYSPACE, random, i));
-
-        SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1),
-                                    TABLES_GENERATED.toArray(new TableMetadata[0]));
+        TABLES_GENERATED.addAll(CommitLogPropertyFixture.prepareKeyspace(logger, KEYSPACE, TABLES));
+        logger.info("examples={}", EXAMPLES);
 
         archive = new File(CommitLog.instance.segmentManager.storageDirectory, "archive");
         archive.tryCreateDirectory();

@@ -30,10 +30,8 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.Mutation;
-import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.quicktheories.impl.JavaRandom;
 
@@ -41,22 +39,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Relations that must hold over the commit log whatever the bytes look like.
- *
- * A metamorphic relation needs neither a model nor a reference implementation: it says that two ways of
- * reaching the same place agree. That makes these the cheapest tests here to keep true across a rewrite,
- * and the ones most likely to survive a change in how entries are laid out.
- *
- * Four relations, each aimed at something the round-trip property cannot see on its own:
- *
- * - Splitting a batch across a segment boundary changes nothing. The segment switch is the part of the
- *   write path a size or layout change is most likely to disturb, and a batch that happens to fit in one
- *   segment never reaches it.
- * - Replaying twice returns the same thing. Replay must not consume or mutate what it reads.
- * - Replaying from a position returns a suffix of replaying from the beginning. The filter must drop a
- *   prefix and nothing else.
- * - A mutation either side of the serialization cache limit round trips the same way. The two sizes take
- *   different serialization paths, and only one of them recomputes the size independently of the write.
+ * Relations that must hold over the commit log whatever the bytes look like. Each test compares two ways
+ * of reaching the same result, so none of them needs a model of what the log should contain.
  */
 public class CommitLogMetamorphicPropertyTest
 {
@@ -72,17 +56,8 @@ public class CommitLogMetamorphicPropertyTest
     @BeforeClass
     public static void beforeClass()
     {
-        KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
-        SchemaLoader.prepareServer();
-
-        long schemaSeed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
-        logger.info("schema seed={}, examples={}, mutations per example={}", schemaSeed, EXAMPLES, MUTATIONS);
-        JavaRandom random = new JavaRandom(schemaSeed);
-        for (int i = 0; i < TABLES; i++)
-            TABLES_GENERATED.add(CommitLogPropertyFixture.generateTable(KEYSPACE, random, i));
-
-        SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1),
-                                    TABLES_GENERATED.toArray(new TableMetadata[0]));
+        TABLES_GENERATED.addAll(CommitLogPropertyFixture.prepareKeyspace(logger, KEYSPACE, TABLES));
+        logger.info("examples={}, mutations per example={}", EXAMPLES, MUTATIONS);
     }
 
     @Before
@@ -104,10 +79,14 @@ public class CommitLogMetamorphicPropertyTest
             List<Mutation> mutations = generate(metadata, seed);
 
             List<ByteBuffer> inOneSegment = writeAndReplay(metadata, mutations, -1);
+            int unsplitSegments = CommitLog.instance.getActiveSegmentNames().size();
             int splitAt = 1 + new Random(seed).nextInt(Math.max(1, mutations.size() - 1));
             List<ByteBuffer> acrossSegments = writeAndReplay(metadata, mutations, splitAt);
+            int splitSegments = CommitLog.instance.getActiveSegmentNames().size();
 
-            assertTrue("the split example did not actually change segments", splitAt < mutations.size());
+            assertTrue("the split example did not actually change segments, split at " + splitAt
+                       + ", segments " + unsplitSegments + " then " + splitSegments,
+                       splitSegments > unsplitSegments);
             assertEquals("a segment boundary changed what replayed, split at " + splitAt + ", schema:\n"
                          + metadata.toCqlString(true, false, false),
                          inOneSegment, acrossSegments);
