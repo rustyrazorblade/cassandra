@@ -637,6 +637,15 @@ public enum CassandraRelevantProperties
     TEST_CASSANDRA_SKIP_SYNC("cassandra.skip_sync"),
     TEST_CASSANDRA_SUITENAME("suitename", "suitename_IS_UNDEFINED"),
     TEST_CASSANDRA_TESTTAG("cassandra.testtag", "cassandra.testtag_IS_UNDEFINED"),
+    /**
+     * Scale knobs for the commit log property and model suite. Examples is how many generated cases each
+     * property runs; seed pins a run so a failure reproduces. Override down for a quick local check.
+     */
+    TEST_COMMITLOG_EXAMPLES("cassandra.test.commitlog.examples", "200"),
+    TEST_COMMITLOG_MUTATIONS_PER_EXAMPLE("cassandra.test.commitlog.mutations_per_example", "40"),
+    TEST_COMMITLOG_SEED("cassandra.test.commitlog.seed"),
+    TEST_COMMITLOG_STATEFUL_STEPS("cassandra.test.commitlog.stateful.steps", "150"),
+
     TEST_COMPRESSION("cassandra.test.compression"),
     TEST_COMPRESSION_ALGO("cassandra.test.compression.algo", "lz4"),
     TEST_DEBUG_REF_COUNT("cassandra.debugrefcount"),
