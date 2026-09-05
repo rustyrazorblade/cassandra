@@ -23,6 +23,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.util.Random;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Test;
 
@@ -34,6 +36,7 @@ import org.apache.cassandra.utils.FBUtilities;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.embedded.EmbeddedChannel;
 
+import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -166,6 +169,97 @@ public class AsyncStreamingOutputPlusTest
         finally
         {
             DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+        }
+    }
+
+    /**
+     * The window has to be used, not merely computed. A TestChannel that is never drained completes the first
+     * write and stalls the rest, so the writer keeps submitting until the bytes in flight reach the window and
+     * then parks. How many writes it manages before parking is therefore a direct reading of the window it is
+     * actually applying, and it changes if the configured window is not the one in force.
+     */
+    @Test
+    public void testConfiguredSendWindowGovernsHowMuchIsInFlight() throws Exception
+    {
+        int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        try
+        {
+            int chunk = 64 << 10;
+
+            // The writer parks before a write whose in-flight total would pass max(low, high - chunk).
+            // The first chunk always flushes, so the count is that threshold in chunks, plus one.
+            //
+            // No window of our own: the channel's 64 KiB high and 32 KiB low stand, the threshold is
+            // max(32 KiB, 0) = 32 KiB, and one chunk of 64 KiB already passes it.
+            assertEquals("with no window of our own the channel's marks should govern",
+                         2, writesBeforeParking(0, chunk));
+
+            // A 256 KiB window gives max(128 KiB, 192 KiB) = 192 KiB, which is three more chunks.
+            assertEquals("the configured window should govern how much the writer keeps in flight",
+                         5, writesBeforeParking(4 * chunk, chunk));
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+        }
+    }
+
+    /** Submit fixed size writes to a channel that is never drained, and report how many land before it parks. */
+    private int writesBeforeParking(int window, int chunk) throws Exception
+    {
+        DatabaseDescriptor.setStreamSendWindowInBytes(window);
+
+        TestChannel channel = new TestChannel(4);
+        AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel);
+        AtomicInteger completed = new AtomicInteger();
+
+        Thread writer = new Thread(() -> {
+            try
+            {
+                StreamManager.StreamRateLimiter limiter = StreamManager.getRateLimiter(FBUtilities.getBroadcastAddressAndPort());
+                for (int i = 0; i < 16; i++)
+                {
+                    out.writeToChannel(supplier -> {
+                        ByteBuffer buffer = supplier.get(chunk);
+                        buffer.position(buffer.limit());
+                        buffer.flip();
+                    }, limiter);
+                    completed.incrementAndGet();
+                }
+            }
+            catch (Throwable ignored)
+            {
+                // the test drains the channel and interrupts; whatever falls out here is not the subject
+            }
+        });
+        writer.setDaemon(true);
+        writer.start();
+
+        try
+        {
+            // let it get as far as it can, then confirm it is parked rather than merely slow
+            long deadline = nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            int stable = -1;
+            while (nanoTime() < deadline)
+            {
+                Thread.State state = writer.getState();
+                int done = completed.get();
+                if (done == stable && (state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING))
+                    return done;
+                stable = done;
+                Thread.sleep(50);
+            }
+            throw new AssertionError("the writer never parked; it completed " + completed.get() + " writes");
+        }
+        finally
+        {
+            while (channel.readOutbound() != null)
+            {
+                // drain, so the parked writer can finish and the thread can exit
+            }
+            writer.interrupt();
+            writer.join(TimeUnit.SECONDS.toMillis(10));
+            out.discard();
         }
     }
 
