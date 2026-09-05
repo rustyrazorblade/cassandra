@@ -29,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Digest;
 import org.apache.cassandra.db.lifecycle.StreamingLifecycleTransaction;
@@ -40,6 +41,7 @@ import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.SSTableTxnSingleStreamWriter;
 import org.apache.cassandra.io.util.DataInputBuffer;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.streaming.StreamSummary;
 import org.apache.cassandra.streaming.messages.StreamMessageHeader;
@@ -126,6 +128,27 @@ public final class StreamingTestFixture
     }
 
     /** Run the writer and return every byte it put on the channel. */
+    /** A channel that fails every write, so a test can see what the writer does when the network gives out. */
+    public static void writeToFailingChannel(CassandraStreamWriter writer, Throwable failure) throws IOException
+    {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.config().setWriteBufferHighWaterMark(64 << 20);
+        channel.pipeline().addLast(new ChannelOutboundHandlerAdapter()
+        {
+            @Override
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
+            {
+                ReferenceCountUtil.release(msg);
+                promise.setFailure(failure);
+            }
+        });
+
+        try (AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
+        {
+            writer.write(out);
+        }
+    }
+
     public static byte[] capture(CassandraStreamWriter writer) throws IOException
     {
         return captureChannel(writer).captured();
@@ -140,6 +163,45 @@ public final class StreamingTestFixture
             writer.write(out);
         }
         return channel;
+    }
+
+    /** Feed already-captured wire bytes to the matching reader; used to test what happens when they are wrong. */
+    public static Received receive(SSTableReader sstable, List<PartitionPositionBounds> sections, byte[] wire) throws Throwable
+    {
+        StreamSession session = session();
+        session.prepareReceiving(new StreamSummary(sstable.metadata().id, Collections.emptyList(), 1, wire.length));
+
+        CassandraStreamHeader header = header(sstable, sections);
+        StreamMessageHeader messageHeader = new StreamMessageHeader(sstable.metadata().id,
+                                                                    FBUtilities.getBroadcastAddressAndPort(),
+                                                                    session.planId(), false, 0, 0, 0, null);
+        IStreamReader reader = sstable.compression
+                               ? new CassandraCompressedStreamReader(messageHeader, header, session)
+                               : new CassandraStreamReader(messageHeader, header, session);
+
+        SSTableTxnSingleStreamWriter written =
+            (SSTableTxnSingleStreamWriter) reader.read(new DataInputBuffer(ByteBuffer.wrap(wire), false));
+
+        StreamingLifecycleTransaction txn = new StreamingLifecycleTransaction();
+        return new Received(txn, written.transferOwnershipTo(txn));
+    }
+
+    /** Data files sitting in the table's directories, so a test can show a failed transfer left none behind. */
+    public static int dataFileCount(ColumnFamilyStore cfs)
+    {
+        int count = 0;
+        for (File directory : cfs.getDirectories().getCFDirectories())
+        {
+            File[] files = directory.tryList();
+            if (files == null)
+                continue;
+            for (File file : files)
+            {
+                if (file.name().endsWith("-Data.db"))
+                    count++;
+            }
+        }
+        return count;
     }
 
     /**
