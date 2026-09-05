@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db.commitlog;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,6 +34,8 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.quicktheories.impl.JavaRandom;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -59,7 +60,10 @@ public class CommitLogShutdownDurabilityTest
     private static final String KEYSPACE = "commitlog_shutdown_durability";
     private static final int MUTATIONS = CassandraRelevantProperties.TEST_COMMITLOG_MUTATIONS_PER_EXAMPLE.getInt();
 
+    private static final Logger logger = LoggerFactory.getLogger(CommitLogShutdownDurabilityTest.class);
+
     private static TableMetadata metadata;
+    private static long seed;
 
     @BeforeClass
     public static void beforeClass()
@@ -70,7 +74,8 @@ public class CommitLogShutdownDurabilityTest
         KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
 
         SchemaLoader.prepareServer();
-        long seed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
+        seed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
+        logger.info("seed={}, mutations={}", seed, MUTATIONS);
         metadata = CommitLogPropertyFixture.generateTable(KEYSPACE, new JavaRandom(seed), 0);
         SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1), metadata);
     }
@@ -80,8 +85,7 @@ public class CommitLogShutdownDurabilityTest
     {
         CommitLog.instance.resetUnsafe(true);
 
-        JavaRandom random = new JavaRandom(CassandraRelevantProperties.TEST_COMMITLOG_SEED
-                                           .getLong(System.currentTimeMillis()));
+        JavaRandom random = new JavaRandom(seed);
         List<ByteBuffer> written = new ArrayList<>(MUTATIONS);
         for (int i = 0; i < MUTATIONS; i++)
         {

@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.zip.CRC32;
@@ -312,13 +313,13 @@ public class CommitLog implements CommitLogMBean
         int size = mutation.serializedSize(version);
         Allocation alloc = segmentManager.allocate(mutation, size + ENTRY_OVERHEAD_SIZE);
 
-        CRC32 checksum = new CRC32();
         SegmentWriter writer = segmentWriter.get().pointAt(alloc);
+        CRC32 checksum = writer.checksum;
         final ByteBuffer buffer = writer.buffer;
         try
         {
             // checksummed length
-            writer.out.writeInt(size);
+            buffer.putInt(size);
             updateChecksumInt(checksum, size);
             buffer.putInt((int) checksum.getValue());
 
@@ -333,14 +334,13 @@ public class CommitLog implements CommitLogMBean
 
             if (buffer.position() != end)
             {
-                // The mutation over-stated its size. Zero the tail it left behind rather than checksum
-                // whatever the segment buffer held there; replay stops at the end of the mutation and
-                // ignores the rest.
+                // The mutation over-stated its size. Zero the tail rather than checksum whatever the
+                // segment buffer held there; replay stops at the end of the mutation.
                 NoSpamLogger.log(logger, NoSpamLogger.Level.ERROR, 1, TimeUnit.MINUTES,
                                  "Mutation for {} serialized to {} bytes but reported {}",
                                  mutation.getKeyspaceName(), buffer.position() - start, size);
                 while (buffer.hasRemaining())
-                    buffer.put((byte) 0);
+                    buffer.put(ZEROS, 0, Math.min(ZEROS.length, buffer.remaining()));
             }
             buffer.limit(entryLimit);
 
@@ -360,17 +360,24 @@ public class CommitLog implements CommitLogMBean
         return alloc.getCommitLogPosition();
     }
 
+    /** Zeroes the tail of a slot a mutation over-stated the size of. */
+    private static final byte[] ZEROS = new byte[1024];
+
+    /** Counts the duplicates {@link SegmentWriter#pointAt} builds, so a test can tell a reuse from a rebuild. */
+    private static final AtomicLong segmentWriterRebuilds = new AtomicLong();
+
+    @VisibleForTesting
+    public static long getSegmentWriterRebuilds()
+    {
+        return segmentWriterRebuilds.get();
+    }
+
     /**
-     * One writer per thread, re-pointed at each allocation rather than built per write.
+     * A per-thread writer over the segment buffer, re-pointed at each allocation.
      *
-     * Building it per write cost three objects every time: a duplicate of the segment buffer, the
-     * DataOutputBufferFixed wrapping it, and the GrowingChannel that DataOutputStreamPlus allocates in
-     * its constructor and that DataOutputBufferFixed can never use, because it throws from both doFlush
-     * and expandToFit. Together they were 64.7% of what a small write allocated.
-     *
-     * The duplicate is what gives a writer its own position and limit over the shared segment buffer, so
-     * it cannot simply be dropped; it is kept per thread instead and re-made only when the segment
-     * rotates, which is once per segment rather than once per write.
+     * A writer needs its own position and limit over the buffer it shares with every other writer, so it
+     * holds a duplicate. Keeping the duplicate and its output stream per thread avoids allocating both on
+     * every write.
      */
     private static final FastThreadLocal<SegmentWriter> segmentWriter = new FastThreadLocal<SegmentWriter>()
     {
@@ -383,23 +390,25 @@ public class CommitLog implements CommitLogMBean
 
     private static final class SegmentWriter
     {
-        /** The segment buffer this writer's duplicate was taken from, compared by identity. */
+        /** The segment buffer this writer's duplicate came from. */
         private ByteBuffer source;
         private ByteBuffer buffer;
         private DataOutputPlus out;
+        private final CRC32 checksum = new CRC32();
 
         SegmentWriter pointAt(Allocation alloc)
         {
             ByteBuffer segmentBuffer = alloc.getSegment().buffer;
             if (segmentBuffer != source)
             {
-                // a rotation, or this thread's first write. The previous duplicate is dropped here and
-                // never touched again, which matters because its segment may already have been closed
-                // and its buffer freed.
+                // The segment rotated, or this thread has not written yet. Never reuse the old duplicate:
+                // its segment may already be closed and its buffer freed.
                 source = segmentBuffer;
                 buffer = segmentBuffer.duplicate();
                 out = new DataOutputBufferFixed(buffer);
+                segmentWriterRebuilds.incrementAndGet();
             }
+            checksum.reset();
             buffer.limit(buffer.capacity()).position(alloc.getPosition());
             buffer.limit(alloc.getPosition() + alloc.getSize());
             return this;

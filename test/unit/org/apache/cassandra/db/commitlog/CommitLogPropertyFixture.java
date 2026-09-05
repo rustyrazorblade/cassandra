@@ -24,23 +24,42 @@ import java.nio.file.StandardCopyOption;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
+import javax.crypto.Cipher;
+
+import org.junit.Assume;
+
+import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.io.compress.DeflateCompressor;
+import org.apache.cassandra.io.compress.LZ4Compressor;
+import org.apache.cassandra.io.compress.ZstdCompressor;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.security.CipherFactory;
+import org.apache.cassandra.security.EncryptionContext;
+import org.apache.cassandra.security.EncryptionContextGenerator;
 import org.apache.cassandra.utils.AbstractTypeGenerators;
 import org.apache.cassandra.utils.AbstractTypeGenerators.TypeGenBuilder;
 import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
 import org.quicktheories.impl.Constraint;
+import org.slf4j.Logger;
 import org.quicktheories.impl.JavaRandom;
 
 
@@ -192,6 +211,78 @@ final class CommitLogPropertyFixture
         return replayer.collected;
     }
 
+    /**
+     * Every segment implementation, as JUnit parameters: the compression, the encryption context, the disk
+     * access mode, and the segment class the combination has to produce. A test that takes these asserts
+     * the fourth element against the segment it actually ran, because a configuration that silently falls
+     * back would otherwise pass as coverage it does not have.
+     */
+    static Collection<Object[]> segmentParameterizations() throws Exception
+    {
+        Config.DiskAccessMode legacy = Config.DiskAccessMode.legacy;
+        return Arrays.asList(new Object[][]
+                             {
+                             { null, EncryptionContextGenerator.createDisabledContext(), legacy, MemoryMappedSegment.class },
+                             { null, EncryptionContextGenerator.createDisabledContext(),
+                               Config.DiskAccessMode.direct, DirectIOSegment.class },
+                             { null, newEncryptionContext(), legacy, EncryptedSegment.class },
+                             { new ParameterizedClass(LZ4Compressor.class.getName(), Collections.emptyMap()),
+                               EncryptionContextGenerator.createDisabledContext(), legacy, CompressedSegment.class },
+                             { new ParameterizedClass(DeflateCompressor.class.getName(), Collections.emptyMap()),
+                               EncryptionContextGenerator.createDisabledContext(), legacy, CompressedSegment.class },
+                             { new ParameterizedClass(ZstdCompressor.class.getName(), Collections.emptyMap()),
+                               EncryptionContextGenerator.createDisabledContext(), legacy, CompressedSegment.class }
+                             });
+    }
+
+    private static EncryptionContext newEncryptionContext() throws Exception
+    {
+        EncryptionContext context = EncryptionContextGenerator.createContext(true);
+        CipherFactory cipherFactory = new CipherFactory(context.getTransparentDataEncryptionOptions());
+        Cipher cipher = cipherFactory.getEncryptor(context.getTransparentDataEncryptionOptions().cipher,
+                                                   context.getTransparentDataEncryptionOptions().key_alias);
+        return EncryptionContextGenerator.createContext(cipher.getIV(), true);
+    }
+
+    /**
+     * Applies one of {@link #segmentParameterizations} to the running configuration. Skips the example when
+     * the file system cannot do direct IO, which only the direct parameterization needs.
+     */
+    static void applySegmentConfiguration(ParameterizedClass compression, EncryptionContext encryption,
+                                          Config.DiskAccessMode mode)
+    {
+        if (mode == Config.DiskAccessMode.direct)
+            Assume.assumeTrue("the file system under the commit log directory does not support direct IO",
+                              FileUtils.isDirectIOSupported(new File(DatabaseDescriptor.getCommitLogLocation())));
+
+        DatabaseDescriptor.setCommitLogCompression(compression);
+        DatabaseDescriptor.setEncryptionContext(encryption);
+        DatabaseDescriptor.setCommitLogWriteDiskAccessMode(mode);
+        DatabaseDescriptor.initializeCommitLogDiskAccessMode();
+    }
+
+    /**
+     * Prepares the server, generates {@code tables} tables into {@code keyspace}, creates the keyspace and
+     * returns the tables. The schema seed comes from cassandra.test.commitlog.seed, or the clock, and is
+     * logged so a failure can be replayed.
+     */
+    static List<TableMetadata> prepareKeyspace(Logger logger, String keyspace, int tables)
+    {
+        KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
+        SchemaLoader.prepareServer();
+
+        long schemaSeed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
+        logger.info("schema seed={}", schemaSeed);
+        JavaRandom random = new JavaRandom(schemaSeed);
+        List<TableMetadata> generated = new ArrayList<>(tables);
+        for (int i = 0; i < tables; i++)
+            generated.add(generateTable(keyspace, random, i));
+
+        SchemaLoader.createKeyspace(keyspace, KeyspaceParams.simple(1),
+                                    generated.toArray(new TableMetadata[0]));
+        return generated;
+    }
+
     /** Copies the active segments into {@code destination} and returns the copies. */
     static File[] copyActiveSegments(File destination) throws IOException
     {
@@ -249,9 +340,9 @@ final class CommitLogPropertyFixture
         @Override
         public void handleMutation(Mutation m, int size, int entryLocation, CommitLogDescriptor desc)
         {
-            // the reader deserializes entries before the requested position too, so the filter has to be
-            // applied here as well; SimpleCountingReplayer in CommitLogTest does the same
-            if (entryLocation <= from.position)
+            // the reader deserializes entries before the requested position too, so filter here as well.
+            // The position is a segment and an offset, so an offset in a later segment is never before it.
+            if (desc.id < from.segmentId || (desc.id == from.segmentId && entryLocation <= from.position))
                 return;
             // the system keyspaces write to the same log and would flake every comparison
             if (m.getPartitionUpdates().stream().anyMatch(u -> u.metadata().id.equals(metadata.id)))

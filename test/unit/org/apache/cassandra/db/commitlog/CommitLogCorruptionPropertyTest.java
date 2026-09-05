@@ -34,13 +34,11 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.commitlog.CommitLogReadHandler.CommitLogReadException;
 import org.apache.cassandra.db.commitlog.CommitLogReplayer.CommitLogReplayException;
 import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.quicktheories.impl.JavaRandom;
 
@@ -56,10 +54,6 @@ import static org.junit.Assert.fail;
  * replay exception. Or it may carry on, in which case every mutation it produces must be one that was
  * actually written. What it must never do is reconstruct something plausible out of damaged bytes and
  * hand it over as real, because that is silent data invention on a restart.
- *
- * The guidance in TESTING-ADVANCED.md prefers this shape to a coverage-guided fuzzer here: a generated
- * bit flip in a real serialized artefact, asserting the reader either completes or throws the declared
- * corruption exception, reaches the same class of defect with the machinery the tree already carries.
  *
  * The flip lands anywhere in the file, header included. Damaging the header usually costs the whole
  * segment, which is a legal outcome; the property is about what comes back, not how much.
@@ -84,17 +78,8 @@ public class CommitLogCorruptionPropertyTest
     @BeforeClass
     public static void beforeClass()
     {
-        KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
-        SchemaLoader.prepareServer();
-
-        long schemaSeed = CassandraRelevantProperties.TEST_COMMITLOG_SEED.getLong(System.currentTimeMillis());
-        logger.info("schema seed={}, examples={}, mutations per example={}", schemaSeed, EXAMPLES, MUTATIONS);
-        JavaRandom random = new JavaRandom(schemaSeed);
-        for (int i = 0; i < TABLES; i++)
-            TABLES_GENERATED.add(CommitLogPropertyFixture.generateTable(KEYSPACE, random, i));
-
-        SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1),
-                                    TABLES_GENERATED.toArray(new TableMetadata[0]));
+        TABLES_GENERATED.addAll(CommitLogPropertyFixture.prepareKeyspace(logger, KEYSPACE, TABLES));
+        logger.info("examples={}, mutations per example={}", EXAMPLES, MUTATIONS);
     }
 
     @Before
@@ -137,7 +122,7 @@ public class CommitLogCorruptionPropertyTest
             }
             CommitLog.instance.sync(true);
 
-            File[] copies = CommitLogPropertyFixture.copyActiveSegments(scratch(seed));
+            File[] copies = CommitLogPropertyFixture.copyActiveSegments(scratch());
             File damaged = flipOneBit(workload, copies);
 
             List<ByteBuffer> replayed;
@@ -193,7 +178,7 @@ public class CommitLogCorruptionPropertyTest
             }
             CommitLog.instance.sync(true);
 
-            File[] copies = CommitLogPropertyFixture.copyActiveSegments(scratch(seed));
+            File[] copies = CommitLogPropertyFixture.copyActiveSegments(scratch());
             if (!truncateOneSegment(workload, copies))
                 return;
             shortened[0]++;
@@ -243,7 +228,7 @@ public class CommitLogCorruptionPropertyTest
             }
             CommitLog.instance.sync(true);
 
-            File[] copies = CommitLogPropertyFixture.copyActiveSegments(scratch(seed));
+            File[] copies = CommitLogPropertyFixture.copyActiveSegments(scratch());
             flipOneBitWithin(workload, 64, copies);
 
             List<ByteBuffer> replayed;
@@ -296,10 +281,12 @@ public class CommitLogCorruptionPropertyTest
         return copies[workload.nextInt(copies.length)];
     }
 
-    /** A fresh directory per example, so damage never carries from one to the next. */
-    private static File scratch(long seed)
+    /** Cleared per example, so damage never carries from one to the next and copies do not accumulate. */
+    private static File scratch()
     {
-        return new File(CommitLog.instance.segmentManager.storageDirectory, "damaged-" + seed);
+        File scratch = new File(CommitLog.instance.segmentManager.storageDirectory, "damaged");
+        scratch.tryDeleteRecursive();
+        return scratch;
     }
 
     /** Flips one bit at a generated offset in one of the copies, and returns the file. */
