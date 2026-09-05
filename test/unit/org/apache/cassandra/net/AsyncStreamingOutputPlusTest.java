@@ -22,6 +22,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -31,9 +34,11 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.streaming.StreamManager;
+import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
 import org.apache.cassandra.utils.FBUtilities;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.FileRegion;
 import io.netty.channel.embedded.EmbeddedChannel;
 
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
@@ -368,13 +373,102 @@ public class AsyncStreamingOutputPlusTest
         }
     }
 
+    /**
+     * Without SSL there is no reason to bring the bytes into the process: each batch of a section must go out
+     * as a file region the kernel copies straight from the page cache, and the regions must walk each section
+     * from start to end with no gap and no overlap.
+     */
+    @Test
+    public void testWriteFileSectionsZeroCopy() throws IOException
+    {
+        File file = populateTempData("sections_zero_copy", 1024);
+        List<Section> sections = Arrays.asList(new Section(0, 100), new Section(400, 700));
+
+        EmbeddedChannel channel = new EmbeddedChannel();
+        long[] progressed = new long[1];
+        int[] batches = new int[1];
+
+        try (FileChannel fileChannel = file.newReadChannel();
+             AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
+        {
+            long written = out.writeSectionsToChannelZeroCopy(fileChannel, rateLimiter(), sections, bytes -> {
+                progressed[0] += bytes;
+                batches[0]++;
+            }, 64);
+
+            assertEquals(400, written);
+            assertEquals(400, progressed[0]);
+            // [0, 100) is 64 + 36; [400, 700) is four of 64 plus 44
+            assertEquals(7, batches[0]);
+        }
+
+        List<long[]> regions = new ArrayList<>();
+        Object msg;
+        while ((msg = channel.readOutbound()) != null)
+        {
+            assertTrue("expected a zero-copy file region, got " + msg, msg instanceof FileRegion);
+            FileRegion region = (FileRegion) msg;
+            regions.add(new long[]{ region.position(), region.count() });
+        }
+
+        long[][] expected = { { 0, 64 }, { 64, 36 }, { 400, 64 }, { 464, 64 }, { 528, 64 }, { 592, 64 }, { 656, 44 } };
+        assertEquals(expected.length, regions.size());
+        for (int i = 0; i < expected.length; i++)
+        {
+            assertEquals("region " + i + " position", expected[i][0], regions.get(i)[0]);
+            assertEquals("region " + i + " count", expected[i][1], regions.get(i)[1]);
+        }
+    }
+
+    /**
+     * With SSL we have to encrypt in user space, so the same sections go out buffered. The bytes on the wire
+     * must be identical to the file's own bytes over those ranges.
+     */
+    @Test
+    public void testWriteFileSectionsBufferedSendsTheSameBytes() throws IOException
+    {
+        File file = populateTempData("sections_buffered", 1024);
+        byte[] content = Files.readAllBytes(file.toPath());
+        List<Section> sections = Arrays.asList(new Section(0, 100), new Section(400, 700));
+
+        TestChannel channel = new TestChannel();
+        try (FileChannel fileChannel = file.newReadChannel();
+             AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
+        {
+            assertEquals(400, out.writeSectionsToChannel(fileChannel, rateLimiter(), sections, bytes -> {}, 64));
+        }
+
+        ByteBuffer actual = ByteBuffer.allocate(400);
+        ByteBuf read;
+        while ((read = channel.readOutbound()) != null)
+            actual.put(read.nioBuffer());
+        actual.flip();
+
+        ByteBuffer expected = ByteBuffer.allocate(400);
+        expected.put(content, 0, 100);
+        expected.put(content, 400, 300);
+        expected.flip();
+
+        assertEquals(expected, actual);
+    }
+
+    private StreamManager.StreamRateLimiter rateLimiter()
+    {
+        return StreamManager.getRateLimiter(FBUtilities.getBroadcastAddressAndPort());
+    }
+
     private File populateTempData(String name) throws IOException
+    {
+        return populateTempData(name, 16);
+    }
+
+    private File populateTempData(String name, int length) throws IOException
     {
         File file = new File(Files.createTempFile(name, ".txt"));
         file.deleteOnExit();
 
         Random r = new Random();
-        byte [] content = new byte[16];
+        byte [] content = new byte[length];
         r.nextBytes(content);
         Files.write(file.toPath(), content);
 

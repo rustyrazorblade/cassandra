@@ -22,6 +22,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
+import java.util.List;
+import java.util.function.LongConsumer;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -212,6 +214,98 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
         }
 
         return bytesTransferred;
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Without SSL the bytes never enter the process: each batch is handed to the kernel as a
+     * {@link SharedDefaultFileRegion} over the section's range of the file. With SSL we must encrypt in user
+     * space, so the batches are read into pooled buffers instead.
+     */
+    @Override
+    public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+    {
+        int batchSize = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        if (channel.pipeline().get(SslHandler.class) != null)
+            return writeSectionsToChannel(file, limiter, sections, progress, batchSize);
+        else
+            return writeSectionsToChannelZeroCopy(file, limiter, sections, progress, batchSize);
+    }
+
+    @VisibleForTesting
+    long writeSectionsToChannel(FileChannel fc, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize) throws IOException
+    {
+        long bytesTransferred = 0;
+        try
+        {
+            for (Section section : sections)
+            {
+                long length = section.length();
+                long sectionTransferred = 0;
+                while (sectionTransferred < length)
+                {
+                    int toWrite = (int) min(batchSize, length - sectionTransferred);
+                    long position = section.start + sectionTransferred;
+
+                    writeToChannel(bufferSupplier -> {
+                        ByteBuffer outBuffer = bufferSupplier.get(toWrite);
+                        long read = fc.read(outBuffer, position);
+                        if (read != toWrite)
+                            throw new IOException(String.format("could not read required number of bytes from " +
+                                                                "file to be streamed: read %d bytes, wanted %d bytes",
+                                                                read, toWrite));
+                        outBuffer.flip();
+                    }, limiter);
+
+                    sectionTransferred += toWrite;
+                    bytesTransferred += toWrite;
+                    progress.accept(toWrite);
+                }
+            }
+            return bytesTransferred;
+        }
+        finally
+        {
+            fc.close();
+        }
+    }
+
+    @VisibleForTesting
+    long writeSectionsToChannelZeroCopy(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize) throws IOException
+    {
+        long bytesTransferred = 0;
+
+        final SharedFileChannel sharedFile = SharedDefaultFileRegion.share(file);
+        try
+        {
+            for (Section section : sections)
+            {
+                long length = section.length();
+                long sectionTransferred = 0;
+                while (sectionTransferred < length)
+                {
+                    int toWrite = (int) min(batchSize, length - sectionTransferred);
+                    long position = section.start + sectionTransferred;
+
+                    limiter.acquire(toWrite);
+                    ChannelPromise promise = beginFlush(toWrite, streamingSendWindowLowWaterMark, streamingSendWindowHighWaterMark);
+                    channel.writeAndFlush(new SharedDefaultFileRegion(sharedFile, position, toWrite), promise);
+
+                    if (logger.isTraceEnabled())
+                        logger.trace("Writing {} bytes at position {}", toWrite, position);
+
+                    sectionTransferred += toWrite;
+                    bytesTransferred += toWrite;
+                    progress.accept(toWrite);
+                }
+            }
+            return bytesTransferred;
+        }
+        finally
+        {
+            sharedFile.release();
+        }
     }
 
     @VisibleForTesting

@@ -21,6 +21,8 @@ package org.apache.cassandra.streaming;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.List;
+import java.util.function.LongConsumer;
 
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
 
@@ -46,5 +48,52 @@ public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implemen
         long tmp;
         while (0 <= (tmp = file.read(buffer))) count += tmp;
         return count;
+    }
+
+    @Override
+    public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+    {
+        long count = 0;
+        try
+        {
+            for (Section section : sections)
+            {
+                long position = section.start;
+                long remaining = section.length();
+                while (remaining > 0)
+                {
+                    int read = readInto(file, position, remaining);
+                    position += read;
+                    remaining -= read;
+                    count += read;
+                    progress.accept(read);
+                }
+            }
+        }
+        finally
+        {
+            file.close();
+        }
+        return count;
+    }
+
+    private int readInto(FileChannel file, long position, long remaining) throws IOException
+    {
+        if (!buffer.hasRemaining())
+            throw new IOException("Buffer is full with " + remaining + " bytes of the section still to read");
+
+        int limit = buffer.limit();
+        buffer.limit((int) Math.min(buffer.position() + remaining, limit));
+        try
+        {
+            int read = file.read(buffer, position);
+            if (read < 0)
+                throw new IOException("Unexpected end of file at position " + position);
+            return read;
+        }
+        finally
+        {
+            buffer.limit(limit);
+        }
     }
 }

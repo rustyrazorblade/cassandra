@@ -22,6 +22,8 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.List;
+import java.util.function.LongConsumer;
 
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.utils.Shared;
@@ -56,6 +58,26 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
         void write(BufferSupplier supplier) throws IOException;
     }
 
+    /**
+     * A [start, end) byte range of a file to be streamed.
+     */
+    final class Section
+    {
+        public final long start;
+        public final long end;
+
+        public Section(long start, long end)
+        {
+            this.start = start;
+            this.end = end;
+        }
+
+        public long length()
+        {
+            return end - start;
+        }
+    }
+
     interface RateLimiter
     {
         void acquire(int bytes);
@@ -83,6 +105,17 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
      * the {@link FileRegion}(zero-copy) or {@link ByteBuffer}(ssl) is flushed to the network.
      */
     long writeFileToChannel(FileChannel file, RateLimiter limiter) throws IOException;
+
+    /**
+     * Writes the given byte ranges of the file to the stream, zero-copy where the channel permits it.
+     * <p>
+     * This method takes ownership of the provided {@link FileChannel}.
+     * <p>
+     * {@code progress} is invoked with the size of each batch once that batch has been submitted to the
+     * channel; as with {@link #writeFileToChannel(FileChannel, RateLimiter)}, submission does not mean the
+     * bytes have reached the network.
+     */
+    long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException;
 
     default void flush() throws IOException {}
 }

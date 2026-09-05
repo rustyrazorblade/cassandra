@@ -19,10 +19,12 @@ package org.apache.cassandra.db.streaming;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.function.LongConsumer;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -30,6 +32,8 @@ import org.junit.Test;
 import com.google.common.util.concurrent.RateLimiter;
 
 import io.netty.channel.Channel;
+import io.netty.channel.FileRegion;
+import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -51,6 +55,7 @@ import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
+import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
 import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -151,25 +156,42 @@ public class CassandraStreamWriterTest
     }
 
     /**
-     * The compressed legacy writer must slice each section into stream_chunk_size network writes, so a
-     * smaller configured chunk size produces strictly more writes for the same SSTable.
+     * The compressed writer sends the on-disk chunks unchanged, so on a plain channel every batch must leave
+     * as a zero-copy file region rather than being read into the process, and the regions must cover exactly
+     * the fused sections with no gap, no overlap and no batch above the configured chunk size.
      */
     @Test
-    public void testCompressedWriterHonorsConfiguredChunkSize() throws IOException
+    public void testCompressedWriterStreamsSectionsZeroCopy() throws IOException
     {
         int original = DatabaseDescriptor.getStreamChunkSizeInBytes();
         try
         {
-            long compressedLength = compressedSstable.getCompressionMetadata().compressedFileLength;
+            int chunkSize = 4 << 10;
+            DatabaseDescriptor.setStreamChunkSizeInBytes(chunkSize);
 
-            DatabaseDescriptor.setStreamChunkSizeInBytes((int) compressedLength + (1 << 20)); // one write per section
-            int writesWithLargeChunk = countCompressedWrites();
+            EmbeddedChannel channel = new EmbeddedChannel();
+            CassandraCompressedStreamWriter writer = compressedWriter();
+            CountingOutputPlus out = new CountingOutputPlus(channel);
+            try
+            {
+                writer.write(out);
+            }
+            finally
+            {
+                out.discard();
+            }
 
-            DatabaseDescriptor.setStreamChunkSizeInBytes(4 << 10); // 4 KiB, many writes
-            int writesWithSmallChunk = countCompressedWrites();
+            List<long[]> regions = new ArrayList<>();
+            Object msg;
+            while ((msg = channel.readOutbound()) != null)
+            {
+                assertTrue("expected a zero-copy file region, got " + msg, msg instanceof FileRegion);
+                FileRegion region = (FileRegion) msg;
+                regions.add(new long[]{ region.position(), region.count() });
+            }
 
-            assertTrue("a smaller chunk size must produce more network writes (large=" + writesWithLargeChunk
-                       + ", small=" + writesWithSmallChunk + ")", writesWithSmallChunk > writesWithLargeChunk);
+            assertEquals("every batch should have produced one file region", out.batchCount, regions.size());
+            assertCovers(writer.fuseAdjacentChunks(compressionInfo().chunks()), regions, chunkSize);
         }
         finally
         {
@@ -177,9 +199,36 @@ public class CassandraStreamWriterTest
         }
     }
 
-    private int countCompressedWrites() throws IOException
+    /** Assert the regions walk each section start to end, in order, in batches of at most {@code maxBatch}. */
+    private void assertCovers(List<Section> sections, List<long[]> regions, int maxBatch)
     {
-        StreamSession session = setupStreamingSessionForTest();
+        int i = 0;
+        for (Section section : sections)
+        {
+            long position = section.start;
+            while (position < section.end)
+            {
+                assertTrue("ran out of file regions while covering section [" + section.start + ", " + section.end + ')',
+                           i < regions.size());
+                long[] region = regions.get(i++);
+                assertEquals("file region must start where the previous one ended", position, region[0]);
+                assertTrue("file region of " + region[1] + " exceeds the configured chunk size", region[1] <= maxBatch);
+                position += region[1];
+            }
+            assertEquals("file regions must end exactly on the section boundary", section.end, position);
+        }
+        assertEquals("no file regions may be sent beyond the sections", regions.size(), i);
+    }
+
+    private CompressionInfo compressionInfo()
+    {
+        List<SSTableReader.PartitionPositionBounds> sections =
+            Collections.singletonList(new SSTableReader.PartitionPositionBounds(0, compressedSstable.getCompressionMetadata().dataLength));
+        return CompressionInfo.newLazyInstance(compressedSstable.getCompressionMetadata(), sections);
+    }
+
+    private CassandraCompressedStreamWriter compressedWriter()
+    {
         List<SSTableReader.PartitionPositionBounds> sections =
             Collections.singletonList(new SSTableReader.PartitionPositionBounds(0, compressedSstable.getCompressionMetadata().dataLength));
         CassandraStreamHeader header =
@@ -188,21 +237,12 @@ public class CassandraStreamWriterTest
                                  .withSSTableLevel(0)
                                  .withEstimatedKeys(compressedSstable.estimatedKeys())
                                  .withSections(sections)
-                                 .withCompressionInfo(CompressionInfo.newLazyInstance(compressedSstable.getCompressionMetadata(), sections))
+                                 .withCompressionInfo(compressionInfo())
                                  .withSerializationHeader(compressedSstable.header.toComponent())
                                  .withTableId(compressedSstable.metadata().id)
                                  .build();
 
-        CountingOutputPlus out = new CountingOutputPlus(new TestChannel(Integer.MAX_VALUE));
-        try
-        {
-            new CassandraCompressedStreamWriter(compressedSstable, header, session).write(out);
-            return out.writeToChannelCount;
-        }
-        finally
-        {
-            out.discard();
-        }
+        return new CassandraCompressedStreamWriter(compressedSstable, header, setupStreamingSessionForTest());
     }
 
     /** Split the whole data file contiguously into {@code count} equal byte-range sections. */
@@ -225,6 +265,7 @@ public class CassandraStreamWriterTest
     {
         int flushCount;
         int writeToChannelCount;
+        int batchCount;
 
         CountingOutputPlus(Channel channel)
         {
@@ -243,6 +284,16 @@ public class CassandraStreamWriterTest
         {
             writeToChannelCount++;
             return super.writeToChannel(write, limiter);
+        }
+
+        @Override
+        public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+        {
+            LongConsumer counting = bytes -> {
+                batchCount++;
+                progress.accept(bytes);
+            };
+            return super.writeFileToChannel(file, limiter, sections, counting);
         }
     }
 
