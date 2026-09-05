@@ -2073,19 +2073,6 @@ public class CursorCompactor extends CompactionInfo.Holder
                : 1 + org.apache.cassandra.utils.vint.VIntCoding.numberOfExtraBytesToRead(firstByte);
     }
 
-    /**
-     * Same output column? Sources opened against different TableMetadata versions (a
-     * type-touching ALTER between flushes — the CASSANDRA-13776 shape) carry DIFFERENT
-     * ColumnMetadata instances for the same column in their open-time serialization
-     * headers, so reference identity alone is wrong across sources. Identity stays as the
-     * fast path (always true between cells of one source, and across sources when no
-     * schema change intervened); the fallback compares the name bytes — no allocation.
-     */
-    private static boolean sameColumn(ColumnMetadata a, ColumnMetadata b)
-    {
-        return a == b || (a != null && b != null && a.name.equals(b.name));
-    }
-
     DeletionTime activeOpenRangeDeletion = DeletionTime.LIVE;
     final List<ReusableDeletionTime> openMarkers = new ArrayList<>();
     final ArrayDeque<ReusableDeletionTime> reusableMarkersPool = new ArrayDeque<>();
