@@ -22,6 +22,7 @@ import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -58,10 +59,18 @@ import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.FileRegion;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.util.ReferenceCountUtil;
 
 import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 
@@ -131,6 +140,68 @@ public final class StreamingTestFixture
             writer.write(out);
         }
         return channel;
+    }
+
+    /**
+     * Run the writer against a channel carrying an {@link SslHandler}, and keep what it submitted.
+     *
+     * The handler is there to select the branch, not to encrypt: the recorder sits nearer the tail, so it takes
+     * each message before the handler would see it. Encrypting for real would need a completed handshake, which
+     * an EmbeddedChannel with no peer on the other end cannot give us.
+     *
+     * What matters is the type of what the writer submits. An SslHandler cannot encrypt a FileRegion, so a
+     * writer that hands one to an SSL channel fails the transfer outright.
+     */
+    public static SslCapture captureThroughSsl(CassandraStreamWriter writer) throws Exception
+    {
+        // server mode, so the handler waits for a client hello instead of starting a handshake it cannot
+        // finish against an EmbeddedChannel with nothing on the other end
+        SSLEngine engine = SSLContext.getDefault().createSSLEngine();
+        engine.setUseClientMode(false);
+
+        SslCapture capture = new SslCapture();
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.config().setWriteBufferHighWaterMark(64 << 20);
+        channel.pipeline().addLast(new SslHandler(engine));
+        channel.pipeline().addLast(capture.recorder);
+
+        try (AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
+        {
+            writer.write(out);
+        }
+        return capture;
+    }
+
+    /** What a writer submitted to an SSL channel: the bytes, and the type of every message. */
+    public static class SslCapture
+    {
+        private final ByteBuf captured = Unpooled.buffer();
+        private final List<Class<?>> messageTypes = new ArrayList<>();
+
+        private final ChannelOutboundHandlerAdapter recorder = new ChannelOutboundHandlerAdapter()
+        {
+            @Override
+            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
+            {
+                messageTypes.add(msg.getClass());
+                if (msg instanceof ByteBuf)
+                    captured.writeBytes((ByteBuf) msg);
+                ReferenceCountUtil.release(msg);
+                promise.setSuccess();
+            }
+        };
+
+        public List<Class<?>> messageTypes()
+        {
+            return messageTypes;
+        }
+
+        public byte[] captured()
+        {
+            byte[] bytes = new byte[captured.readableBytes()];
+            captured.getBytes(0, bytes);
+            return bytes;
+        }
     }
 
     /**
