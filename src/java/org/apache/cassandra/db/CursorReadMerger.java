@@ -412,6 +412,9 @@ final class CursorReadMerger
     // current output complex column state (reset per row), mirroring mergeCells' column-entry fold
     private ColumnMetadata currentComplexColumn;
     private final DeletionTime.ReusableDeletionTime mergedComplexDeletion = DeletionTime.ReusableDeletionTime.live();
+    // set by foldComplexDeletion when a newly entered complex column's folded deletion survives,
+    // which each cell path reports to its own consumer (the sink, or the probe)
+    private boolean complexDeletionNeedsReport;
 
     // Lazy row-start state (reset per row group): a group whose merged shell (liveness + row
     // deletion) is empty starts its output row only when the first surviving cell/complex
@@ -421,6 +424,15 @@ final class CursorReadMerger
     private CursorReads.MergeLeg rowClusteringLeg;
     private Clustering<?> rowClustering;
     private boolean rowStarted;
+
+    // The row group's merged shell, left here by prepareRowGroup rather than converted, because
+    // the emitting and accounting paths need it in different forms: the sink takes stable copies,
+    // the probe takes the reusable originals. groupValidateInSlice carries Gap C's per-group
+    // validation verdict into the cell walk.
+    private LivenessInfo groupMergedInfo;
+    private DeletionTime groupMergedDeletion;
+    private boolean groupDeletionSurvives;
+    private boolean groupValidateInSlice;
 
     // M3.2c regular-column pushdown state (reset per row group; meaningful only with a probe):
     // rowOnEmittedSurface is the group's slicer-emission verdict (strictly after the slice
@@ -726,65 +738,17 @@ final class CursorReadMerger
             }
         }
 
-        UnfilteredDescriptor first = legs[0].unfiltered();
-        LivenessInfo mergedInfo = first.livenessInfo();
-        DeletionTime mergedDeletion = first.deletionTime();
-        for (int i = 1; i < rowMergeLimit; i++)
-        {
-            UnfilteredDescriptor other = legs[i].unfiltered();
-            if (other.livenessInfo().supersedes(mergedInfo))
-                mergedInfo = other.livenessInfo();
-            if (other.deletionTime().supersedes(mergedDeletion))
-                mergedDeletion = other.deletionTime();
-        }
-
-        // AT MOST one clustering materialization per merged group (vs one per source row on the
-        // per-leg path), and NONE for a group that merges to nothing: materialization is deferred
-        // to the row's actual start (startRow/ensureRowStarted below). The clustering's source leg
-        // is captured NOW, before the cell sort reorders legs[]: every group member's clustering
-        // compares equal, but equal clusterings need not be byte-identical (e.g. decimals), and
-        // output bytes must keep coming from the group's first-sorted leg, exactly as before.
-        rowClusteringLeg = legs[0];
-        rowClustering = null;
-        rowStarted = false;
-        // isInSlice's comparator walks exist only to gate validation (Gap C's in-slice placement),
-        // so they — and the eager clustering materialization feeding them — are short-circuited
-        // away entirely on the default validation-disabled configs
-        boolean validateInSlice = false;
-        if (validationEnabled)
-        {
-            rowClustering = (Clustering<?>) rowClusteringLeg.materializeClusteringPrefix();
-            validateInSlice = isInSlice(rowClustering);
-        }
-        if (validateInSlice)
-        {
-            // per-leg parity with the iterator path, which validates EACH leg's deserialized row
-            // (winners and merge losers alike) below its merge
-            for (int i = 0; i < rowMergeLimit; i++)
-                legs[i].validateRowHeader();
-        }
-
-        // Row.Merger.merge / BTreeRow.purge analog WITHOUT the purge arms: the merged row
-        // deletion survives only when it supersedes the active partition/range deletion, and
-        // liveness shadowed by the resulting active deletion is dropped
-        DeletionTime rowActiveDeletion = activeDeletion;
-        DeletionTime rowDeletionOut;
-        if (mergedDeletion.supersedes(rowActiveDeletion))
-        {
-            rowActiveDeletion = mergedDeletion;
-            rowDeletionOut = CursorReads.copyOf(mergedDeletion);
-        }
-        else
-        {
-            // the partition/range deletion takes over
-            rowDeletionOut = DeletionTime.LIVE;
-        }
+        DeletionTime rowActiveDeletion = prepareRowGroup(rowMergeLimit);
+        // liveness shadowed by the active deletion is dropped; the sink keeps what it is handed,
+        // so the surviving row deletion becomes a stable copy
+        DeletionTime rowDeletionOut = groupDeletionSurvives ? CursorReads.copyOf(groupMergedDeletion)
+                                                            : DeletionTime.LIVE;
         LivenessInfo livenessOut;
-        if (mergedInfo.isEmpty() || rowActiveDeletion.deletes(mergedInfo))
+        if (groupMergedInfo.isEmpty() || rowActiveDeletion.deletes(groupMergedInfo))
             livenessOut = LivenessInfo.EMPTY;
         else
-            livenessOut = LivenessInfo.withExpirationTime(mergedInfo.timestamp(), mergedInfo.ttl(),
-                                                          mergedInfo.localExpirationTime());
+            livenessOut = LivenessInfo.withExpirationTime(groupMergedInfo.timestamp(), groupMergedInfo.ttl(),
+                                                          groupMergedInfo.localExpirationTime());
 
         // a surviving shell makes the merged row non-empty no matter what its cells do: start it
         // now; an empty shell defers to the first surviving cell/complex deletion (ensureRowStarted)
@@ -792,30 +756,8 @@ final class CursorReadMerger
         if (!livenessOut.isEmpty() || !rowDeletionOut.isLive())
             startRow(livenessOut, rowDeletionOut);
 
-        currentComplexColumn = null;
         rowAbandonedByFilter = false;
-        int cellMergeLimit = rowMergeLimit;
-        for (;;)
-        {
-            for (int i = 0; i < cellMergeLimit; i++)
-            {
-                if (legs[i].needsCellAdvance())
-                    legs[i].ensureParkedAtCell(validateInSlice);
-            }
-            cellMergeLimit = prepareAndSortCellsForMerge(rowMergeLimit, cellMergeLimit);
-            if (cellMergeLimit == 0)
-                break;
-            // M3.2c: once a regular-column expression failed mid-walk the row is being ABANDONED —
-            // the remaining cell groups take the metadata-only accounting walk (same winner
-            // resolution, no value staging), streaming their surviving winners into the
-            // dropped-row accounting the probe opened at abandonment.
-            if (rowAbandonedByFilter)
-                accountDroppedCellGroup(cellMergeLimit, rowMergeLimit, rowActiveDeletion);
-            else
-                mergeCellGroup(cellMergeLimit, rowMergeLimit, rowActiveDeletion);
-            for (int i = 0; i < cellMergeLimit; i++)
-                legs[i].advancePastCellPosition();
-        }
+        walkCellGroups(rowMergeLimit, rowActiveDeletion, false);
         if (rowAbandonedByFilter)
         {
             // mid-walk abandonment: the probe opened the dropped accounting at the failure point
@@ -836,6 +778,100 @@ final class CursorReadMerger
         else if (rowStarted)
         {
             sink.endRow();
+        }
+    }
+
+    /**
+     * Shared prologue of {@link #mergeRowGroup} and {@link #accountDroppedRowGroup}: folds the
+     * group's liveness and row deletion across its legs, captures the clustering leg, runs Gap C's
+     * in-slice validation, and settles the deletion the cell walk runs under.
+     * <p>
+     * AT MOST one clustering materialization per merged group (vs one per source row on the per-leg
+     * path), and NONE for a group that merges to nothing: materialization is deferred to the row's
+     * actual start ({@link #startRow}/{@link #ensureRowStarted}). The clustering's source leg is
+     * captured NOW, before the cell sort reorders legs[]: every group member's clustering compares
+     * equal, but equal clusterings need not be byte-identical (e.g. decimals), and output bytes
+     * must keep coming from the group's first-sorted leg.
+     * <p>
+     * Row.Merger.merge / BTreeRow.purge analog WITHOUT the purge arms: the merged row deletion
+     * survives only when it supersedes the active partition/range deletion. The merged shell is
+     * left in {@link #groupMergedInfo}, {@link #groupMergedDeletion} and
+     * {@link #groupDeletionSurvives} rather than converted here, because the two callers need it in
+     * different forms: the sink takes stable copies, the probe takes the reusable originals.
+     *
+     * @return the active deletion in effect for this group's cell walk
+     */
+    private DeletionTime prepareRowGroup(int rowMergeLimit) throws IOException
+    {
+        UnfilteredDescriptor first = legs[0].unfiltered();
+        LivenessInfo mergedInfo = first.livenessInfo();
+        DeletionTime mergedDeletion = first.deletionTime();
+        for (int i = 1; i < rowMergeLimit; i++)
+        {
+            UnfilteredDescriptor other = legs[i].unfiltered();
+            if (other.livenessInfo().supersedes(mergedInfo))
+                mergedInfo = other.livenessInfo();
+            if (other.deletionTime().supersedes(mergedDeletion))
+                mergedDeletion = other.deletionTime();
+        }
+        groupMergedInfo = mergedInfo;
+        groupMergedDeletion = mergedDeletion;
+
+        rowClusteringLeg = legs[0];
+        rowClustering = null;
+        rowStarted = false;
+        // isInSlice's comparator walks exist only to gate validation (Gap C's in-slice placement),
+        // so they — and the eager clustering materialization feeding them — are short-circuited
+        // away entirely on the default validation-disabled configs
+        groupValidateInSlice = false;
+        if (validationEnabled)
+        {
+            rowClustering = (Clustering<?>) rowClusteringLeg.materializeClusteringPrefix();
+            groupValidateInSlice = isInSlice(rowClustering);
+        }
+        if (groupValidateInSlice)
+        {
+            // per-leg parity with the iterator path, which validates EACH leg's deserialized row
+            // (winners and merge losers alike) below its merge
+            for (int i = 0; i < rowMergeLimit; i++)
+                legs[i].validateRowHeader();
+        }
+
+        groupDeletionSurvives = mergedDeletion.supersedes(activeDeletion);
+        // when the merged row deletion does not survive, the partition/range deletion takes over
+        return groupDeletionSurvives ? mergedDeletion : activeDeletion;
+    }
+
+    /**
+     * Shared cell walk of {@link #mergeRowGroup} and {@link #accountDroppedRowGroup}: parks every
+     * leg at its next cell position, forms the next cell group, dispatches it, then advances the
+     * group past it. {@code accountingOnly} is a constant at each call site, so the dispatch folds
+     * away once this inlines.
+     */
+    private void walkCellGroups(int rowMergeLimit, DeletionTime rowActiveDeletion, boolean accountingOnly) throws IOException
+    {
+        currentComplexColumn = null;
+        int cellMergeLimit = rowMergeLimit;
+        for (;;)
+        {
+            for (int i = 0; i < cellMergeLimit; i++)
+            {
+                if (legs[i].needsCellAdvance())
+                    legs[i].ensureParkedAtCell(groupValidateInSlice);
+            }
+            cellMergeLimit = prepareAndSortCellsForMerge(rowMergeLimit, cellMergeLimit);
+            if (cellMergeLimit == 0)
+                break;
+            // M3.2c: once a regular-column expression failed mid-walk the row is being ABANDONED —
+            // the remaining cell groups take the metadata-only accounting walk (same winner
+            // resolution, no value staging), streaming their surviving winners into the
+            // dropped-row accounting the probe opened at abandonment.
+            if (accountingOnly || rowAbandonedByFilter)
+                accountDroppedCellGroup(cellMergeLimit, rowMergeLimit, rowActiveDeletion);
+            else
+                mergeCellGroup(cellMergeLimit, rowMergeLimit, rowActiveDeletion);
+            for (int i = 0; i < cellMergeLimit; i++)
+                legs[i].advancePastCellPosition();
         }
     }
 
@@ -871,6 +907,48 @@ final class CursorReadMerger
     // ---------------------------------------------------------------- cell groups
 
     /**
+     * Shared complex-column prologue of {@link #mergeCellGroup} and
+     * {@link #accountDroppedCellGroup}. On entering a new output complex column, every row-group
+     * source that owns it is parked at it (column-ordered streams; this column is the merge
+     * minimum, and deletion-only positions sort ahead of its cells), so the merged complex deletion
+     * is computable up front, before any of the column's cells is emitted. Contributions arrive
+     * per-leg filtered (dropped-column rule) from CursorReads.PendingLeg.cellComplexDeletion.
+     * <p>
+     * A folded deletion survives only when it STRICTLY supersedes the active deletion; on exact
+     * equality the iterator drops it (ColumnDataReducer, Row.java). There is NO purge: a gcable
+     * complex deletion still shadows and still reaches the merged output. Sets
+     * {@link #complexDeletionNeedsReport} when this call entered a new column whose folded deletion
+     * survives, which each caller then reports to its own consumer.
+     *
+     * @return the deletion this group's cells are shadowed against
+     */
+    private DeletionTime foldComplexDeletion(ColumnMetadata column, int rowMergeLimit, DeletionTime rowActiveDeletion)
+    {
+        complexDeletionNeedsReport = false;
+        if (!CursorReads.sameColumn(currentComplexColumn, column))
+        {
+            currentComplexColumn = column;
+            mergedComplexDeletion.resetLive();
+            for (int i = 0; i < rowMergeLimit; i++)
+            {
+                CursorReads.MergeLeg leg = legs[i];
+                if (leg.parkedAtCellPosition() && CursorReads.sameColumn(leg.cellColumn(), column))
+                {
+                    DeletionTime contribution = leg.cellComplexDeletion();
+                    if (contribution.supersedes(mergedComplexDeletion))
+                        mergedComplexDeletion.reset(contribution);
+                }
+            }
+            if (!rowActiveDeletion.isLive() && !mergedComplexDeletion.supersedes(rowActiveDeletion))
+                mergedComplexDeletion.resetLive();
+            complexDeletionNeedsReport = !mergedComplexDeletion.isLive();
+        }
+        if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(rowActiveDeletion))
+            return mergedComplexDeletion;
+        return rowActiveDeletion;
+    }
+
+    /**
      * The adapted shape of CursorCompactor.mergeCells: winner selection via the SHARED
      * {@link CellLivenessInfo#resolve} decision table, value comparison only on full
      * metadata ties (left/current winner keeps equal values, exactly Cells.resolveRegular), and
@@ -886,40 +964,12 @@ final class CursorReadMerger
         DeletionTime effectiveDeletion = rowActiveDeletion;
         if (column.isComplex())
         {
-            if (!CursorReads.sameColumn(currentComplexColumn, column))
+            effectiveDeletion = foldComplexDeletion(column, rowMergeLimit, rowActiveDeletion);
+            if (complexDeletionNeedsReport)
             {
-                currentComplexColumn = column;
-                // On entering a new output complex column, every row-group source that owns it is
-                // parked at it (column-ordered streams; this column is the merge minimum, and
-                // deletion-only positions sort ahead of its cells) — so the merged complex
-                // deletion is computable up front, before any of the column's cells is emitted.
-                // Contributions arrive per-leg filtered (dropped-column rule) from
-                // PendingLeg.cellComplexDeletion.
-                mergedComplexDeletion.resetLive();
-                for (int i = 0; i < rowMergeLimit; i++)
-                {
-                    CursorReads.MergeLeg leg = legs[i];
-                    if (leg.parkedAtCellPosition() && CursorReads.sameColumn(leg.cellColumn(), column))
-                    {
-                        DeletionTime contribution = leg.cellComplexDeletion();
-                        if (contribution.supersedes(mergedComplexDeletion))
-                            mergedComplexDeletion.reset(contribution);
-                    }
-                }
-                // survives only when it STRICTLY supersedes the active deletion — on exact
-                // equality the iterator drops it (ColumnDataReducer, Row.java) — and NO purge:
-                // a gcable complex deletion still shadows and still reaches the merged output
-                if (!rowActiveDeletion.isLive() && !mergedComplexDeletion.supersedes(rowActiveDeletion))
-                    mergedComplexDeletion.resetLive();
-                if (!mergedComplexDeletion.isLive())
-                {
-                    ensureRowStarted();
-                    sink.addComplexDeletion(column, CursorReads.copyOf(mergedComplexDeletion));
-                }
+                ensureRowStarted();
+                sink.addComplexDeletion(column, CursorReads.copyOf(mergedComplexDeletion));
             }
-            if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(rowActiveDeletion))
-                effectiveDeletion = mergedComplexDeletion;
-
             if (!winner.cellProduced())
                 return; // deletion-only group: contribution already folded into the merged deletion
         }
@@ -1135,67 +1185,16 @@ final class CursorReadMerger
      */
     private void accountDroppedRowGroup(int rowMergeLimit, boolean onEmittedSurface) throws IOException
     {
-        UnfilteredDescriptor first = legs[0].unfiltered();
-        LivenessInfo mergedInfo = first.livenessInfo();
-        DeletionTime mergedDeletion = first.deletionTime();
-        for (int i = 1; i < rowMergeLimit; i++)
-        {
-            UnfilteredDescriptor other = legs[i].unfiltered();
-            if (other.livenessInfo().supersedes(mergedInfo))
-                mergedInfo = other.livenessInfo();
-            if (other.deletionTime().supersedes(mergedDeletion))
-                mergedDeletion = other.deletionTime();
-        }
-
-        rowClusteringLeg = legs[0];
-        rowClustering = null;
-        rowStarted = false;
-        boolean validateInSlice = false;
-        if (validationEnabled)
-        {
-            rowClustering = (Clustering<?>) rowClusteringLeg.materializeClusteringPrefix();
-            validateInSlice = isInSlice(rowClustering);
-        }
-        if (validateInSlice)
-        {
-            for (int i = 0; i < rowMergeLimit; i++)
-                legs[i].validateRowHeader();
-        }
-
-        // identical shell computation to mergeRowGroup, minus the output-copy allocations: the
-        // probe receives the merged (post-shadowing) shell as reusable metadata
-        DeletionTime rowActiveDeletion = activeDeletion;
-        DeletionTime rowDeletionOut;
-        if (mergedDeletion.supersedes(rowActiveDeletion))
-        {
-            rowActiveDeletion = mergedDeletion;
-            rowDeletionOut = mergedDeletion;
-        }
-        else
-        {
-            rowDeletionOut = DeletionTime.LIVE;
-        }
-        LivenessInfo livenessOut = mergedInfo.isEmpty() || rowActiveDeletion.deletes(mergedInfo)
+        DeletionTime rowActiveDeletion = prepareRowGroup(rowMergeLimit);
+        // the same merged shell mergeRowGroup computes, minus the output-copy allocations: the
+        // probe receives it as reusable metadata
+        DeletionTime rowDeletionOut = groupDeletionSurvives ? groupMergedDeletion : DeletionTime.LIVE;
+        LivenessInfo livenessOut = groupMergedInfo.isEmpty() || rowActiveDeletion.deletes(groupMergedInfo)
                                    ? null
-                                   : mergedInfo;
+                                   : groupMergedInfo;
 
         filterProbe.beginDroppedRow(rowClusteringLeg, onEmittedSurface, livenessOut, rowDeletionOut);
-        currentComplexColumn = null;
-        int cellMergeLimit = rowMergeLimit;
-        for (;;)
-        {
-            for (int i = 0; i < cellMergeLimit; i++)
-            {
-                if (legs[i].needsCellAdvance())
-                    legs[i].ensureParkedAtCell(validateInSlice);
-            }
-            cellMergeLimit = prepareAndSortCellsForMerge(rowMergeLimit, cellMergeLimit);
-            if (cellMergeLimit == 0)
-                break;
-            accountDroppedCellGroup(cellMergeLimit, rowMergeLimit, rowActiveDeletion);
-            for (int i = 0; i < cellMergeLimit; i++)
-                legs[i].advancePastCellPosition();
-        }
+        walkCellGroups(rowMergeLimit, rowActiveDeletion, true);
         filterProbe.endDroppedRow();
     }
 
@@ -1212,28 +1211,9 @@ final class CursorReadMerger
         DeletionTime effectiveDeletion = rowActiveDeletion;
         if (column.isComplex())
         {
-            if (!CursorReads.sameColumn(currentComplexColumn, column))
-            {
-                currentComplexColumn = column;
-                mergedComplexDeletion.resetLive();
-                for (int i = 0; i < rowMergeLimit; i++)
-                {
-                    CursorReads.MergeLeg leg = legs[i];
-                    if (leg.parkedAtCellPosition() && CursorReads.sameColumn(leg.cellColumn(), column))
-                    {
-                        DeletionTime contribution = leg.cellComplexDeletion();
-                        if (contribution.supersedes(mergedComplexDeletion))
-                            mergedComplexDeletion.reset(contribution);
-                    }
-                }
-                if (!rowActiveDeletion.isLive() && !mergedComplexDeletion.supersedes(rowActiveDeletion))
-                    mergedComplexDeletion.resetLive();
-                if (!mergedComplexDeletion.isLive())
-                    filterProbe.droppedComplexDeletion(mergedComplexDeletion);
-            }
-            if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(rowActiveDeletion))
-                effectiveDeletion = mergedComplexDeletion;
-
+            effectiveDeletion = foldComplexDeletion(column, rowMergeLimit, rowActiveDeletion);
+            if (complexDeletionNeedsReport)
+                filterProbe.droppedComplexDeletion(mergedComplexDeletion);
             if (!winner.cellProduced())
                 return; // deletion-only group: contribution already folded into the merged deletion
         }
