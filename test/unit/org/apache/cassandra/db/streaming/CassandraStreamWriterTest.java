@@ -19,7 +19,6 @@ package org.apache.cassandra.db.streaming;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -56,6 +55,7 @@ import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -287,13 +287,13 @@ public class CassandraStreamWriterTest
         }
 
         @Override
-        public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+        public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
         {
             LongConsumer counting = bytes -> {
                 batchCount++;
                 progress.accept(bytes);
             };
-            return super.writeFileToChannel(file, limiter, sections, counting);
+            return super.writeFileToChannel(source, limiter, sections, counting);
         }
     }
 

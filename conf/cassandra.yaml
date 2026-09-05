@@ -1482,6 +1482,17 @@ slow_query_log_timeout: 500ms
 # Min unit: B
 # stream_chunk_size: 128KiB
 
+# How the compressed non-zero-copy ("legacy") streaming writer reads the data file, on the only occasion it has
+# to read it at all: over an encrypted connection. Without encryption the bytes go from the page cache to the
+# socket without entering the process, and this setting makes no difference. The uncompressed writer is not
+# covered; it reads through its own channel in order to verify the CRC component as it goes.
+# Streamed bytes are read once and are not wanted again, so reading them through the page cache evicts data the
+# read path still needs. 'direct' reads with O_DIRECT and leaves the cache alone; 'standard' reads through it.
+# If 'direct' is set and any data directory is on a filesystem without O_DIRECT support, the node refuses to
+# start; network filesystems (NFS, CIFS) and some virtual filesystems do not support it.
+# Options are 'standard' and 'direct'.
+# stream_disk_access_mode: standard
+
 # Settings for stream stats tracking; used by system_views.streaming table
 # How long before a stream is evicted from tracking; this impacts both historic and currently running
 # streams.

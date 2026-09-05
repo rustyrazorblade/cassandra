@@ -21,18 +21,23 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Random;
 
+import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.config.Config.DiskAccessMode;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.KeyspaceParams;
 
 import io.netty.buffer.ByteBuf;
@@ -114,6 +119,41 @@ public class StreamWriterSslTest
     public void compressedWriterSendsTheSameBytesOverSsl() throws Exception
     {
         assertSameBytesEitherWay(compressed);
+    }
+
+    /**
+     * Encryption is the one case where the compressed writer reads the file rather than handing it to the
+     * kernel, so it is the only case stream_disk_access_mode touches. Reading with O_DIRECT must not change a
+     * byte of what goes out.
+     */
+    @Test
+    public void compressedWriterSendsTheSameBytesOverSslWithDirectIo() throws Exception
+    {
+        Assume.assumeTrue("this volume does not support direct IO",
+                          FileUtils.isDirectIOSupported(compressed.descriptor.fileFor(Components.DATA)));
+
+        DiskAccessMode original = DatabaseDescriptor.getStreamDiskAccessMode();
+        try
+        {
+            List<PartitionPositionBounds> sections = wholeFile(compressed);
+
+            DatabaseDescriptor.setStreamDiskAccessMode(DiskAccessMode.standard);
+            byte[] throughTheCache = captureThroughSsl(writer(compressed, sections, session())).captured();
+
+            DatabaseDescriptor.setStreamDiskAccessMode(DiskAccessMode.direct);
+            StreamingTestFixture.SslCapture direct = captureThroughSsl(writer(compressed, sections, session()));
+
+            assertArrayEquals("reading with O_DIRECT must not change the bytes", throughTheCache, direct.captured());
+            for (Class<?> type : direct.messageTypes())
+            {
+                assertTrue("direct IO must not change what is submitted either, but got a " + type.getName(),
+                           ByteBuf.class.isAssignableFrom(type));
+            }
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamDiskAccessMode(original);
+        }
     }
 
     @Test
