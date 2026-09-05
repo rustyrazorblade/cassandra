@@ -190,6 +190,12 @@ public class Config
     // otherwise the CRC chunk size is used). It does not change the on-wire framing format.
     public volatile DataStorageSpec.IntBytesBound stream_chunk_size = new DataStorageSpec.IntBytesBound("128KiB");
 
+    // How the compressed non-zero-copy ("legacy") streaming writer reads the data file when it has to read it
+    // at all, which is only over an encrypted connection: without SSL the bytes go from the page cache to the
+    // socket without entering the process. Streamed bytes are read once and never wanted again, so 'direct'
+    // keeps them out of the page cache; 'standard' reads through it. Only standard and direct are accepted.
+    public volatile DiskAccessMode stream_disk_access_mode = DiskAccessMode.standard;
+
     @Replaces(oldName = "cross_node_timeout", converter = Converters.IDENTITY, deprecated = true)
     public boolean internode_timeout = true;
 

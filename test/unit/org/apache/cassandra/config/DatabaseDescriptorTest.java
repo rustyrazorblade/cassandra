@@ -439,6 +439,29 @@ public class DatabaseDescriptorTest
         }
     }
 
+    @Test
+    public void testStreamDiskAccessModeAcceptsOnlyStandardOrDirect()
+    {
+        Config config = new Config();
+
+        config.stream_disk_access_mode = Config.DiskAccessMode.standard;
+        DatabaseDescriptor.validateStreamingConfig(config);
+
+        config.stream_disk_access_mode = Config.DiskAccessMode.direct;
+        DatabaseDescriptor.validateStreamingConfig(config);
+
+        config.stream_disk_access_mode = Config.DiskAccessMode.mmap;
+        try
+        {
+            DatabaseDescriptor.validateStreamingConfig(config);
+            fail("stream_disk_access_mode has only two meaningful values");
+        }
+        catch (ConfigurationException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("options: standard/direct"));
+        }
+    }
+
     /** The same pair can be inverted at runtime, so both setters have to guard it, not just start-up. */
     @Test
     public void testSettersRejectAChunkLargerThanTheWindow()

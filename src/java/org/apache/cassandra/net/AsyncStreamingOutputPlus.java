@@ -35,6 +35,7 @@ import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.net.SharedDefaultFileRegion.SharedFileChannel;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.memory.BufferPool;
 import org.apache.cassandra.utils.memory.BufferPools;
 
@@ -224,51 +225,48 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
      * space, so the batches are read into pooled buffers instead.
      */
     @Override
-    public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+    public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
     {
         int batchSize = DatabaseDescriptor.getStreamChunkSizeInBytes();
-        if (channel.pipeline().get(SslHandler.class) != null)
-            return writeSectionsToChannel(file, limiter, sections, progress, batchSize);
-        else
-            return writeSectionsToChannelZeroCopy(file, limiter, sections, progress, batchSize);
-    }
-
-    @VisibleForTesting
-    long writeSectionsToChannel(FileChannel fc, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize) throws IOException
-    {
-        long bytesTransferred = 0;
         try
         {
-            for (Section section : sections)
-            {
-                long length = section.length();
-                long sectionTransferred = 0;
-                while (sectionTransferred < length)
-                {
-                    int toWrite = (int) min(batchSize, length - sectionTransferred);
-                    long position = section.start + sectionTransferred;
-
-                    writeToChannel(bufferSupplier -> {
-                        ByteBuffer outBuffer = bufferSupplier.get(toWrite);
-                        long read = fc.read(outBuffer, position);
-                        if (read != toWrite)
-                            throw new IOException(String.format("could not read required number of bytes from " +
-                                                                "file to be streamed: read %d bytes, wanted %d bytes",
-                                                                read, toWrite));
-                        outBuffer.flip();
-                    }, limiter);
-
-                    sectionTransferred += toWrite;
-                    bytesTransferred += toWrite;
-                    progress.accept(toWrite);
-                }
-            }
-            return bytesTransferred;
+            if (channel.pipeline().get(SslHandler.class) != null)
+                return writeSectionsToChannel(source, limiter, sections, progress, batchSize);
+            else
+                return writeSectionsToChannelZeroCopy(source.channel(), limiter, sections, progress, batchSize);
         }
         finally
         {
-            fc.close();
+            source.close();
         }
+    }
+
+    @VisibleForTesting
+    long writeSectionsToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize) throws IOException
+    {
+        long bytesTransferred = 0;
+        for (Section section : sections)
+        {
+            long length = section.length();
+            long sectionTransferred = 0;
+            while (sectionTransferred < length)
+            {
+                int toWrite = (int) min(batchSize, length - sectionTransferred);
+                long position = section.start + sectionTransferred;
+
+                writeToChannel(bufferSupplier -> {
+                    ByteBuffer outBuffer = bufferSupplier.get(toWrite);
+                    outBuffer.limit(toWrite);
+                    source.read(outBuffer, position);
+                    outBuffer.flip();
+                }, limiter);
+
+                sectionTransferred += toWrite;
+                bytesTransferred += toWrite;
+                progress.accept(toWrite);
+            }
+        }
+        return bytesTransferred;
     }
 
     @VisibleForTesting

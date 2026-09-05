@@ -18,7 +18,6 @@
 package org.apache.cassandra.db.streaming;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -28,6 +27,7 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -35,6 +35,7 @@ import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -70,8 +71,9 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
         // ranges straight to the kernel; nothing is read into the process unless the channel uses SSL
         String filename = sstable.descriptor.fileFor(Components.DATA).toString();
         long[] progress = new long[1];
-        FileChannel channel = sstable.descriptor.fileFor(Components.DATA).newReadChannel();
-        long bytesTransferred = out.writeFileToChannel(channel, limiter, sections, bytes -> {
+        StreamingFileSource source = StreamingFileSource.open(sstable.descriptor.fileFor(Components.DATA),
+                                                              DatabaseDescriptor.getStreamDiskAccessMode());
+        long bytesTransferred = out.writeFileToChannel(source, limiter, sections, bytes -> {
             progress[0] += bytes;
             session.progress(filename, ProgressInfo.Direction.OUT, progress[0], bytes, totalSize);
         });

@@ -34,7 +34,9 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.streaming.StreamManager;
+import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.FBUtilities;
 
 import io.netty.buffer.ByteBuf;
@@ -445,7 +447,8 @@ public class AsyncStreamingOutputPlusTest
         try (FileChannel fileChannel = file.newReadChannel();
              AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
         {
-            assertEquals(400, out.writeSectionsToChannel(fileChannel, rateLimiter(), sections, bytes -> {}, 64));
+            assertEquals(400, out.writeSectionsToChannel(StreamingFileSource.open(file, DiskAccessMode.standard),
+                                                         rateLimiter(), sections, bytes -> {}, 64));
         }
 
         ByteBuffer actual = ByteBuffer.allocate(400);

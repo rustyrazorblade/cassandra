@@ -4681,6 +4681,10 @@ public class DatabaseDescriptor
             throw new ConfigurationException("stream_chunk_size must be positive, but was " + conf.stream_chunk_size, false);
 
         checkChunkFitsSendWindow(conf.stream_chunk_size.toBytes(), conf.stream_send_window.toBytes());
+
+        if (conf.stream_disk_access_mode != DiskAccessMode.standard && conf.stream_disk_access_mode != DiskAccessMode.direct)
+            throw new ConfigurationException("Unsupported disk access mode for stream_disk_access_mode " +
+                                             "(options: standard/direct): " + conf.stream_disk_access_mode, false);
     }
 
     /**
@@ -4706,6 +4710,16 @@ public class DatabaseDescriptor
     {
         checkChunkFitsSendWindow(conf.stream_chunk_size.toBytes(), sendWindowInBytes);
         conf.stream_send_window = new DataStorageSpec.IntBytesBound(sendWindowInBytes);
+    }
+
+    public static DiskAccessMode getStreamDiskAccessMode()
+    {
+        return conf.stream_disk_access_mode;
+    }
+
+    public static void setStreamDiskAccessMode(DiskAccessMode mode)
+    {
+        conf.stream_disk_access_mode = mode;
     }
 
     public static int getStreamChunkSizeInBytes()

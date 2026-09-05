@@ -109,13 +109,13 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
     /**
      * Writes the given byte ranges of the file to the stream, zero-copy where the channel permits it.
      * <p>
-     * This method takes ownership of the provided {@link FileChannel}.
+     * This method takes ownership of the provided {@link StreamingFileSource}.
      * <p>
      * {@code progress} is invoked with the size of each batch once that batch has been submitted to the
      * channel; as with {@link #writeFileToChannel(FileChannel, RateLimiter)}, submission does not mean the
      * bytes have reached the network.
      */
-    long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException;
+    long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException;
 
     default void flush() throws IOException {}
 }

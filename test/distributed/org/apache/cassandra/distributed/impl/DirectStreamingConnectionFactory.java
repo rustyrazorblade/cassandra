@@ -41,6 +41,7 @@ import org.apache.cassandra.streaming.StreamingChannel;
 import org.apache.cassandra.streaming.StreamingDataInputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlusFixed;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
@@ -174,7 +175,7 @@ public class DirectStreamingConnectionFactory
 
                 // TODO (future): support RateLimiter
                 @Override
-                public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+                public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
                 {
                     long count = 0;
                     try
@@ -193,14 +194,13 @@ public class DirectStreamingConnectionFactory
                                 int read;
                                 try
                                 {
-                                    read = file.read(buffer, position);
+                                    read = buffer.remaining();
+                                    source.read(buffer, position);
                                 }
                                 finally
                                 {
                                     buffer.limit(limit);
                                 }
-                                if (read < 0)
-                                    throw new IOException("Unexpected end of file at position " + position);
 
                                 position += read;
                                 remaining -= read;
@@ -212,7 +212,7 @@ public class DirectStreamingConnectionFactory
                     }
                     finally
                     {
-                        file.close();
+                        source.close();
                     }
                     return count;
                 }

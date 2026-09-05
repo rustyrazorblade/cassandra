@@ -51,7 +51,7 @@ public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implemen
     }
 
     @Override
-    public long writeFileToChannel(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+    public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
     {
         long count = 0;
         try
@@ -62,7 +62,7 @@ public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implemen
                 long remaining = section.length();
                 while (remaining > 0)
                 {
-                    int read = readInto(file, position, remaining);
+                    int read = readInto(source, position, remaining);
                     position += read;
                     remaining -= read;
                     count += read;
@@ -72,12 +72,12 @@ public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implemen
         }
         finally
         {
-            file.close();
+            source.close();
         }
         return count;
     }
 
-    private int readInto(FileChannel file, long position, long remaining) throws IOException
+    private int readInto(StreamingFileSource source, long position, long remaining) throws IOException
     {
         if (!buffer.hasRemaining())
             throw new IOException("Buffer is full with " + remaining + " bytes of the section still to read");
@@ -86,9 +86,8 @@ public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implemen
         buffer.limit((int) Math.min(buffer.position() + remaining, limit));
         try
         {
-            int read = file.read(buffer, position);
-            if (read < 0)
-                throw new IOException("Unexpected end of file at position " + position);
+            int read = buffer.remaining();
+            source.read(buffer, position);
             return read;
         }
         finally
