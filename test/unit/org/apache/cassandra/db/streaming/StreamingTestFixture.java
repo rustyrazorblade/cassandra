@@ -22,10 +22,26 @@ import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.Digest;
+import org.apache.cassandra.db.lifecycle.StreamingLifecycleTransaction;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.db.rows.UnfilteredRowIterators;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.compress.CompressionMetadata;
+import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.io.sstable.SSTableTxnSingleStreamWriter;
+import org.apache.cassandra.io.util.DataInputBuffer;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.streaming.StreamSummary;
+import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
@@ -39,6 +55,7 @@ import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
 import io.netty.buffer.ByteBuf;
@@ -163,6 +180,88 @@ public final class StreamingTestFixture
         finally
         {
             into.limit(limit);
+        }
+    }
+
+    /**
+     * The whole legacy path, writer to reader: run the writer, hand what it produced to the matching reader,
+     * and return the SSTables that came out. The caller owns the returned transaction and must abort it.
+     */
+    public static Received roundTrip(SSTableReader sstable, List<PartitionPositionBounds> sections) throws Throwable
+    {
+        byte[] wire = capture(writer(sstable, sections, session()));
+
+        StreamSession session = session();
+        session.prepareReceiving(new StreamSummary(sstable.metadata().id, Collections.emptyList(), 1, wire.length));
+
+        CassandraStreamHeader header = header(sstable, sections);
+        StreamMessageHeader messageHeader = new StreamMessageHeader(sstable.metadata().id,
+                                                                    FBUtilities.getBroadcastAddressAndPort(),
+                                                                    session.planId(), false, 0, 0, 0, null);
+        IStreamReader reader = sstable.compression
+                               ? new CassandraCompressedStreamReader(messageHeader, header, session)
+                               : new CassandraStreamReader(messageHeader, header, session);
+
+        SSTableTxnSingleStreamWriter written =
+            (SSTableTxnSingleStreamWriter) reader.read(new DataInputBuffer(ByteBuffer.wrap(wire), false));
+
+        StreamingLifecycleTransaction txn = new StreamingLifecycleTransaction();
+        return new Received(txn, written.transferOwnershipTo(txn));
+    }
+
+    /** The SSTables a round trip produced, and the transaction holding them. */
+    public static class Received implements AutoCloseable
+    {
+        public final Collection<SSTableReader> sstables;
+        private final StreamingLifecycleTransaction txn;
+
+        Received(StreamingLifecycleTransaction txn, Collection<SSTableReader> sstables)
+        {
+            this.txn = txn;
+            this.sstables = sstables;
+        }
+
+        public void close()
+        {
+            txn.abort();
+        }
+    }
+
+    /** A content digest per partition, so two sets of SSTables can be compared without caring how they are laid out. */
+    public static Map<DecoratedKey, String> digests(Collection<SSTableReader> sstables)
+    {
+        Map<DecoratedKey, String> digests = new LinkedHashMap<>();
+        for (SSTableReader sstable : sstables)
+        {
+            try (ISSTableScanner scanner = sstable.getScanner())
+            {
+                digest(scanner, digests);
+            }
+        }
+        return digests;
+    }
+
+    /** The same, for only the partitions of one SSTable that fall in the given token ranges. */
+    public static Map<DecoratedKey, String> digests(SSTableReader sstable, Collection<Range<Token>> ranges)
+    {
+        Map<DecoratedKey, String> digests = new LinkedHashMap<>();
+        try (ISSTableScanner scanner = sstable.getScanner(ranges))
+        {
+            digest(scanner, digests);
+        }
+        return digests;
+    }
+
+    private static void digest(ISSTableScanner scanner, Map<DecoratedKey, String> into)
+    {
+        while (scanner.hasNext())
+        {
+            try (UnfilteredRowIterator partition = scanner.next())
+            {
+                Digest digest = Digest.forValidator();
+                UnfilteredRowIterators.digest(partition, digest, MessagingService.current_version);
+                into.put(partition.partitionKey(), ByteBufferUtil.bytesToHex(ByteBuffer.wrap(digest.digest())));
+            }
         }
     }
 
