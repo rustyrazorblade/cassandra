@@ -390,6 +390,46 @@ public class DatabaseDescriptorTest
         }
     }
 
+    /**
+     * The setter guards a live change; this guards start-up. They are separate paths, and only the setter had a
+     * test: a bad value in cassandra.yaml never reaches the setter, it goes straight into Config.
+     */
+    @Test
+    public void testStreamChunkSizeIsValidatedAtStartup()
+    {
+        Config config = new Config();
+
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound("128KiB");
+        DatabaseDescriptor.validateStreamingConfig(config); // a good value passes
+
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound(0);
+        try
+        {
+            DatabaseDescriptor.validateStreamingConfig(config);
+            fail("a stream_chunk_size of zero must stop the node coming up");
+        }
+        catch (ConfigurationException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("stream_chunk_size must be positive"));
+        }
+    }
+
+    /**
+     * stream_send_window is deliberately unvalidated: every value the config type accepts is clamped up to the
+     * channel's own high water mark, so none of them can leave the window below a single write.
+     */
+    @Test
+    public void testStreamSendWindowNeedsNoStartupValidation()
+    {
+        Config config = new Config();
+
+        config.stream_send_window = new DataStorageSpec.IntBytesBound(0);
+        DatabaseDescriptor.validateStreamingConfig(config);
+
+        config.stream_send_window = new DataStorageSpec.IntBytesBound("2MiB");
+        DatabaseDescriptor.validateStreamingConfig(config);
+    }
+
     @Test
     public void testWidenToLongInBytes() throws ConfigurationException
     {

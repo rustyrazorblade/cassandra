@@ -169,6 +169,54 @@ public class AsyncStreamingOutputPlusTest
         }
     }
 
+    /**
+     * The window is derived from stream_send_window and the channel's own water marks, and the interesting
+     * values are the ones near where those two meet.
+     */
+    @Test
+    public void testSendWindowBoundaries() throws IOException
+    {
+        int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        try
+        {
+            EmbeddedChannel probe = new TestChannel(4);
+            int channelHigh;
+            int channelLow;
+            try (AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(probe))
+            {
+                channelHigh = out.defaultHighWaterMark;
+                channelLow = out.defaultLowWaterMark;
+            }
+
+            // zero: the channel's own marks stand
+            assertWindow(0, channelHigh, channelLow);
+            // exactly the channel's high mark: same marks again, and no regression below them
+            assertWindow(channelHigh, channelHigh, channelLow);
+            // between the low and high marks: still clamped up to the channel's
+            assertWindow(channelHigh / 2, channelHigh, channelLow);
+            // above: the configured window, with the low mark at half of it
+            assertWindow(4 * channelHigh, 4 * channelHigh, 2 * channelHigh);
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+        }
+    }
+
+    private void assertWindow(int configured, int expectedHigh, int expectedLow) throws IOException
+    {
+        DatabaseDescriptor.setStreamSendWindowInBytes(configured);
+        try (AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(new TestChannel(4)))
+        {
+            assertEquals("high water mark for a window of " + configured, expectedHigh, out.streamingSendWindowHighWaterMark);
+            assertEquals("low water mark for a window of " + configured, expectedLow, out.streamingSendWindowLowWaterMark);
+            assertTrue("the window must never drop below the channel's own high water mark",
+                       out.streamingSendWindowHighWaterMark >= out.defaultHighWaterMark);
+            assertTrue("the low mark must never drop below the channel's own",
+                       out.streamingSendWindowLowWaterMark >= out.defaultLowWaterMark);
+        }
+    }
+
     @Test
     public void testWriteFileToChannelEntireSSTableNoThrottling() throws IOException
     {
