@@ -118,6 +118,17 @@ public class View
         return concat(flushingMemtables, liveMemtables);
     }
 
+    /**
+     * An identity token for the current set of live sstables. The token changes only when the sstable set
+     * itself changes - flush, compaction, streaming - and is passed through unchanged by memtable-only
+     * transitions. Callers may therefore use reference equality on it to memoise anything derived purely
+     * from the sstables, since sstables are immutable once written.
+     */
+    public Object sstablesIdentity()
+    {
+        return sstablesMap;
+    }
+
     // shortcut for all live sstables, so can efficiently use it for size, etc
     public Set<SSTableReader> liveSSTables()
     {

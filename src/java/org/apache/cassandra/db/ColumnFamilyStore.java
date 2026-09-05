@@ -1904,6 +1904,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
     /**
      * Package protected for access from the CompactionManager.
      */
+    /** Memoised result of {@link #getApproximateSSTableKeyCount()}, keyed on the sstable set identity. */
+    private volatile Object approximateKeyCountToken;
+    private volatile long approximateKeyCount;
+
     public Tracker getTracker()
     {
         return data;
@@ -2988,6 +2992,40 @@ public <T> T withAllSSTables(final OperationType operationType, Function<Lifecyc
     }
 
     // End JMX get/set.
+
+    /**
+     * The approximate number of distinct partitions across this table's canonical sstables, memoised against
+     * the current sstable set.
+     * <p>
+     * Recomputing this reads and deserialises the Statistics.db component of every sstable in order to merge
+     * their cardinality estimators, so it must not run on every read. SSTables are immutable, so the value is
+     * a pure function of the sstable set and only needs recomputing when that set changes, which is on flush,
+     * compaction and streaming.
+     *
+     * @return the merged cardinality estimate, or -1 if there are no sstables
+     */
+    public long getApproximateSSTableKeyCount()
+    {
+        Object token = getTracker().getView().sstablesIdentity();
+        if (token == approximateKeyCountToken)
+            return approximateKeyCount;
+
+        long count;
+        try (RefViewFragment refViewFragment = selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
+        {
+            count = SSTableReader.getApproximateKeyCount(refViewFragment.sstables);
+        }
+
+        // Only publish if the sstable set did not change while we were reading it, so a racing flush or
+        // compaction can never leave a stale count cached.
+        if (getTracker().getView().sstablesIdentity() == token)
+        {
+            approximateKeyCount = count;
+            approximateKeyCountToken = token;
+        }
+
+        return count;
+    }
 
     public int getMeanEstimatedCellPerPartitionCount()
     {

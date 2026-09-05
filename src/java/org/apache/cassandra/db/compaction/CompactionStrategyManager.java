@@ -1301,8 +1301,13 @@ public class CompactionStrategyManager implements INotificationConsumer
         readLock.lock();
         try
         {
-            for (AbstractCompactionStrategy strategy : getAllStrategies())
-                tasks += strategy.getEstimatedRemainingTasks();
+            // Iterate the holders directly rather than going through getAllStrategies(), which builds a
+            // Guava concat/transform chain on every call. This gauge is read by every metrics scrape.
+            for (int i = 0, size = holders.size(); i < size; i++)
+            {
+                for (AbstractCompactionStrategy strategy : holders.get(i).allStrategies())
+                    tasks += strategy.getEstimatedRemainingTasks();
+            }
         }
         finally
         {

@@ -566,10 +566,8 @@ public class TableMetrics
                 long memtablePartitions = 0;
                 for (Memtable memtable : cfs.getTracker().getView().getAllMemtables())
                    memtablePartitions += memtable.partitionCount();
-                try(ColumnFamilyStore.RefViewFragment refViewFragment = cfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
-                {
-                    return SSTableReader.getApproximateKeyCount(refViewFragment.sstables) + memtablePartitions;
-                }
+                // The sstable half is memoised against the sstable set; the memtable half is a live counter.
+                return cfs.getApproximateSSTableKeyCount() + memtablePartitions;
             }
         }, null);
         estimatedColumnCountHistogram = createTableGauge("EstimatedColumnCountHistogram", "EstimatedColumnCountHistogram",
