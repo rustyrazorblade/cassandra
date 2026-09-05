@@ -415,19 +415,73 @@ public class DatabaseDescriptorTest
     }
 
     /**
-     * stream_send_window is deliberately unvalidated: every value the config type accepts is clamped up to the
-     * channel's own high water mark, so none of them can leave the window below a single write.
+     * A chunk larger than the window makes the sender drain the pipe before every chunk, which is the
+     * latency-bound behaviour the window exists to remove. Equal is fine; a byte over is not.
      */
     @Test
-    public void testStreamSendWindowNeedsNoStartupValidation()
+    public void testStreamChunkSizeMustFitTheSendWindow()
     {
         Config config = new Config();
 
-        config.stream_send_window = new DataStorageSpec.IntBytesBound(0);
-        DatabaseDescriptor.validateStreamingConfig(config);
-
         config.stream_send_window = new DataStorageSpec.IntBytesBound("2MiB");
-        DatabaseDescriptor.validateStreamingConfig(config);
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound("2MiB");
+        DatabaseDescriptor.validateStreamingConfig(config); // exactly the window is allowed
+
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound((2 << 20) + 1);
+        try
+        {
+            DatabaseDescriptor.validateStreamingConfig(config);
+            fail("a chunk larger than the window must stop the node coming up");
+        }
+        catch (ConfigurationException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("must not exceed stream_send_window"));
+        }
+    }
+
+    /** The same pair can be inverted at runtime, so both setters have to guard it, not just start-up. */
+    @Test
+    public void testSettersRejectAChunkLargerThanTheWindow()
+    {
+        int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        try
+        {
+            DatabaseDescriptor.setStreamSendWindowInBytes(1 << 20);
+            DatabaseDescriptor.setStreamChunkSizeInBytes(1 << 20); // exactly the window is allowed
+
+            try
+            {
+                DatabaseDescriptor.setStreamChunkSizeInBytes((1 << 20) + 1);
+                fail("raising the chunk size past the window must be refused");
+            }
+            catch (ConfigurationException e)
+            {
+                assertEquals(1 << 20, DatabaseDescriptor.getStreamChunkSizeInBytes());
+            }
+
+            try
+            {
+                DatabaseDescriptor.setStreamSendWindowInBytes((1 << 20) - 1);
+                fail("lowering the window below the chunk size must be refused");
+            }
+            catch (ConfigurationException e)
+            {
+                assertEquals(1 << 20, DatabaseDescriptor.getStreamSendWindowInBytes());
+            }
+
+            // lowering both is allowed in the order the message asks for
+            DatabaseDescriptor.setStreamChunkSizeInBytes(64 << 10);
+            DatabaseDescriptor.setStreamSendWindowInBytes(128 << 10);
+            assertEquals(64 << 10, DatabaseDescriptor.getStreamChunkSizeInBytes());
+            assertEquals(128 << 10, DatabaseDescriptor.getStreamSendWindowInBytes());
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamChunkSizeInBytes(Math.min(originalChunk, DatabaseDescriptor.getStreamSendWindowInBytes()));
+            DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+            DatabaseDescriptor.setStreamChunkSizeInBytes(originalChunk);
+        }
     }
 
     @Test

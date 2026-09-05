@@ -4673,16 +4673,28 @@ public class DatabaseDescriptor
         return conf.stream_transfer_task_timeout;
     }
 
-    /**
-     * The streaming settings that have to be right before a node comes up. stream_send_window needs no check
-     * here: {@link org.apache.cassandra.net.AsyncStreamingOutputPlus} clamps it up to the channel's own high
-     * water mark, so no value it accepts can leave the window smaller than a single write.
-     */
+    /** The streaming settings that have to be right before a node comes up. */
     @VisibleForTesting
     static void validateStreamingConfig(Config conf)
     {
         if (conf.stream_chunk_size.toBytes() <= 0)
             throw new ConfigurationException("stream_chunk_size must be positive, but was " + conf.stream_chunk_size, false);
+
+        checkChunkFitsSendWindow(conf.stream_chunk_size.toBytes(), conf.stream_send_window.toBytes());
+    }
+
+    /**
+     * A chunk bigger than the window means the writer waits for the pipe to drain to half the window before
+     * every chunk, which is the latency-bound behaviour the window exists to remove. See
+     * {@link org.apache.cassandra.net.AsyncChannelOutputPlus#waitForSpace}.
+     */
+    private static void checkChunkFitsSendWindow(int chunkSize, int sendWindow)
+    {
+        if (chunkSize > sendWindow)
+            throw new ConfigurationException(String.format("stream_chunk_size (%dB) must not exceed stream_send_window (%dB), " +
+                                                           "or the sender drains the pipe before every chunk. Lower the chunk " +
+                                                           "size before lowering the window.",
+                                                           chunkSize, sendWindow), false);
     }
 
     public static int getStreamSendWindowInBytes()
@@ -4692,6 +4704,7 @@ public class DatabaseDescriptor
 
     public static void setStreamSendWindowInBytes(int sendWindowInBytes)
     {
+        checkChunkFitsSendWindow(conf.stream_chunk_size.toBytes(), sendWindowInBytes);
         conf.stream_send_window = new DataStorageSpec.IntBytesBound(sendWindowInBytes);
     }
 
@@ -4704,6 +4717,7 @@ public class DatabaseDescriptor
     {
         if (chunkSizeInBytes <= 0)
             throw new IllegalArgumentException("stream_chunk_size must be positive, but was " + chunkSizeInBytes);
+        checkChunkFitsSendWindow(chunkSizeInBytes, conf.stream_send_window.toBytes());
         conf.stream_chunk_size = new DataStorageSpec.IntBytesBound(chunkSizeInBytes);
     }
 

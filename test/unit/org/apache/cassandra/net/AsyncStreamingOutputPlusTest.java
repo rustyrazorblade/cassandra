@@ -161,8 +161,10 @@ public class AsyncStreamingOutputPlusTest
         // If an operator configures a tiny window, we must not regress below the channel's own
         // high water mark, otherwise a single chunk could exceed the window.
         int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
         try
         {
+            DatabaseDescriptor.setStreamChunkSizeInBytes(512); // a window may not be smaller than the chunk
             DatabaseDescriptor.setStreamSendWindowInBytes(1024); // 1 KiB, smaller than the 64 KiB default
 
             EmbeddedChannel channel = new TestChannel(4);
@@ -174,6 +176,7 @@ public class AsyncStreamingOutputPlusTest
         finally
         {
             DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+            DatabaseDescriptor.setStreamChunkSizeInBytes(originalChunk);
         }
     }
 
@@ -187,6 +190,7 @@ public class AsyncStreamingOutputPlusTest
     public void testConfiguredSendWindowGovernsHowMuchIsInFlight() throws Exception
     {
         int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
         try
         {
             int chunk = 64 << 10;
@@ -194,10 +198,10 @@ public class AsyncStreamingOutputPlusTest
             // The writer parks before a write whose in-flight total would pass max(low, high - chunk).
             // The first chunk always flushes, so the count is that threshold in chunks, plus one.
             //
-            // No window of our own: the channel's 64 KiB high and 32 KiB low stand, the threshold is
+            // A window far below the channel's marks: its 64 KiB high and 32 KiB low stand, the threshold is
             // max(32 KiB, 0) = 32 KiB, and one chunk of 64 KiB already passes it.
             assertEquals("with no window of our own the channel's marks should govern",
-                         2, writesBeforeParking(0, chunk));
+                         2, writesBeforeParking(1024, chunk));
 
             // A 256 KiB window gives max(128 KiB, 192 KiB) = 192 KiB, which is three more chunks.
             assertEquals("the configured window should govern how much the writer keeps in flight",
@@ -206,12 +210,15 @@ public class AsyncStreamingOutputPlusTest
         finally
         {
             DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+            DatabaseDescriptor.setStreamChunkSizeInBytes(originalChunk);
         }
     }
 
     /** Submit fixed size writes to a channel that is never drained, and report how many land before it parks. */
     private int writesBeforeParking(int window, int chunk) throws Exception
     {
+        // the writes here are sized directly, so stream_chunk_size only has to stay under the window
+        DatabaseDescriptor.setStreamChunkSizeInBytes(512);
         DatabaseDescriptor.setStreamSendWindowInBytes(window);
 
         TestChannel channel = new TestChannel(4);
@@ -276,6 +283,8 @@ public class AsyncStreamingOutputPlusTest
     public void testSendWindowBoundaries() throws IOException
     {
         int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        DatabaseDescriptor.setStreamChunkSizeInBytes(512); // the window may not be set below the chunk size
         try
         {
             EmbeddedChannel probe = new TestChannel(4);
@@ -287,8 +296,8 @@ public class AsyncStreamingOutputPlusTest
                 channelLow = out.defaultLowWaterMark;
             }
 
-            // zero: the channel's own marks stand
-            assertWindow(0, channelHigh, channelLow);
+            // far below the channel's marks: its own stand
+            assertWindow(512, channelHigh, channelLow);
             // exactly the channel's high mark: same marks again, and no regression below them
             assertWindow(channelHigh, channelHigh, channelLow);
             // between the low and high marks: still clamped up to the channel's
@@ -299,6 +308,7 @@ public class AsyncStreamingOutputPlusTest
         finally
         {
             DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+            DatabaseDescriptor.setStreamChunkSizeInBytes(originalChunk);
         }
     }
 
