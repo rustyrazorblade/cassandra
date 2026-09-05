@@ -778,8 +778,7 @@ public class DatabaseDescriptor
                                              false);
         }
 
-        if (conf.stream_chunk_size.toBytes() <= 0)
-            throw new ConfigurationException("stream_chunk_size must be positive, but was " + conf.stream_chunk_size, false);
+        validateStreamingConfig(conf);
 
         if (conf.column_index_size != null)
             checkValidForByteConversion(conf.column_index_size, "column_index_size");
@@ -4672,6 +4671,18 @@ public class DatabaseDescriptor
     public static DurationSpec.LongMillisecondsBound getStreamTransferTaskTimeout()
     {
         return conf.stream_transfer_task_timeout;
+    }
+
+    /**
+     * The streaming settings that have to be right before a node comes up. stream_send_window needs no check
+     * here: {@link org.apache.cassandra.net.AsyncStreamingOutputPlus} clamps it up to the channel's own high
+     * water mark, so no value it accepts can leave the window smaller than a single write.
+     */
+    @VisibleForTesting
+    static void validateStreamingConfig(Config conf)
+    {
+        if (conf.stream_chunk_size.toBytes() <= 0)
+            throw new ConfigurationException("stream_chunk_size must be positive, but was " + conf.stream_chunk_size, false);
     }
 
     public static int getStreamSendWindowInBytes()
