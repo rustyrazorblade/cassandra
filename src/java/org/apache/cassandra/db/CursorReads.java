@@ -2972,10 +2972,10 @@ public final class CursorReads
     }
 
     /**
-     * Column identity across sources (copy of {@code CursorCompactor.sameColumn}'s 2-line name
-     * fallback): different sstables can carry different ColumnMetadata instances for the same
-     * column in their open-time serialization headers, so reference identity alone is wrong
-     * across sources; identity stays the fast path.
+     * Column identity across sources (copy of {@link ColumnMetadata#sameName}): different sstables
+     * can carry different ColumnMetadata instances for the same column in their open-time
+     * serialization headers, so reference identity alone is wrong across sources; identity stays
+     * the fast path.
      */
     static boolean sameColumn(ColumnMetadata a, ColumnMetadata b)
     {
