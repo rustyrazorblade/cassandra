@@ -35,6 +35,7 @@ import io.netty.channel.FileRegion;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
+import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
@@ -287,13 +288,20 @@ public class CassandraStreamWriterTest
         }
 
         @Override
-        public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+        public int writeToChannel(ByteBuffer buffer, RateLimiter limiter) throws IOException
+        {
+            writeToChannelCount++;
+            return super.writeToChannel(buffer, limiter);
+        }
+
+        @Override
+        public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException
         {
             LongConsumer counting = bytes -> {
                 batchCount++;
                 progress.accept(bytes);
             };
-            return super.writeFileToChannel(source, limiter, sections, counting);
+            return super.writeFileToChannel(source, limiter, sections, counting, readAhead);
         }
     }
 

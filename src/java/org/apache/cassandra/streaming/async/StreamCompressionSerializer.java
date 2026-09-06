@@ -59,17 +59,25 @@ public class StreamCompressionSerializer
     public static StreamingDataOutputPlus.Write serialize(LZ4Compressor compressor, ByteBuffer in, int version)
     {
         assert version == current_version;
-        return bufferSupplier -> {
-            int uncompressedLength = in.remaining();
-            int maxLength = compressor.maxCompressedLength(uncompressedLength);
-            ByteBuffer out = bufferSupplier.get(maxLength);
-            out.position(HEADER_LENGTH);
-            compressor.compress(in, out);
-            int compressedLength = out.position() - HEADER_LENGTH;
-            out.putInt(0, compressedLength);
-            out.putInt(4, uncompressedLength);
-            out.flip();
-        };
+        return bufferSupplier -> compress(compressor, in, bufferSupplier);
+    }
+
+    /**
+     * Compress {@code in} into a buffer taken from {@code bufferSupplier}, framed as above, and return it
+     * ready to be written. The caller owns the buffer.
+     */
+    public static ByteBuffer compress(LZ4Compressor compressor, ByteBuffer in, StreamingDataOutputPlus.BufferSupplier bufferSupplier) throws IOException
+    {
+        int uncompressedLength = in.remaining();
+        int maxLength = compressor.maxCompressedLength(uncompressedLength);
+        ByteBuffer out = bufferSupplier.get(maxLength);
+        out.position(HEADER_LENGTH);
+        compressor.compress(in, out);
+        int compressedLength = out.position() - HEADER_LENGTH;
+        out.putInt(0, compressedLength);
+        out.putInt(4, uncompressedLength);
+        out.flip();
+        return out;
     }
 
     /**

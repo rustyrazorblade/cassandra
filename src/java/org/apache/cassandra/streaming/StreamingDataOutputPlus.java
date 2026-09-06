@@ -25,6 +25,7 @@ import java.nio.channels.FileChannel;
 import java.util.List;
 import java.util.function.LongConsumer;
 
+import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.utils.Shared;
 
@@ -95,6 +96,18 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
     int writeToChannel(Write write, RateLimiter limiter) throws IOException;
 
     /**
+     * Write a buffer that is already filled and ready for the wire, for callers that produced it elsewhere,
+     * such as a {@link StreamReadAhead} thread.
+     * <p>
+     * Takes ownership of the buffer, which must have come from the networking {@link
+     * org.apache.cassandra.utils.memory.BufferPool}; it is returned to that pool once the bytes are written.
+     * <p>
+     * As with {@link #writeToChannel(Write, RateLimiter)} this blocks only for permission to write, and
+     * returns before the bytes reach the network.
+     */
+    int writeToChannel(ByteBuffer buffer, RateLimiter limiter) throws IOException;
+
+    /**
      * Writes all data in file channel to stream: <br>
      * * For zero-copy-streaming, 1MiB at a time, with at most 2MiB in flight at once. <br>
      * * For streaming with SSL, 64KiB at a time, with at most 32+64KiB (default low water mark + batch size) in flight. <br>
@@ -114,8 +127,10 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
      * {@code progress} is invoked with the size of each batch once that batch has been submitted to the
      * channel; as with {@link #writeFileToChannel(FileChannel, RateLimiter)}, submission does not mean the
      * bytes have reached the network.
+     * <p>
+     * {@code readAhead} runs the reading when the channel is encrypted and the bytes have to be read at all.
      */
-    long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException;
+    long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException;
 
     default void flush() throws IOException {}
 }

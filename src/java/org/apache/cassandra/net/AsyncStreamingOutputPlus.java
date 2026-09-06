@@ -30,10 +30,12 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.net.SharedDefaultFileRegion.SharedFileChannel;
+import org.apache.cassandra.streaming.StreamReadAhead;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.memory.BufferPool;
@@ -160,6 +162,35 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
     }
 
     /**
+     * {@inheritDoc}
+     *
+     * The buffer is already filled, so there is nothing to do here but wait for room in the send window and
+     * hand it to the channel, which is the point of reading it on another thread.
+     */
+    @Override
+    public int writeToChannel(ByteBuffer buffer, RateLimiter limiter) throws IOException
+    {
+        doFlush(0);
+        bufferPool.putUnusedPortion(buffer);
+
+        int length = buffer.limit();
+        ChannelPromise promise;
+        try
+        {
+            limiter.acquire(length);
+            promise = beginFlush(length, streamingSendWindowLowWaterMark, streamingSendWindowHighWaterMark);
+        }
+        catch (Throwable t)
+        {
+            bufferPool.put(buffer);
+            throw t;
+        }
+
+        channel.writeAndFlush(GlobalBufferPoolAllocator.wrap(buffer), promise);
+        return length;
+    }
+
+    /**
      * Writes all data in file channel to stream: <br>
      * * For zero-copy-streaming, 1MiB at a time, with at most 2MiB in flight at once. <br>
      * * For streaming with SSL, 64KiB at a time, with at most 32+64KiB (default low water mark + batch size) in flight. <br>
@@ -225,13 +256,13 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
      * space, so the batches are read into pooled buffers instead.
      */
     @Override
-    public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+    public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException
     {
         int batchSize = DatabaseDescriptor.getStreamChunkSizeInBytes();
         try
         {
             if (channel.pipeline().get(SslHandler.class) != null)
-                return writeSectionsToChannel(source, limiter, sections, progress, batchSize);
+                return writeSectionsToChannel(source, limiter, sections, progress, batchSize, readAhead);
             else
                 return writeSectionsToChannelZeroCopy(source.channel(), limiter, sections, progress, batchSize);
         }
@@ -241,10 +272,32 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
         }
     }
 
+    /**
+     * Reads the sections on {@code readAhead} and writes them here, so the disk keeps reading while the send
+     * window is full. Only encryption brings the bytes into the process at all; without it they go straight
+     * from the page cache to the socket.
+     */
     @VisibleForTesting
-    long writeSectionsToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize) throws IOException
+    long writeSectionsToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize, ExecutorPlus readAhead) throws IOException
     {
         long bytesTransferred = 0;
+        try (StreamReadAhead ahead = StreamReadAhead.start(readAhead, StreamReadAhead.depthFor(batchSize),
+                                                           sink -> readSections(source, sections, batchSize, sink)))
+        {
+            StreamReadAhead.Chunk chunk;
+            while ((chunk = ahead.take()) != null)
+            {
+                int written = writeToChannel(chunk.buffer, limiter);
+                bytesTransferred += written;
+                progress.accept(written);
+            }
+        }
+        return bytesTransferred;
+    }
+
+    private void readSections(StreamingFileSource source, List<Section> sections, int batchSize, StreamReadAhead.Sink sink)
+    throws IOException, InterruptedException
+    {
         for (Section section : sections)
         {
             long length = section.length();
@@ -254,19 +307,23 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
                 int toWrite = (int) min(batchSize, length - sectionTransferred);
                 long position = section.start + sectionTransferred;
 
-                writeToChannel(bufferSupplier -> {
-                    ByteBuffer outBuffer = bufferSupplier.get(toWrite);
+                ByteBuffer outBuffer = bufferPool.get(toWrite, BufferType.OFF_HEAP);
+                try
+                {
                     outBuffer.limit(toWrite);
                     source.read(outBuffer, position);
                     outBuffer.flip();
-                }, limiter);
+                }
+                catch (Throwable t)
+                {
+                    bufferPool.put(outBuffer);
+                    throw t;
+                }
 
+                sink.accept(new StreamReadAhead.Chunk(outBuffer, toWrite));
                 sectionTransferred += toWrite;
-                bytesTransferred += toWrite;
-                progress.accept(toWrite);
             }
         }
-        return bytesTransferred;
     }
 
     @VisibleForTesting
