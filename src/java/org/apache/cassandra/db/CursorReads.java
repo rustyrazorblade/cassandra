@@ -4694,7 +4694,11 @@ public final class CursorReads
         EncodingStats stats = EncodingStats.merge(allStats, Function.identity());
         SerializationHeader header = new SerializationHeader(false, metadata, cols, stats);
 
-        DataOutputBuffer rowEvents = new DataOutputBuffer();
+        // DataOutputBuffer's own default is 128 bytes, and growth doubles and copies the whole
+        // contents each time, so a response of any size climbs there one memcpy at a time. The
+        // default response path has always avoided that by sizing from a moving average of past
+        // response sizes; this path produces the same bytes, so it uses the same estimate.
+        DataOutputBuffer rowEvents = new DataOutputBuffer(ReadResponse.responseBufferInitialSize());
         ResponseWireWriter writer = new ResponseWireWriter(rowEvents, header, MessagingService.current_version);
         Slice slice = slices.get(0);
         TranscodeMergeSink sink = new TranscodeMergeSink(writer, metadata.comparator, slice, nowInSec, gcBefore,
@@ -4713,7 +4717,12 @@ public final class CursorReads
         boolean hasStatic = !ctx.mergedStatic.isEmpty();
         boolean isEmptyPartition = ctx.mergedDeletion.isLive() && !hasStatic && rowEvents.getLength() == 0;
 
-        try (DataOutputBuffer out = new DataOutputBuffer())
+        // The envelope holds the row events verbatim plus the partition header, so its size is
+        // known here rather than estimated: the row-event length is exact, and the allowance on
+        // top covers the key, flags, deletion, column subset and static row. Undersizing costs at
+        // most one growth; the estimate alone would leave the whole response to climb from
+        // DATA_RESPONSE_BUFFER_INITIAL_SIZE_MAX.
+        try (DataOutputBuffer out = new DataOutputBuffer(rowEvents.getLength() + ReadResponse.responseBufferInitialSize()))
         {
             // UnfilteredPartitionIterators.Serializer's own envelope: the legacy isForThrift
             // placeholder, then "has next partition" (always true — exactly one partition), the
@@ -4732,6 +4741,7 @@ public final class CursorReads
                 envelope.writeEndOfPartition();
             }
             out.writeBoolean(false);
+            ReadResponse.updateEstimatedResponseBytes(out.getLength());
             return out.buffer(false);
         }
     }

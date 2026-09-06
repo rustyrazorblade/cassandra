@@ -249,14 +249,35 @@ public abstract class ReadResponse
         }
     }
 
+    // Exponential moving average of response sizes, used to set initial size of output buffer.
+    // Shared by BOTH replica-response paths: LocalDataResponse.build and the cursor read path's
+    // CursorReads.buildTranscodeResponseBytes, which produce the same bytes for the same query
+    // and so have the same size to predict.
+    private static final MovingAverage estimatedResponseBytes = ExpMovingAverage.decayBy1000();
+    private static final int bufferInitialSizeMin = CassandraRelevantProperties.DATA_RESPONSE_BUFFER_INITIAL_SIZE_MIN.getInt();
+    private static final int bufferInitialSizeMax = CassandraRelevantProperties.DATA_RESPONSE_BUFFER_INITIAL_SIZE_MAX.getInt();
+
+    /** Initial size for a response output buffer, so it does not grow (and copy its whole
+     *  contents) its way up from {@code DataOutputBuffer}'s 128-byte default. */
+    static int responseBufferInitialSize()
+    {
+        if (bufferInitialSizeMax <= bufferInitialSizeMin)
+            return bufferInitialSizeMin;
+        // Size output buffer to 10% above the moving average to absorb minor variance and limit rebuffering.
+        double estimatedResponseSize = estimatedResponseBytes.get();
+        double bufferSizeEstimate = Double.isNaN(estimatedResponseSize) ? bufferInitialSizeMin : estimatedResponseSize * 1.1;
+        return Math.min((int) bufferSizeEstimate, bufferInitialSizeMax);
+    }
+
+    /** Feeds a finished response's size back into the estimate above. */
+    static void updateEstimatedResponseBytes(long responseBytes)
+    {
+        estimatedResponseBytes.update(responseBytes);
+    }
+
     // built on the owning node responding to a query
     private static class LocalDataResponse extends DataResponse
     {
-        // Exponential moving average of response sizes, used to set initial size of output buffer.
-        private static final MovingAverage estimatedResponseBytes = ExpMovingAverage.decayBy1000();
-        private static final int bufferInitialSizeMin = CassandraRelevantProperties.DATA_RESPONSE_BUFFER_INITIAL_SIZE_MIN.getInt();
-        private static final int bufferInitialSizeMax = CassandraRelevantProperties.DATA_RESPONSE_BUFFER_INITIAL_SIZE_MAX.getInt();
-
         private LocalDataResponse(UnfilteredPartitionIterator iter, ReadCommand command, RepairedDataInfo rdi)
         {
             super(build(iter, command.columnFilter()),
@@ -272,20 +293,10 @@ public abstract class ReadResponse
 
         private static ByteBuffer build(UnfilteredPartitionIterator iter, ColumnFilter selection)
         {
-            int initialBufferSize = bufferInitialSizeMin;
-
-            if (bufferInitialSizeMax > bufferInitialSizeMin)
-            {
-                // Size output buffer to 10% above the moving average to absorb minor variance and limit rebuffering.
-                double estimatedResponseSize = estimatedResponseBytes.get();
-                double bufferSizeEstimate = Double.isNaN(estimatedResponseSize) ? bufferInitialSizeMin : estimatedResponseSize * 1.1;
-                initialBufferSize = Math.min((int) bufferSizeEstimate, bufferInitialSizeMax);
-            }
-
-            try (DataOutputBuffer buffer = new DataOutputBuffer(initialBufferSize))
+            try (DataOutputBuffer buffer = new DataOutputBuffer(responseBufferInitialSize()))
             {
                 UnfilteredPartitionIterators.serializerForIntraNode().serialize(iter, selection, buffer, MessagingService.current_version);
-                estimatedResponseBytes.update(buffer.position());
+                updateEstimatedResponseBytes(buffer.position());
                 return buffer.buffer(false);
             }
             catch (IOException e)
