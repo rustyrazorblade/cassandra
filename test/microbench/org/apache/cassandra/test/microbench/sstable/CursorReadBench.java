@@ -111,6 +111,16 @@ public class CursorReadBench extends CQLTester
     @Param("8")
     int colCount = 8;
 
+    /**
+     * Characters in each text column's value. Fixed-length columns land their bytes straight in
+     * the destination; variable-length ones are the arm that can go through a transfer buffer, and
+     * the cost of that only shows once a value is big enough for the copy to matter. 16 is an
+     * ordinary short string; 4096 is at {@code CursorReads.ValueTransfer}'s buffer size, where a
+     * chunked copy also starts needing more than one pass.
+     */
+    @Param("16")
+    int valueSize = 16;
+
     @Param("true")
     boolean isCursor = true;
 
@@ -165,7 +175,7 @@ public class CursorReadBench extends CQLTester
                 values[1] = ck;
                 for (int i = 0; i < colCount; i++)
                     values[2 + i] = i % 2 == 0 ? (Object) (ck * 31 + round)
-                                               : (Object) ("value-" + round + '-' + ck + '-' + i);
+                                               : (Object) text(round, ck, i);
                 execute(insert, values);
             }
             cfs.forceBlockingFlush(ColumnFamilyStore.FlushReason.USER_FORCED);
@@ -176,6 +186,17 @@ public class CursorReadBench extends CQLTester
         if (cfs.getLiveSSTables().size() != sstableCount)
             throw new IllegalStateException("expected " + sstableCount + " overlapping sstables, got "
                                             + cfs.getLiveSSTables().size());
+    }
+
+    /** A distinct value per (round, ck, column) of exactly {@link #valueSize} characters, so no
+     *  two sources tie and every merge resolves on timestamp. */
+    private String text(int round, long ck, int column)
+    {
+        StringBuilder value = new StringBuilder(valueSize).append(round).append('-').append(ck).append('-').append(column).append('-');
+        while (value.length() < valueSize)
+            value.append('x');
+        value.setLength(valueSize);
+        return value.toString();
     }
 
     /** See the class javadoc: a silently declining gate produces a healthy-looking benchmark of

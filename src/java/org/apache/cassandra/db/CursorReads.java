@@ -72,6 +72,8 @@ import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBou
 import org.apache.cassandra.io.sstable.format.bti.BtiCursorSeekSupport;
 import org.apache.cassandra.io.sstable.format.bti.BtiTableReader;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
+import org.apache.cassandra.io.util.ArrayBackedDataOutput;
+import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.metrics.TableMetrics;
@@ -4768,11 +4770,37 @@ public final class CursorReads
      * Every other output method throws {@link UnsupportedOperationException}: if the cursor
      * reader's copy loop ever changes shape, this fails loudly instead of corrupting values.
      */
-    private static final class CellValueCapture implements DataOutputPlus
+    private static final class CellValueCapture implements DataOutputPlus, ArrayBackedDataOutput
     {
         private byte[] target;
         private int written;
         private boolean fixed;
+
+        /**
+         * The value array is always known before a single value byte is read — for a fixed-length
+         * type from {@link #prepareFixed}, for a variable-length one from the wire's length vint,
+         * which {@code copyCellContents} mirrors to {@link #writeUnsignedVInt32} before it copies
+         * anything. So both arms can take {@code copyCellContents}' array-backed fast path and
+         * land the bytes in the value array in one copy; the chunked {@link #write} below is left
+         * as the fallback.
+         */
+        @Override
+        public boolean hasArray()
+        {
+            return target != null;
+        }
+
+        @Override
+        public void readFully(DataInputPlus in, int length) throws IOException
+        {
+            // the same single-full-array-pass shape write() validates, for the same reason: a
+            // partial or repeated pass would leave the value array holding the wrong bytes
+            if (target == null || written != 0 || length != target.length)
+                throw new IllegalStateException("unexpected value read: " + length + " bytes into "
+                                                + (target == null ? "no target" : target.length + " already " + written));
+            in.readFully(target, 0, length);
+            written = length;
+        }
 
         /** Variable-length mode: the array is allocated when the wire's length vint is mirrored. */
         CellValueCapture prepareVariable()

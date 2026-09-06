@@ -40,6 +40,8 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.io.sstable.ClusteringDescriptor;
 import org.apache.cassandra.io.sstable.OpenRangeDeletions;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
+import org.apache.cassandra.io.util.ArrayBackedDataOutput;
+import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessagingService;
@@ -1397,10 +1399,26 @@ final class CursorReadMerger
      * loudly (the CellValueCapture discipline: a copy-loop shape change breaks the build of the
      * comparison, not the comparison's result).
      */
-    static final class CellValueScratch implements DataOutputPlus
+    static final class CellValueScratch implements DataOutputPlus, ArrayBackedDataOutput
     {
         private byte[] buffer = new byte[64];
         private int length;
+
+        /** Always: the staged bytes live in a heap array, so {@code copyCellContents} can read
+         *  straight into it rather than through a caller's transfer buffer. */
+        @Override
+        public boolean hasArray()
+        {
+            return true;
+        }
+
+        @Override
+        public void readFully(DataInputPlus in, int valueLength) throws IOException
+        {
+            ensureCapacity(length + valueLength);
+            in.readFully(buffer, length, valueLength);
+            length += valueLength;
+        }
         /** M3.3a-ii: whether {@link #writeUnsignedVInt32} was called while staging the bytes
          *  currently held — i.e. whether the ORIGINAL wire value was variable-length (a vint
          *  preceded it). Needed to replay ({@link #streamTo}) the exact same shape

@@ -44,8 +44,8 @@ import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.io.util.ArrayBackedDataOutput;
 import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.ResizableByteBuffer;
@@ -903,7 +903,7 @@ public class SSTableCursorReader implements AutoCloseable
             writer.writeUnsignedVInt32(length);
         }
         cellCursor.cellValueLength = length;
-        // In production every writer is a DataOutputBuffer that holds a heap array. Read the value
+        // In production every writer is array-backed. Read the value
         // bytes straight into that array. This needs no loop for a value that is larger than the
         // transfer buffer, and such values occur: valueLengthIfFixed is 6144 for a
         // vector<float, 1536>.
@@ -912,14 +912,14 @@ public class SSTableCursorReader implements AutoCloseable
         // above already checks the length. An exception from the growth of the output buffer is a
         // defect in this process, not damaged data, and it must not mark the sstable as corrupt.
         //
-        // hasArray() guards against a direct-backed DataOutputBuffer: readFully requires a heap
-        // array, so a direct-backed instance falls through to the transfer-buffer loop below
-        // instead of taking this fast path unsafely.
-        if (writer instanceof DataOutputBuffer && ((DataOutputBuffer) writer).hasArray())
+        // hasArray() guards against an output with no heap array to read into: readFully requires
+        // one, so such an instance falls through to the transfer-buffer loop below instead of
+        // taking this fast path unsafely.
+        if (writer instanceof ArrayBackedDataOutput && ((ArrayBackedDataOutput) writer).hasArray())
         {
             try
             {
-                ((DataOutputBuffer) writer).readFully(dataReader, length);
+                ((ArrayBackedDataOutput) writer).readFully(dataReader, length);
             }
             catch (IOException e)
             {

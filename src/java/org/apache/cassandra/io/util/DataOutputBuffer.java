@@ -42,7 +42,7 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.DOB_MAX_RE
  *
  * This class is completely thread unsafe.
  */
-public class DataOutputBuffer extends BufferedDataOutputStreamPlus
+public class DataOutputBuffer extends BufferedDataOutputStreamPlus implements ArrayBackedDataOutput
 {
     /*
      * Threshold at which resizing transitions from doubling to increasing by 50%
