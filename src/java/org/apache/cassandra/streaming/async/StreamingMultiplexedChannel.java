@@ -117,6 +117,12 @@ public class StreamingMultiplexedChannel
     private final ExecutorPlus fileTransferExecutor;
 
     /**
+     * Runs the read-ahead of each in-flight transfer, one thread per transfer, so the sender never reads.
+     * Sized like {@link #fileTransferExecutor} because a reader is busy for as long as its sender is.
+     */
+    private final ExecutorPlus readAheadExecutor;
+
+    /**
      * A mapping of each {@link #fileTransferExecutor} thread to a channel that can be written to (on that thread).
      */
     private final ConcurrentMap<Thread, StreamingChannel> threadToChannelMap = new ConcurrentHashMap<>();
@@ -134,6 +140,9 @@ public class StreamingMultiplexedChannel
         fileTransferExecutor = executorFactory()
                 .configurePooled("NettyStreaming-Outbound-" + name, MAX_PARALLEL_TRANSFERS)
                 .withKeepAlive(1L, SECONDS).build();
+        readAheadExecutor = executorFactory()
+                .configurePooled("NettyStreaming-Outbound-ReadAhead-" + name, MAX_PARALLEL_TRANSFERS)
+                .withKeepAlive(1L, SECONDS).build();
     }
 
 
@@ -141,6 +150,11 @@ public class StreamingMultiplexedChannel
     public InetAddressAndPort peer()
     {
         return to;
+    }
+
+    public ExecutorPlus readAheadExecutor()
+    {
+        return readAheadExecutor;
     }
 
     public InetSocketAddress connectedTo()
@@ -520,6 +534,7 @@ public class StreamingMultiplexedChannel
         threadToChannelMap.values().forEach(StreamingChannel::close);
         threadToChannelMap.clear();
         fileTransferExecutor.shutdownNow();
+        readAheadExecutor.shutdownNow();
     }
 
     @VisibleForTesting // For testing only -- close the control handle for testing streaming exception handling.

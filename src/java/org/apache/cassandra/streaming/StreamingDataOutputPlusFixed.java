@@ -24,7 +24,9 @@ import java.nio.channels.FileChannel;
 import java.util.List;
 import java.util.function.LongConsumer;
 
+import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
+import org.apache.cassandra.utils.memory.BufferPools;
 
 public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implements StreamingDataOutputPlus
 {
@@ -42,6 +44,21 @@ public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implemen
     }
 
     @Override
+    public int writeToChannel(ByteBuffer ready, RateLimiter limiter) throws IOException
+    {
+        try
+        {
+            int length = ready.remaining();
+            buffer.put(ready);
+            return length;
+        }
+        finally
+        {
+            BufferPools.forNetworking().put(ready);
+        }
+    }
+
+    @Override
     public long writeFileToChannel(FileChannel file, RateLimiter limiter) throws IOException
     {
         long count = 0;
@@ -51,7 +68,7 @@ public class StreamingDataOutputPlusFixed extends DataOutputBufferFixed implemen
     }
 
     @Override
-    public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+    public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException
     {
         long count = 0;
         try

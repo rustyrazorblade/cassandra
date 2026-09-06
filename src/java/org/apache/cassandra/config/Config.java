@@ -190,6 +190,13 @@ public class Config
     // otherwise the CRC chunk size is used). It does not change the on-wire framing format.
     public volatile DataStorageSpec.IntBytesBound stream_chunk_size = new DataStorageSpec.IntBytesBound("128KiB");
 
+    // How far the non-zero-copy ("legacy") streaming path reads ahead of the sender, in bytes. The sender
+    // blocks once stream_send_window bytes are in flight, so a reader on the sending thread stops reading
+    // for as long as the network is busy and the disk goes idle. Reading ahead on its own thread keeps the
+    // disk working through that. Rounded down to whole stream_chunk_size chunks, at least one, and every
+    // queued chunk is held out of the networking buffer pool for the life of a transfer.
+    public volatile DataStorageSpec.IntBytesBound stream_read_ahead = new DataStorageSpec.IntBytesBound("2MiB");
+
     // How the compressed non-zero-copy ("legacy") streaming writer reads the data file when it has to read it
     // at all, which is only over an encrypted connection: without SSL the bytes go from the page cache to the
     // socket without entering the process. Streamed bytes are read once and never wanted again, so 'direct'

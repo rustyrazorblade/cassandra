@@ -1482,6 +1482,15 @@ slow_query_log_timeout: 500ms
 # Min unit: B
 # stream_chunk_size: 128KiB
 
+# How far the non-zero-copy ("legacy") streaming path reads ahead of the sender. The sender blocks once
+# stream_send_window bytes are in flight, and a reader on the sending thread stops reading for as long as
+# that lasts, so the disk goes idle exactly when the network is about to want more data. The read runs on
+# its own thread and stays this far in front of the sender instead. The value is rounded down to whole
+# stream_chunk_size chunks, at least one, and each queued chunk holds a networking buffer for the life of
+# a transfer, so raising it raises buffer pool use by that much per concurrent transfer.
+# Min unit: B
+# stream_read_ahead: 2MiB
+
 # How the compressed non-zero-copy ("legacy") streaming writer reads the data file, on the only occasion it has
 # to read it at all: over an encrypted connection. Without encryption the bytes go from the page cache to the
 # socket without entering the process, and this setting makes no difference. The uncompressed writer is not

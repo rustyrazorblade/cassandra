@@ -4680,6 +4680,9 @@ public class DatabaseDescriptor
         if (conf.stream_chunk_size.toBytes() <= 0)
             throw new ConfigurationException("stream_chunk_size must be positive, but was " + conf.stream_chunk_size, false);
 
+        if (conf.stream_read_ahead.toBytes() <= 0)
+            throw new ConfigurationException("stream_read_ahead must be positive, but was " + conf.stream_read_ahead, false);
+
         checkChunkFitsSendWindow(conf.stream_chunk_size.toBytes(), conf.stream_send_window.toBytes());
 
         if (conf.stream_disk_access_mode != DiskAccessMode.standard && conf.stream_disk_access_mode != DiskAccessMode.direct)
@@ -4725,6 +4728,18 @@ public class DatabaseDescriptor
     public static int getStreamChunkSizeInBytes()
     {
         return conf.stream_chunk_size.toBytes();
+    }
+
+    public static int getStreamReadAheadInBytes()
+    {
+        return conf.stream_read_ahead.toBytes();
+    }
+
+    public static void setStreamReadAheadInBytes(int readAheadInBytes)
+    {
+        if (readAheadInBytes <= 0)
+            throw new IllegalArgumentException("stream_read_ahead must be positive, but was " + readAheadInBytes);
+        conf.stream_read_ahead = new DataStorageSpec.IntBytesBound(readAheadInBytes);
     }
 
     public static void setStreamChunkSizeInBytes(int chunkSizeInBytes)

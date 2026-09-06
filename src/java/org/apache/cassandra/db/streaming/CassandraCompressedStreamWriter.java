@@ -76,7 +76,7 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
         long bytesTransferred = out.writeFileToChannel(source, limiter, sections, bytes -> {
             progress[0] += bytes;
             session.progress(filename, ProgressInfo.Direction.OUT, progress[0], bytes, totalSize);
-        });
+        }, session.getChannel().readAheadExecutor());
 
         logger.debug("[Stream #{}] Finished streaming file {} to {}, bytesTransferred = {}, totalSize = {}",
                      session.planId(), sstable.getFilename(), session.peer,

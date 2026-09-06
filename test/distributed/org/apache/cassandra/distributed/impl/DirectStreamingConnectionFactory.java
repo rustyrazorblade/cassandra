@@ -31,6 +31,7 @@ import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.LongConsumer;
 
+import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
@@ -43,6 +44,7 @@ import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlusFixed;
 import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.memory.BufferPools;
 import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
@@ -160,6 +162,21 @@ public class DirectStreamingConnectionFactory
                     return length;
                 }
 
+                @Override
+                public int writeToChannel(ByteBuffer ready, RateLimiter limiter) throws IOException
+                {
+                    try
+                    {
+                        int length = ready.remaining();
+                        write(ready);
+                        return length;
+                    }
+                    finally
+                    {
+                        BufferPools.forNetworking().put(ready);
+                    }
+                }
+
                 // TODO (future): support RateLimiter
                 @Override
                 public long writeFileToChannel(FileChannel file, RateLimiter limiter) throws IOException
@@ -175,7 +192,7 @@ public class DirectStreamingConnectionFactory
 
                 // TODO (future): support RateLimiter
                 @Override
-                public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress) throws IOException
+                public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException
                 {
                     long count = 0;
                     try

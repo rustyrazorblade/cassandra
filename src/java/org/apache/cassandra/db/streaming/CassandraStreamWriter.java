@@ -36,13 +36,12 @@ import org.apache.cassandra.io.util.DataIntegrityMetadata.ChecksumValidator;
 import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.StreamManager;
 import org.apache.cassandra.streaming.StreamManager.StreamRateLimiter;
+import org.apache.cassandra.streaming.StreamReadAhead;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.async.StreamCompressionSerializer;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.memory.BufferPools;
-
-import static org.apache.cassandra.net.MessagingService.current_version;
 
 /**
  * CassandraStreamWriter writes given section of the SSTable to given channel.
@@ -83,41 +82,28 @@ public class CassandraStreamWriter
             ChecksumValidator validator = sstable.maybeGetChecksumValidator())
         {
             int bufferSize = validator == null ? DatabaseDescriptor.getStreamChunkSizeInBytes() : validator.chunkSize;
-
-            // setting up data compression stream
+            String filename = sstable.descriptor.fileFor(Components.DATA).toString();
             long progress = 0L;
 
-            // stream each of the required sections of the file
-            String filename = sstable.descriptor.fileFor(Components.DATA).toString();
-            for (SSTableReader.PartitionPositionBounds section : sections)
+            // Read, validate and compress on the read-ahead thread, so this one does nothing but hand finished
+            // chunks to the channel. Otherwise every chunk waits on the disk after the send window frees up.
+            try (StreamReadAhead ahead = StreamReadAhead.start(session.getChannel().readAheadExecutor(),
+                                                               StreamReadAhead.depthFor(bufferSize),
+                                                               sink -> read(proxy, validator, bufferSize, sink)))
             {
-                long start = validator == null ? section.lowerPosition : validator.chunkStart(section.lowerPosition);
-                // if the transfer does not start on the valididator's chunk boundary, this is the number of bytes to offset by
-                int transferOffset = (int) (section.lowerPosition - start);
-                if (validator != null)
-                    validator.seek(start);
-
-                // length of the section to read
-                long length = section.upperPosition - start;
-                // tracks write progress
-                long bytesRead = 0;
-                while (bytesRead < length)
+                StreamReadAhead.Chunk chunk;
+                while ((chunk = ahead.take()) != null)
                 {
-                    int toTransfer = (int) Math.min(bufferSize, length - bytesRead);
-                    long lastBytesRead = write(proxy, validator, out, start, transferOffset, toTransfer, bufferSize);
-                    start += lastBytesRead;
-                    bytesRead += lastBytesRead;
-                    long delta = lastBytesRead - transferOffset;
-                    progress += delta;
-                    session.progress(filename, ProgressInfo.Direction.OUT, progress, delta, totalSize);
-                    transferOffset = 0;
+                    out.writeToChannel(chunk.buffer, limiter);
+                    progress += chunk.progress;
+                    session.progress(filename, ProgressInfo.Direction.OUT, progress, chunk.progress, totalSize);
                 }
             }
 
             // Flush once after all sections rather than draining the channel at every section boundary.
             // A per-section out.flush() blocks the sender until the channel has fully drained, which on a
             // high-latency link empties the pipe and costs a full round-trip per section. Each chunk is
-            // already writeAndFlush'd to the channel inside write(...), and the send window bounds the
+            // already writeAndFlush'd to the channel inside writeToChannel, and the send window bounds the
             // bytes in flight, so a single flush here preserves ordering and the end-of-file contract
             // while keeping the pipe full across section boundaries.
             out.flush();
@@ -131,27 +117,55 @@ public class CassandraStreamWriter
         return totalSize;
     }
 
+    /** Reads every section in order on the read-ahead thread, blocking in {@code sink} once it is far enough ahead. */
+    private void read(ChannelProxy proxy, ChecksumValidator validator, int bufferSize, StreamReadAhead.Sink sink)
+    throws IOException, InterruptedException
+    {
+        for (SSTableReader.PartitionPositionBounds section : sections)
+        {
+            long start = validator == null ? section.lowerPosition : validator.chunkStart(section.lowerPosition);
+            // if the transfer does not start on the valididator's chunk boundary, this is the number of bytes to offset by
+            int transferOffset = (int) (section.lowerPosition - start);
+            if (validator != null)
+                validator.seek(start);
+
+            // length of the section to read
+            long length = section.upperPosition - start;
+            // tracks read progress
+            long bytesRead = 0;
+            while (bytesRead < length)
+            {
+                int toTransfer = (int) Math.min(bufferSize, length - bytesRead);
+                sink.accept(read(proxy, validator, start, transferOffset, toTransfer, bufferSize));
+                start += toTransfer;
+                bytesRead += toTransfer;
+                transferOffset = 0;
+            }
+        }
+    }
+
     /**
-     * Sequentially read bytes from the file and write them to the output stream
+     * Read one chunk off disk, verify it and compress it into the buffer that goes on the wire.
      *
      * @param proxy The file reader to read from
      * @param validator validator to verify data integrity
-     * @param start The readd offset from the beginning of the {@code proxy} file.
+     * @param start The read offset from the beginning of the {@code proxy} file.
      * @param transferOffset number of bytes to skip transfer, but include for validation.
      * @param toTransfer The number of bytes to be transferred.
      *
-     * @return Number of bytes transferred.
+     * @return The chunk to send, and the transfer progress sending it represents.
      *
      * @throws java.io.IOException on any I/O error
      */
-    protected long write(ChannelProxy proxy, ChecksumValidator validator, StreamingDataOutputPlus output, long start, int transferOffset, int toTransfer, int bufferSize) throws IOException
+    protected StreamReadAhead.Chunk read(ChannelProxy proxy, ChecksumValidator validator, long start, int transferOffset, int toTransfer, int bufferSize) throws IOException
     {
         // the count of bytes to read off disk
         int minReadable = (int) Math.min(bufferSize, proxy.size() - start);
 
-        // this buffer will hold the data from disk. as it will be compressed on the fly by
-        // AsyncChannelCompressedStreamWriter.write(ByteBuffer), we can release this buffer as soon as we can.
+        // this buffer holds the data from disk; it is compressed into the buffer that goes out, so it can go
+        // back to the pool as soon as the compression is done
         ByteBuffer buffer = BufferPools.forNetworking().get(minReadable, BufferType.OFF_HEAP);
+        ByteBuffer[] out = new ByteBuffer[1];
         try
         {
             int readCount = proxy.read(buffer, start);
@@ -166,13 +180,19 @@ public class CassandraStreamWriter
 
             buffer.position(transferOffset);
             buffer.limit(transferOffset + (toTransfer - transferOffset));
-            output.writeToChannel(StreamCompressionSerializer.serialize(compressor, buffer, current_version), limiter);
+            ByteBuffer compressed = StreamCompressionSerializer.compress(compressor, buffer,
+                                                                        size -> out[0] = BufferPools.forNetworking().get(size, BufferType.OFF_HEAP));
+            return new StreamReadAhead.Chunk(compressed, toTransfer - transferOffset);
+        }
+        catch (Throwable t)
+        {
+            if (out[0] != null)
+                BufferPools.forNetworking().put(out[0]);
+            throw t;
         }
         finally
         {
             BufferPools.forNetworking().put(buffer);
         }
-
-        return toTransfer;
     }
 }

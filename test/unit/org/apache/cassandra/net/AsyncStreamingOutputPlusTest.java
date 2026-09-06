@@ -29,8 +29,11 @@ import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.junit.AfterClass;
 import org.junit.Test;
 
+import org.apache.cassandra.concurrent.ExecutorFactory;
+import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.streaming.StreamManager;
@@ -54,6 +57,15 @@ public class AsyncStreamingOutputPlusTest
     static
     {
         DatabaseDescriptor.daemonInitialization();
+    }
+
+    private static final ExecutorPlus readAhead =
+        ExecutorFactory.Global.executorFactory().pooled("test-stream-read-ahead", 4);
+
+    @AfterClass
+    public static void shutdownReadAhead()
+    {
+        readAhead.shutdownNow();
     }
 
     @Test
@@ -448,7 +460,7 @@ public class AsyncStreamingOutputPlusTest
              AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel))
         {
             assertEquals(400, out.writeSectionsToChannel(StreamingFileSource.open(file, DiskAccessMode.standard),
-                                                         rateLimiter(), sections, bytes -> {}, 64));
+                                                         rateLimiter(), sections, bytes -> {}, 64, readAhead));
         }
 
         ByteBuffer actual = ByteBuffer.allocate(400);
