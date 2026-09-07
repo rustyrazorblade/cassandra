@@ -76,6 +76,30 @@ public class ThreadLocalMeterTest
         assertMeter(meter, codahaleMeter);
     }
 
+    /**
+     * Rates live in one array shared by every meter, and that array is copied when it grows.
+     * Creating enough meters to grow it must not disturb the rates already in it.
+     */
+    @Test
+    public void growingTheRatesArrayPreservesRates()
+    {
+        DeterministicClock clock = new DeterministicClock(0);
+        ThreadLocalMeter meter = new ThreadLocalMeter(clock);
+        com.codahale.metrics.Meter codahaleMeter = new com.codahale.metrics.Meter(clock);
+        meter.mark(100);
+        codahaleMeter.mark(100);
+
+        clock.setTime(TimeUnit.SECONDS.toNanos(10));
+        ThreadLocalMeter.tickAll();
+        assertThat(meter.getOneMinuteRate()).isGreaterThan(0);
+
+        List<ThreadLocalMeter> held = new ArrayList<>();
+        for (int i = 0; i < 1000; i++)
+            held.add(new ThreadLocalMeter(clock));
+
+        assertMeter(meter, codahaleMeter);
+    }
+
     @Test
     public void marksEventsAndUpdatesRatesAndCount()
     {

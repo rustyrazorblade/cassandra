@@ -19,10 +19,9 @@
 package org.apache.cassandra.metrics;
 
 import java.lang.ref.WeakReference;
-import java.util.ArrayList;
 import java.util.BitSet;
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -69,7 +68,9 @@ public class ThreadLocalMeter extends com.codahale.metrics.Meter implements Mete
     private static final double NON_INITIALIZED = Double.MIN_VALUE;
 
     private static final int BACKGROUND_TICK_INTERVAL_SEC = INTERVAL_SEC;
-    private static final List<WeakReference<ThreadLocalMeter>> allMeters = new CopyOnWriteArrayList<>();
+    // a set rather than a list: a node with many tables registers tens of thousands of meters,
+    // and copy-on-write makes each registration copy the whole backing array
+    private static final Set<WeakReference<ThreadLocalMeter>> allMeters = ConcurrentHashMap.newKeySet();
 
     /**
      * CASSANDRA-19332
@@ -142,7 +143,9 @@ public class ThreadLocalMeter extends com.codahale.metrics.Meter implements Mete
         {
             if (rates.length < rateGroupId + RATES_COUNT)
             {
-                double[] newRates = new double[rateGroupId + RATES_COUNT];
+                // grow by a factor, not by one rate group: without it every new meter copies the
+                // whole array, which is quadratic in the number of meters
+                double[] newRates = new double[Math.max(rateGroupId + RATES_COUNT, rates.length * 2)];
                 System.arraycopy(rates, 0, newRates, 0, rates.length);
                 rates = newRates;
             }
@@ -283,23 +286,14 @@ public class ThreadLocalMeter extends com.codahale.metrics.Meter implements Mete
     @VisibleForTesting
     static void tickAll()
     {
-            List<WeakReference<ThreadLocalMeter>> emptyRefsToRemove = null;
             for (WeakReference<ThreadLocalMeter> threadLocalMeterRef : allMeters)
             {
                 ThreadLocalMeter meter = threadLocalMeterRef.get();
                 if (meter != null)
-                {
                     meter.tickIfNessesary();
-                }
                 else
-                {
-                    if (emptyRefsToRemove == null)
-                        emptyRefsToRemove = new ArrayList<>();
-                    emptyRefsToRemove.add(threadLocalMeterRef);
-                }
+                    allMeters.remove(threadLocalMeterRef);
             }
-            if (emptyRefsToRemove != null)
-                allMeters.removeAll(emptyRefsToRemove);
 
     }
 
