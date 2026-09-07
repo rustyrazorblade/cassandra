@@ -85,8 +85,8 @@ public class CassandraStreamWriter
             String filename = sstable.descriptor.fileFor(Components.DATA).toString();
             long progress = 0L;
 
-            // Read, validate and compress on the read-ahead thread, so this one does nothing but hand finished
-            // chunks to the channel. Otherwise every chunk waits on the disk after the send window frees up.
+            // Read, validate and compress on the read-ahead thread. Otherwise each chunk waits on the disk
+            // after the send window frees up.
             try (StreamReadAhead ahead = StreamReadAhead.start(session.getChannel().readAheadExecutor(),
                                                                StreamReadAhead.depthFor(bufferSize),
                                                                sink -> read(proxy, validator, bufferSize, sink)))
@@ -100,12 +100,8 @@ public class CassandraStreamWriter
                 }
             }
 
-            // Flush once after all sections rather than draining the channel at every section boundary.
-            // A per-section out.flush() blocks the sender until the channel has fully drained, which on a
-            // high-latency link empties the pipe and costs a full round-trip per section. Each chunk is
-            // already writeAndFlush'd to the channel inside writeToChannel, and the send window bounds the
-            // bytes in flight, so a single flush here preserves ordering and the end-of-file contract
-            // while keeping the pipe full across section boundaries.
+            // One flush, after every section. A flush per section blocks the sender until the channel
+            // drains, which costs a round trip at each section boundary.
             out.flush();
             logger.debug("[Stream #{}] Finished streaming file {} to {}, bytesTransferred = {}, totalSize = {}",
                          session.planId(), sstable.getFilename(), session.peer, FBUtilities.prettyPrintMemory(progress), FBUtilities.prettyPrintMemory(totalSize));
@@ -121,22 +117,21 @@ public class CassandraStreamWriter
     private void read(ChannelProxy proxy, ChecksumValidator validator, int bufferSize, StreamReadAhead.Sink sink)
     throws IOException, InterruptedException
     {
+        long fileSize = proxy.size();
         for (SSTableReader.PartitionPositionBounds section : sections)
         {
             long start = validator == null ? section.lowerPosition : validator.chunkStart(section.lowerPosition);
-            // if the transfer does not start on the valididator's chunk boundary, this is the number of bytes to offset by
+            // bytes to skip when the transfer does not start on a validator chunk boundary
             int transferOffset = (int) (section.lowerPosition - start);
             if (validator != null)
                 validator.seek(start);
 
-            // length of the section to read
             long length = section.upperPosition - start;
-            // tracks read progress
             long bytesRead = 0;
             while (bytesRead < length)
             {
                 int toTransfer = (int) Math.min(bufferSize, length - bytesRead);
-                sink.accept(read(proxy, validator, start, transferOffset, toTransfer, bufferSize));
+                sink.accept(read(proxy, validator, fileSize, start, transferOffset, toTransfer, bufferSize));
                 start += toTransfer;
                 bytesRead += toTransfer;
                 transferOffset = 0;
@@ -149,21 +144,22 @@ public class CassandraStreamWriter
      *
      * @param proxy The file reader to read from
      * @param validator validator to verify data integrity
+     * @param fileSize The size of the {@code proxy} file, read once for the transfer.
      * @param start The read offset from the beginning of the {@code proxy} file.
      * @param transferOffset number of bytes to skip transfer, but include for validation.
      * @param toTransfer The number of bytes to be transferred.
      *
-     * @return The chunk to send, and the transfer progress sending it represents.
+     * @return The chunk to send, and the transfer progress it represents. The caller owns the chunk buffer,
+     *         which comes from the networking buffer pool and must be returned to it.
      *
      * @throws java.io.IOException on any I/O error
      */
-    protected StreamReadAhead.Chunk read(ChannelProxy proxy, ChecksumValidator validator, long start, int transferOffset, int toTransfer, int bufferSize) throws IOException
+    protected StreamReadAhead.Chunk read(ChannelProxy proxy, ChecksumValidator validator, long fileSize, long start, int transferOffset, int toTransfer, int bufferSize) throws IOException
     {
         // the count of bytes to read off disk
-        int minReadable = (int) Math.min(bufferSize, proxy.size() - start);
+        int minReadable = (int) Math.min(bufferSize, fileSize - start);
 
-        // this buffer holds the data from disk; it is compressed into the buffer that goes out, so it can go
-        // back to the pool as soon as the compression is done
+        // holds the data read from disk; the compressed copy is what goes on the wire
         ByteBuffer buffer = BufferPools.forNetworking().get(minReadable, BufferType.OFF_HEAP);
         ByteBuffer[] out = new ByteBuffer[1];
         try

@@ -84,19 +84,18 @@ import static org.junit.Assert.assertEquals;
  * and reports how long it takes and what it costs in CPU.
  *
  * The unit tests around this writer run on an EmbeddedChannel, which brings every byte into user space to
- * inspect it. That is the one thing a real socket does not have to do, so it is the one thing those tests
- * cannot measure. This test exists to measure it.
+ * inspect it. A real socket does not have to do that, so those tests cannot measure it.
  *
- * It also asserts that what crossed the socket is what is on disk: the checksum taken on the receiving side is
- * compared against a checksum over the compressed chunks read straight out of the data file.
+ * The test also compares the checksum the receiver takes against a checksum over the compressed chunks read
+ * straight out of the data file, which proves that what crossed the socket is what is on disk.
  *
  * Loopback has memory bandwidth to spare, so wall-clock throughput is the weaker of the numbers. Read the
  * process CPU time, the heap allocated, and the networking pool's hit count.
  *
- * The ant test JVM sets cassandra.debugrefcount, which allocates on its own account, so the heap figure is
- * good for comparing one commit against another and is not a production number.
+ * The ant test JVM sets cassandra.debugrefcount, which allocates on its own account. The heap figure
+ * therefore compares one commit against another and is not a production number.
  *
- * The knobs must be forwarded to the forked JVM; they are not read from the ant command line:
+ * Pass the settings to the forked JVM; ant does not read them from its own command line:
  *
  *   ant burn-testsome -Dtest.name=org.apache.cassandra.db.streaming.CompressedStreamWriterBurnTest
  *       -Dtest.jvm.args="-Dcassandra.test.streaming_burn_mib=512 -Dcassandra.test.streaming_burn_iterations=10"
@@ -133,8 +132,8 @@ public class CompressedStreamWriterBurnTest
         CompactionManager.instance.disableAutoCompaction();
         ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF);
 
-        // incompressible values, so the file on disk is the size we asked for and the bytes we time crossing
-        // the socket are the bytes we wrote
+        // incompressible values, so the file on disk is the size asked for, and the bytes timed across the
+        // socket are the bytes written
         Random random = new Random(0);
         byte[] value = new byte[VALUE_SIZE];
         int rows = (DATA_MIB << 20) / VALUE_SIZE;
@@ -195,8 +194,7 @@ public class CompressedStreamWriterBurnTest
             logger.info("streamed {} in {} ms, {} MiB/s, {} ms of process CPU",
                         FBUtilities.prettyPrintMemory(expectedBytes), fastest.millis, fastest.mibPerSecond(expectedBytes),
                         TimeUnit.NANOSECONDS.toMillis(fastest.cpuNanos));
-            // min of the runs, the same way the allocation gates do it: a sampling profiler or a stray
-            // background thread only ever adds
+            // min of the runs: a sampling profiler or a stray background thread only ever adds
             logger.info("allocated {} on the heap, {} networking pool hits, {} misses",
                         FBUtilities.prettyPrintMemory(leanest.heapBytes), leanest.poolHits, leanest.poolMisses);
         }
@@ -236,9 +234,9 @@ public class CompressedStreamWriterBurnTest
     }
 
     /**
-     * Heap allocated by every thread, live and dead, for the same reason: the event loops allocate as much of
-     * this as the writing thread does. The direct buffers the writer takes from the networking pool are not
-     * heap and do not appear here; the pool's own hit and miss counters are what track those.
+     * Heap allocated by every thread, live and dead: the event loops allocate as much of this as the writing
+     * thread does. The direct buffers the writer takes from the networking pool are not heap and do not
+     * appear here; the pool's own hit and miss counters track those.
      */
     private static long allocatedBytes()
     {

@@ -63,8 +63,8 @@ public class StreamCompressionSerializer
     }
 
     /**
-     * Compress {@code in} into a buffer taken from {@code bufferSupplier}, framed as above, and return it
-     * ready to be written. The caller owns the buffer.
+     * Compress {@code in} into a buffer taken from {@code bufferSupplier}, frame it as this class documents,
+     * and return it ready to write. The caller owns the buffer.
      */
     public static ByteBuffer compress(LZ4Compressor compressor, ByteBuffer in, StreamingDataOutputPlus.BufferSupplier bufferSupplier) throws IOException
     {

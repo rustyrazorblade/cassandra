@@ -51,10 +51,9 @@ import static org.junit.Assert.fail;
 /**
  * What the legacy streaming path does when it goes wrong.
  *
- * Two obligations. A writer whose network gives out has to say so, because the caller aborts the transfer on
- * the exception and a silent failure means a session that never finishes. A reader handed bytes that are
- * truncated or corrupt has to fail and take its half-written SSTable with it, because the alternative is a
- * partial SSTable left on disk that looks complete.
+ * Two obligations. A writer whose network gives out has to throw, because the caller aborts the transfer on
+ * that exception; a silent failure leaves a session that never finishes. A reader handed truncated or corrupt
+ * bytes has to fail and take its half-written SSTable with it. A partial SSTable left on disk looks complete.
  */
 public class StreamFailureTest
 {
@@ -156,7 +155,7 @@ public class StreamFailureTest
 
     /**
      * A reader given bytes it cannot make sense of must throw, and must not leave its half-written SSTable on
-     * disk: the count of data files in the table's directories has to be what it was before.
+     * disk.
      */
     private void assertReceivingFails(SSTableReader sstable, ColumnFamilyStore store, byte[] wire) throws Throwable
     {
@@ -174,7 +173,7 @@ public class StreamFailureTest
         }
         catch (Throwable expected)
         {
-            // any failure will do; what matters is that it failed and cleaned up
+            // any failure will do
         }
 
         assertEquals("a failed transfer must not leave a data file behind", before, dataFileCount(store));

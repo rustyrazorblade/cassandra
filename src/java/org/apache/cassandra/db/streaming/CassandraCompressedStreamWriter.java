@@ -64,11 +64,11 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
         logger.debug("[Stream #{}] Start streaming file {} to {}, repairedAt = {}, totalSize = {}", session.planId(),
                      sstable.getFilename(), session.peer, sstable.getSSTableMetadata().repairedAt, totalSize);
 
-        // we want to send continuous chunks together to minimise reads from disk and network writes
+        // contiguous chunks go out together, which reduces reads from disk and writes to the network
         List<Section> sections = fuseAdjacentChunks(compressionInfo.chunks());
 
-        // the compressed chunks are already in the form they go out in, so the writer can hand the file
-        // ranges straight to the kernel; nothing is read into the process unless the channel uses SSL
+        // the compressed chunks already have the form they go out in, so this writer sends file ranges
+        // instead of reading and transforming them
         String filename = sstable.descriptor.fileFor(Components.DATA).toString();
         long[] progress = new long[1];
         StreamingFileSource source = StreamingFileSource.open(sstable.descriptor.fileFor(Components.DATA),

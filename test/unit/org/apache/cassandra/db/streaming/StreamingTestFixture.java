@@ -79,9 +79,6 @@ import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 /**
  * Shared scaffolding for the legacy (non-zero-copy) streaming tests: build a stream header, run a writer
  * against a channel that keeps whatever it emits, and work out what those bytes should have been.
- *
- * The capture channel accepts both a {@link ByteBuf} and a {@link FileRegion}, because the writer is free to
- * choose either and the tests are about the bytes, not about which one it picked.
  */
 public final class StreamingTestFixture
 {
@@ -127,8 +124,7 @@ public final class StreamingTestFixture
                : new CassandraStreamWriter(sstable, header, session);
     }
 
-    /** Run the writer and return every byte it put on the channel. */
-    /** A channel that fails every write, so a test can see what the writer does when the network gives out. */
+    /** Run the writer against a channel that fails every write. */
     public static void writeToFailingChannel(CassandraStreamWriter writer, Throwable failure) throws IOException
     {
         EmbeddedChannel channel = new EmbeddedChannel();
@@ -149,6 +145,7 @@ public final class StreamingTestFixture
         }
     }
 
+    /** Run the writer and return every byte it put on the channel. */
     public static byte[] capture(CassandraStreamWriter writer) throws IOException
     {
         return captureChannel(writer).captured();
@@ -186,7 +183,7 @@ public final class StreamingTestFixture
         return new Received(txn, written.transferOwnershipTo(txn));
     }
 
-    /** Data files sitting in the table's directories, so a test can show a failed transfer left none behind. */
+    /** The number of data files in the table's directories. */
     public static int dataFileCount(ColumnFamilyStore cfs)
     {
         int count = 0;
@@ -207,12 +204,8 @@ public final class StreamingTestFixture
     /**
      * Run the writer against a channel carrying an {@link SslHandler}, and keep what it submitted.
      *
-     * The handler is there to select the branch, not to encrypt: the recorder sits nearer the tail, so it takes
-     * each message before the handler would see it. Encrypting for real would need a completed handshake, which
-     * an EmbeddedChannel with no peer on the other end cannot give us.
-     *
-     * What matters is the type of what the writer submits. An SslHandler cannot encrypt a FileRegion, so a
-     * writer that hands one to an SSL channel fails the transfer outright.
+     * The handler selects the writer's SSL branch; it does not encrypt. The recorder sits nearer the tail, so
+     * it takes each outbound message before the handler sees it.
      */
     public static SslCapture captureThroughSsl(CassandraStreamWriter writer) throws Exception
     {
@@ -318,7 +311,8 @@ public final class StreamingTestFixture
 
     /**
      * The whole legacy path, writer to reader: run the writer, hand what it produced to the matching reader,
-     * and return the SSTables that came out. The caller owns the returned transaction and must abort it.
+     * and return the SSTables that came out. The caller must close the returned object, which aborts the
+     * transaction holding them.
      */
     public static Received roundTrip(SSTableReader sstable, List<PartitionPositionBounds> sections) throws Throwable
     {
@@ -374,7 +368,7 @@ public final class StreamingTestFixture
         return digests;
     }
 
-    /** The same, for only the partitions of one SSTable that fall in the given token ranges. */
+    /** A content digest per partition, for the partitions of one SSTable in the given token ranges. */
     public static Map<DecoratedKey, String> digests(SSTableReader sstable, Collection<Range<Token>> ranges)
     {
         Map<DecoratedKey, String> digests = new LinkedHashMap<>();
@@ -415,9 +409,9 @@ public final class StreamingTestFixture
     }
 
     /**
-     * Keeps every byte written to it, whether the writer sent a buffer or handed the kernel a file region.
-     * A region is drained here rather than by the operating system, which is the one thing a real socket does
-     * differently; what the region covers is the same either way, and that is what these tests assert.
+     * Keeps every byte written to it, whether the writer sent a buffer or a file region.
+     * This class drains a region itself, where a real socket leaves that to the operating system. The bytes
+     * the region covers are the same either way.
      */
     public static class CapturingChannel extends EmbeddedChannel
     {

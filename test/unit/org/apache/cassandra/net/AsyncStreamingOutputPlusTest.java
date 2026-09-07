@@ -143,10 +143,7 @@ public class AsyncStreamingOutputPlusTest
     @Test
     public void testLegacyStreamingUsesConfiguredSendWindow() throws IOException
     {
-        // A TestChannel uses Netty's default WriteBufferWaterMark (64 KiB high), which historically
-        // capped the legacy streaming send window and made throughput latency-bound. The legacy path
-        // must instead honor the configurable stream_send_window, while never dropping below the
-        // channel's own high water mark.
+        // a TestChannel keeps Netty's default water marks, 64 KiB high, so a 2 MiB window clears them
         int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
         try
         {
@@ -158,7 +155,6 @@ public class AsyncStreamingOutputPlusTest
             {
                 assertEquals(window, out.streamingSendWindowHighWaterMark);
                 assertEquals(window / 2, out.streamingSendWindowLowWaterMark);
-                // proves we are no longer bounded by the small Netty channel default
                 assertTrue("send window should exceed the channel default high water mark",
                            out.streamingSendWindowHighWaterMark > out.defaultHighWaterMark);
             }
@@ -172,8 +168,7 @@ public class AsyncStreamingOutputPlusTest
     @Test
     public void testSendWindowNeverBelowChannelDefault() throws IOException
     {
-        // If an operator configures a tiny window, we must not regress below the channel's own
-        // high water mark, otherwise a single chunk could exceed the window.
+        // a window below the channel's own high water mark is raised to that mark
         int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
         int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
         try
@@ -195,10 +190,9 @@ public class AsyncStreamingOutputPlusTest
     }
 
     /**
-     * The window has to be used, not merely computed. A TestChannel that is never drained completes the first
-     * write and stalls the rest, so the writer keeps submitting until the bytes in flight reach the window and
-     * then parks. How many writes it manages before parking is therefore a direct reading of the window it is
-     * actually applying, and it changes if the configured window is not the one in force.
+     * The window has to be applied, not only computed. Nothing drains the channel here, so the bytes in flight
+     * climb to the window and the writer parks. The number of writes it completes first reports the window it
+     * applied.
      */
     @Test
     public void testConfiguredSendWindowGovernsHowMuchIsInFlight() throws Exception
@@ -298,7 +292,7 @@ public class AsyncStreamingOutputPlusTest
     {
         int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
         int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
-        DatabaseDescriptor.setStreamChunkSizeInBytes(512); // the window may not be set below the chunk size
+        DatabaseDescriptor.setStreamChunkSizeInBytes(512); // a window may not be smaller than the chunk
         try
         {
             EmbeddedChannel probe = new TestChannel(4);
@@ -310,13 +304,13 @@ public class AsyncStreamingOutputPlusTest
                 channelLow = out.defaultLowWaterMark;
             }
 
-            // far below the channel's marks: its own stand
+            // far below the channel's marks: the channel's marks stand
             assertWindow(512, channelHigh, channelLow);
-            // exactly the channel's high mark: same marks again, and no regression below them
+            // exactly the channel's high mark: the channel's marks stand
             assertWindow(channelHigh, channelHigh, channelLow);
-            // between the low and high marks: still clamped up to the channel's
+            // between the channel's low and high marks: raised to the channel's marks
             assertWindow(channelHigh / 2, channelHigh, channelLow);
-            // above: the configured window, with the low mark at half of it
+            // above the channel's high mark: the configured window, with the low mark at half of it
             assertWindow(4 * channelHigh, 4 * channelHigh, 2 * channelHigh);
         }
         finally
@@ -398,9 +392,8 @@ public class AsyncStreamingOutputPlusTest
     }
 
     /**
-     * Without SSL there is no reason to bring the bytes into the process: each batch of a section must go out
-     * as a file region the kernel copies straight from the page cache, and the regions must walk each section
-     * from start to end with no gap and no overlap.
+     * Without SSL each batch of a section goes out as a file region, and the regions walk each section from
+     * start to end with no gap and no overlap.
      */
     @Test
     public void testWriteFileSectionsZeroCopy() throws IOException

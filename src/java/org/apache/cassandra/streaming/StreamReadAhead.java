@@ -36,15 +36,12 @@ import org.apache.cassandra.utils.memory.BufferPools;
 /**
  * Reads a transfer ahead of the sender, so the disk keeps working while the send window drains.
  *
- * The sender blocks whenever the bytes in flight reach the send window. A reader on the sending thread
- * therefore stops reading for as long as the sender is blocked, and the disk goes idle at exactly the moment
- * the network is about to want more. This moves the reading to its own thread and leaves the sender with
- * nothing to do but hand finished chunks to the channel.
+ * The sender blocks whenever the bytes in flight reach the send window. A reader on the sending thread stops
+ * for as long as the sender is blocked, and the disk goes idle just as the network is about to want more.
+ * Here the sender only hands finished chunks to the channel.
  *
- * The queue holds whole chunks, so the read-ahead is bounded in bytes to within one chunk of
- * {@code stream_read_ahead}. Chunks come out in the order the reader produced them. Whatever the reader
- * throws is rethrown from {@link #take()} on the sending thread, so the writers keep the failure handling
- * they already have.
+ * The queue holds whole chunks, so the read-ahead stays within one chunk of {@code stream_read_ahead}.
+ * Chunks come out in the order the reader produced them. {@link #take()} rethrows whatever the reader threw.
  */
 public class StreamReadAhead implements Closeable
 {
@@ -67,7 +64,7 @@ public class StreamReadAhead implements Closeable
         void accept(Chunk chunk) throws InterruptedException;
     }
 
-    /** Reads one transfer in order. Runs on the read-ahead thread, never on the sender's. */
+    /** Reads one transfer in order. Runs on the read-ahead thread, never on the sending thread. */
     public interface Reader
     {
         void read(Sink sink) throws IOException, InterruptedException;
@@ -101,16 +98,15 @@ public class StreamReadAhead implements Closeable
     }
 
     /**
-     * The next chunk in order, or null once the reader has finished. The caller owns the buffer it returns:
-     * handing it to the channel passes ownership on, and anything else has to return it to the pool.
+     * The next chunk in order, or null once the reader has finished. The caller owns the buffer: writing it to
+     * the channel passes ownership on, and any other use must return it to the networking {@code BufferPool}.
      */
     public Chunk take() throws IOException
     {
         Chunk chunk = null;
         try
         {
-            // the reader marks itself finished only once it has enqueued everything, so an empty queue and a
-            // finished reader together mean there is nothing more coming
+            // the reader marks itself finished only once it has enqueued everything
             while (chunk == null && !finished)
                 chunk = queue.poll(50, TimeUnit.MILLISECONDS);
 
@@ -138,8 +134,8 @@ public class StreamReadAhead implements Closeable
     }
 
     /**
-     * A running task cannot be interrupted, so the reader is stopped by draining what it is waiting on: the
-     * drain frees the space it is blocked for, and its next chunk hits the closed check and unwinds it.
+     * A running task cannot be interrupted, so close stops the reader by draining the queue it waits on. The
+     * drain frees the space the reader blocks for, and its next chunk hits the closed check and unwinds it.
      */
     @Override
     public void close()

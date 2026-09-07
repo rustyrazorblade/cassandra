@@ -52,13 +52,13 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Streaming over an encrypted connection, which had no coverage in this tree at all.
+ * Streaming over an encrypted connection.
  *
- * An {@link io.netty.handler.ssl.SslHandler} encrypts in user space and can only encrypt a buffer. Hand it
- * anything else, a file region included, and it fails the write outright. So a writer on an SSL channel has one
+ * An {@link io.netty.handler.ssl.SslHandler} encrypts in user space and can only encrypt a buffer. It fails
+ * the write outright for anything else, a file region included. So a writer on an SSL channel has one
  * obligation beyond sending the right bytes: everything it submits has to be a buffer.
  *
- * Both writers are covered, because both are reachable over an encrypted connection.
+ * Both writers are reachable over an encrypted connection, so both are covered here.
  */
 public class StreamWriterSslTest
 {
@@ -122,9 +122,8 @@ public class StreamWriterSslTest
     }
 
     /**
-     * Encryption is the one case where the compressed writer reads the file rather than handing it to the
-     * kernel, so it is the only case stream_disk_access_mode touches. Reading with O_DIRECT must not change a
-     * byte of what goes out.
+     * The compressed writer reads the file itself only when encrypting, so encryption is the one case
+     * stream_disk_access_mode touches. Reading with O_DIRECT must not change a byte of what goes out.
      */
     @Test
     public void compressedWriterSendsTheSameBytesOverSslWithDirectIo() throws Exception

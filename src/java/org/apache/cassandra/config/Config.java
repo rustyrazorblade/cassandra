@@ -175,32 +175,22 @@ public class Config
     @Replaces(oldName = "streaming_keep_alive_period_in_secs", converter = Converters.SECONDS_DURATION, deprecated = true)
     public DurationSpec.IntSecondsBound streaming_keep_alive_period = new DurationSpec.IntSecondsBound("300s");
 
-    // Maximum number of bytes the non-zero-copy ("legacy") streaming path keeps in flight before the
-    // sender blocks for the network to drain. This is the send window for partial-section transfers
-    // (sub-range repair/bootstrap, or SSTables that are not streamed whole). It must cover the
-    // bandwidth-delay product to keep high-latency links saturated; the historical 64 KiB Netty
-    // channel default made throughput latency-bound. Zero-copy transfers already use a 2 MiB window.
+    // Bytes in flight before a streaming sender blocks, for transfers that do not send a whole SSTable.
+    // It must cover the bandwidth-delay product of the link. Must be at least stream_chunk_size.
     public volatile DataStorageSpec.IntBytesBound stream_send_window = new DataStorageSpec.IntBytesBound("2MiB");
 
-    // Size of each buffer the non-zero-copy ("legacy") streaming path reads from disk and writes to the
-    // network at a time. A larger value means fewer syscalls, network frames and compression calls. The
-    // default matches BufferPool.NORMAL_CHUNK_SIZE (128 KiB), the largest size still served from the
-    // networking buffer pool; larger values are allocated outside the pool. Applies to both the
-    // compressed and uncompressed legacy writers (the latter only when the SSTable has no CRC component,
-    // otherwise the CRC chunk size is used). It does not change the on-wire framing format.
+    // Size of each buffer read from disk and written to the network, for transfers that do not send a
+    // whole SSTable. Must not exceed stream_send_window.
     public volatile DataStorageSpec.IntBytesBound stream_chunk_size = new DataStorageSpec.IntBytesBound("128KiB");
 
-    // How far the non-zero-copy ("legacy") streaming path reads ahead of the sender, in bytes. The sender
-    // blocks once stream_send_window bytes are in flight, so a reader on the sending thread stops reading
-    // for as long as the network is busy and the disk goes idle. Reading ahead on its own thread keeps the
-    // disk working through that. Rounded down to whole stream_chunk_size chunks, at least one, and every
-    // queued chunk is held out of the networking buffer pool for the life of a transfer.
+    // How far ahead of the sender the streaming read-ahead thread reads. Rounded down to whole
+    // stream_chunk_size chunks, at least one. Each queued chunk holds a networking buffer for the
+    // life of the transfer.
     public volatile DataStorageSpec.IntBytesBound stream_read_ahead = new DataStorageSpec.IntBytesBound("2MiB");
 
-    // How the compressed non-zero-copy ("legacy") streaming writer reads the data file when it has to read it
-    // at all, which is only over an encrypted connection: without SSL the bytes go from the page cache to the
-    // socket without entering the process. Streamed bytes are read once and never wanted again, so 'direct'
-    // keeps them out of the page cache; 'standard' reads through it. Only standard and direct are accepted.
+    // How the compressed streaming writer reads the data file. It reads the file only over an encrypted
+    // connection; otherwise the bytes go from the page cache to the socket without entering the process.
+    // Only standard and direct are accepted.
     public volatile DiskAccessMode stream_disk_access_mode = DiskAccessMode.standard;
 
     @Replaces(oldName = "cross_node_timeout", converter = Converters.IDENTITY, deprecated = true)

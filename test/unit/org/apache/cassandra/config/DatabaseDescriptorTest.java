@@ -363,8 +363,7 @@ public class DatabaseDescriptorTest
     @Test
     public void testStreamChunkSizeMustBePositive()
     {
-        // a non-positive stream_chunk_size would make the legacy streaming writers spin forever
-        // (toTransfer = min(0, remaining) = 0 never advances the loop), so it must be rejected.
+        // a chunk size of zero leaves the writer's read loop with nothing to advance by, so it never ends
         int original = DatabaseDescriptor.getStreamChunkSizeInBytes();
         try
         {
@@ -391,8 +390,8 @@ public class DatabaseDescriptorTest
     }
 
     /**
-     * The setter guards a live change; this guards start-up. They are separate paths, and only the setter had a
-     * test: a bad value in cassandra.yaml never reaches the setter, it goes straight into Config.
+     * A bad value in cassandra.yaml goes straight into Config and never reaches the setter, so start-up
+     * validation is a separate path from the setter's guard.
      */
     @Test
     public void testStreamChunkSizeIsValidatedAtStartup()
@@ -415,8 +414,7 @@ public class DatabaseDescriptorTest
     }
 
     /**
-     * A chunk larger than the window makes the sender drain the pipe before every chunk, which is the
-     * latency-bound behaviour the window exists to remove. Equal is fine; a byte over is not.
+     * A chunk equal to the send window is allowed; a byte over is not.
      */
     @Test
     public void testStreamChunkSizeMustFitTheSendWindow()
@@ -462,7 +460,7 @@ public class DatabaseDescriptorTest
         }
     }
 
-    /** The same pair can be inverted at runtime, so both setters have to guard it, not just start-up. */
+    /** Either setter can break the chunk-to-window relation at runtime, so both guard it, not just start-up. */
     @Test
     public void testSettersRejectAChunkLargerThanTheWindow()
     {

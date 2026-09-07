@@ -51,12 +51,10 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
- * The compressed half of the legacy streaming path, end to end: what the writer sends, the reader must turn
- * back into the partitions it started from.
- *
- * The writer had some coverage and {@link CassandraCompressedStreamReader} had none, so nothing pinned the
- * pair together. These are the tests that fail if either side stops agreeing with the other, whatever the
- * writer does internally to get the bytes across.
+ * The compressed half of the legacy streaming path, end to end: what
+ * {@link CassandraCompressedStreamWriter} sends, {@link CassandraCompressedStreamReader} must turn back into
+ * the partitions it started from. These tests fail if either side stops agreeing with the other, whatever
+ * the writer does internally to get the bytes across.
  *
  * Partitions are compared by content digest, so the assertion is about the data and not about how the
  * receiving SSTable happens to be laid out.
@@ -198,10 +196,6 @@ public class CassandraCompressedStreamRoundTripTest
         assertRoundTrips(complex, ranges);
     }
 
-    /**
-     * Stream the given ranges and check that what arrives is what was asked for: the same partitions, with the
-     * same content, and nothing outside the ranges.
-     */
     private void assertRoundTrips(SSTableReader sstable, List<Range<Token>> ranges) throws Throwable
     {
         List<PartitionPositionBounds> sections = sstable.getPositionsForRanges(ranges);
