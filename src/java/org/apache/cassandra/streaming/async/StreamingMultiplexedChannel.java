@@ -117,8 +117,8 @@ public class StreamingMultiplexedChannel
     private final ExecutorPlus fileTransferExecutor;
 
     /**
-     * Runs the read-ahead of each in-flight transfer, one thread per transfer, so the sender never reads.
-     * Sized like {@link #fileTransferExecutor} because a reader is busy for as long as its sender is.
+     * Runs the read-ahead for each in-flight transfer, one thread per transfer, so no sending thread reads
+     * from disk. Sized like {@link #fileTransferExecutor}, because a reader stays busy while its sender runs.
      */
     private final ExecutorPlus readAheadExecutor;
 

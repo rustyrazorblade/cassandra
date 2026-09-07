@@ -80,11 +80,11 @@ public class CassandraStreamWriterTest
         SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE,
                                     KeyspaceParams.simple(1),
-                                    // no compression so the legacy (uncompressed) CassandraStreamWriter
-                                    // streams the data file directly and sections are plain byte ranges
+                                    // no compression, so CassandraStreamWriter runs and sections are plain
+                                    // byte ranges into the data file
                                     SchemaLoader.standardCFMD(KEYSPACE, CF_STANDARD)
                                                 .compression(CompressionParams.noCompression()),
-                                    // compressed so the common CassandraCompressedStreamWriter path is exercised
+                                    // compressed, so CassandraCompressedStreamWriter runs
                                     SchemaLoader.standardCFMD(KEYSPACE, CF_COMPRESSED)
                                                 .compression(CompressionParams.lz4()));
 
@@ -115,9 +115,8 @@ public class CassandraStreamWriterTest
     }
 
     /**
-     * The legacy streaming writer must flush once after writing all sections, not once per section.
-     * A per-section flush drains the channel at every section boundary, which on a high-latency link
-     * empties the send pipe and costs a full round-trip per section.
+     * A flush per section drains the channel at every section boundary. On a high-latency link that empties
+     * the send pipe and costs a full round-trip per section.
      */
     @Test
     public void testFlushesOncePerFileRegardlessOfSectionCount() throws IOException
@@ -157,9 +156,9 @@ public class CassandraStreamWriterTest
     }
 
     /**
-     * The compressed writer sends the on-disk chunks unchanged, so on a plain channel every batch must leave
-     * as a zero-copy file region rather than being read into the process, and the regions must cover exactly
-     * the fused sections with no gap, no overlap and no batch above the configured chunk size.
+     * The compressed writer sends the on-disk chunks unchanged, so every batch must leave a plain channel as
+     * a zero-copy file region. The regions must cover the fused sections with no gap and no overlap, and no
+     * batch may exceed the configured chunk size.
      */
     @Test
     public void testCompressedWriterStreamsSectionsZeroCopy() throws IOException
@@ -246,7 +245,7 @@ public class CassandraStreamWriterTest
         return new CassandraCompressedStreamWriter(compressedSstable, header, setupStreamingSessionForTest());
     }
 
-    /** Split the whole data file contiguously into {@code count} equal byte-range sections. */
+    /** Split the whole data file into {@code count} contiguous byte-range sections of near-equal length. */
     private List<SSTableReader.PartitionPositionBounds> buildSections(int count)
     {
         long dataLength = sstable.getDataChannel().size();

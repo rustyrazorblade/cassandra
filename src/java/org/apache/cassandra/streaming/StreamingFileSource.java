@@ -34,21 +34,21 @@ import static org.apache.cassandra.utils.Shared.Recursive.INTERFACES;
 import static org.apache.cassandra.utils.Shared.Scope.SIMULATION;
 
 /**
- * The file a streaming writer is sending, and the two ways a transport can get at it.
+ * The file a streaming writer sends, and the two ways a transport reads it.
  *
- * Without encryption the bytes never enter the process: the transport hands the kernel a region of the file
- * and {@link #channel()} is what it hands over. With encryption they have to be read into user space first,
- * and {@link #read} is how, which is the only place the disk access mode makes any difference.
+ * Without encryption the bytes never enter the process. The transport hands {@link #channel()} to the kernel,
+ * and the kernel sends the region. With encryption the transport reads the bytes into user space through
+ * {@link #read}, which is the only method the disk access mode changes.
  *
- * Only the compressed writer sends through here. The uncompressed one reads through its own channel, because
- * it verifies the CRC component against what it reads.
+ * Only the compressed writer sends through this interface. The uncompressed writer opens its own channel,
+ * because it verifies the CRC component against the bytes it reads.
  */
 @Shared(scope = SIMULATION, inner = INTERFACES)
 public interface StreamingFileSource extends Closeable
 {
     /**
-     * The channel to hand the kernel for a zero-copy send. Ownership passes to the caller, which closes it once
-     * the last region referring to it has been written.
+     * The channel to hand the kernel for a zero-copy send. The caller takes ownership and closes the channel
+     * once it has written the last region that refers to it.
      */
     FileChannel channel() throws IOException;
 
@@ -103,12 +103,8 @@ public interface StreamingFileSource extends Closeable
     }
 
     /**
-     * Reads with O_DIRECT, so a transfer does not evict whatever the page cache is holding for the read path.
-     * Streamed bytes are read once and never wanted again, which is the case the page cache is worst at.
-     *
-     * O_DIRECT wants the offset, the length and the buffer all aligned to the device block, and a section is
-     * aligned to none of them, so each read takes the aligned span that covers what was asked for and copies
-     * the requested bytes out of it.
+     * Reads with O_DIRECT, so a transfer does not evict what the page cache holds for the read path.
+     * Streamed bytes are read once and never wanted again, which is the case the page cache handles worst.
      */
     class Direct implements StreamingFileSource
     {
@@ -125,7 +121,7 @@ public interface StreamingFileSource extends Closeable
             this.buffers = new DirectThreadLocalByteBufferHolder(blockSize);
         }
 
-        /** Zero-copy sends go through the kernel already, so this channel is an ordinary one. */
+        /** A zero-copy send goes through the kernel, so this channel does not use O_DIRECT. */
         public FileChannel channel() throws IOException
         {
             if (channel == null)
@@ -133,6 +129,10 @@ public interface StreamingFileSource extends Closeable
             return channel;
         }
 
+        /**
+         * O_DIRECT requires the offset, the length and the buffer to align to the device block. A section
+         * aligns to none of them, so read the aligned span that covers the request, then copy out the bytes.
+         */
         public void read(ByteBuffer into, long position) throws IOException
         {
             int length = into.remaining();

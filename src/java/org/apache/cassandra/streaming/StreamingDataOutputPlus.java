@@ -96,11 +96,10 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
     int writeToChannel(Write write, RateLimiter limiter) throws IOException;
 
     /**
-     * Write a buffer that is already filled and ready for the wire, for callers that produced it elsewhere,
-     * such as a {@link StreamReadAhead} thread.
+     * Write a buffer that is already filled and ready for the wire, and return the number of bytes written.
      * <p>
-     * Takes ownership of the buffer, which must have come from the networking {@link
-     * org.apache.cassandra.utils.memory.BufferPool}; it is returned to that pool once the bytes are written.
+     * Takes ownership of the buffer, which must come from the networking {@link
+     * org.apache.cassandra.utils.memory.BufferPool}, and returns it to that pool after writing it.
      * <p>
      * As with {@link #writeToChannel(Write, RateLimiter)} this blocks only for permission to write, and
      * returns before the bytes reach the network.
@@ -110,7 +109,7 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
     /**
      * Writes all data in file channel to stream: <br>
      * * For zero-copy-streaming, 1MiB at a time, with at most 2MiB in flight at once. <br>
-     * * For streaming with SSL, 64KiB at a time, with at most 32+64KiB (default low water mark + batch size) in flight. <br>
+     * * For streaming with SSL, 64KiB at a time, with at most stream_send_window bytes in flight. <br>
      * <p>
      * This method takes ownership of the provided {@link FileChannel}.
      * <p>
@@ -120,15 +119,17 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
     long writeFileToChannel(FileChannel file, RateLimiter limiter) throws IOException;
 
     /**
-     * Writes the given byte ranges of the file to the stream, zero-copy where the channel permits it.
+     * Writes the given byte ranges of the file to the stream, zero-copy where the channel permits it, and
+     * returns the number of bytes written.
      * <p>
      * This method takes ownership of the provided {@link StreamingFileSource}.
      * <p>
-     * {@code progress} is invoked with the size of each batch once that batch has been submitted to the
+     * This method calls {@code progress} with the size of each batch once it submits that batch to the
      * channel; as with {@link #writeFileToChannel(FileChannel, RateLimiter)}, submission does not mean the
      * bytes have reached the network.
      * <p>
-     * {@code readAhead} runs the reading when the channel is encrypted and the bytes have to be read at all.
+     * This method reads on {@code readAhead} when the channel is encrypted, which is the only case that
+     * brings the bytes into the process.
      */
     long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException;
 

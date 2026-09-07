@@ -68,10 +68,8 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
     final int defaultLowWaterMark;
     final int defaultHighWaterMark;
 
-    // Send window for the non-zero-copy ("legacy") streaming path. The Netty channel default
-    // (64 KiB high) is too small to cover the bandwidth-delay product of high-latency links, which
-    // left the legacy path latency-bound. We size the window from stream_send_window, but never drop
-    // below the channel's own high water mark. See DatabaseDescriptor#getStreamSendWindowInBytes.
+    // Send window for streaming that is not zero-copy. The 64 KiB Netty channel default does not
+    // cover the bandwidth-delay product of a high-latency link.
     final int streamingSendWindowLowWaterMark;
     final int streamingSendWindowHighWaterMark;
 
@@ -161,12 +159,6 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
         return length;
     }
 
-    /**
-     * {@inheritDoc}
-     *
-     * The buffer is already filled, so there is nothing to do here but wait for room in the send window and
-     * hand it to the channel, which is the point of reading it on another thread.
-     */
     @Override
     public int writeToChannel(ByteBuffer buffer, RateLimiter limiter) throws IOException
     {
@@ -193,7 +185,7 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
     /**
      * Writes all data in file channel to stream: <br>
      * * For zero-copy-streaming, 1MiB at a time, with at most 2MiB in flight at once. <br>
-     * * For streaming with SSL, 64KiB at a time, with at most 32+64KiB (default low water mark + batch size) in flight. <br>
+     * * For streaming with SSL, 64KiB at a time, with at most stream_send_window bytes in flight. <br>
      * <p>
      * This method takes ownership of the provided {@link FileChannel}.
      * <p>
@@ -248,13 +240,6 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
         return bytesTransferred;
     }
 
-    /**
-     * {@inheritDoc}
-     *
-     * Without SSL the bytes never enter the process: each batch is handed to the kernel as a
-     * {@link SharedDefaultFileRegion} over the section's range of the file. With SSL we must encrypt in user
-     * space, so the batches are read into pooled buffers instead.
-     */
     @Override
     public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException
     {
@@ -273,9 +258,7 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
     }
 
     /**
-     * Reads the sections on {@code readAhead} and writes them here, so the disk keeps reading while the send
-     * window is full. Only encryption brings the bytes into the process at all; without it they go straight
-     * from the page cache to the socket.
+     * Reads the sections on {@code readAhead}, so the disk keeps working while the send window is full.
      */
     @VisibleForTesting
     long writeSectionsToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize, ExecutorPlus readAhead) throws IOException
@@ -347,8 +330,7 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
                     ChannelPromise promise = beginFlush(toWrite, streamingSendWindowLowWaterMark, streamingSendWindowHighWaterMark);
                     channel.writeAndFlush(new SharedDefaultFileRegion(sharedFile, position, toWrite), promise);
 
-                    if (logger.isTraceEnabled())
-                        logger.trace("Writing {} bytes at position {}", toWrite, position);
+                    logger.trace("Writing {} bytes at position {}", toWrite, position);
 
                     sectionTransferred += toWrite;
                     bytesTransferred += toWrite;

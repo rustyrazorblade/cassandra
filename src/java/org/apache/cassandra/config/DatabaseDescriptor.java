@@ -4673,7 +4673,6 @@ public class DatabaseDescriptor
         return conf.stream_transfer_task_timeout;
     }
 
-    /** The streaming settings that have to be right before a node comes up. */
     @VisibleForTesting
     static void validateStreamingConfig(Config conf)
     {
@@ -4691,9 +4690,8 @@ public class DatabaseDescriptor
     }
 
     /**
-     * A chunk bigger than the window means the writer waits for the pipe to drain to half the window before
-     * every chunk, which is the latency-bound behaviour the window exists to remove. See
-     * {@link org.apache.cassandra.net.AsyncChannelOutputPlus#waitForSpace}.
+     * A chunk larger than the window makes the writer wait for the in-flight bytes to fall to half the
+     * window before every chunk. See {@link org.apache.cassandra.net.AsyncChannelOutputPlus#waitForSpace}.
      */
     private static void checkChunkFitsSendWindow(int chunkSize, int sendWindow)
     {

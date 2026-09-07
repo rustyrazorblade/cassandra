@@ -51,9 +51,8 @@ import static org.junit.Assert.assertTrue;
 /**
  * What the compressed writer puts on the wire, for every shape of section it can be asked for.
  *
- * The writer is not supposed to transform anything: the compressed chunks covering the requested sections go
- * out as they sit in the data file, each followed by its CRC. Every case here asserts exactly that, so the
- * assertions hold no matter how the writer gets the bytes to the channel.
+ * The writer transforms nothing: the compressed chunks covering the requested sections go out as they sit in
+ * the data file, each followed by its CRC. Every case asserts the bytes, not the mechanism that sent them.
  */
 public class CassandraCompressedStreamWriterTest
 {
@@ -77,7 +76,8 @@ public class CassandraCompressedStreamWriterTest
         CompactionManager.instance.disableAutoCompaction();
         ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF);
 
-        // incompressible, so a chunk of compressed output is a chunk of input and the geometry stays legible
+        // incompressible, so each compressed chunk stays near CHUNK_LENGTH and section offsets map to
+        // predictable chunk counts
         Random random = new Random(0);
         byte[] value = new byte[512];
         for (int i = 0; i < 4000; i++)
@@ -173,8 +173,8 @@ public class CassandraCompressedStreamWriterTest
     }
 
     /**
-     * A section goes out in batches of at most stream_chunk_size, so a smaller setting means more writes for
-     * the same section, and a setting past the end of the file means exactly one.
+     * A section goes out in batches of at most stream_chunk_size. A setting larger than the section takes one
+     * write.
      */
     @Test
     public void chunkSizeDecidesHowManyWritesASectionTakes() throws IOException
@@ -207,8 +207,8 @@ public class CassandraCompressedStreamWriterTest
     }
 
     /**
-     * The bytes on the wire are the chunks covering the sections, and there are exactly as many of them as the
-     * header promised. A receiver reads until it has the header's count, so the two have to agree.
+     * A receiver reads until it has the byte count the header declares, so the header and the bytes sent must
+     * agree.
      */
     private void assertSendsExactly(List<PartitionPositionBounds> sections) throws IOException
     {

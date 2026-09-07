@@ -33,14 +33,11 @@ import org.apache.cassandra.distributed.test.TestBaseImpl;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * A repair that has to move real data between two nodes over the legacy path, with zero-copy streaming turned
- * off so nothing can quietly take the fast route.
+ * The legacy streaming path through a real two-node cluster, where the unit tests drive the writers and
+ * readers directly.
  *
- * The unit tests around this path drive the writers and readers directly. This one goes through the whole
- * machinery a cluster uses, and asks the only question that matters at that level: after the repair, does the
- * node that was missing the data have exactly the data it was missing.
- *
- * Both compression settings are covered, because they are two different writers and two different readers.
+ * A repair moves the data, and the test checks the receiving node ends up with exactly what the sender
+ * holds. Compressed and uncompressed tables run separately, because each uses a different writer and reader.
  */
 public class LegacyStreamingRepairTest extends TestBaseImpl
 {
