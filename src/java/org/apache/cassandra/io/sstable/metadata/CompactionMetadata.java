@@ -32,7 +32,8 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 /**
  * Compaction related SSTable metadata.
  *
- * Only loaded for <b>compacting</b> SSTables at the time of compaction.
+ * Holds the cardinality estimator used to estimate partition counts. The reader loading builders do not ask
+ * for it, so a caller that wants it requests {@link MetadataType#COMPACTION}.
  */
 public class CompactionMetadata extends MetadataComponent
 {

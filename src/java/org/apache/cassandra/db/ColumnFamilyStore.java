@@ -337,6 +337,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
     final DiskBoundaryManager diskBoundaryManager = new DiskBoundaryManager();
     private volatile ShardBoundaries cachedShardBoundaries = null;
 
+    /** Memoised result of {@link #getApproximateSSTableKeyCount()}, valid while its token still matches the view. */
+    private volatile ApproximateKeyCount cachedApproximateKeyCount = null;
+
     private volatile boolean neverPurgeTombstones = false;
 
     private class PaxosRepairHistoryLoader
@@ -2988,6 +2991,51 @@ public <T> T withAllSSTables(final OperationType operationType, Function<Lifecyc
     }
 
     // End JMX get/set.
+
+    /**
+     * The approximate number of distinct partitions across this table's sstables, memoised until the live or
+     * compacting sstables change.
+     * <p>
+     * Recomputing this loads and deserialises the Statistics.db component of every sstable to merge their
+     * cardinality estimators, so it must not run on every read. SSTables are immutable, so the value holds
+     * for as long as those two sets do.
+     *
+     * @return the merged cardinality estimate, the summed index summary estimate if an estimator fails to
+     *         load, or -1 if there are no sstables
+     */
+    public long getApproximateSSTableKeyCount()
+    {
+        ApproximateKeyCount cached = cachedApproximateKeyCount;
+        if (cached != null && cached.token.matches(getTracker().getView()))
+            return cached.count;
+
+        View.SSTableToken token = getTracker().getView().sstableToken();
+
+        long count;
+        try (RefViewFragment refViewFragment = selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
+        {
+            count = SSTableReader.getApproximateKeyCount(refViewFragment.sstables);
+        }
+
+        // Only publish if the sstables did not change while we were reading them, so a racing flush or
+        // compaction can never leave a stale count cached.
+        if (token.matches(getTracker().getView()))
+            cachedApproximateKeyCount = new ApproximateKeyCount(token, count);
+
+        return count;
+    }
+
+    private static class ApproximateKeyCount
+    {
+        final View.SSTableToken token;
+        final long count;
+
+        ApproximateKeyCount(View.SSTableToken token, long count)
+        {
+            this.token = token;
+            this.count = count;
+        }
+    }
 
     public int getMeanEstimatedCellPerPartitionCount()
     {
