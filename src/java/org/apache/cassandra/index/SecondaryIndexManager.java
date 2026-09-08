@@ -35,6 +35,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -186,6 +187,14 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
      * All registered indexes.
      */
     private final Map<String, Index> indexes = Maps.newConcurrentMap();
+
+    /**
+     * Bumped whenever {@link #indexes} is mutated, so {@link #getAllIndexColumnFamilyStores()} can cache
+     * its result and detect a concurrent change.
+     */
+    private final AtomicLong indexesVersion = new AtomicLong();
+
+    private volatile IndexCfsSnapshot indexCfsSnapshot;
 
     /**
      * The indexes that had a build failure.
@@ -403,6 +412,9 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
 
         if (removedIndex != null)
         {
+            indexesVersion.incrementAndGet();
+            // Drop the snapshot rather than wait for the next read, so the removed index's table goes with it.
+            indexCfsSnapshot = null;
             removedIndex.unregister(this);
 
             markIndexRemoved(indexName);
@@ -1060,9 +1072,36 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
      */
     public Set<ColumnFamilyStore> getAllIndexColumnFamilyStores()
     {
-        Set<ColumnFamilyStore> backingTables = new HashSet<>();
-        indexes.values().forEach(index -> index.getBackingTable().ifPresent(backingTables::add));
-        return backingTables;
+        // The backing tables only change when an index is registered or removed, so cache the set
+        // rather than rebuilding it on every call. This is read by metrics scrapes and by the flush
+        // and compaction paths via ColumnFamilyStore.concatWithIndexes().
+        long version = indexesVersion.get();
+        IndexCfsSnapshot snapshot = indexCfsSnapshot;
+        if (snapshot != null && snapshot.version == version)
+            return snapshot.stores;
+
+        ImmutableSet.Builder<ColumnFamilyStore> builder = ImmutableSet.builder();
+        indexes.values().forEach(index -> index.getBackingTable().ifPresent(builder::add));
+        Set<ColumnFamilyStore> stores = builder.build();
+
+        // Only publish if no registration or removal happened while we were building, so a racing
+        // mutation can never leave a stale set cached.
+        if (indexesVersion.get() == version)
+            indexCfsSnapshot = new IndexCfsSnapshot(version, stores);
+
+        return stores;
+    }
+
+    private static class IndexCfsSnapshot
+    {
+        private final long version;
+        private final Set<ColumnFamilyStore> stores;
+
+        private IndexCfsSnapshot(long version, Set<ColumnFamilyStore> stores)
+        {
+            this.version = version;
+            this.stores = stores;
+        }
     }
 
     /**
@@ -1419,6 +1458,7 @@ public class SecondaryIndexManager implements IndexRegistry, INotificationConsum
     {
         String name = index.getIndexMetadata().name;
         indexes.put(name, index);
+        indexesVersion.incrementAndGet();
         logger.trace("Registered index {}", name);
 
         // instantiate and add the index group if it hasn't been already added

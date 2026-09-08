@@ -118,6 +118,33 @@ public class View
         return concat(flushingMemtables, liveMemtables);
     }
 
+    /**
+     * A token for the live and the compacting sstables. Transitions that touch only memtables pass both
+     * sets through, so a token taken from an earlier view still matches. SSTables are immutable, so a
+     * caller may memoise anything read from those two sets against one of these.
+     */
+    public SSTableToken sstableToken()
+    {
+        return new SSTableToken(this);
+    }
+
+    public static class SSTableToken
+    {
+        private final Map<SSTableReader, SSTableReader> sstables;
+        private final Map<SSTableReader, SSTableReader> compacting;
+
+        private SSTableToken(View view)
+        {
+            this.sstables = view.sstablesMap;
+            this.compacting = view.compactingMap;
+        }
+
+        public boolean matches(View view)
+        {
+            return sstables == view.sstablesMap && compacting == view.compactingMap;
+        }
+    }
+
     // shortcut for all live sstables, so can efficiently use it for size, etc
     public Set<SSTableReader> liveSSTables()
     {
