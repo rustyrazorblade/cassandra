@@ -19,14 +19,16 @@ package org.apache.cassandra.io.compress;
 
 import java.io.IOException;
 import java.util.Collections;
-import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.ImmutableMap;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.marshal.BytesType;
@@ -37,6 +39,7 @@ import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.CompressionParams;
 
+import static org.apache.cassandra.utils.Throwables.anyCauseMatches;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -153,7 +156,7 @@ public class AsyncChunkPipelineFaultTest
         // depending on disk_failure_policy. The synchronous writer never does that.
         assertFalse("a compressor fault surfaced as " + thrown.getClass().getName()
                     + ", which the disk failure policy would act on",
-                    isOrCauses(thrown, FSError.class));
+                    anyCauseMatches(thrown, FSError.class::isInstance));
 
         try
         {
@@ -179,11 +182,7 @@ public class AsyncChunkPipelineFaultTest
         File data = FileUtils.createTempFile("asyncFaultChannel", ".db");
         File meta = new File(data.absolutePath() + ".metadata");
 
-        Map<String, String> opts = ImmutableMap.of();
-        CompressionParams params = new CompressionParams(FaultyCompressor.class.getName(), opts, CHUNK,
-                                                         CompressionParams.DEFAULT_MIN_COMPRESS_RATIO);
-
-        FailingWriteWriter writer = new FailingWriteWriter(data, meta, params, 2);
+        FailingWriteWriter writer = new FailingWriteWriter(data, meta, faultyParams(), 2);
         Throwable thrown = null;
         try
         {
@@ -198,7 +197,7 @@ public class AsyncChunkPipelineFaultTest
         assertNotNull("write failure never reached the producer", thrown);
         assertTrue("write failure surfaced as " + thrown.getClass().getName()
                    + "; the disk failure policy tests for FSError and reads its path",
-                   isOrCauses(thrown, FSError.class));
+                   anyCauseMatches(thrown, FSError.class::isInstance));
 
         try { writer.abort(null); } catch (Throwable ignored) { }
         settle(writer);
@@ -254,29 +253,14 @@ public class AsyncChunkPipelineFaultTest
         // Slots are allocated on demand, so the pool holds what was actually handed out less the
         // one still installed as the staging buffer.
         int expected = writer.pipeline.allocatedSlots() - 1;
-        long deadline = System.nanoTime() + 10_000_000_000L;
-        while (writer.pipeline.freeSlotCount() < expected && System.nanoTime() < deadline)
-            Thread.sleep(10);
+        Util.spinUntilTrue(() -> writer.pipeline.freeSlotCount() >= expected, 10, TimeUnit.SECONDS);
 
         assertEquals("a slot leaked on the failure path", expected, writer.pipeline.freeSlotCount());
     }
 
-    private static boolean isOrCauses(Throwable t, Class<?> type)
-    {
-        for (Throwable c = t; c != null; c = c.getCause())
-            if (type.isInstance(c))
-                return true;
-        return false;
-    }
-
     private static void settle(CompressedSequentialWriter writer)
     {
-        long deadline = System.nanoTime() + 10_000_000_000L;
-        while (writer.pipeline.stillRunning() && System.nanoTime() < deadline)
-        {
-            try { Thread.sleep(10); }
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-        }
+        Util.spinUntilTrue(() -> !writer.pipeline.stillRunning(), 10, TimeUnit.SECONDS);
     }
 
     private static void writeChunks(CompressedSequentialWriter writer, int chunks) throws IOException
@@ -291,14 +275,15 @@ public class AsyncChunkPipelineFaultTest
 
     private CompressedSequentialWriter newWriter(File data, File meta)
     {
-        Map<String, String> opts = ImmutableMap.of();
-        // Built by class name so CompressionParams instantiates it the way production does.
-        CompressionParams params = new CompressionParams(FaultyCompressor.class.getName(),
-                                                         opts,
-                                                         CHUNK,
-                                                         CompressionParams.DEFAULT_MIN_COMPRESS_RATIO);
         return new CompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT,
-                                              params, collector(), null, BUFFER_BYTES);
+                                              faultyParams(), collector(), null, BUFFER_BYTES);
+    }
+
+    /** Built by class name so CompressionParams instantiates the compressor the way production does. */
+    private static CompressionParams faultyParams()
+    {
+        return new CompressionParams(FaultyCompressor.class.getName(), ImmutableMap.of(), CHUNK,
+                                     CompressionParams.DEFAULT_MIN_COMPRESS_RATIO);
     }
 
     private static MetadataCollector collector()

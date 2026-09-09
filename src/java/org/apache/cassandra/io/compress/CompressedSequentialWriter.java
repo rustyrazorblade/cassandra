@@ -33,6 +33,7 @@ import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.ChecksumWriter;
+import org.apache.cassandra.io.util.ChecksumWriter.SinkChecksumWriter;
 import org.apache.cassandra.io.util.DataPosition;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.SequentialWriter;
@@ -70,9 +71,10 @@ public class CompressedSequentialWriter extends SequentialWriter
     private final ByteBuffer crcCheckBuffer = ByteBuffer.allocate(4);
     protected final Optional<File> digestFile;
 
-    // Non-null when crcMetadata is the inline-trailer writer this class installs. A subclass that
-    // overrides createChecksumWriter supplies its own CRC sink and its own writeChunk.
-    private final InlineTrailerChecksumWriter inlineTrailer;
+    // Parks the per-chunk CRC so writeChunk emits it in the same gathering write as the chunk body.
+    // Pushing it through a channel-backed DataOutputStream cost a second write syscall per chunk.
+    // A subclass that overrides createChecksumWriter also overrides writeChunk, so this stays unread.
+    private ByteBuffer trailer = ByteBuffer.allocateDirect(4);
 
     // Reused so writeChunk's gathering write allocates nothing per chunk.
     private final ByteBuffer[] chunkAndTrailer = new ByteBuffer[2];
@@ -188,9 +190,6 @@ public class CompressedSequentialWriter extends SequentialWriter
         this.pipeline = asyncBufferBytes > 0
                         ? new AsyncChunkPipeline(this, parameters, option.trickleFsync(), asyncBufferBytes, file.name())
                         : null;
-        this.inlineTrailer = crcMetadata instanceof InlineTrailerChecksumWriter
-                             ? (InlineTrailerChecksumWriter) crcMetadata
-                             : null;
     }
 
     /**
@@ -199,7 +198,7 @@ public class CompressedSequentialWriter extends SequentialWriter
      */
     protected ChecksumWriter createChecksumWriter()
     {
-        return new InlineTrailerChecksumWriter();
+        return new SinkChecksumWriter(this::stashTrailer);
     }
 
     @Override
@@ -292,36 +291,23 @@ public class CompressedSequentialWriter extends SequentialWriter
 
     /**
      * Compresses, writes and checksums one filled chunk buffer.
+     *
+     * Every field touched here is order-dependent -- chunkOffset, chunkCount, the offsets table, the
+     * full-file checksum -- so this runs on one thread, in chunk order: the producer when there is no
+     * pipeline, otherwise the pipeline's writer thread.
      */
     protected void flushData(ByteBuffer src)
     {
-        ChunkPrep prep = new ChunkPrep();
-        compressChunk(src, compressed, prep);
-        emitChunk(prep, src);
-    }
+        // resetAndTruncate leaves fchannel.position() past EOF after its verification reads + truncate;
+        // re-seek so the next chunk lands at chunkOffset. No-op under linear writes.
+        seekToChunkStart();
 
-    /** What compressing a chunk produced: which buffer to write, and the two lengths. */
-    protected static final class ChunkPrep
-    {
-        ByteBuffer toWrite;
-        int uncompressedLength;
-        int compressedLength;
-    }
-
-    /**
-     * Compresses one chunk into {@code out}.
-     *
-     * Reads no writer state beyond the compressor and the length limit, and mutates only the two
-     * buffers it is handed, so it can run on any thread. Everything order-dependent is in
-     * {@link #emitChunk}.
-     */
-    protected void compressChunk(ByteBuffer src, ByteBuffer out, ChunkPrep prep)
-    {
         try
         {
+            // compressing data with buffer re-use
             src.flip();
-            out.clear();
-            compressor.compress(src, out);
+            compressed.clear();
+            compressor.compress(src, compressed);
         }
         catch (IOException e)
         {
@@ -329,8 +315,9 @@ public class CompressedSequentialWriter extends SequentialWriter
         }
 
         int uncompressedLength = src.position();
-        int compressedLength = out.position();
-        ByteBuffer toWrite = out;
+        int compressedLength = compressed.position();
+        uncompressedSize += uncompressedLength;
+        ByteBuffer toWrite = compressed;
         if (compressedLength >= maxCompressedLength)
         {
             toWrite = src;
@@ -349,50 +336,38 @@ public class CompressedSequentialWriter extends SequentialWriter
                 compressedLength = maxCompressedLength;
             }
         }
-        toWrite.flip();
-
-        prep.toWrite = toWrite;
-        prep.uncompressedLength = uncompressedLength;
-        prep.compressedLength = compressedLength;
-    }
-
-    /**
-     * Writes one compressed chunk and advances the file state.
-     *
-     * Every field touched here is order-dependent -- chunkOffset, chunkCount, the offsets table, the
-     * full-file checksum -- so this runs on one thread, in chunk order.
-     *
-     */
-    protected void emitChunk(ChunkPrep prep, ByteBuffer src)
-    {
-        // resetAndTruncate leaves fchannel.position() past EOF after its verification reads + truncate;
-        // re-seek so the next chunk lands at chunkOffset. No-op under linear writes.
-        seekToChunkStart();
-
-        uncompressedSize += prep.uncompressedLength;
-        compressedSize += prep.compressedLength;
+        compressedSize += compressedLength;
 
         // write an offset of the newly written chunk to the index file
         metadataWriter.addOffset(chunkOffset);
         chunkCount++;
 
-        writeChunk(prep.toWrite);
+        // write out the compressed data and checksum
+        toWrite.flip();
+        writeChunk(toWrite);
 
         lastFlushOffset = uncompressedSize;
 
-        if (prep.toWrite == src)
-            src.position(prep.uncompressedLength);
+        if (toWrite == src)
+            src.position(uncompressedLength);
 
         // next chunk should be written right after current + length of the checksum (int)
-        chunkOffset += prep.compressedLength + 4;
+        chunkOffset += compressedLength + 4;
         if (runPostFlush != null)
             runPostFlush.accept(getLastFlushOffset());
+    }
+
+    private void stashTrailer(int chunkCrc)
+    {
+        trailer.clear();
+        trailer.putInt(chunkCrc);
+        trailer.flip();
     }
 
     private void gatheringWrite(ByteBuffer toWrite) throws IOException
     {
         chunkAndTrailer[0] = toWrite;
-        chunkAndTrailer[1] = inlineTrailer.trailer();
+        chunkAndTrailer[1] = trailer;
         long remaining = (long) chunkAndTrailer[0].remaining() + chunkAndTrailer[1].remaining();
         while (remaining > 0)
             remaining -= fchannel.write(chunkAndTrailer);
@@ -675,11 +650,12 @@ public class CompressedSequentialWriter extends SequentialWriter
                 compressed = null;
             }
 
-            if (inlineTrailer != null)
+            if (trailer != null)
             {
                 try
                 {
-                    inlineTrailer.release();
+                    MemoryUtil.clean(trailer);
+                    trailer = null;
                 }
                 catch (Throwable t) { accumulate = merge(accumulate, t); }
             }
@@ -692,44 +668,6 @@ public class CompressedSequentialWriter extends SequentialWriter
     protected SequentialWriter.TransactionalProxy txnProxy()
     {
         return new TransactionalProxy();
-    }
-
-    /**
-     * Parks the per-chunk CRC in a small direct buffer so {@link #writeChunk} can emit it in the same
-     * gathering write as the chunk body. Pushing it through a channel-backed {@code DataOutputStream}
-     * cost a second write syscall for every chunk.
-     */
-    private static final class InlineTrailerChecksumWriter extends ChecksumWriter
-    {
-        private ByteBuffer trailer = ByteBuffer.allocateDirect(4);
-
-        @Override
-        protected void writeIncrementalInt(int value)
-        {
-            trailer.clear();
-            trailer.putInt(value);
-            trailer.flip();
-        }
-
-        @Override
-        public void writeChunkSize(int length)
-        {
-            throw new UnsupportedOperationException("writeChunkSize is unused on the compressed path");
-        }
-
-        ByteBuffer trailer()
-        {
-            return trailer;
-        }
-
-        void release()
-        {
-            if (trailer != null)
-            {
-                MemoryUtil.clean(trailer);
-                trailer = null;
-            }
-        }
     }
 
     /**

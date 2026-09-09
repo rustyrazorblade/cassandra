@@ -42,11 +42,6 @@ public class FaultyCompressor implements ICompressor
 
     private final ICompressor delegate = LZ4Compressor.create(ImmutableMap.of());
 
-    public static Map<String, String> params()
-    {
-        return ImmutableMap.of();
-    }
-
     /** Throw on the nth compress call, counting from 1. */
     public static void failAt(long n)
     {
@@ -58,11 +53,6 @@ public class FaultyCompressor implements ICompressor
     {
         compressCalls.set(0);
         failAtCall = Long.MAX_VALUE;
-    }
-
-    public static long callsSoFar()
-    {
-        return compressCalls.get();
     }
 
     @SuppressWarnings("unused")   // found by reflection from CompressionParams

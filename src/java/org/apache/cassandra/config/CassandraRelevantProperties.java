@@ -80,6 +80,9 @@ public enum CassandraRelevantProperties
     BATCHLOG_REPLAY_INTERVAL_MS("cassandra.batchlog.replay_interval_ms", "10000"),
     BATCHLOG_REPLAY_TIMEOUT_IN_MS("cassandra.batchlog.replay_timeout_in_ms"),
     BATCH_COMMIT_LOG_SYNC_INTERVAL("cassandra.batch_commitlog_sync_interval_millis", "1000"),
+
+    /** Directory of a pre-generated microbenchmark dataset to reuse across runs. */
+    BENCH_DATASET("cassandra.bench.dataset"),
     /**
      * When bootstraping how long to wait for schema versions to be seen.
      */
