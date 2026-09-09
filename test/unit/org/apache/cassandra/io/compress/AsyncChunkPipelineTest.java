@@ -120,26 +120,26 @@ public class AsyncChunkPipelineTest
 
     private void compareDirect(CompressionParams params, String name, int bytes) throws IOException
     {
-        byte[] payload = payload(bytes, false);
-
-        File syncData = FileUtils.createTempFile(name + "_sync", ".db");
-        File asyncData = FileUtils.createTempFile(name + "_async", ".db");
-        File syncMeta = new File(syncData.absolutePath() + ".metadata");
-        File asyncMeta = new File(asyncData.absolutePath() + ".metadata");
-
-        long syncPosition = write(new DirectCompressedSequentialWriter(syncData, syncMeta, null,
-                                                                       SequentialWriterOption.DEFAULT, params,
-                                                                       collector(), null, 0), payload);
-        long asyncPosition = write(new DirectCompressedSequentialWriter(asyncData, asyncMeta, null,
-                                                                        SequentialWriterOption.DEFAULT, params,
-                                                                        collector(), null, asyncBytes(params)), payload);
-
-        assertEquals(name + ": reported position differs", syncPosition, asyncPosition);
-        assertArrayEquals(name + ": data file differs", readAll(syncData), readAll(asyncData));
-        assertArrayEquals(name + ": compression metadata differs", readAll(syncMeta), readAll(asyncMeta));
+        compare(params, name, bytes, false,
+                (data, meta, asyncBytes) -> new DirectCompressedSequentialWriter(data, meta, null,
+                                                                                 SequentialWriterOption.DEFAULT,
+                                                                                 params, collector(), null, asyncBytes));
     }
 
     private void compare(CompressionParams params, String name, int bytes, boolean incompressible)
+    throws IOException
+    {
+        compare(params, name, bytes, incompressible,
+                (data, meta, asyncBytes) -> new CompressedSequentialWriter(data, meta, null,
+                                                                           SequentialWriterOption.DEFAULT,
+                                                                           params, collector(), null, asyncBytes));
+    }
+
+    /**
+     * Writes the same payload through the inline and the pipelined writer, then asserts that both
+     * produced byte-identical files and the same reported position.
+     */
+    private void compare(CompressionParams params, String name, int bytes, boolean incompressible, WriterFactory factory)
     throws IOException
     {
         byte[] payload = payload(bytes, incompressible);
@@ -149,24 +149,17 @@ public class AsyncChunkPipelineTest
         File syncMeta = new File(syncData.absolutePath() + ".metadata");
         File asyncMeta = new File(asyncData.absolutePath() + ".metadata");
 
-        long syncPosition = write(newSync(syncData, syncMeta, params), payload);
-        long asyncPosition = write(newAsync(asyncData, asyncMeta, params), payload);
+        long syncPosition = write(factory.open(syncData, syncMeta, 0), payload);
+        long asyncPosition = write(factory.open(asyncData, asyncMeta, asyncBytes(params)), payload);
 
         assertEquals(name + ": reported position differs", syncPosition, asyncPosition);
         assertArrayEquals(name + ": data file differs", readAll(syncData), readAll(asyncData));
         assertArrayEquals(name + ": compression metadata differs", readAll(syncMeta), readAll(asyncMeta));
     }
 
-    private CompressedSequentialWriter newSync(File data, File meta, CompressionParams params)
+    private interface WriterFactory
     {
-        return new CompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT, params,
-                                              collector());
-    }
-
-    private CompressedSequentialWriter newAsync(File data, File meta, CompressionParams params)
-    {
-        return new CompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT, params,
-                                              collector(), null, asyncBytes(params));
+        CompressedSequentialWriter open(File data, File meta, int asyncBytes);
     }
 
     /** Deliberately small, so the slot pool wraps repeatedly during a run. */

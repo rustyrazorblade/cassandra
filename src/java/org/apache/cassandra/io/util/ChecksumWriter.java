@@ -23,6 +23,7 @@ import java.io.IOError;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.function.IntConsumer;
 import java.util.zip.CRC32;
 
 import javax.annotation.Nonnull;
@@ -56,6 +57,9 @@ public class ChecksumWriter
 
     public void writeChunkSize(int length)
     {
+        if (incrementalOut == null)
+            throw new UnsupportedOperationException("writeChunkSize needs a stream sink");
+
         try
         {
             incrementalOut.writeInt(length);
@@ -113,6 +117,26 @@ public class ChecksumWriter
         catch (IOException e)
         {
             throw new FSWriteError(e, digestFile);
+        }
+    }
+
+    /**
+     * Sends the per-chunk CRC to a sink instead of a stream. Both compressed write paths use this to
+     * put the CRC in a buffer they control, rather than in a channel write of its own.
+     */
+    public static final class SinkChecksumWriter extends ChecksumWriter
+    {
+        private final IntConsumer sink;
+
+        public SinkChecksumWriter(IntConsumer sink)
+        {
+            this.sink = sink;
+        }
+
+        @Override
+        protected void writeIncrementalInt(int value)
+        {
+            sink.accept(value);
         }
     }
 }

@@ -21,13 +21,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongConsumer;
 
 import com.google.common.annotations.VisibleForTesting;
+
+import org.jctools.queues.SpscArrayQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +39,7 @@ import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
+import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
 import static org.apache.cassandra.utils.Throwables.merge;
 
 /**
@@ -49,12 +52,13 @@ import static org.apache.cassandra.utils.Throwables.merge;
  * repeats any of it.
  *
  * The producer fills a chunk-sized slot, hands it on and takes a fresh one; slots rotate between
- * two bounded queues, so the pool is the back-pressure. Compression then fans out across a shared
- * pool while one thread per writer takes the results in sequence order and does everything
- * order-dependent: the offsets table, chunkOffset, the full-file checksum and the write itself.
+ * two single-producer, single-consumer queues, so the pool is the back-pressure. One thread per
+ * writer takes the filled slots in order and does everything order-dependent: compression, the
+ * offsets table, chunkOffset, the full-file checksum and the write itself.
  *
- * The writer it serves supplies four things, all of which it already had:
- * {@link CompressedSequentialWriter#compressChunk}, {@link CompressedSequentialWriter#emitChunk},
+ * The writer it serves supplies five things, all of which it already had:
+ * {@link CompressedSequentialWriter#flushData(java.nio.ByteBuffer)},
+ * {@link CompressedSequentialWriter#getLastFlushOffset}, {@code chunkOffsetSnapshot},
  * {@code forceDataOnly} and {@code getPath}.
  */
 class AsyncChunkPipeline
@@ -64,31 +68,36 @@ class AsyncChunkPipeline
     /** How long shutdown waits for the writer thread before giving up and logging. */
     private static final long QUIESCE_MILLIS = 30_000L;
 
-    /** How long the writer waits for a chunk before looking for other work, such as a force. */
-    private static final long POLL_MILLIS = 200L;
+    /** How long the writer parks before looking for other work, such as a force. */
+    private static final long WRITER_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
+
+    /** Polls the queue this many times before parking; a busy pipeline never reaches the park. */
+    private static final int WRITER_SPINS = 128;
+
+    /** How long the producer parks between checks. Short: this is the back-pressure stall. */
+    private static final long PRODUCER_PARK_NANOS = 50_000L;
 
     private final CompressedSequentialWriter owner;
 
-    /** Slots the producer may take. */
-    private final ArrayBlockingQueue<ByteBuffer> free;
+    /** Slots the producer may take. Offered by the writer thread, polled by the producer. */
+    private final SpscArrayQueue<ByteBuffer> free;
 
-    /** Filled chunks, in order. */
-    private final ArrayBlockingQueue<ByteBuffer> filled;
+    /** Filled chunks, in order. Offered by the producer, polled by the writer thread. */
+    private final SpscArrayQueue<ByteBuffer> filled;
 
-    private final Thread writer;
+    /** Producer-only until the thread starts; null until then. */
+    private Thread writer;
 
     private final BufferType bufferType;
     private final int chunkLength;
     private final int slotCount;
+    private final String threadName;
 
     /** Slots in existence. Grown lazily, so a writer holds only what its pipeline depth needed. */
     private int allocated;
 
     private long submitted = 0;
     private volatile long completed = 0;
-
-    /** Chunks the producer had submitted when shutdown was set; the writer drains up to it. */
-    private volatile long submittedAtShutdown = Long.MAX_VALUE;
 
     /**
      * First failure seen off the producer thread, rethrown on the producer's next interaction.
@@ -106,8 +115,15 @@ class AsyncChunkPipeline
     private final Object fsyncLock = new Object();
     private final ScheduledFuture<?> fsyncTask;
     private volatile boolean forcePending = false;
-    private long bytesWritten = 0;
-    private long bytesForced = 0;
+
+    /** Writer-only: whether anything has reached the channel since the last force. */
+    private boolean unforcedWrites = false;
+
+    /**
+     * Set while the writer is parked, so the producer pays for an unpark only when it is felt. The
+     * park is bounded anyway, so a missed wake-up costs latency, never progress.
+     */
+    private volatile boolean writerParked = false;
 
     /**
      * Uncompressed offset actually put on the channel. The post-flush listener is fed this rather
@@ -133,9 +149,9 @@ class AsyncChunkPipeline
         // Derive the slot count from a byte budget: the runway that matters is bytes in flight, and
         // a fixed count would scale it with the table's chunk length.
         this.slotCount = Math.max(2, bufferBytes / chunkLength);
-        this.free = new ArrayBlockingQueue<>(slotCount);
+        this.free = new SpscArrayQueue<>(slotCount);
         // +1 so the queue can never reject: the producer holds one slot while offering another.
-        this.filled = new ArrayBlockingQueue<>(slotCount + 1);
+        this.filled = new SpscArrayQueue<>(slotCount + 1);
         // The writer already allocated one chunk buffer and installed it as its staging buffer, and
         // the first swap returns it here, so it counts against the budget.
         this.allocated = 1;
@@ -150,8 +166,7 @@ class AsyncChunkPipeline
                                this::requestForce, fsyncMillis, fsyncMillis, TimeUnit.MILLISECONDS)
                          : null;
 
-        this.writer = new Thread(this::writerLoop, "CompactionWriter-" + name);
-        this.writer.setDaemon(true);
+        this.threadName = "CompactionWriter-" + name;
     }
 
     /**
@@ -167,7 +182,7 @@ class AsyncChunkPipeline
         if (!started)
         {
             started = true;
-            writer.start();
+            writer = executorFactory().startThread(threadName, this::writerLoop);
         }
     }
 
@@ -217,10 +232,11 @@ class AsyncChunkPipeline
     /** Hands a filled chunk to the writer thread. */
     void submit(ByteBuffer outgoing)
     {
-        ensureStarted();
         submitted++;
         if (!filled.offer(outgoing))
             throw new IllegalStateException("async writer queue full; slot accounting is wrong");
+        if (writerParked)
+            LockSupport.unpark(writer);
     }
 
     /** Fires the early-open callback with what the writer has actually made durable. */
@@ -262,21 +278,22 @@ class AsyncChunkPipeline
      * Waits briefly for the writer to make progress. Polling rather than parking on a condition
      * keeps the writer thread free of any signalling obligation on its error paths, where a missed
      * signal would hang the producer for good.
+     *
+     * parkNanos rather than Thread.sleep: sleep(0, nanos) rounds up to a whole millisecond on JDK 11
+     * and 17, which is 20 times the intended stall.
      */
     private void awaitProgress()
     {
         if (started && !writer.isAlive() && failure.get() == null)
             failure.compareAndSet(null, new IOException("Async writer thread for " + owner.getPath() + " exited unexpectedly"));
 
-        try
-        {
-            Thread.sleep(0, 200_000);
-        }
-        catch (InterruptedException e)
+        LockSupport.parkNanos(PRODUCER_PARK_NANOS);
+
+        if (Thread.interrupted())
         {
             Thread.currentThread().interrupt();
             // Not a disk fault: leave the type alone so the disk failure policy is not involved.
-            throw new RuntimeException("Interrupted waiting for the async compaction writer", e);
+            throw new RuntimeException("Interrupted waiting for the async compaction writer");
         }
     }
 
@@ -309,27 +326,17 @@ class AsyncChunkPipeline
      */
     private void writerLoop()
     {
+        int idle = 0;
         while (true)
         {
-            ByteBuffer slot;
-            try
-            {
-                slot = filled.poll(POLL_MILLIS, TimeUnit.MILLISECONDS);
-            }
-            catch (InterruptedException e)
-            {
-                // Nothing interrupts this thread today, but exiting without latching would freeze
-                // `completed` and leave the producer waiting for a chunk that will never land.
-                failure.compareAndSet(null, e);
-                return;
-            }
-
+            ByteBuffer slot = filled.poll();
             if (slot != null)
             {
+                idle = 0;
                 try
                 {
                     owner.flushData(slot);
-                    bytesWritten += slot.position();
+                    unforcedWrites = true;
                     durableOffset = owner.getLastFlushOffset();
                     estimatedOnDisk = owner.chunkOffsetSnapshot();
                 }
@@ -344,14 +351,39 @@ class AsyncChunkPipeline
                     completed++;
                 }
             }
-            else if (shutdown && completed >= submittedAtShutdown)
+            else if (shutdown)
             {
+                // quiesce() runs on the producer, which has stopped submitting, so an empty queue
+                // here means every submitted chunk has been written.
                 return;
             }
 
             if (forcePending)
                 backgroundForce();
+
+            if (slot == null)
+                awaitWork(idle++);
         }
+    }
+
+    /**
+     * Spins for the first few empty polls, then parks. A busy pipeline never reaches the park; an
+     * idle one wakes five times a second, as the old timed poll did.
+     */
+    private void awaitWork(int idle)
+    {
+        if (idle < WRITER_SPINS)
+        {
+            Thread.onSpinWait();
+            return;
+        }
+
+        writerParked = true;
+        // Re-check after publishing the flag: the producer may have offered between the poll above
+        // and this store, and so skipped the unpark.
+        if (filled.isEmpty() && !shutdown && !forcePending)
+            LockSupport.parkNanos(WRITER_PARK_NANOS);
+        writerParked = false;
     }
 
     /**
@@ -373,14 +405,13 @@ class AsyncChunkPipeline
                 return;
 
             forcePending = false;
-            if (bytesWritten == bytesForced)
+            if (!unforcedWrites)
                 return;
 
-            long written = bytesWritten;
             try
             {
                 owner.forceDataOnly();
-                bytesForced = written;
+                unforcedWrites = false;
             }
             catch (Throwable t)
             {
@@ -411,9 +442,8 @@ class AsyncChunkPipeline
         if (!started)
             return;   // nothing was ever flushed; there is no thread to wait for
 
-        // Tell the writer how far to drain. It exits once it has taken every chunk the producer
-        // submitted, so nothing already dispatched is dropped.
-        submittedAtShutdown = submitted;
+        // The writer exits once it finds the queue empty, so nothing already dispatched is dropped.
+        LockSupport.unpark(writer);
         try
         {
             writer.join(QUIESCE_MILLIS);
@@ -433,8 +463,8 @@ class AsyncChunkPipeline
     Throwable releaseBuffers(Throwable accumulate)
     {
         List<ByteBuffer> remaining = new ArrayList<>(slotCount);
-        free.drainTo(remaining);
-        filled.drainTo(remaining);
+        free.drain(remaining::add);
+        filled.drain(remaining::add);
         for (ByteBuffer slot : remaining)
         {
             try
@@ -450,12 +480,6 @@ class AsyncChunkPipeline
     int freeSlotCount()
     {
         return free.size();
-    }
-
-    @VisibleForTesting
-    int slotCount()
-    {
-        return slotCount;
     }
 
     @VisibleForTesting

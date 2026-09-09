@@ -19,7 +19,8 @@
 package org.apache.cassandra.test.microbench.sstable;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
@@ -35,6 +36,7 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
@@ -107,7 +109,7 @@ public class CompactionWritePathBench extends CompactionBench
 
         // Generating the dataset costs about two minutes, so it is done per trial by default.
         // Set cassandra.bench.dataset to reuse one set of SSTables across runs instead.
-        String cachePath = System.getProperty("cassandra.bench.dataset");
+        String cachePath = CassandraRelevantProperties.BENCH_DATASET.getString();
         if (cachePath == null)
         {
             generateRows();
@@ -143,13 +145,8 @@ public class CompactionWritePathBench extends CompactionBench
 
     private static List<File> dataFilesIn(File dir)
     {
-        List<File> files = new ArrayList<>();
-        File[] listed = dir.tryList();
-        if (listed != null)
-            for (File f : listed)
-                if (!f.isDirectory())
-                    files.add(f);
-        return files;
+        File[] listed = dir.tryList(f -> !f.isDirectory());
+        return listed == null ? Collections.emptyList() : Arrays.asList(listed);
     }
 
     private File liveDirectory()

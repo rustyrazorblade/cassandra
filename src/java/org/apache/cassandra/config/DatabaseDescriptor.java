@@ -4953,12 +4953,6 @@ public class DatabaseDescriptor
         return conf.async_compaction_writer_fsync_interval.toMilliseconds();
     }
 
-    @VisibleForTesting
-    public static void setAsyncCompactionWriterFsyncInterval(String interval)
-    {
-        conf.async_compaction_writer_fsync_interval = new DurationSpec.IntMillisecondsBound(interval);
-    }
-
     public static int getAsyncCompactionWriterBufferInBytes()
     {
         return conf.async_compaction_writer_buffer.toBytes();

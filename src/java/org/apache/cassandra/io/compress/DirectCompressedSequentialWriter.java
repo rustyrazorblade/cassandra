@@ -20,7 +20,6 @@ package org.apache.cassandra.io.compress;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
 
 import javax.annotation.Nullable;
@@ -41,6 +40,7 @@ import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.ChecksumWriter;
+import org.apache.cassandra.io.util.ChecksumWriter.SinkChecksumWriter;
 import org.apache.cassandra.io.util.DataPosition;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
@@ -164,7 +164,8 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     @Override
     protected ChecksumWriter createChecksumWriter()
     {
-        return new DirectChecksumWriter(this::writeCrcToAlignedBuffer);
+        // Routes the per-chunk CRC into the block-aligned writeBuffer instead of the channel.
+        return new SinkChecksumWriter(this::writeCrcToAlignedBuffer);
     }
 
     // Parent reads fchannel.position(), which lags by the bytes staged in writeBuffer.
@@ -420,30 +421,4 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         return new DirectTransactionalProxy();
     }
 
-    /**
-     * Routes the per-chunk CRC into the block-aligned writeBuffer instead of the channel, reusing
-     * ChecksumWriter's bookkeeping rather than duplicating it. Only the CRC trailer flows through here;
-     * {@link #writeChunk} stages the chunk data.
-     */
-    private static final class DirectChecksumWriter extends ChecksumWriter
-    {
-        private final IntConsumer alignedSink;
-
-        DirectChecksumWriter(IntConsumer alignedSink)
-        {
-            this.alignedSink = alignedSink;
-        }
-
-        @Override
-        protected void writeIncrementalInt(int value)
-        {
-            alignedSink.accept(value);
-        }
-
-        @Override
-        public void writeChunkSize(int length)
-        {
-            throw new UnsupportedOperationException("writeChunkSize is unused on the compressed O_DIRECT path");
-        }
-    }
 }
