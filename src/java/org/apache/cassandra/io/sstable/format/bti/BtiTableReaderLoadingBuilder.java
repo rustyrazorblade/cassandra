@@ -193,7 +193,9 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
             rowIndexFileBuilder = new FileHandle.Builder(descriptor.fileFor(Components.ROW_INDEX));
 
         rowIndexFileBuilder.withChunkCache(chunkCache);
-        rowIndexFileBuilder.mmapped(ioOptions.indexDiskAccessMode);
+
+        if (ioOptions.indexDiskAccessMode != null)
+            rowIndexFileBuilder.withDiskAccessMode(ioOptions.indexDiskAccessMode);
 
         return rowIndexFileBuilder;
     }
@@ -206,7 +208,9 @@ public class BtiTableReaderLoadingBuilder extends SortedTableReaderLoadingBuilde
             partitionIndexFileBuilder = new FileHandle.Builder(descriptor.fileFor(Components.PARTITION_INDEX));
 
         partitionIndexFileBuilder.withChunkCache(chunkCache);
-        partitionIndexFileBuilder.mmapped(ioOptions.indexDiskAccessMode);
+
+        if (ioOptions.indexDiskAccessMode != null)
+            partitionIndexFileBuilder.withDiskAccessMode(ioOptions.indexDiskAccessMode);
 
         return partitionIndexFileBuilder;
     }
