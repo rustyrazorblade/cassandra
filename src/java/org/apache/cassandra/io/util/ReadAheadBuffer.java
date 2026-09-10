@@ -19,6 +19,9 @@
 package org.apache.cassandra.io.util;
 
 import java.nio.ByteBuffer;
+import java.util.function.Supplier;
+
+import javax.annotation.concurrent.NotThreadSafe;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -26,18 +29,16 @@ import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.compress.CorruptBlockException;
 import org.apache.cassandra.utils.Closeable;
 
-import javax.annotation.concurrent.NotThreadSafe;
-
 /**
  * A read-ahead buffer for sequential scans of a single file.
  */
 @NotThreadSafe
 public class ReadAheadBuffer implements Closeable
 {
-    private final ChannelProxy channel;
-    private final BufferType bufferType;
+    protected final ChannelProxy channel;
+
+    private final Supplier<ByteBuffer> bufferSupplier;
     private final long channelSize;
-    private final int bufferSize;
 
     private ByteBuffer buffer;
     private int index = -1;
@@ -45,10 +46,14 @@ public class ReadAheadBuffer implements Closeable
 
     public ReadAheadBuffer(ChannelProxy channel, int bufferSize, BufferType bufferType)
     {
+        this(channel, () -> bufferType.allocate(bufferSize));
+    }
+
+    public ReadAheadBuffer(ChannelProxy channel, Supplier<ByteBuffer> bufferSupplier)
+    {
         this.channel = channel;
         this.channelSize = channel.size();
-        this.bufferSize = bufferSize;
-        this.bufferType = bufferType;
+        this.bufferSupplier = bufferSupplier;
     }
 
     public boolean hasBuffer()
@@ -59,7 +64,7 @@ public class ReadAheadBuffer implements Closeable
     @VisibleForTesting
     int bufferSize()
     {
-        return bufferSize;
+        return buffer == null ? -1 : buffer.capacity();
     }
 
     public int remaining()
@@ -80,7 +85,7 @@ public class ReadAheadBuffer implements Closeable
 
         if (buffer == null)
         {
-            buffer = bufferType.allocate(bufferSize);
+            buffer = bufferSupplier.get();
             buffer.clear();
         }
         return buffer;
@@ -97,6 +102,7 @@ public class ReadAheadBuffer implements Closeable
     public void fill(long position) throws CorruptBlockException
     {
         ByteBuffer blockBuffer = getBuffer();
+        int bufferSize = blockBuffer.capacity();
         if (position >= channelSize)
             throw new CorruptBlockException(channel.filePath(), position, bufferSize);
 
@@ -135,6 +141,11 @@ public class ReadAheadBuffer implements Closeable
         return length;
     }
 
+    protected void cleanBuffer(ByteBuffer buffer)
+    {
+        FileUtils.clean(buffer);
+    }
+
     @Override
     public void close()
     {
@@ -144,7 +155,7 @@ public class ReadAheadBuffer implements Closeable
 
         index = -1;
         buffer.clear();
-        FileUtils.clean(buffer);
+        cleanBuffer(buffer);
         buffer = null;
     }
 }
