@@ -92,7 +92,7 @@ public class RowIndexTest
     }
 
     @Parameterized.Parameter(value = 0)
-    public static Config.DiskAccessMode accessMode = Config.DiskAccessMode.standard;
+    public static Config.DiskAccessMode diskAccessMode = Config.DiskAccessMode.standard;
 
     @Test
     public void testSingletons() throws IOException
@@ -200,7 +200,7 @@ public class RowIndexTest
     {
         complete();
 
-        FileHandle.Builder builder = new FileHandle.Builder(file).mmapped(accessMode == Config.DiskAccessMode.mmap);
+        FileHandle.Builder builder = new FileHandle.Builder(file).withDiskAccessMode(diskAccessMode);
         fh = builder.complete();
         try (RandomAccessReader rdr = fh.createReader())
         {
