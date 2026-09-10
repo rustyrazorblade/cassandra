@@ -22,6 +22,7 @@ Merged from 4.0:
 
 
 5.0.9
+ * Direct I/O support for compaction reads (CASSANDRA-19987)
  * Coordinator load-shedding returns OverloadedException without setting streamId, misrouting query responses (CASSANDRA-21508)
  * SAI Component Checksum Validation Should be Segment-Aware (CASSANDRA-21516)
  * Support Python 3.12 and 3.13 in cqlsh (CASSANDRA-20997)
