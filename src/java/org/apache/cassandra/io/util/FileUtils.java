@@ -46,6 +46,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -861,7 +862,14 @@ public final class FileUtils
         }
     }
 
+    private static final ConcurrentHashMap<String, Integer> blockSizeByDirectory = new ConcurrentHashMap<>();
+
     public static int getBlockSize(File directory)
+    {
+        return blockSizeByDirectory.computeIfAbsent(directory.absolutePath(), ignored -> probeBlockSize(directory));
+    }
+
+    private static int probeBlockSize(File directory)
     {
         File f = FileUtils.createTempFile("block-size-test", ".tmp", directory);
         try
