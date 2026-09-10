@@ -132,7 +132,7 @@ public class CompressedStreamWriterBurnTest
         CompactionManager.instance.disableAutoCompaction();
         ColumnFamilyStore store = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF);
 
-        // incompressible values, so the file on disk is the size asked for, and the bytes timed across the
+        // incompressible values, so compression does not shrink the data and the bytes timed across the
         // socket are the bytes written
         Random random = new Random(0);
         byte[] value = new byte[VALUE_SIZE];
@@ -184,6 +184,7 @@ public class CompressedStreamWriterBurnTest
             // then time it without one: checksumming the received bytes costs more CPU than the transfer does
             Result fastest = null;
             Result leanest = null;
+            // keep the min of the runs: a sampling profiler or a stray background thread only ever adds
             for (int i = 0; i < ITERATIONS; i++)
             {
                 Result result = run(receiver, expectedBytes, false, writer);
@@ -194,7 +195,6 @@ public class CompressedStreamWriterBurnTest
             logger.info("streamed {} in {} ms, {} MiB/s, {} ms of process CPU",
                         FBUtilities.prettyPrintMemory(expectedBytes), fastest.millis, fastest.mibPerSecond(expectedBytes),
                         TimeUnit.NANOSECONDS.toMillis(fastest.cpuNanos));
-            // min of the runs: a sampling profiler or a stray background thread only ever adds
             logger.info("allocated {} on the heap, {} networking pool hits, {} misses",
                         FBUtilities.prettyPrintMemory(leanest.heapBytes), leanest.poolHits, leanest.poolMisses);
         }
@@ -281,7 +281,7 @@ public class CompressedStreamWriterBurnTest
         }
     }
 
-    /** A real TCP server on loopback that counts whatever arrives, then discards it. */
+    /** A real TCP server on loopback that counts arriving bytes, checksums them on request, then discards them. */
     private static class Receiver implements AutoCloseable
     {
         private final EventLoopGroup group = new NioEventLoopGroup(2);

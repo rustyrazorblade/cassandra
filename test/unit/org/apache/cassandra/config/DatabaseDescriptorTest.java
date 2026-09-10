@@ -491,7 +491,7 @@ public class DatabaseDescriptorTest
                 assertEquals(1 << 20, DatabaseDescriptor.getStreamSendWindowInBytes());
             }
 
-            // lowering both is allowed in the order the message asks for
+            // the guard asks for the chunk size to come down before the window
             DatabaseDescriptor.setStreamChunkSizeInBytes(64 << 10);
             DatabaseDescriptor.setStreamSendWindowInBytes(128 << 10);
             assertEquals(64 << 10, DatabaseDescriptor.getStreamChunkSizeInBytes());

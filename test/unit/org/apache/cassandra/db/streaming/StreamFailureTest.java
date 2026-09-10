@@ -131,7 +131,6 @@ public class StreamFailureTest
     {
         byte[] wire = capture(writer(compressed, wholeFile(compressed), session()));
 
-        // flip a bit a long way in, so the damage lands in a chunk rather than in its length prefix
         wire[wire.length / 2] ^= 0x7F;
 
         assertReceivingFails(compressed, compressedStore, wire);

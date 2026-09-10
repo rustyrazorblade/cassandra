@@ -52,7 +52,7 @@ import static org.junit.Assert.assertTrue;
  * What the compressed writer puts on the wire, for every shape of section it can be asked for.
  *
  * The writer transforms nothing: the compressed chunks covering the requested sections go out as they sit in
- * the data file, each followed by its CRC. Every case asserts the bytes, not the mechanism that sent them.
+ * the data file, each followed by its CRC.
  */
 public class CassandraCompressedStreamWriterTest
 {

@@ -91,7 +91,6 @@ public class StreamReadAhead implements Closeable
         return new StreamReadAhead(executor, depth, reader);
     }
 
-    /** How many chunks of {@code chunkSize} fit in the configured read-ahead, at least one. */
     public static int depthFor(int chunkSize)
     {
         return Math.max(1, DatabaseDescriptor.getStreamReadAheadInBytes() / chunkSize);

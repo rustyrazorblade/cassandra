@@ -42,26 +42,16 @@ import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.AsyncStreamingOutputPlus;
 import org.apache.cassandra.net.TestChannel;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.streaming.PreviewKind;
-import org.apache.cassandra.streaming.SessionInfo;
-import org.apache.cassandra.streaming.StreamCoordinator;
-import org.apache.cassandra.streaming.StreamEventHandler;
-import org.apache.cassandra.streaming.StreamOperation;
-import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
 import org.apache.cassandra.streaming.StreamingFileSource;
-import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
 
-import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -91,7 +81,7 @@ public class CassandraStreamWriterTest
         CompactionManager.instance.disableAutoCompaction();
         sstable = writeSStable(CF_STANDARD, ByteBufferUtil.EMPTY_BYTE_BUFFER, 1000);
 
-        // high-entropy values so the compressed data file is comfortably larger than the chunk sizes under test
+        // 4000 rows carrying a 512-byte value, so the compressed data file is larger than the chunk sizes under test
         Random random = new Random(0);
         byte[] value = new byte[512];
         random.nextBytes(value);
@@ -115,8 +105,8 @@ public class CassandraStreamWriterTest
     }
 
     /**
-     * A flush per section drains the channel at every section boundary. On a high-latency link that empties
-     * the send pipe and costs a full round-trip per section.
+     * A flush per section drains the channel at every section boundary. On a high-latency link each section
+     * boundary then costs a full round trip.
      */
     @Test
     public void testFlushesOncePerFileRegardlessOfSectionCount() throws IOException
@@ -128,7 +118,7 @@ public class CassandraStreamWriterTest
 
     private void assertFlushedOnce(List<SSTableReader.PartitionPositionBounds> sections) throws IOException
     {
-        StreamSession session = setupStreamingSessionForTest();
+        StreamSession session = StreamingTestFixture.session();
         CassandraStreamHeader header =
             CassandraStreamHeader.builder()
                                  .withSSTableVersion(sstable.descriptor.version)
@@ -242,7 +232,7 @@ public class CassandraStreamWriterTest
                                  .withTableId(compressedSstable.metadata().id)
                                  .build();
 
-        return new CassandraCompressedStreamWriter(compressedSstable, header, setupStreamingSessionForTest());
+        return new CassandraCompressedStreamWriter(compressedSstable, header, StreamingTestFixture.session());
     }
 
     /** Split the whole data file into {@code count} contiguous byte-range sections of near-equal length. */
@@ -304,16 +294,4 @@ public class CassandraStreamWriterTest
         }
     }
 
-    private StreamSession setupStreamingSessionForTest()
-    {
-        StreamCoordinator streamCoordinator = new StreamCoordinator(StreamOperation.BOOTSTRAP, 1, new NettyStreamingConnectionFactory(), false, false, null, PreviewKind.NONE);
-        StreamResultFuture future = StreamResultFuture.createInitiator(nextTimeUUID(), StreamOperation.BOOTSTRAP, Collections.<StreamEventHandler>emptyList(), streamCoordinator);
-
-        InetAddressAndPort peer = FBUtilities.getBroadcastAddressAndPort();
-        streamCoordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(), StreamSession.State.INITIALIZED, null));
-
-        StreamSession session = streamCoordinator.getOrCreateOutboundSession(peer);
-        session.init(future);
-        return session;
-    }
 }

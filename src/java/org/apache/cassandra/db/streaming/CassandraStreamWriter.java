@@ -55,7 +55,7 @@ public class CassandraStreamWriter
     protected final Collection<SSTableReader.PartitionPositionBounds> sections;
     protected final StreamRateLimiter limiter;
     protected final StreamSession session;
-    private final long totalSize;
+    protected final long totalSize;
 
     public CassandraStreamWriter(SSTableReader sstable, CassandraStreamHeader header, StreamSession session)
     {
@@ -74,7 +74,6 @@ public class CassandraStreamWriter
      */
     public void write(StreamingDataOutputPlus out) throws IOException
     {
-        long totalSize = totalSize();
         logger.debug("[Stream #{}] Start streaming file {} to {}, repairedAt = {}, totalSize = {}", session.planId(),
                      sstable.getFilename(), session.peer, sstable.getSSTableMetadata().repairedAt, totalSize);
 
@@ -85,8 +84,7 @@ public class CassandraStreamWriter
             String filename = sstable.descriptor.fileFor(Components.DATA).toString();
             long progress = 0L;
 
-            // Read, validate and compress on the read-ahead thread. Otherwise each chunk waits on the disk
-            // after the send window frees up.
+            // Read, validate and compress on the read-ahead thread.
             try (StreamReadAhead ahead = StreamReadAhead.start(session.getChannel().readAheadExecutor(),
                                                                StreamReadAhead.depthFor(bufferSize),
                                                                sink -> read(proxy, validator, bufferSize, sink)))
@@ -100,17 +98,12 @@ public class CassandraStreamWriter
                 }
             }
 
-            // One flush, after every section. A flush per section blocks the sender until the channel
-            // drains, which costs a round trip at each section boundary.
+            // Flush once, after the last section. A flush per section blocks the sender until the
+            // channel drains, which costs a round trip at each section boundary.
             out.flush();
             logger.debug("[Stream #{}] Finished streaming file {} to {}, bytesTransferred = {}, totalSize = {}",
                          session.planId(), sstable.getFilename(), session.peer, FBUtilities.prettyPrintMemory(progress), FBUtilities.prettyPrintMemory(totalSize));
         }
-    }
-
-    protected long totalSize()
-    {
-        return totalSize;
     }
 
     /** Reads every section in order on the read-ahead thread, blocking in {@code sink} once it is far enough ahead. */

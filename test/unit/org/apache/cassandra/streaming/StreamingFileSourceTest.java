@@ -39,8 +39,8 @@ import static org.junit.Assert.assertTrue;
  * The direct source has to return the same bytes as the buffered one, from any offset and for any length.
  *
  * O_DIRECT reads whole blocks at block boundaries only. A section is aligned to neither, so each read takes
- * the aligned span covering the request and copies the wanted bytes out of it. Every case here uses an offset
- * or a length that no block boundary lines up with.
+ * the aligned span covering the request and copies the wanted bytes out of it. The cases here cover aligned
+ * and unaligned offsets and lengths.
  *
  * These tests skip themselves where the volume has no O_DIRECT, and they only mean something on Linux. On
  * macOS the JDK maps the option to F_NOCACHE, which does not enforce alignment, so they pass there whether

@@ -68,8 +68,9 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
     final int defaultLowWaterMark;
     final int defaultHighWaterMark;
 
-    // Send window for streaming that is not zero-copy. The 64 KiB Netty channel default does not
-    // cover the bandwidth-delay product of a high-latency link.
+    // Send window for streaming. Every path here uses it except writeFileToChannelZeroCopy, which has
+    // its own fixed marks. The 64 KiB Netty channel default does not cover the bandwidth-delay
+    // product of a high-latency link.
     final int streamingSendWindowLowWaterMark;
     final int streamingSendWindowHighWaterMark;
 
