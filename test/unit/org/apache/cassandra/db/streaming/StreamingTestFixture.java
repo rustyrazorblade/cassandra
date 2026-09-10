@@ -77,7 +77,7 @@ import io.netty.util.ReferenceCountUtil;
 import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 
 /**
- * Shared scaffolding for the legacy (non-zero-copy) streaming tests: build a stream header, run a writer
+ * Shared scaffolding for the legacy streaming tests: build a stream header, run a writer
  * against a channel that keeps whatever it emits, and work out what those bytes should have been.
  */
 public final class StreamingTestFixture
@@ -162,7 +162,10 @@ public final class StreamingTestFixture
         return channel;
     }
 
-    /** Feed already-captured wire bytes to the matching reader; used to test what happens when they are wrong. */
+    /**
+     * Feed captured wire bytes to the matching reader. The caller must close the returned object, which
+     * aborts the transaction holding the SSTables.
+     */
     public static Received receive(SSTableReader sstable, List<PartitionPositionBounds> sections, byte[] wire) throws Throwable
     {
         StreamSession session = session();

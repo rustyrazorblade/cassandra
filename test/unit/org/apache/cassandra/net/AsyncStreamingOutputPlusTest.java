@@ -203,8 +203,8 @@ public class AsyncStreamingOutputPlusTest
         {
             int chunk = 64 << 10;
 
-            // The writer parks before a write whose in-flight total would pass max(low, high - chunk).
-            // The first chunk always flushes, so the count is that threshold in chunks, plus one.
+            // The writer parks before a write once the bytes already in flight pass max(low, high - chunk).
+            // The first write always flushes and never counts, so the count is that threshold in chunks, plus two.
             //
             // A window far below the channel's marks: its 64 KiB high and 32 KiB low stand, the threshold is
             // max(32 KiB, 0) = 32 KiB, and one chunk of 64 KiB already passes it.
@@ -308,7 +308,7 @@ public class AsyncStreamingOutputPlusTest
             assertWindow(512, channelHigh, channelLow);
             // exactly the channel's high mark: the channel's marks stand
             assertWindow(channelHigh, channelHigh, channelLow);
-            // between the channel's low and high marks: raised to the channel's marks
+            // exactly the channel's low mark: the channel's marks stand
             assertWindow(channelHigh / 2, channelHigh, channelLow);
             // above the channel's high mark: the configured window, with the low mark at half of it
             assertWindow(4 * channelHigh, 4 * channelHigh, 2 * channelHigh);
@@ -438,8 +438,8 @@ public class AsyncStreamingOutputPlusTest
     }
 
     /**
-     * With SSL we have to encrypt in user space, so the same sections go out buffered. The bytes on the wire
-     * must be identical to the file's own bytes over those ranges.
+     * The buffered path, which an encrypted channel takes because it must encrypt in user space. The bytes it
+     * puts on the wire must match the file's own bytes over the sections.
      */
     @Test
     public void testWriteFileSectionsBufferedSendsTheSameBytes() throws IOException

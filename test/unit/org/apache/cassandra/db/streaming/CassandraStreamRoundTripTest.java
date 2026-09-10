@@ -58,9 +58,9 @@ import static org.junit.Assert.assertTrue;
  * The uncompressed half of the legacy streaming path, end to end.
  *
  * This writer works in the chunks of the CRC component rather than in compressed chunks. It seeks the
- * validator to the start of the chunk a section begins in, then tells the receiver how far into that chunk
- * the section really starts. Only a section that does not begin on a chunk boundary exercises that offset,
- * which is what a sub-range request produces.
+ * validator to the start of the chunk a section begins in. It validates the whole chunk, then sends only
+ * the bytes from the section start. Only a section that does not begin on a chunk boundary exercises that
+ * offset, which is what a sub-range request produces.
  */
 public class CassandraStreamRoundTripTest
 {

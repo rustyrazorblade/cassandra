@@ -1463,8 +1463,8 @@ slow_query_log_timeout: 500ms
 # streaming_connections_per_host: 1
 
 # Maximum bytes in flight before the streaming sender waits for the network to drain. It applies to
-# transfers that do not send a whole SSTable: sub-range repair and bootstrap, and SSTables that
-# cannot be sent whole. Whole-SSTable (zero-copy) transfers keep their own window.
+# every streaming transfer but one: an unencrypted whole-SSTable transfer, which uses its own fixed
+# window. With internode encryption on it applies to whole-SSTable transfers as well.
 # Set this to the bandwidth-delay product of your inter-node links. A smaller window leaves a
 # high-latency link idle while it waits for acknowledgements.
 # The node never uses a window below the channel's own write limit, whatever this value is.
@@ -1478,14 +1478,13 @@ slow_query_log_timeout: 500ms
 # For an uncompressed SSTable that has a CRC component the setting has no effect: the CRC chunk
 # size decides the buffer size instead.
 # The format on the wire does not change, so a mixed-version cluster is safe.
-# The node refuses to start if this value is larger than stream_send_window. To lower both, lower
-# this one first.
+# The node refuses to start if this value is larger than stream_send_window.
 # Min unit: B
 # stream_chunk_size: 128KiB
 
 # How far a transfer that does not send a whole SSTable reads ahead of the sender. A separate thread
 # reads this far in front, so the disk keeps working while the sender waits for the network.
-# The node rounds the value down to whole stream_chunk_size chunks, and always uses at least one.
+# The node rounds the value down to whole chunks, and always uses at least one.
 # Each concurrent transfer holds this much extra memory until it finishes.
 # Min unit: B
 # stream_read_ahead: 2MiB
@@ -1493,9 +1492,9 @@ slow_query_log_timeout: 500ms
 # Set the disk access mode for reading compressed SSTables during streaming. The allowed values are:
 # - standard: use buffered I/O (default)
 # - direct: use direct I/O, bypassing the OS page cache
-# It applies only to a compressed SSTable sent over an encrypted connection, the only case in which
-# streaming reads the data file into the process. Without encryption the bytes go from the page cache
-# to the socket, and this setting has no effect. Uncompressed SSTables always use buffered I/O.
+# It applies only to a compressed SSTable sent over an encrypted connection. Without encryption the
+# bytes go from the page cache to the socket, and this setting has no effect. Uncompressed SSTables
+# always use buffered I/O.
 # Streaming reads each byte once and never reads it again, so buffered I/O evicts data that the read
 # path still needs.
 # If direct is set and any data directory is on a filesystem without direct I/O support, the node

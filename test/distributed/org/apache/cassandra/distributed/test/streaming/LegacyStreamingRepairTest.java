@@ -33,8 +33,8 @@ import org.apache.cassandra.distributed.test.TestBaseImpl;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The legacy streaming path through a real two-node cluster, where the unit tests drive the writers and
- * readers directly.
+ * The legacy streaming path through a real two-node cluster, rather than through a writer and reader
+ * called directly.
  *
  * A repair moves the data, and the test checks the receiving node ends up with exactly what the sender
  * holds. Compressed and uncompressed tables run separately, because each uses a different writer and reader.

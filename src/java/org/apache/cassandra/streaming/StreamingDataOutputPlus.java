@@ -101,8 +101,8 @@ public interface StreamingDataOutputPlus extends DataOutputPlus, Closeable
      * Takes ownership of the buffer, which must come from the networking {@link
      * org.apache.cassandra.utils.memory.BufferPool}, and returns it to that pool after writing it.
      * <p>
-     * As with {@link #writeToChannel(Write, RateLimiter)} this blocks only for permission to write, and
-     * returns before the bytes reach the network.
+     * WARNING: this method blocks only for permission to write to the netty channel; it returns before
+     * the bytes reach the network.
      */
     int writeToChannel(ByteBuffer buffer, RateLimiter limiter) throws IOException;
 
