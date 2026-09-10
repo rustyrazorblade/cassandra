@@ -18,14 +18,13 @@
 package org.apache.cassandra.io.util;
 
 import java.util.Optional;
-import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.RateLimiter;
 
 import org.apache.cassandra.cache.ChunkCache;
-import org.apache.cassandra.config.Config;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.utils.NativeLibrary;
@@ -33,6 +32,8 @@ import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.concurrent.Ref;
 import org.apache.cassandra.utils.concurrent.RefCounted;
 import org.apache.cassandra.utils.concurrent.SharedCloseableImpl;
+
+import static org.apache.cassandra.config.Config.DiskAccessMode;
 
 /**
  * {@link FileHandle} provides access to a file for reading, including the ones written by various {@link SequentialWriter}
@@ -48,6 +49,13 @@ import org.apache.cassandra.utils.concurrent.SharedCloseableImpl;
  */
 public class FileHandle extends SharedCloseableImpl
 {
+
+    public enum OnReaderClose
+    {
+        CLOSE_FILE,
+        RETAIN_FILE_OPEN
+    }
+
     public final ChannelProxy channel;
 
     public final long onDiskLength;
@@ -62,17 +70,41 @@ public class FileHandle extends SharedCloseableImpl
      */
     private final Optional<CompressionMetadata> compressionMetadata;
 
+    private final DiskAccessMode diskAccessMode;
+
+    // Properties to support unbuilding via toBuilder
+    private final ChunkCache chunkCache;
+    private final MmappedRegionsCache mmappedRegionsCache;
+    private final Supplier<Double> crcCheckChanceSupplier;
+    private final long lengthOverride;
+    private final int bufferSize;
+    private final BufferType bufferType;
+
     private FileHandle(Cleanup cleanup,
                        ChannelProxy channel,
                        RebuffererFactory rebuffererFactory,
                        CompressionMetadata compressionMetadata,
-                       long onDiskLength)
+                       long onDiskLength,
+                       DiskAccessMode diskAccessMode,
+                       ChunkCache chunkCache,
+                       MmappedRegionsCache mmappedRegionsCache,
+                       Supplier<Double> crcCheckChanceSupplier,
+                       long lengthOverride,
+                       int bufferSize,
+                       BufferType bufferType)
     {
         super(cleanup);
         this.rebuffererFactory = rebuffererFactory;
         this.channel = channel;
         this.compressionMetadata = Optional.ofNullable(compressionMetadata);
         this.onDiskLength = onDiskLength;
+        this.diskAccessMode = diskAccessMode;
+        this.chunkCache = chunkCache;
+        this.mmappedRegionsCache = mmappedRegionsCache;
+        this.crcCheckChanceSupplier = crcCheckChanceSupplier;
+        this.lengthOverride = lengthOverride;
+        this.bufferSize = bufferSize;
+        this.bufferType = bufferType;
     }
 
     private FileHandle(FileHandle copy)
@@ -82,6 +114,26 @@ public class FileHandle extends SharedCloseableImpl
         rebuffererFactory = copy.rebuffererFactory;
         compressionMetadata = copy.compressionMetadata;
         onDiskLength = copy.onDiskLength;
+        diskAccessMode = copy.diskAccessMode;
+        chunkCache = copy.chunkCache;
+        mmappedRegionsCache = copy.mmappedRegionsCache;
+        crcCheckChanceSupplier = copy.crcCheckChanceSupplier;
+        lengthOverride = copy.lengthOverride;
+        bufferSize = copy.bufferSize;
+        bufferType = copy.bufferType;
+    }
+
+    public Builder toBuilder()
+    {
+        return new FileHandle.Builder(file())
+               .withDiskAccessMode(diskAccessMode)
+               .withCrcCheckChance(crcCheckChanceSupplier)
+               .withMmappedRegionsCache(mmappedRegionsCache)
+               .withCompressionMetadata(compressionMetadata.orElse(null))
+               .withLengthOverride(lengthOverride)
+               .withChunkCache(chunkCache)
+               .bufferSize(bufferSize)
+               .bufferType(bufferType);
     }
 
     /**
@@ -112,6 +164,16 @@ public class FileHandle extends SharedCloseableImpl
         return compressionMetadata;
     }
 
+    public DiskAccessMode diskAccessMode()
+    {
+        return diskAccessMode;
+    }
+
+    public boolean supportsDirectIO()
+    {
+        return FileUtils.isDirectIOSupported(file()) && compressionMetadata.isPresent();
+    }
+
     @Override
     public void addTo(Ref.IdentityCollection identities)
     {
@@ -134,16 +196,6 @@ public class FileHandle extends SharedCloseableImpl
         return createReader(null);
     }
 
-    public RandomAccessReader createReaderForScan()
-    {
-        return createReaderForScan(null);
-    }
-
-    public RandomAccessReader createReaderForScan(RateLimiter limiter)
-    {
-        return createReader(limiter, true);
-    }
-
     /**
      * Create {@link RandomAccessReader} with configured method of reading content of the file.
      * Reading from file will be rate limited by given {@link RateLimiter}.
@@ -158,7 +210,20 @@ public class FileHandle extends SharedCloseableImpl
 
     public RandomAccessReader createReader(RateLimiter limiter, boolean isScan)
     {
-       return new RandomAccessReader(instantiateRebufferer(limiter, isScan));
+        return createReader(limiter, isScan, OnReaderClose.RETAIN_FILE_OPEN);
+    }
+
+    public RandomAccessReader createReader(RateLimiter limiter, boolean isScan, OnReaderClose onReaderClose)
+    {
+        if (onReaderClose == OnReaderClose.CLOSE_FILE)
+        {
+            return new RandomAccessReader.RandomAccessReaderWithOwnFile(instantiateRebufferer(limiter, isScan), this);
+        }
+        else if (onReaderClose == OnReaderClose.RETAIN_FILE_OPEN)
+        {
+            return new RandomAccessReader(instantiateRebufferer(limiter, isScan));
+        }
+        throw new IllegalArgumentException("Unknown close policy: " + onReaderClose);
     }
 
     public FileDataInput createReader(long position)
@@ -282,7 +347,7 @@ public class FileHandle extends SharedCloseableImpl
         private ChunkCache chunkCache;
         private int bufferSize = RandomAccessReader.DEFAULT_BUFFER_SIZE;
         private BufferType bufferType = BufferType.OFF_HEAP;
-        private boolean mmapped = false;
+        private DiskAccessMode diskAccessMode = DiskAccessMode.standard;
         private long lengthOverride = -1;
         private MmappedRegionsCache mmappedRegionsCache;
 
@@ -324,21 +389,15 @@ public class FileHandle extends SharedCloseableImpl
             return this;
         }
 
-        /**
-         * Set whether to use mmap for reading
-         *
-         * @param mmapped true if using mmap
-         * @return this instance
-         */
-        public Builder mmapped(boolean mmapped)
+        public Builder mmapped()
         {
-            this.mmapped = mmapped;
+            withDiskAccessMode(DiskAccessMode.mmap);
             return this;
         }
 
-        public Builder mmapped(Config.DiskAccessMode diskAccessMode)
+        public Builder withDiskAccessMode(DiskAccessMode diskAccessMode)
         {
-            this.mmapped = diskAccessMode == Config.DiskAccessMode.mmap;
+            this.diskAccessMode = diskAccessMode;
             return this;
         }
 
@@ -390,7 +449,28 @@ public class FileHandle extends SharedCloseableImpl
          */
         public FileHandle complete()
         {
-            return complete(ChannelProxy::new);
+            return complete(file -> new ChannelProxy(file, ioMode()));
+        }
+
+        private ChannelProxy.IOMode ioMode()
+        {
+            switch (diskAccessMode)
+            {
+                case mmap:
+                case standard:
+                case auto:
+                case legacy:
+                case mmap_index_only:
+                    // For mmap and standard, BUFFERED is the correct mode.
+                    // For auto/legacy/mmap_index_only, these are meta-modes that should normally be resolved
+                    // during DatabaseDescriptor initialization. In client/tool mode where full initialization
+                    // didn't occur, BUFFERED (standard) is the safe default.
+                    return ChannelProxy.IOMode.BUFFERED;
+                case direct:
+                    return ChannelProxy.IOMode.DIRECT;
+                default:
+                    throw new AssertionError("Unhandled diskAccessMode: " + diskAccessMode);
+            }
         }
 
         @VisibleForTesting
@@ -412,7 +492,7 @@ public class FileHandle extends SharedCloseableImpl
                 {
                     rebuffererFactory = new EmptyRebufferer(channel);
                 }
-                else if (mmapped)
+                else if (DiskAccessMode.mmap == diskAccessMode)
                 {
                     if (compressionMetadata != null)
                     {
@@ -431,7 +511,16 @@ public class FileHandle extends SharedCloseableImpl
                 {
                     if (compressionMetadata != null)
                     {
-                        rebuffererFactory = maybeCached(new CompressedChunkReader.Standard(channel, compressionMetadata, crcCheckChanceSupplier));
+                        final CompressedChunkReader compressedChunkReader;
+                        if (DiskAccessMode.direct == diskAccessMode)
+                        {
+                            compressedChunkReader = new CompressedChunkReader.Direct(channel, compressionMetadata, crcCheckChanceSupplier);
+                        }
+                        else
+                        {
+                            compressedChunkReader = new CompressedChunkReader.Standard(channel, compressionMetadata, crcCheckChanceSupplier);
+                        }
+                        rebuffererFactory = maybeCached(compressedChunkReader);
                     }
                     else
                     {
@@ -439,10 +528,10 @@ public class FileHandle extends SharedCloseableImpl
                         rebuffererFactory = maybeCached(new SimpleChunkReader(channel, length, bufferType, chunkSize));
                     }
                 }
-                Cleanup cleanup = new Cleanup(channel, rebuffererFactory, compressionMetadata, chunkCache);
 
-                FileHandle fileHandle = new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length);
-                return fileHandle;
+                Cleanup cleanup = new Cleanup(channel, rebuffererFactory, compressionMetadata, chunkCache);
+                return new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length, diskAccessMode, chunkCache,
+                                      mmappedRegionsCache, crcCheckChanceSupplier, lengthOverride, bufferSize, bufferType);
             }
             catch (Throwable t)
             {

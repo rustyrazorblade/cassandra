@@ -35,7 +35,6 @@ import org.assertj.core.api.Assertions;
 import org.junit.Assert;
 import org.junit.Test;
 
-import accord.utils.Gen;
 import accord.utils.Gens;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -49,7 +48,7 @@ import org.apache.cassandra.schema.CompressionParams;
 
 import static accord.utils.Property.qt;
 
-public class CompressedChunkReaderTest
+public class StandardCompressedChunkReaderTest extends CompressedChunkReaderTestBase
 {
     static
     {
@@ -57,10 +56,10 @@ public class CompressedChunkReaderTest
     }
 
     @Test
-    public void scanReaderIssuesFewerPhysicalReadsThanRandomAccessReader()
+    public void scanReaderReadsLessThanRAReader()
     {
-        var optionGen = options();
-        var paramsGen = params();
+        var optionGen = writerOptions();
+        var paramsGen = compressionParams(Gens.constant(CompressionParams.DEFAULT_CHUNK_LENGTH));
         var lengthGen = Gens.longs().between(1, 1 << 16);
 
         qt().forAll(Gens.random(), optionGen, paramsGen).check((rs, option, params) -> {
@@ -82,17 +81,17 @@ public class CompressedChunkReaderTest
             }
 
             doReads(f, metadata1, length, false);
-            int randomAccessReads = reads.getAndSet(0);
+            int raReads = reads.getAndSet(0);
 
             doReads(f, metadata2, length, true);
             int scanReads = reads.getAndSet(0);
 
             if (Files.size(f.toPath()) > DatabaseDescriptor.getCompressedReadAheadBufferSize())
-                Assert.assertTrue(scanReads <= randomAccessReads);
+                Assert.assertTrue(scanReads <= raReads);
         });
     }
 
-    private void doReads(File f, CompressionMetadata metadata, long length, boolean useReadAhead)
+    protected void doReads(File f, CompressionMetadata metadata, long length, boolean useReadAhead)
     {
         ByteBuffer buffer = ByteBuffer.allocateDirect(metadata.chunkLength());
 
@@ -101,6 +100,7 @@ public class CompressedChunkReaderTest
             try (CompressedChunkReader reader = new CompressedChunkReader.Standard(channel, metadata, () -> 1d);
                  metadata)
             {
+                // forScan() returns a per-scan reader that owns its read-ahead buffer; use it, then close it.
                 CompressedChunkReader scanReader = useReadAhead ? reader.forScan() : reader;
                 try
                 {
@@ -127,35 +127,6 @@ public class CompressedChunkReaderTest
         {
             FileUtils.clean(buffer);
         }
-    }
-
-    private static Gen<SequentialWriterOption> options()
-    {
-        Gen<Integer> bufferSizes = Gens.constant(1 << 10);
-        return rs -> SequentialWriterOption.newBuilder()
-                                           .finishOnClose(false)
-                                           .bufferSize(bufferSizes.next(rs))
-                                           .build();
-    }
-
-    private enum CompressionKind { Noop, Snappy, Deflate, Lz4, Zstd }
-
-    private static Gen<CompressionParams> params()
-    {
-        Gen<Integer> chunkLengths = Gens.constant(CompressionParams.DEFAULT_CHUNK_LENGTH);
-        Gen<Double> compressionRatio = Gens.pick(1.1D);
-        return rs -> {
-            CompressionKind kind = rs.pick(CompressionKind.values());
-            switch (kind)
-            {
-                case Noop: return CompressionParams.noop();
-                case Snappy: return CompressionParams.snappy(chunkLengths.next(rs), compressionRatio.next(rs));
-                case Deflate: return CompressionParams.deflate(chunkLengths.next(rs));
-                case Lz4: return CompressionParams.lz4(chunkLengths.next(rs));
-                case Zstd: return CompressionParams.zstd(chunkLengths.next(rs));
-                default: throw new UnsupportedOperationException(kind.name());
-            }
-        };
     }
 
     @Test(timeout = 10_000)
@@ -216,14 +187,13 @@ public class CompressedChunkReaderTest
         }
     }
 
-    /*
-     * Two or more concurrent scans of one file must not corrupt each other or double-free a shared buffer.
-     */
     @Test(timeout = 60_000)
     public void concurrentScansOfOneReaderAreIndependent() throws Exception
     {
-        
-        SequentialWriterOption writerOption = SequentialWriterOption.newBuilder().finishOnClose(false).bufferSize(1 << 10).build();
+        // Two or more scanners over one SSTable (compaction plus an index build sharing the dfile) each open
+        // their own scan reader via forScan(). Under Option A each scan reader owns its read-ahead buffer, so
+        // concurrent scans of one file must not corrupt each other or double-free a shared buffer.
+        SequentialWriterOption writerOption = writerOption(1 << 10);
         CompressionParams params = CompressionParams.snappy(4096, 1.1);
 
         FileSystems.newGlobalInMemoryFileSystem();
@@ -241,8 +211,7 @@ public class CompressedChunkReaderTest
             metadata = writer.open(0);
         }
 
-        // Minium legal buffer size. (This should span many blocks over the test file.)
-        DatabaseDescriptor.setCompressedReadAheadBufferSizeInKb(256);
+        DatabaseDescriptor.setCompressedReadAheadBufferSizeInKb(256); // minimum allowed; spans many blocks over the test file
 
         int threads = 4;
         long maxOffset = longsToWrite * Long.BYTES;
@@ -284,6 +253,7 @@ public class CompressedChunkReaderTest
                     }));
                 }
 
+                // Propagate any assertion failure or corruption from the worker threads.
                 for (Future<?> future : futures)
                     future.get(45, TimeUnit.SECONDS);
             }
