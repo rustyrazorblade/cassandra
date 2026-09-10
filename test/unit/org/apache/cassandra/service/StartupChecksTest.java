@@ -27,6 +27,7 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.spi.FileSystemProvider;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -278,12 +279,24 @@ public class StartupChecksTest
     public void testKernelBug1057843Check() throws Exception
     {
         Assume.assumeTrue(DatabaseDescriptor.getCommitLogCompression() == null); // we would not be able to enable direct io otherwise
-        testKernelBug1057843Check("ext4", DiskAccessMode.direct, new Semver("6.1.63.1-generic"), false);
-        testKernelBug1057843Check("ext4", DiskAccessMode.direct, new Semver("6.1.64.1-generic"), true);
-        testKernelBug1057843Check("ext4", DiskAccessMode.direct, new Semver("6.1.65.1-generic"), true);
-        testKernelBug1057843Check("ext4", DiskAccessMode.direct, new Semver("6.1.66.1-generic"), false);
-        testKernelBug1057843Check("tmpfs", DiskAccessMode.direct, new Semver("6.1.64.1-generic"), false);
-        testKernelBug1057843Check("ext4", DiskAccessMode.mmap, new Semver("6.1.64.1-generic"), false);
+        Assume.assumeTrue("Skipping this test on non-Linux OS", FBUtilities.isLinux);
+
+        // Commit log direct writes
+        testKernelBug1057843Check("ext4", DiskAccessMode.direct, DiskAccessMode.standard, new Semver("6.1.63.1-generic"), false);
+        testKernelBug1057843Check("ext4", DiskAccessMode.direct, DiskAccessMode.standard, new Semver("6.1.64.1-generic"), true);
+        testKernelBug1057843Check("ext4", DiskAccessMode.direct, DiskAccessMode.standard, new Semver("6.1.65.1-generic"), true);
+        testKernelBug1057843Check("ext4", DiskAccessMode.direct, DiskAccessMode.standard, new Semver("6.1.66.1-generic"), false);
+        testKernelBug1057843Check("tmpfs", DiskAccessMode.direct, DiskAccessMode.standard, new Semver("6.1.64.1-generic"), false);
+        testKernelBug1057843Check("ext4", DiskAccessMode.mmap, DiskAccessMode.standard, new Semver("6.1.64.1-generic"), false);
+
+        // Background (data dir) direct writes hit the same check; kernel/fs-type logic is swept above, so
+        // here we only prove the data-dir branch reaches it (ext4 trips, tmpfs filtered out). Commit log is
+        // mmap, not standard: standard is rejected for the commit log unless compression/encryption is on.
+        testKernelBug1057843Check("ext4", DiskAccessMode.mmap, DiskAccessMode.direct, new Semver("6.1.64.1-generic"), true);
+        testKernelBug1057843Check("tmpfs", DiskAccessMode.mmap, DiskAccessMode.direct, new Semver("6.1.64.1-generic"), false);
+
+        // Both commit log and background data dir direct writes at once
+        testKernelBug1057843Check("ext4", DiskAccessMode.direct, DiskAccessMode.direct, new Semver("6.1.64.1-generic"), true);
     }
 
     private <R> void withPathOverriddingFileSystem(Map<String, String> pathOverrides, Callable<? extends R> callable) throws Exception
@@ -341,21 +354,35 @@ public class StartupChecksTest
         }
     }
 
-    private void testKernelBug1057843Check(String fsType, DiskAccessMode diskAccessMode, Semver kernelVersion, boolean expectToFail) throws Exception
+    private void testKernelBug1057843Check(String fsType,
+                                           DiskAccessMode commitLogMode,
+                                           DiskAccessMode backgroundMode,
+                                           Semver kernelVersion,
+                                           boolean expectToFail) throws Exception
     {
         String commitLogLocation = Files.createTempDirectory("testKernelBugCheck").toString();
 
         String savedCommitLogLocation = DatabaseDescriptor.getCommitLogLocation();
         DiskAccessMode savedCommitLogWriteDiskAccessMode = DatabaseDescriptor.getCommitLogWriteDiskAccessMode();
+        DiskAccessMode savedBackgroundWriteDiskAccessMode = DatabaseDescriptor.getBackgroundWriteDiskAccessMode();
         Semver savedKernelVersion = FBUtilities.getKernelVersion();
         try
         {
+            DatabaseDescriptor.setBackgroundWriteDiskAccessMode(backgroundMode);
             DatabaseDescriptor.setCommitLogLocation(commitLogLocation);
-            DatabaseDescriptor.setCommitLogWriteDiskAccessMode(diskAccessMode);
+            DatabaseDescriptor.setCommitLogWriteDiskAccessMode(commitLogMode);
             DatabaseDescriptor.initializeCommitLogDiskAccessMode();
-            assertThat(DatabaseDescriptor.getCommitLogWriteDiskAccessMode()).isEqualTo(diskAccessMode);
+            assertThat(DatabaseDescriptor.getCommitLogWriteDiskAccessMode()).isEqualTo(commitLogMode);
             FBUtilities.setKernelVersionSupplier(() -> kernelVersion);
-            withPathOverriddingFileSystem(Map.of(commitLogLocation, fsType), () -> {
+
+            // Override the filesystem type for every path getDirectIOWritePaths() may return (commit log and
+            // all data dirs) so the check sees only our synthetic type, never the real test filesystem.
+            Map<String, String> pathOverrides = new HashMap<>();
+            pathOverrides.put(commitLogLocation, fsType);
+            for (String dataDir : DatabaseDescriptor.getAllDataFileLocations())
+                pathOverrides.put(dataDir, fsType);
+
+            withPathOverriddingFileSystem(pathOverrides, () -> {
                 if (expectToFail)
                     assertThatExceptionOfType(StartupException.class).isThrownBy(() -> StartupChecks.checkKernelBug1057843.execute(options));
                 else
@@ -368,6 +395,7 @@ public class StartupChecksTest
             DatabaseDescriptor.setCommitLogLocation(savedCommitLogLocation);
             DatabaseDescriptor.setCommitLogWriteDiskAccessMode(savedCommitLogWriteDiskAccessMode);
             DatabaseDescriptor.initializeCommitLogDiskAccessMode();
+            DatabaseDescriptor.setBackgroundWriteDiskAccessMode(savedBackgroundWriteDiskAccessMode);
             FBUtilities.setKernelVersionSupplier(() -> savedKernelVersion);
         }
     }

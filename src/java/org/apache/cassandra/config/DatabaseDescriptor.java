@@ -34,6 +34,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -187,6 +188,8 @@ public class DatabaseDescriptor
     private static DiskAccessMode commitLogWriteDiskAccessMode;
 
     private static DiskAccessMode compactionReadDiskAccessMode;
+
+    private static DiskAccessMode backgroundWriteDiskAccessMode;
 
     private static AbstractCryptoProvider cryptoProvider;
     private static IAuthenticator authenticator;
@@ -766,6 +769,8 @@ public class DatabaseDescriptor
             throw new ConfigurationException("hints_directory must not be the same as the commitlog_directory", false);
         if (conf.hints_directory.equals(conf.saved_caches_directory))
             throw new ConfigurationException("saved_caches_directory must not be the same as the hints_directory", false);
+
+        initializeBackgroundWriteDiskAccessMode();
 
         if (conf.memtable_flush_writers == 0)
         {
@@ -2955,6 +2960,71 @@ public class DatabaseDescriptor
         Pair<DiskAccessMode, Boolean> accessModeDirectIoPair = resolveCommitLogWriteDiskAccessMode(conf.commitlog_disk_access_mode);
         validateCommitLogWriteDiskAccessMode(accessModeDirectIoPair);
         commitLogWriteDiskAccessMode = accessModeDirectIoPair.left;
+    }
+
+    public static DiskAccessMode getBackgroundWriteDiskAccessMode()
+    {
+        return backgroundWriteDiskAccessMode;
+    }
+
+    @VisibleForTesting
+    public static void setBackgroundWriteDiskAccessMode(DiskAccessMode diskAccessMode)
+    {
+        backgroundWriteDiskAccessMode = diskAccessMode;
+        conf.background_write_disk_access_mode = diskAccessMode;
+    }
+
+    public static DataStorageSpec.IntKibibytesBound getDirectWriteBufferSize()
+    {
+        return conf.direct_write_buffer_size;
+    }
+
+    /**
+     * The directories opened with O_DIRECT for writing. Startup checks that must reason about O_DIRECT
+     * write targets (e.g. the kernel-bug 1057843 check) derive their path set from here.
+     */
+    public static Set<Path> getDirectIOWritePaths()
+    {
+        Set<Path> paths = new HashSet<>();
+
+        if (getCommitLogWriteDiskAccessMode() == DiskAccessMode.direct)
+            paths.add(new File(getCommitLogLocation()).toPath());
+
+        if (getBackgroundWriteDiskAccessMode() == DiskAccessMode.direct)
+            for (String dataDir : getAllDataFileLocations())
+                paths.add(new File(dataDir).toPath());
+
+        return paths;
+    }
+
+    @VisibleForTesting
+    public static void initializeBackgroundWriteDiskAccessMode()
+    {
+        DiskAccessMode providedMode = conf.background_write_disk_access_mode;
+
+        if (providedMode == DiskAccessMode.direct)
+        {
+            // DataStorageSpec already rejects negatives at parse time; zero is the remaining
+            // nonsense value. The writer's Math.max would silently coerce it to minRequiredSize,
+            // which masks a likely operator mistake — fail fast instead.
+            if (conf.direct_write_buffer_size.toBytes() <= 0)
+                throw new ConfigurationException("direct_write_buffer_size must be > 0 when background_write_disk_access_mode is 'direct'. " +
+                                                 "Got: " + conf.direct_write_buffer_size, false);
+
+            // Create the data directories up front (as we do for the commit log) so the kernel-bug 1057843
+            // startup check can stat each O_DIRECT write target. Direct I/O support is validated separately
+            // by the directio_support startup check.
+            if (!toolInitialized)
+                for (String dataDir : getAllDataFileLocations())
+                    PathUtils.createDirectoriesIfNotExists(new File(dataDir).toPath());
+        }
+        else if (providedMode != DiskAccessMode.standard)
+        {
+            throw new ConfigurationException("Unsupported disk access mode for background_write_disk_access_mode " +
+                                             "(options: standard/direct): " + providedMode, false);
+        }
+
+        backgroundWriteDiskAccessMode = providedMode;
     }
 
     public static String getSavedCachesLocation()

@@ -62,7 +62,7 @@ public class CompressionMetadata extends WrappedSharedCloseable
     public final long dataLength;
     public final long compressedFileLength;
     private final Memory chunkOffsets;
-    private final long chunkOffsetsSize;
+    final long chunkOffsetsSize;
     public final File chunksIndexFile;
     public final CompressionParams parameters;
 
