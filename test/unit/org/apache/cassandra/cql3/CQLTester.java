@@ -105,6 +105,7 @@ import org.apache.cassandra.auth.IRoleManager;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DataStorageSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
@@ -2919,12 +2920,31 @@ public abstract class CQLTester
         @BeforeClass
         public static void setUpClass()
         {
+            prePrepareServer();
+
+            // Once per-JVM is enough
+            prepareServer();
+        }
+
+        protected static void prePrepareServer()
+        {
+            setupFileSystem();
+
+            CQLTester.prePrepareServer();
+
+            // The in-memory (jimfs) filesystem installed above cannot do Direct I/O: its FileStore has no
+            // getBlockSize() and it rejects ExtendedOpenOption.DIRECT. cassandra_latest.yaml enables
+            // background_write_disk_access_mode: direct, which would otherwise crash every flush+compact here.
+            DatabaseDescriptor.setBackgroundWriteDiskAccessMode(Config.DiskAccessMode.standard);
+        }
+
+        protected static void setupFileSystem()
+        {
             fs = FileSystems.newGlobalInMemoryFileSystem();
             CassandraRelevantProperties.IGNORE_MISSING_NATIVE_FILE_HINTS.setBoolean(true);
             FileSystems.maybeCreateTmp();
-
-            CQLTester.setUpClass();
         }
+
         @Before
         public void cleanupFileSystemListeners()
         {
