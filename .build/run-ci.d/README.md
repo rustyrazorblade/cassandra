@@ -20,7 +20,7 @@ options:
   -b BRANCH, --branch BRANCH
                         Repository branch. Defaults to current branch.
   -p {packaging,skinny,pre-commit,pre-commit w/ upgrades,post-commit,custom}, --profile {packaging,skinny,pre-commit,pre-commit w/ upgrades,post-commit,custom}
-                        CI pipeline profile. Defaults to skinny.
+                        CI pipeline profile. Defaults to skinny. Can also be specified via the JENKINS_PROFILE environment variable (and in .build/.run-ci.env)
   -e PROFILE_CUSTOM_REGEXP, --profile-custom-regexp PROFILE_CUSTOM_REGEXP
                         Regexp for stages when using custom profile. See `testSteps` in Jenkinsfile for list of stages. Example: 'stress.*|jvm-dtest.'
   -j JDK, --jdk JDK     Specify JDK version. Defaults to all JDKs the current branch supports.
@@ -38,6 +38,16 @@ options:
   -o DOWNLOAD_RESULTS, --download-results DOWNLOAD_RESULTS
                         Just download the results for the specificed build number. Naming of local artefacts assumes current tracking remote and branch, use -r and -b otherwise.
 ```
+
+## Configuration file
+The settings you repeat on every run belong in `.build/.run-ci.env`, which the script reads at startup.  The file is gitignored, so the password stays out of the repository.
+```
+JENKINS_URL=pre-ci.cassandra.apache.org
+JENKINS_USER=myuser
+JENKINS_PASSWORD=mypassword
+JENKINS_PROFILE=pre-commit
+```
+A command line option always wins over the file.  Without `JENKINS_PASSWORD`, the script asks for the password.
 
 ## Examples
 Run the current directory's fork and branch through the default "skinny" pipeline, connecting via your default kubeconfig
