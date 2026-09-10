@@ -22,6 +22,7 @@ import java.util.stream.StreamSupport;
 
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
+import com.codahale.metrics.Meter;
 import org.apache.cassandra.db.Keyspace;
 
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
@@ -47,6 +48,9 @@ public class StorageMetrics
     public static final Counter repairExceptions = Metrics.counter(factory.createMetricName("RepairExceptions"));
     public static final Counter totalOpsForInvalidToken = Metrics.counter(factory.createMetricName("TotalOpsForInvalidToken"));
     public static final Counter startupOpsForInvalidToken = Metrics.counter(factory.createMetricName("StartupOpsForInvalidToken"));
+
+    public static final Counter directWriteBufferBytes = Metrics.counter(factory.createMetricName("DirectWriteBufferBytes"));
+    public static final Meter directWriteBuffersAllocated = Metrics.meter(factory.createMetricName("DirectWriteBuffersAllocated"));
 
     private static Gauge<Long> createSummingGauge(String name, ToLongFunction<KeyspaceMetrics> extractor)
     {
