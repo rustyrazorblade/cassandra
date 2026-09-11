@@ -31,6 +31,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.quicktheories.impl.JavaRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,7 +41,6 @@ import org.apache.cassandra.db.commitlog.CommitLogReadHandler.CommitLogReadExcep
 import org.apache.cassandra.db.commitlog.CommitLogReplayer.CommitLogReplayException;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.TableMetadata;
-import org.quicktheories.impl.JavaRandom;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.COMMITLOG_IGNORE_REPLAY_ERRORS;
 import static org.junit.Assert.assertEquals;

@@ -33,7 +33,6 @@ import java.util.zip.CRC32;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -109,8 +108,8 @@ public class CompressedStreamWriterBurnTest
 
     private static final int CRC_LENGTH = 4;
     private static final int VALUE_SIZE = 1024;
-    private static final int DATA_MIB = Integer.getInteger("cassandra.test.streaming_burn_mib", 256);
-    private static final int ITERATIONS = Integer.getInteger("cassandra.test.streaming_burn_iterations", 5);
+    private static final int DATA_MIB = Integer.getInteger("cassandra.test.streaming_burn_mib", 256); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
+    private static final int ITERATIONS = Integer.getInteger("cassandra.test.streaming_burn_iterations", 5); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
 
     private static SSTableReader sstable;
 

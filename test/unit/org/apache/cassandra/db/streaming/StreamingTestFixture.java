@@ -29,6 +29,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Digest;
@@ -40,16 +43,14 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.SSTableTxnSingleStreamWriter;
-import org.apache.cassandra.io.util.DataInputBuffer;
-import org.apache.cassandra.io.util.File;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.streaming.StreamSummary;
-import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
+import org.apache.cassandra.io.util.DataInputBuffer;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.AsyncStreamingOutputPlus;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.SessionInfo;
 import org.apache.cassandra.streaming.StreamCoordinator;
@@ -57,12 +58,11 @@ import org.apache.cassandra.streaming.StreamEventHandler;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
+import org.apache.cassandra.streaming.StreamSummary;
 import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
+import org.apache.cassandra.streaming.messages.StreamMessageHeader;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLEngine;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;

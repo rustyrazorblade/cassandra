@@ -114,7 +114,7 @@ public class CommitLogAddBench
         // allocates nothing, so the tail of the profile stays empty.
         System.out.println("DONE");
         System.out.flush();
-        if (Boolean.getBoolean("bench.hold"))
+        if (Boolean.getBoolean("bench.hold")) // checkstyle: suppress nearby 'blockSystemPropertyUsage'
             Thread.sleep(10_000);
 
         System.out.printf("payload_bytes=%d%n", payloadSize);

@@ -25,14 +25,11 @@ import java.util.List;
 import java.util.Random;
 import java.util.function.LongConsumer;
 
+import com.google.common.util.concurrent.RateLimiter;
+
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.google.common.util.concurrent.RateLimiter;
-
-import io.netty.channel.Channel;
-import io.netty.channel.FileRegion;
-import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.concurrent.ExecutorPlus;
@@ -51,6 +48,10 @@ import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
 import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.ByteBufferUtil;
+
+import io.netty.channel.Channel;
+import io.netty.channel.FileRegion;
+import io.netty.channel.embedded.EmbeddedChannel;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;

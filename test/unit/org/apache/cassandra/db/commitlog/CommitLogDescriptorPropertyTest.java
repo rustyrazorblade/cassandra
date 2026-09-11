@@ -18,8 +18,8 @@
 
 package org.apache.cassandra.db.commitlog;
 
-import java.io.DataInputStream;
 import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.HashMap;
@@ -40,7 +40,6 @@ import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.security.EncryptionContextGenerator;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 
 /**
  * A segment header written and read back is the header that was written.

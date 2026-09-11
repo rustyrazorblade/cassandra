@@ -19,9 +19,9 @@
 package org.apache.cassandra.db.commitlog;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -32,6 +32,9 @@ import java.util.Random;
 import javax.crypto.Cipher;
 
 import org.junit.Assume;
+import org.quicktheories.impl.Constraint;
+import org.quicktheories.impl.JavaRandom;
+import org.slf4j.Logger;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
@@ -58,9 +61,6 @@ import org.apache.cassandra.utils.AbstractTypeGenerators;
 import org.apache.cassandra.utils.AbstractTypeGenerators.TypeGenBuilder;
 import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
-import org.quicktheories.impl.Constraint;
-import org.slf4j.Logger;
-import org.quicktheories.impl.JavaRandom;
 
 
 /**

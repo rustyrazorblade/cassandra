@@ -29,7 +29,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.BufferClusteringBound;
 import org.apache.cassandra.db.BufferClusteringBoundary;
 import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ClusteringBoundOrBoundary;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.marshal.AbstractType;

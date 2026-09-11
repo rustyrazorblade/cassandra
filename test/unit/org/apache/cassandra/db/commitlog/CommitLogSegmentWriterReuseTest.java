@@ -35,6 +35,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+import org.quicktheories.impl.JavaRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,7 +45,6 @@ import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.security.EncryptionContext;
-import org.quicktheories.impl.JavaRandom;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;

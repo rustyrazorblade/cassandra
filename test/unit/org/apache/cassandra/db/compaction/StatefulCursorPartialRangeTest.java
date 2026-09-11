@@ -106,7 +106,7 @@ public class StatefulCursorPartialRangeTest extends CQLTester
         return keys;
     }
 
-    /** {@code (exclusiveStart, inclusiveEnd]}, matching Cassandra's Range<Token> convention. */
+    /** {@code (exclusiveStart, inclusiveEnd]}, matching Cassandra's {@code Range<Token>} convention. */
     private static Range<Token> rangeBetween(Token exclusiveStart, DecoratedKey inclusiveEnd)
     {
         return new Range<>(exclusiveStart, inclusiveEnd.getToken());

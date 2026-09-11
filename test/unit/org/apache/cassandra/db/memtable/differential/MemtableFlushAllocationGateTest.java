@@ -26,7 +26,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Assume;
 import org.junit.Test;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

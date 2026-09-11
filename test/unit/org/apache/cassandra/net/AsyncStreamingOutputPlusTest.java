@@ -34,10 +34,10 @@ import org.junit.Test;
 
 import org.apache.cassandra.concurrent.ExecutorFactory;
 import org.apache.cassandra.concurrent.ExecutorPlus;
+import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.streaming.StreamManager;
-import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
 import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.FBUtilities;

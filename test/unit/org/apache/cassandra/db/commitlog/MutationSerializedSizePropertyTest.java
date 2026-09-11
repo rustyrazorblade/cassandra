@@ -23,6 +23,8 @@ import java.util.Random;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.quicktheories.core.Gen;
+import org.quicktheories.impl.JavaRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,8 +43,6 @@ import org.apache.cassandra.utils.AbstractTypeGenerators.TypeGenBuilder;
 import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
 import org.apache.cassandra.utils.Generators;
-import org.quicktheories.core.Gen;
-import org.quicktheories.impl.JavaRandom;
 
 import static org.apache.cassandra.utils.Generators.IDENTIFIER_GEN;
 import static org.junit.Assert.assertEquals;

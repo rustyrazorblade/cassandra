@@ -24,6 +24,9 @@ import java.util.List;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.quicktheories.impl.JavaRandom;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CassandraRelevantProperties;
@@ -33,9 +36,6 @@ import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
-import org.quicktheories.impl.JavaRandom;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
