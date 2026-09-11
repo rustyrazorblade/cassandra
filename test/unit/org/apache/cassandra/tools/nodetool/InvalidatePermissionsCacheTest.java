@@ -24,7 +24,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.lang3.StringUtils;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -42,7 +41,6 @@ import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.auth.RoleResource;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.tools.ToolRunner;
 
 import static org.apache.cassandra.auth.AuthTestUtils.ROLE_A;
@@ -79,9 +77,6 @@ public class InvalidatePermissionsCacheTest extends CQLTester
             RoleResource.role("role_x"),
             FunctionResource.root(),
             FunctionResource.keyspace(KEYSPACE),
-            // Particular function is excluded from here and covered by a separate test because in order to grant
-            // permissions we need to have a function registered. However, the function cannot be registered via
-            // CQLTester.createFunction from static contex. That's why we initialize it in a separate test case.
             JMXResource.root(),
             JMXResource.mbean("org.apache.cassandra.auth:type=*"));
 
@@ -156,26 +151,6 @@ public class InvalidatePermissionsCacheTest extends CQLTester
         assertInvalidation(JMXResource.root(), Collections.singletonList("--all-mbeans"));
         assertInvalidation(JMXResource.mbean("org.apache.cassandra.auth:type=*"),
                 Arrays.asList("--mbean", "org.apache.cassandra.auth:type=*"));
-    }
-
-    @Test
-    public void testInvalidatePermissionsForFunction() throws Throwable
-    {
-        String keyspaceAndFunctionName = createFunction(KEYSPACE, "int",
-                " CREATE FUNCTION %s (val int)" +
-                        " CALLED ON NULL INPUT" +
-                        " RETURNS int" +
-                        " LANGUAGE java" +
-                        " AS 'return val;'");
-        String functionName = StringUtils.split(keyspaceAndFunctionName, ".")[1];
-
-        FunctionResource resource = FunctionResource.function(KEYSPACE, functionName, Collections.singletonList(Int32Type.instance));
-        Set<Permission> permissions = resource.applicablePermissions();
-        DatabaseDescriptor.getAuthorizer().grant(AuthenticatedUser.SYSTEM_USER, permissions, resource, ROLE_A);
-        DatabaseDescriptor.getAuthorizer().grant(AuthenticatedUser.SYSTEM_USER, permissions, resource, ROLE_B);
-
-        assertInvalidation(resource,
-                Arrays.asList("--functions-in-keyspace", KEYSPACE, "--function", functionName + "[Int32Type]"));
     }
 
     private void assertInvalidation(IResource resource, List<String> options)

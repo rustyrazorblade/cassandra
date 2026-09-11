@@ -40,29 +40,6 @@ public class SchemaChangeDuringRangeMovementTest extends CQLTester
         // Category of schema transformations should always be allowed if syntactically
         // and semantically valid. The presence of inflight range movements is not relevant.
 
-        // create/drop function
-        // create/drop aggregate
-        withAndWithoutLockedRanges(() -> {
-            String f = createFunction(KEYSPACE,
-                                      "double, double",
-                                      "CREATE OR REPLACE FUNCTION %s(state double, val double) " +
-                                      "RETURNS NULL ON NULL INPUT " +
-                                      "RETURNS double " +
-                                      "LANGUAGE java " +
-                                      "AS 'return 0.0;';");
-
-            String a = createAggregate(KEYSPACE,
-                                       "double",
-                                       "CREATE OR REPLACE AGGREGATE %s(double) " +
-                                       "SFUNC " + shortFunctionName(f) + " " +
-                                       "STYPE double " +
-                                       "INITCOND 0");
-
-            execute("DROP AGGREGATE " + a);
-            execute("DROP FUNCTION " + f);
-        });
-
-
         // create/alter/drop table
         // create/drop index
         withAndWithoutLockedRanges(() -> {

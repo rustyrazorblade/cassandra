@@ -18,7 +18,6 @@
 package org.apache.cassandra.schema;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -55,12 +54,8 @@ import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.functions.FunctionName;
 import org.apache.cassandra.cql3.functions.FunctionResolver;
 import org.apache.cassandra.cql3.functions.ScalarFunction;
-import org.apache.cassandra.cql3.functions.UDAggregate;
-import org.apache.cassandra.cql3.functions.UDFunction;
-import org.apache.cassandra.cql3.functions.UserFunction;
 import org.apache.cassandra.cql3.functions.masking.ColumnMask;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
-import org.apache.cassandra.cql3.terms.Term;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Digest;
@@ -89,7 +84,6 @@ import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.service.accord.topology.FastPathStrategy;
 import org.apache.cassandra.service.reads.SpeculativeRetryPolicy;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
-import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Simulate;
 
@@ -279,6 +273,8 @@ public final class SchemaKeyspace
               + "field_types frozen<list<text>>,"
               + "PRIMARY KEY ((keyspace_name), type_name))");
 
+    // Retained as an empty, read-only stub table.  User defined functions are removed; no row is ever written here.
+    // The table stays so that native-protocol clients and drivers can read the schema without an error.
     private static final TableMetadata Functions =
         parse(FUNCTIONS,
               "user defined function definitions",
@@ -293,6 +289,8 @@ public final class SchemaKeyspace
               + "called_on_null_input boolean,"
               + "PRIMARY KEY ((keyspace_name), function_name, argument_types))");
 
+    // Retained as an empty, read-only stub table.  User defined aggregates are removed; no row is ever written here.
+    // The table stays so that native-protocol clients and drivers can read the schema without an error.
     private static final TableMetadata Aggregates =
         parse(AGGREGATES,
               "user defined aggregate definitions",
@@ -356,14 +354,6 @@ public final class SchemaKeyspace
             kd.views.dropped.forEach(v -> addDropViewToSchemaMutation(v, builder));
             kd.views.created.forEach(v -> addViewToSchemaMutation(v, true, builder));
             kd.views.altered(Difference.SHALLOW).forEach(vd -> addAlterViewToSchemaMutation(vd.before, vd.after, builder));
-
-            kd.udfs.dropped.forEach(f -> addDropFunctionToSchemaMutation((UDFunction) f, builder));
-            kd.udfs.created.forEach(f -> addFunctionToSchemaMutation((UDFunction) f, builder));
-            kd.udfs.altered(Difference.SHALLOW).forEach(fd -> addFunctionToSchemaMutation(fd.after, builder));
-
-            kd.udas.dropped.forEach(a -> addDropAggregateToSchemaMutation((UDAggregate) a, builder));
-            kd.udas.created.forEach(a -> addAggregateToSchemaMutation((UDAggregate) a, builder));
-            kd.udas.altered(Difference.SHALLOW).forEach(ad -> addAggregateToSchemaMutation(ad.after, builder));
 
             mutations.put(ks.name, builder.build());
         });
@@ -597,8 +587,6 @@ public final class SchemaKeyspace
         keyspace.tables.forEach(table -> addTableToSchemaMutation(table, true, builder));
         keyspace.views.forEach(view -> addViewToSchemaMutation(view, true, builder));
         keyspace.types.forEach(type -> addTypeToSchemaMutation(type, builder));
-        keyspace.userFunctions.udfs().forEach(udf -> addFunctionToSchemaMutation(udf, builder));
-        keyspace.userFunctions.udas().forEach(uda -> addAggregateToSchemaMutation(uda, builder));
 
         return builder;
     }
@@ -945,53 +933,6 @@ public final class SchemaKeyspace
         addIndexToSchemaMutation(table, index, builder);
     }
 
-    private static void addFunctionToSchemaMutation(UDFunction function, Mutation.SimpleBuilder builder)
-    {
-        builder.update(Functions)
-               .row(function.name().name, function.argumentsList())
-               .add("body", function.body())
-               .add("language", function.language())
-               .add("return_type", function.returnType().asCQL3Type().toString())
-               .add("called_on_null_input", function.isCalledOnNullInput())
-               .add("argument_names", function.argNames().stream().map((c) -> bbToString(c.bytes)).collect(toList()));
-    }
-
-    public static String bbToString(ByteBuffer bb)
-    {
-        try
-        {
-            return ByteBufferUtil.string(bb);
-        }
-        catch (CharacterCodingException e)
-        {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private static void addDropFunctionToSchemaMutation(UDFunction function, Mutation.SimpleBuilder builder)
-    {
-        builder.update(Functions).row(function.name().name, function.argumentsList()).delete();
-    }
-
-    private static void addAggregateToSchemaMutation(UDAggregate aggregate, Mutation.SimpleBuilder builder)
-    {
-        builder.update(Aggregates)
-               .row(aggregate.name().name, aggregate.argumentsList())
-               .add("return_type", aggregate.returnType().asCQL3Type().toString())
-               .add("state_func", aggregate.stateFunction().name().name)
-               .add("state_type", aggregate.stateType().asCQL3Type().toString())
-               .add("final_func", aggregate.finalFunction() != null ? aggregate.finalFunction().name().name : null)
-               .add("initcond", aggregate.initialCondition() != null
-                                // must use the frozen state type here, as 'null' for unfrozen collections may mean 'empty'
-                                ? aggregate.stateType().freeze().asCQL3Type().toCQLLiteral(aggregate.initialCondition())
-                                : null);
-    }
-
-    private static void addDropAggregateToSchemaMutation(UDAggregate aggregate, Mutation.SimpleBuilder builder)
-    {
-        builder.update(Aggregates).row(aggregate.name().name, aggregate.argumentsList()).delete();
-    }
-
     /*
      * Fetching schema
      */
@@ -1018,10 +959,9 @@ public final class SchemaKeyspace
     {
         KeyspaceParams params = fetchKeyspaceParams(keyspaceName);
         Types types = fetchTypes(keyspaceName);
-        UserFunctions functions = fetchFunctions(keyspaceName, types);
-        Tables tables = fetchTables(keyspaceName, types, functions);
-        Views views = fetchViews(keyspaceName, types, functions);
-        return KeyspaceMetadata.create(keyspaceName, params, tables, views, types, functions);
+        Tables tables = fetchTables(keyspaceName, types);
+        Views views = fetchViews(keyspaceName, types);
+        return KeyspaceMetadata.create(keyspaceName, params, tables, views, types);
     }
 
     private static KeyspaceParams fetchKeyspaceParams(String keyspaceName)
@@ -1055,7 +995,7 @@ public final class SchemaKeyspace
         return types.build();
     }
 
-    private static Tables fetchTables(String keyspaceName, Types types, UserFunctions functions)
+    private static Tables fetchTables(String keyspaceName, Types types)
     {
         String query = format("SELECT table_name FROM %s.%s WHERE keyspace_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, TABLES);
 
@@ -1065,7 +1005,7 @@ public final class SchemaKeyspace
             String tableName = row.getString("table_name");
             try
             {
-                tables.add(fetchTable(keyspaceName, tableName, types, functions));
+                tables.add(fetchTable(keyspaceName, tableName, types));
             }
             catch (MissingColumns exc)
             {
@@ -1094,7 +1034,7 @@ public final class SchemaKeyspace
         return tables.build();
     }
 
-    private static TableMetadata fetchTable(String keyspaceName, String tableName, Types types, UserFunctions functions)
+    private static TableMetadata fetchTable(String keyspaceName, String tableName, Types types)
     {
         String query = String.format("SELECT * FROM %s.%s WHERE keyspace_name = ? AND table_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, TABLES);
         UntypedResultSet rows = query(query, keyspaceName, tableName);
@@ -1106,7 +1046,7 @@ public final class SchemaKeyspace
         return TableMetadata.builder(keyspaceName, tableName, TableId.fromUUID(row.getUUID("id")))
                             .flags(flags)
                             .params(createTableParamsFromRow(row))
-                            .addColumns(fetchColumns(keyspaceName, tableName, types, functions))
+                            .addColumns(fetchColumns(keyspaceName, tableName, types))
                             .droppedColumns(fetchDroppedColumns(keyspaceName, tableName))
                             .indexes(fetchIndexes(keyspaceName, tableName))
                             .build();
@@ -1156,7 +1096,7 @@ public final class SchemaKeyspace
         return builder.build();
     }
 
-    private static List<ColumnMetadata> fetchColumns(String keyspace, String table, Types types, UserFunctions functions)
+    private static List<ColumnMetadata> fetchColumns(String keyspace, String table, Types types)
     {
         String query = format("SELECT * FROM %s.%s WHERE keyspace_name = ? AND table_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, COLUMNS);
         UntypedResultSet columnRows = query(query, keyspace, table);
@@ -1164,7 +1104,7 @@ public final class SchemaKeyspace
             throw new MissingColumns("Columns not found in schema table for " + keyspace + '.' + table);
 
         List<ColumnMetadata> columns = new ArrayList<>();
-        columnRows.forEach(row -> columns.add(createColumnFromRow(row, types, functions)));
+        columnRows.forEach(row -> columns.add(createColumnFromRow(row, types)));
 
         if (columns.stream().noneMatch(ColumnMetadata::isPartitionKey))
             throw new MissingColumns("No partition key columns found in schema table for " + keyspace + "." + table);
@@ -1173,7 +1113,7 @@ public final class SchemaKeyspace
     }
 
     @VisibleForTesting
-    public static ColumnMetadata createColumnFromRow(UntypedResultSet.Row row, Types types, UserFunctions functions)
+    public static ColumnMetadata createColumnFromRow(UntypedResultSet.Row row, Types types)
     {
         String keyspace = row.getString("keyspace_name");
         String table = row.getString("table_name");
@@ -1206,7 +1146,7 @@ public final class SchemaKeyspace
                 argumentTypes.add(CQLTypeParser.parse(keyspace, argumentType, types));
             }
 
-            Function function = FunctionResolver.get(keyspace, functionName, argumentTypes, null, null, null, functions);
+            Function function = FunctionResolver.get(keyspace, functionName, argumentTypes, null, null, null);
             if (function == null)
             {
                 throw new AssertionError(format("Unable to find masking function %s(%s) for column %s.%s.%s",
@@ -1288,17 +1228,17 @@ public final class SchemaKeyspace
         return IndexMetadata.fromSchemaMetadata(name, type, options);
     }
 
-    private static Views fetchViews(String keyspaceName, Types types, UserFunctions functions)
+    private static Views fetchViews(String keyspaceName, Types types)
     {
         String query = format("SELECT view_name FROM %s.%s WHERE keyspace_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, VIEWS);
 
         Views.Builder views = org.apache.cassandra.schema.Views.builder();
         for (UntypedResultSet.Row row : query(query, keyspaceName))
-            views.put(fetchView(keyspaceName, row.getString("view_name"), types, functions));
+            views.put(fetchView(keyspaceName, row.getString("view_name"), types));
         return views.build();
     }
 
-    private static ViewMetadata fetchView(String keyspaceName, String viewName, Types types, UserFunctions functions)
+    private static ViewMetadata fetchView(String keyspaceName, String viewName, Types types)
     {
         String query = String.format("SELECT * FROM %s.%s WHERE keyspace_name = ? AND view_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, VIEWS);
         UntypedResultSet rows = query(query, keyspaceName, viewName);
@@ -1311,7 +1251,7 @@ public final class SchemaKeyspace
         boolean includeAll = row.getBoolean("include_all_columns");
         String whereClauseString = row.getString("where_clause");
 
-        List<ColumnMetadata> columns = fetchColumns(keyspaceName, viewName, types, functions);
+        List<ColumnMetadata> columns = fetchColumns(keyspaceName, viewName, types);
 
         TableMetadata metadata =
             TableMetadata.builder(keyspaceName, viewName, TableId.fromUUID(row.getUUID("id")))
@@ -1333,121 +1273,6 @@ public final class SchemaKeyspace
         }
 
         return new ViewMetadata(baseTableId, baseTableName, includeAll, whereClause, metadata);
-    }
-
-    private static UserFunctions fetchFunctions(String keyspaceName, Types types)
-    {
-        Collection<UDFunction> udfs = fetchUDFs(keyspaceName, types);
-        Collection<UDAggregate> udas = fetchUDAs(keyspaceName, udfs, types);
-
-        return UserFunctions.builder().add(udfs).add(udas).build();
-    }
-
-    private static Collection<UDFunction> fetchUDFs(String keyspaceName, Types types)
-    {
-        String query = format("SELECT * FROM %s.%s WHERE keyspace_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, FUNCTIONS);
-
-        Collection<UDFunction> functions = new ArrayList<>();
-        for (UntypedResultSet.Row row : query(query, keyspaceName))
-            functions.add(createUDFFromRow(row, types));
-        return functions;
-    }
-
-    private static UDFunction createUDFFromRow(UntypedResultSet.Row row, Types types)
-    {
-        String ksName = row.getString("keyspace_name");
-        String functionName = row.getString("function_name");
-        FunctionName name = new FunctionName(ksName, functionName);
-
-        List<ColumnIdentifier> argNames = new ArrayList<>();
-        for (String arg : row.getFrozenList("argument_names", UTF8Type.instance))
-            argNames.add(new ColumnIdentifier(arg, true));
-
-        List<AbstractType<?>> argTypes = new ArrayList<>();
-        for (String type : row.getFrozenList("argument_types", UTF8Type.instance))
-            argTypes.add(CQLTypeParser.parse(ksName, type, types).udfType());
-
-        AbstractType<?> returnType = CQLTypeParser.parse(ksName, row.getString("return_type"), types).udfType();
-
-        String language = row.getString("language");
-        String body = row.getString("body");
-        boolean calledOnNullInput = row.getBoolean("called_on_null_input");
-
-        /*
-         * TODO: find a way to get rid of Schema.instance dependency; evaluate if the opimisation below makes a difference
-         * in the first place. Remove if it isn't.
-         */
-        UserFunction existing = Schema.instance.findUserFunction(name, argTypes).orElse(null);
-        if (existing instanceof UDFunction)
-        {
-            // This check prevents duplicate compilation of effectively the same UDF.
-            // Duplicate compilation attempts can occur on the coordinator node handling the CREATE FUNCTION
-            // statement, since CreateFunctionStatement needs to execute UDFunction.create but schema migration
-            // also needs that (since it needs to handle its own change).
-            UDFunction udf = (UDFunction) existing;
-            if (udf.argNames().equals(argNames) &&
-                udf.argTypes().equals(argTypes) &&
-                udf.returnType().equals(returnType) &&
-                !udf.isAggregate() &&
-                udf.language().equals(language) &&
-                udf.body().equals(body) &&
-                udf.isCalledOnNullInput() == calledOnNullInput)
-            {
-                logger.trace("Skipping duplicate compilation of already existing UDF {}", name);
-                return udf;
-            }
-        }
-
-        try
-        {
-            return UDFunction.create(name, argNames, argTypes, returnType, calledOnNullInput, language, body);
-        }
-        catch (InvalidRequestException e)
-        {
-            logger.error(String.format("Cannot load function '%s' from schema: this function won't be available (on this node)", name), e);
-            return UDFunction.createBrokenFunction(name, argNames, argTypes, returnType, calledOnNullInput, language, body, e);
-        }
-    }
-
-    private static Collection<UDAggregate> fetchUDAs(String keyspaceName, Collection<UDFunction> udfs, Types types)
-    {
-        String query = format("SELECT * FROM %s.%s WHERE keyspace_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, AGGREGATES);
-
-        Collection<UDAggregate> aggregates = new ArrayList<>();
-        query(query, keyspaceName).forEach(row -> aggregates.add(createUDAFromRow(row, udfs, types)));
-        return aggregates;
-    }
-
-    private static UDAggregate createUDAFromRow(UntypedResultSet.Row row, Collection<UDFunction> functions, Types types)
-    {
-        String ksName = row.getString("keyspace_name");
-        String functionName = row.getString("aggregate_name");
-        FunctionName name = new FunctionName(ksName, functionName);
-
-        List<AbstractType<?>> argTypes =
-            row.getFrozenList("argument_types", UTF8Type.instance)
-               .stream()
-               .map(t -> CQLTypeParser.parse(ksName, t, types).udfType())
-               .collect(toList());
-
-        AbstractType<?> returnType = CQLTypeParser.parse(ksName, row.getString("return_type"), types).udfType();
-
-        FunctionName stateFunc = new FunctionName(ksName, (row.getString("state_func")));
-
-        FunctionName finalFunc = row.has("final_func") ? new FunctionName(ksName, row.getString("final_func")) : null;
-        AbstractType<?> stateType = row.has("state_type") ? CQLTypeParser.parse(ksName, row.getString("state_type"), types) : null;
-        ByteBuffer initcond;
-        if (row.has("initcond"))
-        {
-            String term = row.getString("initcond");
-            initcond = Term.asBytes(ksName, term, stateType);
-        }
-        else
-        {
-            initcond = null;
-        }
-
-        return UDAggregate.create(functions, name, argTypes, returnType, stateFunc, finalFunc, stateType, initcond);
     }
 
     private static UntypedResultSet query(String query, Object... variables)

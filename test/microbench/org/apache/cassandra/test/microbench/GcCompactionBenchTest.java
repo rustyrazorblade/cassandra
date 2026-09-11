@@ -95,32 +95,7 @@ public class GcCompactionBenchTest extends CQLTester
                     ")"
                    );
 
-        String hashIFunc = parseFunctionName(createFunction(KEYSPACE, "int, int",
-                " CREATE FUNCTION %s (state int, val int)" +
-                " CALLED ON NULL INPUT" +
-                " RETURNS int" +
-                " LANGUAGE java" +
-                " AS 'return val != null ? state * 17 + val : state;'")).name;
-        String hashTFunc = parseFunctionName(createFunction(KEYSPACE, "int, text",
-                " CREATE FUNCTION %s (state int, val text)" +
-                " CALLED ON NULL INPUT" +
-                " RETURNS int" +
-                " LANGUAGE java" +
-                " AS 'return val != null ? state * 17 + val.hashCode() : state;'")).name;
-
-        String hashInt = createAggregate(KEYSPACE, "int",
-                " CREATE AGGREGATE %s (int)" +
-                " SFUNC " + hashIFunc +
-                " STYPE int" +
-                " INITCOND 1");
-        String hashText = createAggregate(KEYSPACE, "text",
-                " CREATE AGGREGATE %s (text)" +
-                " SFUNC " + hashTFunc +
-                " STYPE int" +
-                " INITCOND 1");
-
-        hashQuery = String.format("SELECT count(column), %s(key), %s(column), %s(data), %s(extra), avg(key), avg(column), avg(data) FROM %%s",
-                                  hashInt, hashInt, hashInt, hashText);
+        hashQuery = "SELECT count(column), sum(key), sum(column), sum(data), max(extra), avg(key), avg(column), avg(data) FROM %s";
     }
     AtomicLong id = new AtomicLong();
     long compactionTimeNanos = 0;

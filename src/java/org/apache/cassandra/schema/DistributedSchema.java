@@ -34,7 +34,6 @@ import com.google.common.collect.ImmutableList;
 
 import org.apache.cassandra.auth.AuthKeyspace;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.functions.UserFunction;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
@@ -175,8 +174,7 @@ public class DistributedSchema implements MetadataValue<DistributedSchema>
                                                           mergeTo.params,
                                                           mergeTo.tables,
                                                           mergeTo.views,
-                                                          mergeTo.types,
-                                                          mergeTo.userFunctions);
+                                                          mergeTo.types);
         Tables newTables = newKsm.tables;
         for (TableMetadata metadata : mergeFrom.tables)
             if (!newTables.containsTable(metadata.id) && newTables.stream().noneMatch(tmd -> tmd.name.equals(metadata.name)))
@@ -194,15 +192,9 @@ public class DistributedSchema implements MetadataValue<DistributedSchema>
             if (!newTypes.containsType(type.name))
                 newTypes = newTypes.with(type);
 
-        UserFunctions newUserFunctions = newKsm.userFunctions;
-        for (UserFunction uf : mergeFrom.userFunctions)
-            if (newUserFunctions.get(uf.name()).isEmpty())
-                newUserFunctions = newUserFunctions.with(uf);
-
         return newKsm.withSwapped(newTables)
                      .withSwapped(newViews)
-                     .withSwapped(newTypes)
-                     .withSwapped(newUserFunctions);
+                     .withSwapped(newTypes);
     }
 
     public void initializeKeyspaceInstances(DistributedSchema prev, boolean loadSSTables)
@@ -463,7 +455,6 @@ public class DistributedSchema implements MetadataValue<DistributedSchema>
             ksm.tables.forEach(tm -> Preconditions.checkArgument(tm.keyspace.equals(ksm.name), "Table %s metadata points to keyspace %s while defined in keyspace %s", tm.name, tm.keyspace, ksm.name));
             ksm.views.forEach(vm -> Preconditions.checkArgument(vm.keyspace().equals(ksm.name), "View %s metadata points to keyspace %s while defined in keyspace %s", vm.name(), vm.keyspace(), ksm.name));
             ksm.types.forEach(ut -> Preconditions.checkArgument(ut.keyspace.equals(ksm.name), "Type %s points to keyspace %s while defined in keyspace %s", ut.name, ut.keyspace, ksm.name));
-            ksm.userFunctions.forEach(f -> Preconditions.checkArgument(f.name().keyspace.equals(ksm.name), "Function %s points to keyspace %s while defined in keyspace %s", f.name().name, f.name().keyspace, ksm.name));
         });
     }
 

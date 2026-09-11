@@ -24,7 +24,7 @@ import com.google.common.base.Objects;
 
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
+import org.apache.cassandra.tcm.serialization.UDTAwareMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 
 import static org.apache.cassandra.db.TypeSizes.sizeof;
@@ -69,7 +69,7 @@ public final class DroppedColumn
         return MoreObjects.toStringHelper(this).add("column", column).add("droppedTime", droppedTime).toString();
     }
 
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<DroppedColumn>
+    public static class Serializer implements UDTAwareMetadataSerializer<DroppedColumn>
     {
         public void serialize(DroppedColumn t, DataOutputPlus out, Version version) throws IOException
         {
@@ -77,10 +77,10 @@ public final class DroppedColumn
             ColumnMetadata.serializer.serialize(t.column, out, version);
         }
 
-        public DroppedColumn deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
+        public DroppedColumn deserialize(DataInputPlus in, Types types, Version version) throws IOException
         {
             long droppedTime = in.readLong();
-            ColumnMetadata column = ColumnMetadata.serializer.deserialize(in, types, functions, version);
+            ColumnMetadata column = ColumnMetadata.serializer.deserialize(in, types, version);
             return new DroppedColumn(column, droppedTime);
         }
 

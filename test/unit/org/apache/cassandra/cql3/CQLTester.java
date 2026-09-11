@@ -215,8 +215,6 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_RANDO
 import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_REUSE_PREPARED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_ROW_CACHE_SIZE;
 import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_USE_PREPARED;
-import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.AGGREGATE;
-import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.FUNCTION;
 import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.MATERIALIZED_VIEW;
 import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.TABLE;
 import static org.apache.cassandra.cql3.SchemaElement.SchemaElementType.TYPE;
@@ -334,8 +332,6 @@ public abstract class CQLTester
     private List<String> indexes = new ArrayList<>();
     private List<String> views = new ArrayList<>();
     private List<String> types = new ArrayList<>();
-    private List<String> functions = new ArrayList<>();
-    private List<String> aggregates = new ArrayList<>();
 
     private User user;
 
@@ -542,8 +538,6 @@ public abstract class CQLTester
         indexes = null;
         views = null;
         types = null;
-        functions = null;
-        aggregates = null;
         user = null;
     }
 
@@ -565,8 +559,6 @@ public abstract class CQLTester
         indexes.clear();
         views.clear();
         types.clear();
-        functions.clear();
-        aggregates.clear();
     }
 
     protected void clearState()
@@ -1050,56 +1042,6 @@ public abstract class CQLTester
         String typeName = createSchemaElementName(TYPE, null);
         types.add(typeName);
         return typeName;
-    }
-
-    protected String createFunctionName(String keyspace)
-    {
-        return createSchemaElementName(FUNCTION, keyspace);
-    }
-
-    protected void registerFunction(String functionName, String argTypes)
-    {
-        functions.add(functionName + '(' + argTypes + ')');
-    }
-
-    protected String createFunction(String keyspace, String argTypes, String query) throws Throwable
-    {
-        String functionName = createFunctionName(keyspace);
-        createFunctionOverload(functionName, argTypes, query);
-        return functionName;
-    }
-
-    protected void createFunctionOverload(String functionName, String argTypes, String query) throws Throwable
-    {
-        registerFunction(functionName, argTypes);
-        String fullQuery = String.format(query, functionName);
-        logger.info(fullQuery);
-        schemaChange(fullQuery);
-    }
-
-    protected String createAggregateName(String keyspace)
-    {
-        return createSchemaElementName(AGGREGATE, keyspace);
-    }
-
-    protected void registerAggregate(String aggregateName, String argTypes)
-    {
-        aggregates.add(aggregateName + '(' + argTypes + ')');
-    }
-
-    protected String createAggregate(String keyspace, String argTypes, String query) throws Throwable
-    {
-        String aggregateName = createAggregateName(keyspace);
-        createAggregateOverload(aggregateName, argTypes, query);
-        return aggregateName;
-    }
-
-    protected void createAggregateOverload(String aggregateName, String argTypes, String query) throws Throwable
-    {
-        String fullQuery = String.format(query, aggregateName);
-        registerAggregate(aggregateName, argTypes);
-        logger.info(fullQuery);
-        schemaChange(fullQuery);
     }
 
     protected String createKeyspace(String query)

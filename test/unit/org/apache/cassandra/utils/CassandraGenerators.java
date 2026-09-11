@@ -129,7 +129,6 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableParams;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.schema.Types;
-import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.schema.Views;
 import org.apache.cassandra.service.accord.topology.AccordFastPath;
 import org.apache.cassandra.service.accord.topology.AccordStaleReplicas;
@@ -522,8 +521,7 @@ public final class CassandraGenerators
                 Tables tables = Tables.none();
                 Views views = Views.none();
                 Types types = Types.none();
-                UserFunctions userFunctions = UserFunctions.none();
-                return KeyspaceMetadata.createUnsafe(name, kind, params, tables, views, types, userFunctions);
+                return KeyspaceMetadata.createUnsafe(name, kind, params, tables, views, types);
             };
         }
     }

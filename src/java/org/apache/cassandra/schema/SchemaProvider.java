@@ -19,9 +19,6 @@
 package org.apache.cassandra.schema;
 
 import java.nio.ByteBuffer;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -29,13 +26,9 @@ import java.util.UUID;
 import javax.annotation.Nullable;
 
 import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.cql3.functions.FunctionName;
-import org.apache.cassandra.cql3.functions.UserFunction;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.KeyspaceNotDefinedException;
-import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.UnknownTableException;
@@ -193,45 +186,6 @@ public interface SchemaProvider
         throw new UnknownTableException(message, id);
     }
 
-    /* Function helpers */
-
-    /**
-     * Get all function overloads with the specified name
-     *
-     * @param name fully qualified function name
-     * @return an empty list if the keyspace or the function name are not found;
-     *         a non-empty collection of {@link Function} otherwise
-     */
-    default Collection<UserFunction> getUserFunctions(FunctionName name)
-    {
-        if (!name.hasKeyspace())
-            throw new IllegalArgumentException(String.format("Function name must be fully qualified: got %s", name));
-
-        KeyspaceMetadata ksm = getKeyspaceMetadata(name.keyspace);
-        return ksm == null
-               ? Collections.emptyList()
-               : ksm.userFunctions.get(name);
-    }
-
-    /**
-     * Find the function with the specified name
-     *
-     * @param name     fully qualified function name
-     * @param argTypes function argument types
-     * @return an empty {@link Optional} if the keyspace or the function name are not found;
-     *         a non-empty optional of {@link Function} otherwise
-     */
-    default Optional<UserFunction> findFunction(FunctionName name, List<AbstractType<?>> argTypes)
-    {
-        if (!name.hasKeyspace())
-            throw new IllegalArgumentException(String.format("Function name must be fully quallified: got %s", name));
-
-        KeyspaceMetadata ksm = getKeyspaceMetadata(name.keyspace);
-        return ksm == null
-               ? Optional.empty()
-               : ksm.userFunctions.find(name, argTypes);
-    }
-
     /**
      * Compute the largest gc grace seconds amongst all the tables
      * @return the largest gcgs.
@@ -247,21 +201,4 @@ public interface SchemaProvider
 
     // TODO: remove?
     public abstract void saveSystemKeyspace();
-
-    /**
-     * Find the function with the specified name and arguments.
-     *
-     * @param name     fully qualified function name
-     * @param argTypes function argument types
-     * @return an empty {@link Optional} if the keyspace or the function name are not found;
-     *         a non-empty optional of {@link Function} otherwise
-     */
-    default Optional<UserFunction> findUserFunction(FunctionName name, List<AbstractType<?>> argTypes)
-    {
-        if (!name.hasKeyspace())
-            throw new IllegalArgumentException(String.format("Function name must be fully quallified: got %s", name));
-
-        return Optional.ofNullable(getKeyspaceMetadata(name.keyspace))
-                       .flatMap(ksm -> ksm.userFunctions.find(name, argTypes));
-    }
 }

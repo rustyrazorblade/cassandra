@@ -36,7 +36,7 @@ import com.google.common.collect.Iterables;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
+import org.apache.cassandra.tcm.serialization.UDTAwareMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 
 import static com.google.common.collect.Iterables.any;
@@ -269,7 +269,7 @@ public final class Views implements Iterable<ViewMetadata>
         }
     }
 
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<Views>
+    public static class Serializer implements UDTAwareMetadataSerializer<Views>
     {
         public void serialize(Views t, DataOutputPlus out, Version version) throws IOException
         {
@@ -278,13 +278,13 @@ public final class Views implements Iterable<ViewMetadata>
                 ViewMetadata.serializer.serialize(vm, out, version);
         }
 
-        public Views deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
+        public Views deserialize(DataInputPlus in, Types types, Version version) throws IOException
         {
             int size = in.readInt();
             Views.Builder builder = Views.builder();
             for (int i = 0; i < size; i++)
             {
-                ViewMetadata vm = ViewMetadata.serializer.deserialize(in, types, functions, version);
+                ViewMetadata vm = ViewMetadata.serializer.deserialize(in, types, version);
                 builder.put(vm);
             }
             return builder.build();

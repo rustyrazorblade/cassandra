@@ -48,7 +48,6 @@ import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.transform;
 import static java.lang.String.join;
 import static java.util.function.Predicate.isEqual;
-import static java.util.stream.Collectors.toList;
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
 
 public abstract class AlterTypeStatement extends AlterSchemaStatement
@@ -203,20 +202,6 @@ public abstract class AlterTypeStatement extends AlterSchemaStatement
 
         UserType apply(KeyspaceMetadata keyspace, UserType userType)
         {
-            List<String> dependentAggregates =
-                keyspace.userFunctions
-                        .udas()
-                        .filter(uda -> null != uda.initialCondition() && uda.stateType().referencesUserType(userType.name))
-                        .map(uda -> uda.name().toString())
-                        .collect(toList());
-
-            if (!dependentAggregates.isEmpty())
-            {
-                throw ire("Cannot alter user type %s as it is still used in INITCOND by aggregates %s",
-                          userType.getCqlTypeName(),
-                          join(", ", dependentAggregates));
-            }
-
             List<FieldIdentifier> fieldNames = new ArrayList<>(userType.fieldNames());
 
             renamedFields.forEach((oldName, newName) ->

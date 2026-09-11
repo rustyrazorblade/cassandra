@@ -99,3 +99,57 @@ This change breaks the read-path wire format.  `DataLimits` uses ordinal-based s
 The `IS_FOR_THRIFT` bit at `0x02` is now unused.  The other flag bits keep their explicit values, so their wire positions do not change.
 
 This change does not touch the legacy `isForThrift` placeholder boolean in the `UnfilteredPartitionIterators` serializer.  That byte is a live wire element; the writer and the reader both agree on it, and `CursorReads` and the response test oracle mirror it.  Its removal is a separate, deeper wire change and is out of scope here.
+
+## UDF and UDA
+
+### Purpose
+
+This change removes user defined functions (UDF) and user defined aggregates (UDA).  A UDF let a user run custom Java code inside the database.  A UDA built an aggregate from user functions.  The feature added a large attack surface, a sandbox, a compiler dependency, and cost to the schema.  This branch removes bad old technology, so the removal is a goal.
+
+The native function framework stays.  Built-in functions still work.  These include cast functions, time functions, token functions, collection functions, and the data masking functions.  Only user defined functions and aggregates go away.
+
+### What changes
+
+A client can no longer create a UDF or a UDA.  The grammar drops `CREATE FUNCTION`, `DROP FUNCTION`, `CREATE AGGREGATE`, and `DROP AGGREGATE`.  The parser rejects these statements.
+
+The schema no longer stores or loads user functions.  `KeyspaceMetadata` drops its `UserFunctions` member.  The schema read path is native-only; `FunctionResolver` resolves built-in functions only.
+
+The `system_schema.functions` and `system_schema.aggregates` tables stay.  They are empty, read-only stub tables.  The database never writes a row to them.  They stay so that native-protocol clients and drivers can read the schema without an error.
+
+### What is removed
+
+- The `CREATE FUNCTION`, `DROP FUNCTION`, `CREATE AGGREGATE`, and `DROP AGGREGATE` grammar in `Parser.g` and the generated parser.
+- The statement classes for these four statements.
+- The `UserFunction`, `UDFunction`, `UDAggregate`, `JavaBasedUDFunction`, `UDFByteCodeVerifier`, and `UDFContext` classes and the UDF sandbox and security manager hooks.
+- The `UserFunctions` schema container and the `KeyspaceMetadata` `userFunctions` member.
+- The fetch, create, and store logic for user functions and aggregates in `SchemaKeyspace`.
+- The `UDTAndFunctionsAwareMetadataSerializer`.
+- The UDF configuration in `Config`, `DatabaseDescriptor`, and both `cassandra.yaml` files: `user_defined_functions_enabled`, the threads setting, the two insecure settings, the two timeouts, and the timeout policy.
+- The Eclipse compiler (ECJ) dependency, which only the UDF compiler used.
+- The cqlsh grammar and fixtures for the four statements.
+
+The `system_schema.functions` and `system_schema.aggregates` tables are NOT removed.  They stay as empty, read-only stub tables for client and driver schema-read compatibility.
+
+### Tests
+
+Run each command from the worktree root with JDK 21.
+
+- `ant build`: BUILD SUCCESSFUL.
+- `ant build-test`: BUILD SUCCESSFUL.
+- `ant testsome -Dtest.name=org.apache.cassandra.cql3.statements.DescribeStatementTest`: 24 tests, 0 failures, 0 errors.  This test drives the DataStax driver over the native protocol; it confirms the driver connects and reads the schema.
+- `ant testsome -Dtest.name=org.apache.cassandra.schema.SchemaKeyspaceTest`: 7 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.schema.SchemaMetadataSerializationTest`: 11 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.schema.TableMetadataSerDeTest`: 3 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.cql3.functions.NativeFunctionsTest`: 2 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.cql3.functions.FunctionFactoryTest`: 9 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.cql3.functions.CastFctsTest`: 13 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.cql3.functions.masking.ColumnMaskTest`: 17 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.auth.FunctionResourceTest`: 8 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.cql3.validation.operations.AggregationTest`: 25 tests, 0 failures, 0 errors.
+- `ant testsome -Dtest.name=org.apache.cassandra.cql3.validation.operations.SelectTest`: 83 tests, 0 failures, 0 errors.
+
+### Risks
+
+This change breaks the TCM `KeyspaceMetadata` metadata format.  The metadata no longer carries a `UserFunctions` section, and there is no `Version` gate.  A node on this branch cannot exchange keyspace metadata with a node that still has the old format.  This break is accepted.
+
+The `system_schema.functions` and `system_schema.aggregates` tables stay as empty, read-only stub tables.  They exist only for live driver connectivity.  The DataStax java-driver control connection reads these two tables during a schema refresh; a missing table breaks all native-protocol clients.  The stub tables keep that path working.  They do not hold data and they are not for old data.

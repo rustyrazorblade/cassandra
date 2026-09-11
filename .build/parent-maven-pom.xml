@@ -46,7 +46,6 @@
     <asm.version>@asm.version@</asm.version>
     <jamm.version>@jamm.version@</jamm.version>
     <allocation-instrumenter.version>@allocation-instrumenter.version@</allocation-instrumenter.version>
-    <ecj.version>@ecj.version@</ecj.version>
     <jacoco.version>@jacoco.version@</jacoco.version>
     <jflex.version>@jflex.version@</jflex.version>
   </properties>
@@ -1051,11 +1050,6 @@
             <groupId>com.github.jnr</groupId>
           </exclusion>
         </exclusions>
-      </dependency>
-      <dependency>
-        <groupId>org.eclipse.jdt</groupId>
-        <artifactId>ecj</artifactId>
-        <version>${ecj.version}</version>
       </dependency>
       <dependency>
         <groupId>org.caffinitas.ohc</groupId>

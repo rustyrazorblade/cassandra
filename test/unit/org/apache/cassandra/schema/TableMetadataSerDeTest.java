@@ -100,7 +100,7 @@ public class TableMetadataSerDeTest extends TestBaseImpl
             TableMetadata rt = null;
             try
             {
-                rt = TableMetadata.serializer.deserialize(new DataInputBuffer(out, true), Types.builder().build(), UserFunctions.builder().build(), NodeVersion.CURRENT_METADATA_VERSION);
+                rt = TableMetadata.serializer.deserialize(new DataInputBuffer(out, true), Types.builder().build(), NodeVersion.CURRENT_METADATA_VERSION);
             }
             catch (IOException e)
             {
@@ -156,7 +156,7 @@ public class TableMetadataSerDeTest extends TestBaseImpl
                 TableMetadata rt = null;
                 try
                 {
-                    rt = TableMetadata.serializer.deserialize(new DataInputBuffer(out, true), Types.builder().build(), UserFunctions.builder().build(), NodeVersion.CURRENT_METADATA_VERSION);
+                    rt = TableMetadata.serializer.deserialize(new DataInputBuffer(out, true), Types.builder().build(), NodeVersion.CURRENT_METADATA_VERSION);
                 }
                 catch (IOException e)
                 {
@@ -245,7 +245,7 @@ public class TableMetadataSerDeTest extends TestBaseImpl
                 TableMetadata after = null;
                 try
                 {
-                    after = TableMetadata.serializer.deserialize(new DataInputBuffer(out, true), Types.builder().build(), UserFunctions.builder().build(), NodeVersion.CURRENT_METADATA_VERSION);
+                    after = TableMetadata.serializer.deserialize(new DataInputBuffer(out, true), Types.builder().build(), NodeVersion.CURRENT_METADATA_VERSION);
                 }
                 catch (IOException e)
                 {

@@ -78,7 +78,6 @@ import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.QueryHandler;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.cql3.functions.JavaBasedUDFunction;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SystemKeyspace;
@@ -1052,7 +1051,6 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
                                 () -> IndexStatusManager.instance.shutdownAndWait(1L, MINUTES),
                                 DiskErrorsHandlerService::close,
                                 () -> ThreadLocalMetrics.shutdownCleaner(1L, MINUTES),
-                                () -> JavaBasedUDFunction.shutdownAndWait(1L, MINUTES),
                                 () -> PerSSTableIndexWriter.shutdownAndWait(1L, MINUTES)
             );
 

@@ -71,7 +71,6 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableParams;
 import org.apache.cassandra.schema.Types;
-import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -159,13 +158,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
             throw new AlreadyExistsException(keyspaceName, tableName);
         }
 
-        // add all user functions to be able to give a good error message to the user if the alter references
-        // a function from another keyspace
-        UserFunctions.Builder ufBuilder = UserFunctions.builder().add();
-        for (KeyspaceMetadata ksm : schema)
-            ufBuilder.add(ksm.userFunctions);
-
-        TableMetadata.Builder builder = builder(keyspace.types, ufBuilder.build()).epoch(metadata.nextEpoch());
+        TableMetadata.Builder builder = builder(keyspace.types).epoch(metadata.nextEpoch());
 
         // We do not want to set table ID here just yet, since we are using CQL for serialising a fully expanded CREATE TABLE statement.
         expandedCql = builder.build().toCqlString(false, attrs.hasProperty(TableAttributes.ID), ifNotExists);
@@ -261,14 +254,14 @@ public final class CreateTableStatement extends AlterSchemaStatement
         return String.format("%s (%s, %s)", getClass().getSimpleName(), keyspaceName, tableName);
     }
 
-    public TableMetadata.Builder builder(Types types, UserFunctions functions)
+    public TableMetadata.Builder builder(Types types)
     {
         attrs.validate();
         TableParams params = attrs.asNewTableParams(keyspaceName);
 
         // use a TreeMap to preserve ordering across JDK versions (see CASSANDRA-9492) - important for stable unit tests
         Map<ColumnIdentifier, ColumnProperties> columns = new TreeMap<>(comparing(o -> o.bytes));
-        rawColumns.forEach((column, properties) -> columns.put(column, properties.prepare(keyspaceName, tableName, column, types, functions)));
+        rawColumns.forEach((column, properties) -> columns.put(column, properties.prepare(keyspaceName, tableName, column, types)));
 
         // check for nested non-frozen UDTs or collections in a non-frozen UDT
         columns.forEach((column, properties) ->
@@ -539,7 +532,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
         }
     }
 
-    public static TableMetadata.Builder parse(String cql, String keyspace, String table, Types types, UserFunctions userFunctions)
+    public static TableMetadata.Builder parse(String cql, String keyspace, String table, Types types)
     {
         Raw createTable = CQLFragmentParser.parseAny(CqlParser::createTableStatement, cql, "CREATE TABLE")
                                            .keyspace(keyspace);
@@ -548,12 +541,12 @@ public final class CreateTableStatement extends AlterSchemaStatement
             createTable.table(table);
 
         return createTable.prepare(null) // works around a messy ClientState/QueryProcessor class init deadlock
-                .builder(types, userFunctions);
+                .builder(types);
     }
 
     public static TableMetadata.Builder parse(String cql, String keyspace)
     {
-        return parse(cql, keyspace, null, Types.none(), UserFunctions.none());
+        return parse(cql, keyspace, null, Types.none());
     }
 
     public final static class Raw extends CQLStatement.Raw
@@ -725,11 +718,11 @@ public final class CreateTableStatement extends AlterSchemaStatement
                     ColumnMask.ensureEnabled();
             }
 
-            public ColumnProperties prepare(String keyspace, String table, ColumnIdentifier column, Types udts, UserFunctions functions)
+            public ColumnProperties prepare(String keyspace, String table, ColumnIdentifier column, Types udts)
             {
                 CQL3Type cqlType = rawType.prepare(keyspace, udts);
                 AbstractType<?> type = cqlType.getType();
-                ColumnMask mask = rawMask == null ? null : rawMask.prepare(keyspace, table, column, type, functions);
+                ColumnMask mask = rawMask == null ? null : rawMask.prepare(keyspace, table, column, type);
                 return new ColumnProperties(type, cqlType, mask);
             }
         }

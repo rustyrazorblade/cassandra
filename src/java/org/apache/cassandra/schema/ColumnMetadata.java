@@ -60,7 +60,7 @@ import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.serializers.MarshalException;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
+import org.apache.cassandra.tcm.serialization.UDTAwareMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -796,7 +796,7 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
         return types;
     }
 
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<ColumnMetadata>
+    public static class Serializer implements UDTAwareMetadataSerializer<ColumnMetadata>
     {
         public void serialize(ColumnMetadata t, DataOutputPlus out, Version version) throws IOException
         {
@@ -827,7 +827,7 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
             }
         }
 
-        public ColumnMetadata deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
+        public ColumnMetadata deserialize(DataInputPlus in, Types types, Version version) throws IOException
         {
             String ksName = in.readUTF();
             String tableName = in.readUTF();
@@ -842,7 +842,7 @@ public final class ColumnMetadata extends ColumnSpecification implements Selecta
             ColumnMask mask = null;
             boolean masked = in.readBoolean();
             if (masked)
-                mask = ColumnMask.serializer.deserialize(in, ksName, type, types, functions, version);
+                mask = ColumnMask.serializer.deserialize(in, ksName, type, types, version);
             ColumnConstraints constraints;
             if (version.isAtLeast(Version.V6) && in.readBoolean())
                 constraints = ColumnConstraints.serializer.deserialize(in, version);

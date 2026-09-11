@@ -36,7 +36,6 @@ import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.OverrideConfigurationLoader;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -62,28 +61,13 @@ public class FunctionWithTerminalArgsBench extends CQLTester
     // since its impact is relatively small in the context of a full query.
     private static final int NUM_FUNCTION_CALLS = 10;
 
-    private String udf;
-
     @Setup(Level.Trial)
     public void setup() throws Throwable
     {
-        // we disable UDF threads to avoid the overhead and better see the impact of the terminal arguments
-        OverrideConfigurationLoader.override((config) -> {
-            config.allow_insecure_udfs = true;
-            config.user_defined_functions_threads_enabled = false;
-        });
         DatabaseDescriptor.daemonInitialization();
 
         CQLTester.setUpClass();
         beforeTest();
-
-        udf = createFunction(KEYSPACE,
-                             "int, text",
-                             " CREATE FUNCTION %s (a1 text, a2 text, a3 text, a4 text, a5 text)" +
-                             " CALLED ON NULL INPUT" +
-                             " RETURNS text" +
-                             " LANGUAGE java" +
-                             " AS 'return a1 + a2 + a3 + a4 + a5;'");
 
         String table = createTable(KEYSPACE, "CREATE TABLE %s (k int, c int, v text, PRIMARY KEY(k, c))");
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(table);
@@ -116,12 +100,6 @@ public class FunctionWithTerminalArgsBench extends CQLTester
     public Object add()
     {
         return execute("v + 'abc'");
-    }
-
-    @Benchmark
-    public Object udf()
-    {
-        return execute(udf + "(v, 'a1', 'a2', 'a3', 'a4')");
     }
 
     @Benchmark

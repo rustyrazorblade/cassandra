@@ -87,155 +87,6 @@ public class DescribeStatementTest extends CQLTester
     }
 
     @Test
-    public void testDescribeFunctionAndAggregate() throws Throwable
-    {
-        String fNonOverloaded = createFunction(KEYSPACE_PER_TEST,
-                                               "",
-                                               "CREATE OR REPLACE FUNCTION %s() " +
-                                               "CALLED ON NULL INPUT " +
-                                               "RETURNS int " +
-                                               "LANGUAGE java " +
-                                               "AS 'throw new RuntimeException();';");
-
-        String fOverloaded = createFunction(KEYSPACE_PER_TEST,
-                                            "int, ascii",
-                                            "CREATE FUNCTION %s (input int, other_in ascii) " +
-                                            "RETURNS NULL ON NULL INPUT " +
-                                            "RETURNS text " +
-                                            "LANGUAGE java " +
-                                            "AS 'return \"Hello World\";'");
-        createFunctionOverload(fOverloaded,
-                               "text, ascii",
-                               "CREATE FUNCTION %s (input text, other_in ascii) " +
-                               "RETURNS NULL ON NULL INPUT " +
-                               "RETURNS text " +
-                               "LANGUAGE java " +
-                               "AS 'return \"Hello World\";'");
-
-        for (String describeKeyword : new String[]{ "DESCRIBE", "DESC" })
-        {
-            assertRowsNet(executeDescribeNet(describeKeyword + " FUNCTION " + fNonOverloaded),
-                          row(KEYSPACE_PER_TEST,
-                              "function",
-                              shortFunctionName(fNonOverloaded) + "()",
-                              "CREATE FUNCTION " + fNonOverloaded + "()\n" +
-                              "    CALLED ON NULL INPUT\n" +
-                              "    RETURNS int\n" +
-                              "    LANGUAGE java\n" +
-                              "    AS $$throw new RuntimeException();$$;"));
-
-            assertRowsNet(executeDescribeNet(describeKeyword + " FUNCTION " + fOverloaded),
-                          row(KEYSPACE_PER_TEST,
-                              "function",
-                              shortFunctionName(fOverloaded) + "(int, ascii)",
-                              "CREATE FUNCTION " + fOverloaded + "(input int, other_in ascii)\n" +
-                              "    RETURNS NULL ON NULL INPUT\n" +
-                              "    RETURNS text\n" +
-                              "    LANGUAGE java\n" +
-                              "    AS $$return \"Hello World\";$$;"),
-                          row(KEYSPACE_PER_TEST,
-                              "function",
-                              shortFunctionName(fOverloaded) + "(text, ascii)",
-                              "CREATE FUNCTION " + fOverloaded + "(input text, other_in ascii)\n" +
-                              "    RETURNS NULL ON NULL INPUT\n" +
-                              "    RETURNS text\n" +
-                              "    LANGUAGE java\n" +
-                              "    AS $$return \"Hello World\";$$;"));
-
-            assertRowsNet(executeDescribeNet(describeKeyword + " FUNCTIONS"),
-                          row(KEYSPACE_PER_TEST,
-                              "function",
-                              shortFunctionName(fNonOverloaded) + "()"),
-                          row(KEYSPACE_PER_TEST,
-                              "function",
-                              shortFunctionName(fOverloaded) + "(int, ascii)"),
-                          row(KEYSPACE_PER_TEST,
-                              "function",
-                              shortFunctionName(fOverloaded) + "(text, ascii)"));
-        }
-
-        String fIntState = createFunction(KEYSPACE_PER_TEST,
-                                          "int, int",
-                                          "CREATE FUNCTION %s (state int, add_to int) " +
-                                          "CALLED ON NULL INPUT " +
-                                          "RETURNS int " +
-                                          "LANGUAGE java " +
-                                          "AS 'return state + add_to;'");
-        String fFinal = createFunction(KEYSPACE_PER_TEST,
-                                       "int",
-                                       "CREATE FUNCTION %s (state int) " +
-                                       "RETURNS NULL ON NULL INPUT " +
-                                       "RETURNS int " +
-                                       "LANGUAGE java " +
-                                       "AS 'return state;'");
-
-        String aNonDeterministic = createAggregate(KEYSPACE_PER_TEST,
-                                                   "int",
-                                                   format("CREATE AGGREGATE %%s(int) " +
-                                                          "SFUNC %s " +
-                                                          "STYPE int " +
-                                                          "INITCOND 42",
-                                                          shortFunctionName(fIntState)));
-        String aDeterministic = createAggregate(KEYSPACE_PER_TEST,
-                                                "int",
-                                                format("CREATE AGGREGATE %%s(int) " +
-                                                       "SFUNC %s " +
-                                                       "STYPE int " +
-                                                       "FINALFUNC %s ",
-                                                       shortFunctionName(fIntState),
-                                                       shortFunctionName(fFinal)));
-
-        for (String describeKeyword : new String[]{ "DESCRIBE", "DESC" })
-        {
-            assertRowsNet(executeDescribeNet(describeKeyword + " AGGREGATE " + aNonDeterministic),
-                          row(KEYSPACE_PER_TEST,
-                              "aggregate",
-                              shortFunctionName(aNonDeterministic) + "(int)",
-                              "CREATE AGGREGATE " + aNonDeterministic + "(int)\n" +
-                              "    SFUNC " + shortFunctionName(fIntState) + "\n" +
-                              "    STYPE int\n" +
-                              "    INITCOND 42;"));
-            assertRowsNet(executeDescribeNet(describeKeyword + " AGGREGATE " + aDeterministic),
-                          row(KEYSPACE_PER_TEST,
-                              "aggregate",
-                              shortFunctionName(aDeterministic) + "(int)",
-                              "CREATE AGGREGATE " + aDeterministic + "(int)\n" +
-                              "    SFUNC " + shortFunctionName(fIntState) + "\n" +
-                              "    STYPE int\n" +
-                              "    FINALFUNC " + shortFunctionName(fFinal) + ";"));
-            assertRowsNet(executeDescribeNet(describeKeyword + " AGGREGATES"),
-                          row(KEYSPACE_PER_TEST,
-                              "aggregate",
-                              shortFunctionName(aNonDeterministic) + "(int)"),
-                          row(KEYSPACE_PER_TEST,
-                              "aggregate",
-                              shortFunctionName(aDeterministic) + "(int)"));
-        }
-    }
-
-    @Test
-    public void testDescribeFunctionWithTuples() throws Throwable
-    {
-        String function = createFunction(KEYSPACE_PER_TEST,
-                                         "tuple<int>, list<frozen<tuple<int, text>>>, tuple<frozen<tuple<int, text>>, text>",
-                                         "CREATE OR REPLACE FUNCTION %s(t tuple<int>, l list<frozen<tuple<int, text>>>, nt tuple<frozen<tuple<int, text>>, text>) " +
-                                         "CALLED ON NULL INPUT " +
-                                         "RETURNS tuple<int, text> " +
-                                         "LANGUAGE java " +
-                                         "AS 'throw new RuntimeException();';");
-
-        assertRowsNet(executeDescribeNet("DESCRIBE FUNCTION " + function),
-                      row(KEYSPACE_PER_TEST,
-                          "function",
-                          shortFunctionName(function) + "(tuple<int>, list<frozen<tuple<int, text>>>, tuple<frozen<tuple<int, text>>, text>)",
-                          "CREATE FUNCTION " + function + "(t tuple<int>, l list<frozen<tuple<int, text>>>, nt tuple<frozen<tuple<int, text>>, text>)\n" +
-                          "    CALLED ON NULL INPUT\n" +
-                          "    RETURNS tuple<int, text>\n" +
-                          "    LANGUAGE java\n" +
-                          "    AS $$throw new RuntimeException();$$;"));
-    }
-
-    @Test
     public void testDescribeVirtualTables() throws Throwable
     {
         assertRowsNet(executeDescribeNet("DESCRIBE ONLY KEYSPACE system_virtual_schema;"),
@@ -764,49 +615,17 @@ public class DescribeStatementTest extends CQLTester
             executeDescribeNet(KEYSPACE_PER_TEST, "DROP MATERIALIZED VIEW " + table + "_view");
             execute("DROP TABLE " + KEYSPACE_PER_TEST + "." + table);
 
-            String aggregationFunctionName = KEYSPACE_PER_TEST + ".\"token\"";
-            String aggregationName = KEYSPACE_PER_TEST + ".\"aggregate\"";
-            createFunction(KEYSPACE_PER_TEST,
-                           "int, int",
-                           "CREATE FUNCTION " + aggregationFunctionName + " (\"token\" int, add_to int) " +
-                           "CALLED ON NULL INPUT " +
-                           "RETURNS int " +
-                           "LANGUAGE java " +
-                           "AS 'return token + add_to;'");
-
-            createAggregate(KEYSPACE_PER_TEST,
-                            "int",
-                            format("CREATE AGGREGATE " + aggregationName + "(int) " +
-                                   "SFUNC %s " +
-                                   "STYPE int " +
-                                   "INITCOND 42",
-                                   shortFunctionName(aggregationFunctionName)));
-
-            String functionCreate = executeDescribeNet(KEYSPACE_PER_TEST, "DESCRIBE FUNCTION " + aggregationFunctionName).all().get(0).getString("create_statement");
-            String aggregateCreate = executeDescribeNet(KEYSPACE_PER_TEST, "DESCRIBE AGGREGATE " + aggregationName).all().get(0).getString("create_statement");
-
-            execute("DROP AGGREGATE " + aggregationName);
-            execute("DROP FUNCTION " + aggregationFunctionName);
-
             executeNet(output);
             executeNet(mvCreateView);
-            executeNet(functionCreate);
-            executeNet(aggregateCreate);
 
             String output2 = executeDescribeNet(KEYSPACE_PER_TEST, "DESCRIBE TABLE " + table + withInternals).all().get(0).getString("create_statement");
             String mvCreateView2 = executeDescribeNet(KEYSPACE_PER_TEST, "DESCRIBE MATERIALIZED VIEW " + table + "_view").all().get(0).getString("create_statement");
-            String functionCreate2 = executeDescribeNet(KEYSPACE_PER_TEST, "DESCRIBE FUNCTION " + aggregationFunctionName).all().get(0).getString("create_statement");
-            String aggregateCreate2 = executeDescribeNet(KEYSPACE_PER_TEST, "DESCRIBE AGGREGATE " + aggregationName).all().get(0).getString("create_statement");
 
             assertEquals(output, output2);
             assertEquals(mvCreateView, mvCreateView2);
-            assertEquals(functionCreate, functionCreate2);
-            assertEquals(aggregateCreate, aggregateCreate2);
 
             execute("INSERT INTO " + KEYSPACE_PER_TEST + "." + table + " (key) VALUES (1)");
             executeDescribeNet(KEYSPACE_PER_TEST, "DROP MATERIALIZED VIEW " + table + "_view");
-            executeDescribeNet(KEYSPACE_PER_TEST, "DROP AGGREGATE " + aggregationName);
-            executeDescribeNet(KEYSPACE_PER_TEST, "DROP FUNCTION " + aggregationFunctionName);
         }
     }
 
@@ -989,67 +808,6 @@ public class DescribeStatementTest extends CQLTester
         finally
         {
             execute("DROP KEYSPACE IF EXISTS testWithKeywords");
-        }
-    }
-
-    @Test
-    public void testDescFunctionAndAggregateShouldNotOmitQuotations() throws Throwable
-    {
-
-        final String functionName = KEYSPACE_PER_TEST + ".\"token\"";
-
-        createFunctionOverload(functionName,
-                               "int, ascii",
-                               "CREATE FUNCTION " + functionName + " (\"token\" int, other_in ascii) " +
-                               "RETURNS NULL ON NULL INPUT " +
-                               "RETURNS text " +
-                               "LANGUAGE java " +
-                               "AS 'return \"Hello World\";'");
-
-        for (String describeKeyword : new String[]{ "DESCRIBE", "DESC" })
-        {
-
-            assertRowsNet(executeDescribeNet(describeKeyword + " FUNCTION " + functionName),
-                          row(KEYSPACE_PER_TEST,
-                              "function",
-                              shortFunctionName(functionName) + "(int, ascii)",
-                              "CREATE FUNCTION " + functionName + "(\"token\" int, other_in ascii)\n" +
-                              "    RETURNS NULL ON NULL INPUT\n" +
-                              "    RETURNS text\n" +
-                              "    LANGUAGE java\n" +
-                              "    AS $$return \"Hello World\";$$;"));
-        }
-
-        final String aggregationFunctionName = KEYSPACE_PER_TEST + ".\"token\"";
-        final String aggregationName = KEYSPACE_PER_TEST + ".\"token\"";
-        createFunctionOverload(aggregationName,
-                               "int, int",
-                               "CREATE FUNCTION " + aggregationFunctionName + " (\"token\" int, add_to int) " +
-                               "CALLED ON NULL INPUT " +
-                               "RETURNS int " +
-                               "LANGUAGE java " +
-                               "AS 'return token + add_to;'");
-
-
-        String aggregate = createAggregate(KEYSPACE_PER_TEST,
-                                           "int",
-                                           format("CREATE AGGREGATE %%s(int) " +
-                                                  "SFUNC %s " +
-                                                  "STYPE int " +
-                                                  "INITCOND 42",
-                                                  shortFunctionName(aggregationFunctionName)));
-
-
-        for (String describeKeyword : new String[]{ "DESCRIBE", "DESC" })
-        {
-            assertRowsNet(executeDescribeNet(describeKeyword + " AGGREGATE " + aggregate),
-                          row(KEYSPACE_PER_TEST,
-                              "aggregate",
-                              shortFunctionName(aggregate) + "(int)",
-                              "CREATE AGGREGATE " + aggregate + "(int)\n" +
-                              "    SFUNC " + shortFunctionName(aggregationName) + "\n" +
-                              "    STYPE int\n" +
-                              "    INITCOND 42;"));
         }
     }
 

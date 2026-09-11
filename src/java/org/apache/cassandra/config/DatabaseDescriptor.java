@@ -1095,19 +1095,6 @@ public class DatabaseDescriptor
         // we need this assignment for the Settings virtual table - CASSANDRA-17735
         conf.index_summary_capacity = new DataStorageSpec.LongMebibytesBound(indexSummaryCapacityInMiB);
 
-        if (conf.user_defined_functions_fail_timeout.toMilliseconds() < conf.user_defined_functions_warn_timeout.toMilliseconds())
-            throw new ConfigurationException("user_defined_functions_warn_timeout must less than user_defined_function_fail_timeout", false);
-
-        if (!conf.allow_insecure_udfs && !conf.user_defined_functions_threads_enabled)
-            throw new ConfigurationException("To be able to set enable_user_defined_functions_threads: false you need to set allow_insecure_udfs: true - this is an unsafe configuration and is not recommended.");
-
-        if (conf.allow_extra_insecure_udfs)
-            logger.warn("Allowing java.lang.System.* access in UDFs is dangerous and not recommended. Set allow_extra_insecure_udfs: false to disable.");
-
-        if (conf.scripted_user_defined_functions_enabled)
-            throw new ConfigurationException("JavaScript user-defined functions were removed in CASSANDRA-18252. " +
-                                             "Hooks are planned to be introduced as part of CASSANDRA-17280");
-
         if (conf.commitlog_segment_size.toMebibytes() == 0)
             throw new ConfigurationException("commitlog_segment_size must be positive, but was "
                                              + conf.commitlog_segment_size.toString(), false);
@@ -4908,41 +4895,6 @@ public class DatabaseDescriptor
         return preparedStatementsCacheSizeInMiB;
     }
 
-    public static boolean enableUserDefinedFunctions()
-    {
-        return conf.user_defined_functions_enabled;
-    }
-
-    public static boolean enableScriptedUserDefinedFunctions()
-    {
-        return conf.scripted_user_defined_functions_enabled;
-    }
-
-    public static boolean enableUserDefinedFunctionsThreads()
-    {
-        return conf.user_defined_functions_threads_enabled;
-    }
-
-    public static long getUserDefinedFunctionWarnTimeout()
-    {
-        return conf.user_defined_functions_warn_timeout.toMilliseconds();
-    }
-
-    public static void setUserDefinedFunctionWarnTimeout(long userDefinedFunctionWarnTimeout)
-    {
-        conf.user_defined_functions_warn_timeout = new DurationSpec.LongMillisecondsBound(userDefinedFunctionWarnTimeout);
-    }
-
-    public static boolean allowInsecureUDFs()
-    {
-        return conf.allow_insecure_udfs;
-    }
-
-    public static boolean allowExtraInsecureUDFs()
-    {
-        return conf.allow_extra_insecure_udfs;
-    }
-
     public static boolean getMaterializedViewsEnabled()
     {
         return conf.materialized_views_enabled;
@@ -5072,26 +5024,6 @@ public class DatabaseDescriptor
     public static void setEnableDropCompactStorage(boolean enableDropCompactStorage)
     {
         conf.drop_compact_storage_enabled = enableDropCompactStorage;
-    }
-
-    public static long getUserDefinedFunctionFailTimeout()
-    {
-        return conf.user_defined_functions_fail_timeout.toMilliseconds();
-    }
-
-    public static void setUserDefinedFunctionFailTimeout(long userDefinedFunctionFailTimeout)
-    {
-        conf.user_defined_functions_fail_timeout = new DurationSpec.LongMillisecondsBound(userDefinedFunctionFailTimeout);
-    }
-
-    public static Config.UserFunctionTimeoutPolicy getUserFunctionTimeoutPolicy()
-    {
-        return conf.user_function_timeout_policy;
-    }
-
-    public static void setUserFunctionTimeoutPolicy(Config.UserFunctionTimeoutPolicy userFunctionTimeoutPolicy)
-    {
-        conf.user_function_timeout_policy = userFunctionTimeoutPolicy;
     }
 
     public static long getGCLogThreshold()

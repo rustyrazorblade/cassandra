@@ -72,8 +72,6 @@ public class ParseAndConvertUnitsTest
         assertEquals(new DurationSpec.IntMinutesBound(60), config.index_summary_resize_interval);
         assertEquals(DurationSpec.IntSecondsBound.inSecondsString("4h"), config.key_cache_save_period);
         assertEquals(new DurationSpec.IntSecondsBound(30), config.cache_load_timeout);
-        assertEquals(new DurationSpec.LongMillisecondsBound(1500), config.user_defined_functions_fail_timeout);
-        assertEquals(new DurationSpec.LongMillisecondsBound(500), config.user_defined_functions_warn_timeout);
         assertEquals(new DurationSpec.IntSecondsBound(3600), config.validation_preview_purge_head_start);
 
         //Confirm space parameters were successfully parsed with the default values in cassandra.yaml

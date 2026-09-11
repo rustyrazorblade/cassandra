@@ -101,38 +101,6 @@ public class AlterSchemaStatementNoOpTest extends CQLTester
         assertMultipleExecutionSingleEpoch(format("DROP MATERIALIZED VIEW IF EXISTS %s", view));
     }
 
-    @Test
-    public void testUserFunctionNoOp()
-    {
-        String function = name();
-        assertMultipleExecutionSingleEpoch(format("CREATE FUNCTION IF NOT EXISTS %s.%s(a int, b int) " +
-                                                  "CALLED ON NULL INPUT " +
-                                                  "RETURNS int " +
-                                                  "LANGUAGE java " +
-                                                  "AS 'return Integer.valueOf((a!=null?a.intValue():0) + b.intValue());'",
-                                                  KEYSPACE, function));
-        assertMultipleExecutionSingleEpoch(format("DROP FUNCTION IF EXISTS %s.%s", KEYSPACE, function));
-    }
-
-    @Test
-    public void testUserAggregateNoOp() throws Throwable
-    {
-        String function = createFunction(KEYSPACE,
-                                  "double, double",
-                                  "CREATE OR REPLACE FUNCTION %s(state double, val double) " +
-                                  "RETURNS NULL ON NULL INPUT " +
-                                  "RETURNS double " +
-                                  "LANGUAGE java " +
-                                  "AS 'return state;';");
-        String aggregate = name();
-        assertMultipleExecutionSingleEpoch(format("CREATE AGGREGATE IF NOT EXISTS %s.%s(double) " +
-                                                  "SFUNC %s " +
-                                                  "STYPE double " +
-                                                  "INITCOND 0",
-                                                  KEYSPACE, aggregate, shortFunctionName(function)));
-        assertMultipleExecutionSingleEpoch(format("DROP AGGREGATE IF EXISTS %s.%s", KEYSPACE, aggregate));
-    }
-
     private void assertMultipleExecutionSingleEpoch(String cql)
     {
         // execute the statement once to ensure it is valid and to set

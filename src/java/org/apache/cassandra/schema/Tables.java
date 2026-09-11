@@ -40,7 +40,7 @@ import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.index.internal.CassandraIndex;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
+import org.apache.cassandra.tcm.serialization.UDTAwareMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.btree.BTreeMap;
 
@@ -369,7 +369,7 @@ public final class Tables implements Iterable<TableMetadata>
         }
     }
 
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<Tables>
+    public static class Serializer implements UDTAwareMetadataSerializer<Tables>
     {
         public void serialize(Tables t, DataOutputPlus out, Version version) throws IOException
         {
@@ -378,13 +378,13 @@ public final class Tables implements Iterable<TableMetadata>
                 TableMetadata.serializer.serialize(tm, out, version);
         }
 
-        public Tables deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
+        public Tables deserialize(DataInputPlus in, Types types, Version version) throws IOException
         {
             int count = in.readInt();
             Tables.Builder builder = Tables.builder();
             for (int i = 0; i < count; i++)
             {
-                TableMetadata tm = TableMetadata.serializer.deserialize(in, types, functions, version);
+                TableMetadata tm = TableMetadata.serializer.deserialize(in, types, version);
                 builder.add(tm);
             }
             return builder.build();

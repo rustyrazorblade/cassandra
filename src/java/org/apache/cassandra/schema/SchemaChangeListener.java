@@ -17,8 +17,6 @@
  */
 package org.apache.cassandra.schema;
 
-import org.apache.cassandra.cql3.functions.UDAggregate;
-import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.db.marshal.UserType;
 
 public interface SchemaChangeListener
@@ -37,14 +35,6 @@ public interface SchemaChangeListener
     }
 
     default void onCreateType(UserType type)
-    {
-    }
-
-    default void onCreateFunction(UDFunction function)
-    {
-    }
-
-    default void onCreateAggregate(UDAggregate aggregate)
     {
     }
 
@@ -75,14 +65,6 @@ public interface SchemaChangeListener
     {
     }
 
-    default void onAlterFunction(UDFunction before, UDFunction after)
-    {
-    }
-
-    default void onAlterAggregate(UDAggregate before, UDAggregate after)
-    {
-    }
-
     default void onDropKeyspace(KeyspaceMetadata keyspace, boolean dropData)
     {
     }
@@ -97,14 +79,6 @@ public interface SchemaChangeListener
     }
 
     default void onDropType(UserType type)
-    {
-    }
-
-    default void onDropFunction(UDFunction function)
-    {
-    }
-
-    default void onDropAggregate(UDAggregate aggregate)
     {
     }
 }

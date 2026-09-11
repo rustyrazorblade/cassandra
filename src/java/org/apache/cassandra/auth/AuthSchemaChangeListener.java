@@ -18,8 +18,6 @@
 package org.apache.cassandra.auth;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.functions.UDAggregate;
-import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.SchemaChangeListener;
 import org.apache.cassandra.schema.TableMetadata;
@@ -41,19 +39,5 @@ public class AuthSchemaChangeListener implements SchemaChangeListener
     public void onDropTable(TableMetadata table, boolean dropData)
     {
         DatabaseDescriptor.getAuthorizer().revokeAllOn(DataResource.table(table.keyspace, table.name));
-    }
-
-    @Override
-    public void onDropFunction(UDFunction function)
-    {
-        DatabaseDescriptor.getAuthorizer()
-                          .revokeAllOn(FunctionResource.function(function.name().keyspace, function.name().name, function.argTypes()));
-    }
-
-    @Override
-    public void onDropAggregate(UDAggregate aggregate)
-    {
-        DatabaseDescriptor.getAuthorizer()
-                          .revokeAllOn(FunctionResource.function(aggregate.name().keyspace, aggregate.name().name, aggregate.argTypes()));
     }
 }

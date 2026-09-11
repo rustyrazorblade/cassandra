@@ -145,8 +145,6 @@ public final class SchemaEvent extends DiagnosticEvent
             ks.put("tables", repr(ksDiff.tables));
             ks.put("views", repr(ksDiff.views));
             ks.put("types", repr(ksDiff.types));
-            ks.put("udas", repr(ksDiff.udas));
-            ks.put("udfs", repr(ksDiff.udfs));
             ret.put("ksDiff", ks);
         }
         if (tableUpdate != null) ret.put("tableMetadataUpdate", repr(tableUpdate));
@@ -174,7 +172,6 @@ public final class SchemaEvent extends DiagnosticEvent
         if (ksm.params != null) ret.put("params", ksm.params.toString());
         if (ksm.tables != null) ret.put("tables", ksm.tables.toString());
         if (ksm.views != null) ret.put("views", ksm.views.toString());
-        if (ksm.userFunctions != null) ret.put("functions", ksm.userFunctions.toString());
         if (ksm.types != null) ret.put("types", ksm.types.toString());
         return ret;
     }

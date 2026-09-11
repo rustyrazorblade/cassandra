@@ -67,7 +67,6 @@ public class SelectionColumnMappingTest extends CQLTester
     String tableName;
     String typeName;
     UserType userType;
-    String functionName;
 
     @BeforeClass
     public static void setUpClass()     // overrides CQLTester.setUpClass()
@@ -90,12 +89,6 @@ public class SelectionColumnMappingTest extends CQLTester
                                 " v2 ascii," +
                                 " v3 frozen<" + typeName + ">)");
         userType = Schema.instance.getKeyspaceMetadata(KEYSPACE).types.get(ByteBufferUtil.bytes(typeName)).get().freeze();
-        functionName = createFunction(KEYSPACE, "int, ascii",
-                                      "CREATE FUNCTION %s (i int, a ascii) " +
-                                      "CALLED ON NULL INPUT " +
-                                      "RETURNS int " +
-                                      "LANGUAGE java " +
-                                      "AS 'return Integer.valueOf(i);'");
         execute("INSERT INTO %s (k, v1 ,v2, v3) VALUES (1, 1, 'foo', {f1:1, f2:'bar'})");
 
         testSimpleTypes();
@@ -107,8 +100,6 @@ public class SelectionColumnMappingTest extends CQLTester
         testWritetimeAndTTLWithAliases();
         testFunction();
         testNoArgFunction();
-        testUserDefinedFunction();
-        testOverloadedFunction();
         testFunctionWithAlias();
         testNoArgumentFunction();
         testNestedFunctions();
@@ -120,7 +111,6 @@ public class SelectionColumnMappingTest extends CQLTester
         testMultipleAliasesOnSameColumn();
         testMixedColumnTypes();
         testMultipleUnaliasedSelectionOfSameColumn();
-        testUserDefinedAggregate();
         testListLitteral();
         testEmptyListLitteral();
         testSetLitteral();
@@ -265,38 +255,6 @@ public class SelectionColumnMappingTest extends CQLTester
         verify(expected, "SELECT now() FROM %s");
     }
 
-    private void testOverloadedFunction() throws Throwable
-    {
-        String fnName = createFunction(KEYSPACE, "int",
-                                       "CREATE FUNCTION %s (input int) " +
-                                       "RETURNS NULL ON NULL INPUT " +
-                                       "RETURNS text " +
-                                       "LANGUAGE java " +
-                                       "AS 'return \"Hello World\";'");
-        createFunctionOverload(fnName, "text",
-                               "CREATE FUNCTION %s (input text) " +
-                               "RETURNS NULL ON NULL INPUT " +
-                               "RETURNS text " +
-                               "LANGUAGE java " +
-                               "AS 'return \"Hello World\";'");
-
-        createFunctionOverload(fnName, "int, text",
-                               "CREATE FUNCTION %s (input1 int, input2 text) " +
-                               "RETURNS NULL ON NULL INPUT " +
-                               "RETURNS text " +
-                               "LANGUAGE java " +
-                               "AS 'return \"Hello World\";'");
-        ColumnSpecification fnSpec1 = columnSpecification(fnName + "(v1)", UTF8Type.instance);
-        ColumnSpecification fnSpec2 = columnSpecification(fnName + "(v2)", UTF8Type.instance);
-        ColumnSpecification fnSpec3 = columnSpecification(fnName + "(v1, v2)", UTF8Type.instance);
-        SelectionColumnMapping expected = SelectionColumnMapping.newMapping()
-                                                                .addMapping(fnSpec1, columnDefinition("v1"))
-                                                                .addMapping(fnSpec2, columnDefinition("v2"))
-                                                                .addMapping(fnSpec3, columnDefinitions("v1", "v2"));
-
-        verify(expected, String.format("SELECT %1$s(v1), %1$s(v2), %1$s(v1, v2) FROM %%s", fnName));
-    }
-
     private void testCount() throws Throwable
     {
         // SELECT COUNT does not necessarily include any mappings, but it must always return
@@ -323,16 +281,6 @@ public class SelectionColumnMappingTest extends CQLTester
         ColumnSpecification countV1Alias = columnSpecification("count_v1", LongType.instance);
         expected = SelectionColumnMapping.newMapping().addMapping(countV1Alias, columnDefinition("v1"));
         verify(expected, "SELECT COUNT(v1) AS count_v1 FROM %s");
-    }
-
-    private void testUserDefinedFunction() throws Throwable
-    {
-        // UDFs are basically represented in the same way as system functions
-        String functionCall = String.format("%s(v1, v2)", functionName);
-        ColumnSpecification fnSpec = columnSpecification(functionCall, Int32Type.instance);
-        SelectionColumnMapping expected = SelectionColumnMapping.newMapping()
-                                                                .addMapping(fnSpec, columnDefinitions("v1", "v2"));
-        verify(expected, "SELECT " + functionCall + " FROM %s");
     }
 
     private void testFunctionWithAlias() throws Throwable
@@ -544,49 +492,6 @@ public class SelectionColumnMappingTest extends CQLTester
                          "       v3.f2 AS f2_alias," +
                          "       v3" +
                          " FROM %s");
-    }
-
-    private void testUserDefinedAggregate() throws Throwable
-    {
-        String sFunc = parseFunctionName(createFunction(KEYSPACE, "int",
-                                                        " CREATE FUNCTION %s (a int, b int)" +
-                                                        " RETURNS NULL ON NULL INPUT" +
-                                                        " RETURNS int" +
-                                                        " LANGUAGE java" +
-                                                        " AS ' return a + b;'")).name;
-
-        String aFunc = createAggregate(KEYSPACE, "int, int",
-                                       " CREATE AGGREGATE %s (int)" +
-                                       " SFUNC " + sFunc +
-                                       " STYPE int" +
-                                       " INITCOND 0");
-
-        String plusOne = createFunction(KEYSPACE, "int",
-                                        " CREATE FUNCTION %s (a int)" +
-                                        " RETURNS NULL ON NULL INPUT" +
-                                        " RETURNS int" +
-                                        " LANGUAGE java" +
-                                        " AS ' return a + 1;'");
-
-        String sqFunc = createFunction(KEYSPACE, "int",
-                                       " CREATE FUNCTION %s (a int)" +
-                                       " RETURNS NULL ON NULL INPUT" +
-                                       " RETURNS int" +
-                                       " LANGUAGE java" +
-                                       " AS ' return a * a;'");
-
-        ColumnMetadata v1 = columnDefinition("v1");
-        SelectionColumns expected = SelectionColumnMapping.newMapping()
-                                                          .addMapping(columnSpecification(aFunc + "(v1)",
-                                                                                          Int32Type.instance),
-                                                                      v1);
-        verify(expected, String.format("SELECT %s(v1) FROM %%s", aFunc));
-
-        // aggregate with nested udfs as input
-        String specName = String.format("%s(%s(%s(v1)))", aFunc, sqFunc, plusOne);
-        expected = SelectionColumnMapping.newMapping().addMapping(columnSpecification(specName, Int32Type.instance),
-                                                                  v1);
-        verify(expected, String.format("SELECT %s FROM %%s", specName));
     }
 
     private void verify(SelectionColumns expected, String query) throws Throwable

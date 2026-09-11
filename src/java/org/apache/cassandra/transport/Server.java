@@ -39,8 +39,6 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.auth.AuthenticatedUser;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
-import org.apache.cassandra.cql3.functions.UDAggregate;
-import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -586,20 +584,6 @@ public class Server implements CassandraDaemon.Server
         }
 
         @Override
-        public void onCreateFunction(UDFunction function)
-        {
-            send(new Event.SchemaChange(Event.SchemaChange.Change.CREATED, Event.SchemaChange.Target.FUNCTION,
-                                        function.name().keyspace, function.name().name, AbstractType.asCQLTypeStringList(function.argTypes())));
-        }
-
-        @Override
-        public void onCreateAggregate(UDAggregate aggregate)
-        {
-            send(new Event.SchemaChange(Event.SchemaChange.Change.CREATED, Event.SchemaChange.Target.AGGREGATE,
-                                        aggregate.name().keyspace, aggregate.name().name, AbstractType.asCQLTypeStringList(aggregate.argTypes())));
-        }
-
-        @Override
         public void onAlterKeyspace(KeyspaceMetadata before, KeyspaceMetadata after)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, after.name));
@@ -615,20 +599,6 @@ public class Server implements CassandraDaemon.Server
         public void onAlterType(UserType before, UserType after)
         {
             send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TYPE, after.keyspace, after.getNameAsString()));
-        }
-
-        @Override
-        public void onAlterFunction(UDFunction before, UDFunction after)
-        {
-            send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.FUNCTION,
-                                        after.name().keyspace, after.name().name, AbstractType.asCQLTypeStringList(after.argTypes())));
-        }
-
-        @Override
-        public void onAlterAggregate(UDAggregate before, UDAggregate after)
-        {
-            send(new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.AGGREGATE,
-                                        after.name().keyspace, after.name().name, AbstractType.asCQLTypeStringList(after.argTypes())));
         }
 
         @Override
@@ -649,18 +619,5 @@ public class Server implements CassandraDaemon.Server
             send(new Event.SchemaChange(Event.SchemaChange.Change.DROPPED, Event.SchemaChange.Target.TYPE, type.keyspace, type.getNameAsString()));
         }
 
-        @Override
-        public void onDropFunction(UDFunction function)
-        {
-            send(new Event.SchemaChange(Event.SchemaChange.Change.DROPPED, Event.SchemaChange.Target.FUNCTION,
-                                        function.name().keyspace, function.name().name, AbstractType.asCQLTypeStringList(function.argTypes())));
-        }
-
-        @Override
-        public void onDropAggregate(UDAggregate aggregate)
-        {
-            send(new Event.SchemaChange(Event.SchemaChange.Change.DROPPED, Event.SchemaChange.Target.AGGREGATE,
-                                        aggregate.name().keyspace, aggregate.name().name, AbstractType.asCQLTypeStringList(aggregate.argTypes())));
-        }
     }
 }

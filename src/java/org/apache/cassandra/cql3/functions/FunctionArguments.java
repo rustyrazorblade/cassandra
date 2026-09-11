@@ -45,27 +45,6 @@ public final class FunctionArguments implements Arguments
      */
     private final Object[] arguments;
 
-    /**
-     * Creates a new {@link FunctionArguments} for the specified types.
-     *
-     * @param argTypes the argument types
-     * @return a new {@link FunctionArguments} for the specified types.
-     */
-    public static Arguments newInstanceForUdf(FunctionContext context, List<UDFDataType> argTypes)
-    {
-        int size = argTypes.size();
-
-        if (size == 0)
-            return context.noArguments();
-
-        ArgumentDeserializer[] deserializers = new ArgumentDeserializer[size];
-
-        for (int i = 0; i < size; i++)
-            deserializers[i] = argTypes.get(i).getArgumentDeserializer();
-
-        return new FunctionArguments(context, deserializers);
-    }
-
     @Override
     public ProtocolVersion getProtocolVersion()
     {

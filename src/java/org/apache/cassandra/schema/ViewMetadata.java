@@ -36,7 +36,7 @@ import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
+import org.apache.cassandra.tcm.serialization.UDTAwareMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 
 public final class ViewMetadata implements SchemaElement
@@ -251,7 +251,7 @@ public final class ViewMetadata implements SchemaElement
         return builder.toString();
     }
 
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<ViewMetadata>
+    public static class Serializer implements UDTAwareMetadataSerializer<ViewMetadata>
     {
         public void serialize(ViewMetadata t, DataOutputPlus out, Version version) throws IOException
         {
@@ -262,9 +262,9 @@ public final class ViewMetadata implements SchemaElement
             out.writeUTF(t.baseTableName);
         }
 
-        public ViewMetadata deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
+        public ViewMetadata deserialize(DataInputPlus in, Types types, Version version) throws IOException
         {
-            TableMetadata meta = TableMetadata.serializer.deserialize(in, types, functions, version);
+            TableMetadata meta = TableMetadata.serializer.deserialize(in, types, version);
             boolean includeAllColumns = in.readBoolean();
             TableId tableId = TableId.deserialize(in);
             String whereClause = in.readUTF();

@@ -76,7 +76,6 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.schema.Types;
-import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.schema.Views;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -506,22 +505,20 @@ public class HarrySSTableWriter implements Closeable
                                                                                                  KeyspaceParams.simple(1),
                                                                                                  Tables.none(),
                                                                                                  Views.none(),
-                                                                                                 Types.none(),
-                                                                                                 UserFunctions.none()), true));
+                                                                                                 Types.none()), true));
 
                 KeyspaceMetadata ksm = KeyspaceMetadata.create(keyspaceName,
                                                                KeyspaceParams.simple(1),
                                                                Tables.none(),
                                                                Views.none(),
-                                                               Types.none(),
-                                                               UserFunctions.none());
+                                                               Types.none());
 
                 TableMetadata tableMetadata = Schema.instance.getTableMetadata(keyspaceName, tableName);
                 if (tableMetadata == null)
                 {
                     Types types = createTypes(keyspaceName);
                     Schema.instance.submit(SchemaTransformations.addTypes(types, true));
-                    tableMetadata = createTable(types, ksm.userFunctions);
+                    tableMetadata = createTable(types);
                     Schema.instance.submit(SchemaTransformations.addTable(tableMetadata, true));
 
                     if (buildIndexes && !indexStatements.isEmpty())
@@ -642,13 +639,13 @@ public class HarrySSTableWriter implements Closeable
          *
          * @param types types this table should be created with
          */
-        private TableMetadata createTable(Types types, UserFunctions functions)
+        private TableMetadata createTable(Types types)
         {
             ClientState state = ClientState.forInternalCalls();
             CreateTableStatement statement = schemaStatement.prepare(state);
             statement.validate(ClientState.forInternalCalls());
 
-            TableMetadata.Builder builder = statement.builder(types, functions);
+            TableMetadata.Builder builder = statement.builder(types);
             if (partitioner != null)
                 builder.partitioner(partitioner);
 

@@ -613,7 +613,7 @@ class TestCqlshCompletion(CqlshCompletionCase):
     def test_complete_in_drop(self):
         self.trycompletions('DR', immediate='OP ')
         self.trycompletions('DROP ',
-                            choices=['AGGREGATE', 'COLUMNFAMILY', 'FUNCTION', 'IDENTITY',
+                            choices=['COLUMNFAMILY', 'IDENTITY',
                                      'INDEX', 'KEYSPACE', 'ROLE', 'TABLE',
                                      'TYPE', 'USER', 'MATERIALIZED'])
 
@@ -950,28 +950,6 @@ class TestCqlshCompletion(CqlshCompletionCase):
                                      'tags'],
                             other_choices_ok=True)
 
-        self.trycompletions('DESC FUNCTION ',
-                            choices=['system.',
-                                     'system_auth.',
-                                     'system_traces.',
-                                     'system_distributed.',
-                                     'fbestband',
-                                     'fbestsong',
-                                     'fmax',
-                                     'fmin',
-                                     self.cqlsh.keyspace + '.'],
-                            other_choices_ok=True)
-
-        self.trycompletions('DESC AGGREGATE ',
-                            choices=['system.',
-                                     'system_auth.',
-                                     'system_traces.',
-                                     'system_distributed.',
-                                     'aggmin',
-                                     'aggmax',
-                                     self.cqlsh.keyspace + '.'],
-                            other_choices_ok=True)
-
         # Unfortunately these commented tests will not work. This is due to the keyspace name containing quotes;
         # cqlsh auto-completes a DESC differently when the keyspace contains quotes. I'll leave the
         # test here though in case we ever change this script to test using keyspace names without
@@ -1001,28 +979,6 @@ class TestCqlshCompletion(CqlshCompletionCase):
                                      'phone_number',
                                      'band_info_type',
                                      'tags'],
-                            other_choices_ok=True)
-
-        # See comment above for DESC TABLE
-        # self.trycompletions('DESC FUNCTION ' + '"' + self.cqlsh.keyspace + '"', immediate='.f')
-
-        self.trycompletions('DESC FUNCTION ' + '"' + self.cqlsh.keyspace + '".', immediate='f')
-
-        self.trycompletions('DESC FUNCTION ' + '"' + self.cqlsh.keyspace + '".f',
-                            choices=['fbestband',
-                                     'fbestsong',
-                                     'fmax',
-                                     'fmin'],
-                            other_choices_ok=True)
-
-        # See comment above for DESC TABLE
-        # self.trycompletions('DESC AGGREGATE ' + '"' + self.cqlsh.keyspace + '"', immediate='.aggm')
-
-        self.trycompletions('DESC AGGREGATE ' + '"' + self.cqlsh.keyspace + '".', immediate='aggm')
-
-        self.trycompletions('DESC AGGREGATE ' + '"' + self.cqlsh.keyspace + '".aggm',
-                            choices=['aggmin',
-                                     'aggmax'],
                             other_choices_ok=True)
 
     def test_complete_in_drop_table(self):

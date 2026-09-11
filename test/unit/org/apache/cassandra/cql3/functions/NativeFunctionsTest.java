@@ -27,7 +27,6 @@ import org.assertj.core.api.Assertions;
 import org.junit.Test;
 
 import org.apache.cassandra.schema.SchemaConstants;
-import org.apache.cassandra.schema.UserFunctions;
 
 import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
@@ -147,8 +146,7 @@ public class NativeFunctionsTest
                                                         function.argTypes,
                                                         null,
                                                         null,
-                                                        function.returnType,
-                                                        UserFunctions.none());
+                                                        function.returnType);
 
             Assertions.assertThat(newFunction).isNotNull();
             Assertions.assertThat(function).isNotEqualTo(newFunction);

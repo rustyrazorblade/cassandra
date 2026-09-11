@@ -65,7 +65,6 @@ import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableParams;
 import org.apache.cassandra.schema.TableParams.Option;
-import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.schema.ViewMetadata;
 import org.apache.cassandra.schema.Views;
 import org.apache.cassandra.service.ClientState;
@@ -239,14 +238,8 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
                 return keyspace;
             }
 
-            // add all user functions to be able to give a good error message to the user if the alter references
-            // a function from another keyspace
-            UserFunctions.Builder ufBuilder = UserFunctions.builder();
-            for (KeyspaceMetadata ksm : metadata.schema.getKeyspaces())
-                ufBuilder.add(ksm.userFunctions);
-
             ColumnMask oldMask = table.getColumn(columnName).getMask();
-            ColumnMask newMask = rawMask == null ? null : rawMask.prepare(keyspace.name, table.name, columnName, column.type, ufBuilder.build());
+            ColumnMask newMask = rawMask == null ? null : rawMask.prepare(keyspace.name, table.name, columnName, column.type);
 
             if (Objects.equals(oldMask, newMask))
                 return keyspace;
@@ -348,7 +341,7 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             ColumnIdentifier name = column.name;
             AbstractType<?> type = column.type.prepare(keyspaceName, keyspace.types).getType();
             boolean isStatic = column.isStatic;
-            ColumnMask mask = column.mask == null ? null : column.mask.prepare(keyspaceName, tableName, name, type, keyspace.userFunctions);
+            ColumnMask mask = column.mask == null ? null : column.mask.prepare(keyspaceName, tableName, name, type);
             ColumnConstraints columnConstraints = column.constraints == null ? ColumnConstraints.NO_OP : column.constraints.prepare(name);
 
             if (null != tableBuilder.getColumn(name)) {

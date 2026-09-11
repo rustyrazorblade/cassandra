@@ -1230,68 +1230,6 @@ public class CollectionsTest extends CQLTester
                            "333", "value333_2"), 42)
         );
 
-        // with UDF as slice arg
-
-        String f = createFunction(KEYSPACE, "text",
-                                  "CREATE FUNCTION %s(arg text) " +
-                                  "CALLED ON NULL INPUT " +
-                                  "RETURNS TEXT " +
-                                  "LANGUAGE java AS 'return arg;'");
-
-        assertRows(execute("SELECT k, c, l, m[" + f +"('1').." + f +"('22')], o FROM %s WHERE k = 0"),
-                   row(0, 0, "foobar", map("1", "value1",
-                                           "22", "value22"), 42),
-                   row(0, 1, "foobar", map("1", "value1_2"), 42)
-        );
-
-        assertRows(execute("SELECT k, c, l, m[" + f +"(?).." + f +"(?)], o FROM %s WHERE k = 0", "1", "22"),
-                   row(0, 0, "foobar", map("1", "value1",
-                                           "22", "value22"), 42),
-                   row(0, 1, "foobar", map("1", "value1_2"), 42)
-        );
-
-        // with UDF taking a map
-
-        f = createFunction(KEYSPACE, "map<text,text>",
-                           "CREATE FUNCTION %s(m text) " +
-                           "CALLED ON NULL INPUT " +
-                           "RETURNS TEXT " +
-                           "LANGUAGE java AS $$return m;$$");
-
-        assertRows(execute("SELECT k, c, " + f + "(m['1']) FROM %s WHERE k = 0"),
-                   row(0, 0, "value1"),
-                   row(0, 1, "value1_2"));
-
-        // with UDF taking multiple cols
-
-        f = createFunction(KEYSPACE, "map<text,text>,map<text,text>,int,int",
-                           "CREATE FUNCTION %s(m1 map<text,text>, m2 text, k int, c int) " +
-                           "CALLED ON NULL INPUT " +
-                           "RETURNS TEXT " +
-                           "LANGUAGE java AS $$return m1.get(\"1\") + ':' + m2 + ':' + k + ':' + c;$$");
-
-        assertRows(execute("SELECT " + f + "(m, m['1'], k, c) FROM %s WHERE k = 0"),
-                   row("value1:value1:0:0"),
-                   row("value1_2:value1_2:0:1"));
-
-        // with nested UDF + aggregation and multiple cols
-
-        f = createFunction(KEYSPACE, "int,int",
-                           "CREATE FUNCTION %s(k int, c int) " +
-                           "CALLED ON NULL INPUT " +
-                           "RETURNS int " +
-                           "LANGUAGE java AS $$return k + c;$$");
-
-        assertColumnNames(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s WHERE k = 0"),
-                          "sel1", "system.max(" + f + "(k, c))");
-        assertRows(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s WHERE k = 0"),
-                   row(1, 1));
-
-        assertColumnNames(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s"),
-                          "sel1", "system.max(" + f + "(k, c))");
-        assertRows(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s"),
-                   row(2, 2));
-
         // prepared parameters
 
         assertRows(execute("SELECT c, m[?], fm[?] FROM %s WHERE k = 0", "1", "1"),
@@ -1365,68 +1303,6 @@ public class CollectionsTest extends CQLTester
                    row(0, "svalue1", "fsvalue1"),
                    row(1, "svalue1", "fsvalue1")
         );
-
-        // with UDF as slice arg
-
-        String f = createFunction(KEYSPACE, "int",
-                                  "CREATE FUNCTION %s(arg int) " +
-                                  "CALLED ON NULL INPUT " +
-                                  "RETURNS int " +
-                                  "LANGUAGE java AS 'return arg;'");
-
-        assertRows(execute("SELECT k, c, l, m[" + f +"(1).." + f +"(22)], o FROM %s WHERE k = 0"),
-                   row(0, 0, "foobar", map(1, "value1",
-                                           22, "value22"), 42),
-                   row(0, 1, "foobar", map(1, "value1_2"), 42)
-        );
-
-        assertRows(execute("SELECT k, c, l, m[" + f +"(?).." + f +"(?)], o FROM %s WHERE k = 0", 1, 22),
-                   row(0, 0, "foobar", map(1, "value1",
-                                           22, "value22"), 42),
-                   row(0, 1, "foobar", map(1, "value1_2"), 42)
-        );
-
-        // with UDF taking a map
-
-        f = createFunction(KEYSPACE, "map<int,text>",
-                           "CREATE FUNCTION %s(m text) " +
-                           "CALLED ON NULL INPUT " +
-                           "RETURNS TEXT " +
-                           "LANGUAGE java AS $$return m;$$");
-
-        assertRows(execute("SELECT k, c, " + f + "(m[1]) FROM %s WHERE k = 0"),
-                   row(0, 0, "value1"),
-                   row(0, 1, "value1_2"));
-
-        // with UDF taking multiple cols
-
-        f = createFunction(KEYSPACE, "map<int,text>,map<int,text>,int,int",
-                           "CREATE FUNCTION %s(m1 map<int,text>, m2 text, k int, c int) " +
-                           "CALLED ON NULL INPUT " +
-                           "RETURNS TEXT " +
-                           "LANGUAGE java AS $$return m1.get(1) + ':' + m2 + ':' + k + ':' + c;$$");
-
-        assertRows(execute("SELECT " + f + "(m, m[1], k, c) FROM %s WHERE k = 0"),
-                   row("value1:value1:0:0"),
-                   row("value1_2:value1_2:0:1"));
-
-        // with nested UDF + aggregation and multiple cols
-
-        f = createFunction(KEYSPACE, "int,int",
-                           "CREATE FUNCTION %s(k int, c int) " +
-                           "CALLED ON NULL INPUT " +
-                           "RETURNS int " +
-                           "LANGUAGE java AS $$return k + c;$$");
-
-        assertColumnNames(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s WHERE k = 0"),
-                          "sel1", "system.max(" + f + "(k, c))");
-        assertRows(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s WHERE k = 0"),
-                   row(1, 1));
-
-        assertColumnNames(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s"),
-                          "sel1", "system.max(" + f + "(k, c))");
-        assertRows(execute("SELECT max(" + f + "(k, c)) as sel1, max(" + f + "(k, c)) FROM %s"),
-                   row(2, 2));
 
         // prepared parameters
 

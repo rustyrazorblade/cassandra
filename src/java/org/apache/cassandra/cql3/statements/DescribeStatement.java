@@ -41,7 +41,6 @@ import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.ResultSet;
 import org.apache.cassandra.cql3.SchemaElement;
-import org.apache.cassandra.cql3.functions.FunctionName;
 import org.apache.cassandra.db.KeyspaceNotDefinedException;
 import org.apache.cassandra.db.marshal.ListType;
 import org.apache.cassandra.db.marshal.MapType;
@@ -72,7 +71,6 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 
 import static java.lang.String.format;
-import static org.apache.cassandra.cql3.statements.RequestValidations.checkNotEmpty;
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkNotNull;
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkTrue;
 import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
@@ -322,7 +320,8 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
      */
     public static DescribeStatement<SchemaElement> functions()
     {
-        return new Listing(ks -> ks.userFunctions.udfs());
+        // User-defined functions are removed, so there are no functions to describe.
+        return new Listing(ks -> Stream.empty());
     }
 
     /**
@@ -330,7 +329,8 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
      */
     public static DescribeStatement<SchemaElement> aggregates()
     {
-        return new Listing(ks -> ks.userFunctions.udas());
+        // User-defined aggregates are removed, so there are no aggregates to describe.
+        return new Listing(ks -> Stream.empty());
     }
 
     /**
@@ -459,8 +459,6 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
         if (!onlyKeyspace)
         {
             s = Stream.concat(s, ks.types.sortedStream());
-            s = Stream.concat(s, ks.userFunctions.udfs().sorted(SchemaElement.NAME_COMPARATOR));
-            s = Stream.concat(s, ks.userFunctions.udas().sorted(SchemaElement.NAME_COMPARATOR));
             s = Stream.concat(s, ks.tables.stream().sorted(SchemaElement.NAME_COMPARATOR)
                                                    .flatMap(tm -> getTableElements(ks, tm)));
         }
@@ -554,10 +552,8 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
     public static DescribeStatement<SchemaElement> function(String keyspace, String name)
     {
         return new Element(keyspace, name, (ks, n) -> {
-
-            return checkNotEmpty(ks.userFunctions.getUdfs(new FunctionName(ks.name, n)),
-                                 "User defined function '%s' not found in '%s'", n, ks.name).stream()
-                                                                                             .sorted(SchemaElement.NAME_COMPARATOR);
+            // User-defined functions are removed, so no function can be found.
+            throw invalidRequest("User defined function '%s' not found in '%s'", n, ks.name);
         });
     }
 
@@ -567,10 +563,8 @@ public abstract class DescribeStatement<T> extends CQLStatement.Raw implements C
     public static DescribeStatement<SchemaElement> aggregate(String keyspace, String name)
     {
         return new Element(keyspace, name, (ks, n) -> {
-
-            return checkNotEmpty(ks.userFunctions.getUdas(new FunctionName(ks.name, n)),
-                                 "User defined aggregate '%s' not found in '%s'", n, ks.name).stream()
-                                                                                              .sorted(SchemaElement.NAME_COMPARATOR);
+            // User-defined aggregates are removed, so no aggregate can be found.
+            throw invalidRequest("User defined aggregate '%s' not found in '%s'", n, ks.name);
         });
     }
 

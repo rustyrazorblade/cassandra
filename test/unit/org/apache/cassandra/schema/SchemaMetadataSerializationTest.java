@@ -242,8 +242,7 @@ public class SchemaMetadataSerializationTest
                                                                            .withSecurityLabel("TEST"),
                                                              Tables.of(table),
                                                              Views.none(),
-                                                             Types.of(addressType),
-                                                             UserFunctions.none());
+                                                             Types.of(addressType));
 
         KeyspaceMetadata deserialized = serializeAndDeserializeKeyspace(original);
 
@@ -314,8 +313,7 @@ public class SchemaMetadataSerializationTest
                                                  argTypes,
                                                  KEYSPACE,
                                                  "users",
-                                                 argTypes.get(0),
-                                                 UserFunctions.none());
+                                                 argTypes.get(0));
         assertNotNull("Masking function should be resolvable", function);
         return new ColumnMask((ScalarFunction) function, partialArgumentValues);
     }
@@ -375,7 +373,7 @@ public class SchemaMetadataSerializationTest
         ColumnMetadata.serializer.serialize(original, out, Version.V8);
 
         DataInputBuffer in = new DataInputBuffer(out.toByteArray());
-        return ColumnMetadata.serializer.deserialize(in, Types.none(), UserFunctions.none(), Version.V8);
+        return ColumnMetadata.serializer.deserialize(in, Types.none(), Version.V8);
     }
 
     private TableMetadata serializeAndDeserializeTable(TableMetadata original) throws IOException
@@ -384,7 +382,7 @@ public class SchemaMetadataSerializationTest
         TableMetadata.serializer.serialize(original, out, Version.V8);
 
         DataInputBuffer in = new DataInputBuffer(out.toByteArray());
-        return TableMetadata.serializer.deserialize(in, Types.none(), UserFunctions.none(), Version.V8);
+        return TableMetadata.serializer.deserialize(in, Types.none(), Version.V8);
     }
 
     private UserType serializeAndDeserializeType(UserType original) throws IOException

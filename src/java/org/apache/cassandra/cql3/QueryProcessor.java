@@ -34,8 +34,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.primitives.Ints;
 
@@ -46,10 +44,6 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.concurrent.ImmediateExecutor;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.cql3.functions.Function;
-import org.apache.cassandra.cql3.functions.FunctionName;
-import org.apache.cassandra.cql3.functions.UDAggregate;
-import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.cql3.selection.ResultSetBuilder;
 import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
@@ -1047,26 +1041,6 @@ public class QueryProcessor implements QueryHandler
             removeInvalidPersistentPreparedStatements(preparedStatements.asMap().entrySet().iterator(), ksName, cfName);
         }
 
-        private static void removeInvalidPreparedStatementsForFunction(String ksName, String functionName)
-        {
-            Predicate<Function> matchesFunction = f -> ksName.equals(f.name().keyspace) && functionName.equals(f.name().name);
-
-            for (Iterator<Map.Entry<MD5Digest, Prepared>> iter = preparedStatements.asMap().entrySet().iterator();
-                 iter.hasNext();)
-            {
-                Map.Entry<MD5Digest, Prepared> pstmt = iter.next();
-                if (Iterables.any(pstmt.getValue().statement.getFunctions(), matchesFunction))
-                {
-                    SystemKeyspace.removePreparedStatement(pstmt.getKey());
-                    iter.remove();
-                }
-            }
-
-
-            Iterators.removeIf(internalStatements.values().iterator(),
-                               statement -> Iterables.any(statement.statement.getFunctions(), matchesFunction));
-        }
-
         private static void removeInvalidPersistentPreparedStatements(Iterator<Map.Entry<MD5Digest, Prepared>> iterator,
                                                                       String ksName, String cfName)
         {
@@ -1125,51 +1099,11 @@ public class QueryProcessor implements QueryHandler
         }
 
         @Override
-        public void onCreateFunction(UDFunction function)
-        {
-            onCreateFunctionInternal(function.name().keyspace, function.name().name, function.argTypes());
-        }
-
-        @Override
-        public void onCreateAggregate(UDAggregate aggregate)
-        {
-            onCreateFunctionInternal(aggregate.name().keyspace, aggregate.name().name, aggregate.argTypes());
-        }
-
-        private static void onCreateFunctionInternal(String ksName, String functionName, List<AbstractType<?>> argTypes)
-        {
-            // in case there are other overloads, we have to remove all overloads since argument type
-            // matching may change (due to type casting)
-            if (!Schema.instance.getKeyspaceMetadata(ksName).userFunctions.get(new FunctionName(ksName, functionName)).isEmpty())
-                removeInvalidPreparedStatementsForFunction(ksName, functionName);
-        }
-
-        @Override
         public void onAlterTable(TableMetadata before, TableMetadata after, boolean affectsStatements)
         {
             logger.trace("Column definitions for {}.{} changed, invalidating related prepared statements", before.keyspace, before.name);
             if (affectsStatements)
                 removeInvalidPreparedStatements(before.keyspace, before.name);
-        }
-
-        @Override
-        public void onAlterFunction(UDFunction before, UDFunction after)
-        {
-            // Updating a function may imply we've changed the body of the function, so we need to invalid statements so that
-            // the new definition is picked (the function is resolved at preparation time).
-            // TODO: if the function has multiple overload, we could invalidate only the statement refering to the overload
-            // that was updated. This requires a few changes however and probably doesn't matter much in practice.
-            removeInvalidPreparedStatementsForFunction(before.name().keyspace, before.name().name);
-        }
-
-        @Override
-        public void onAlterAggregate(UDAggregate before, UDAggregate after)
-        {
-            // Updating a function may imply we've changed the body of the function, so we need to invalid statements so that
-            // the new definition is picked (the function is resolved at preparation time).
-            // TODO: if the function has multiple overload, we could invalidate only the statement refering to the overload
-            // that was updated. This requires a few changes however and probably doesn't matter much in practice.
-            removeInvalidPreparedStatementsForFunction(before.name().keyspace, before.name().name);
         }
 
         @Override
@@ -1184,18 +1118,6 @@ public class QueryProcessor implements QueryHandler
         {
             logger.trace("Table {}.{} was dropped, invalidating related prepared statements", table.keyspace, table.name);
             removeInvalidPreparedStatements(table.keyspace, table.name);
-        }
-
-        @Override
-        public void onDropFunction(UDFunction function)
-        {
-            removeInvalidPreparedStatementsForFunction(function.name().keyspace, function.name().name);
-        }
-
-        @Override
-        public void onDropAggregate(UDAggregate aggregate)
-        {
-            removeInvalidPreparedStatementsForFunction(aggregate.name().keyspace, aggregate.name().name);
         }
     }
 }

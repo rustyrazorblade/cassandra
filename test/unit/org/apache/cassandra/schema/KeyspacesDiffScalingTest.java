@@ -243,7 +243,7 @@ public class KeyspacesDiffScalingTest
         Keyspaces before = Keyspaces.of(KeyspaceMetadata.create("ks", KeyspaceParams.simple(1), Tables.of(base)));
         KeyspaceMetadata after = KeyspaceMetadata.create("ks", KeyspaceParams.simple(1),
                                                          Tables.of(base), Views.builder().put(view).build(),
-                                                         Types.none(), UserFunctions.none());
+                                                         Types.none());
 
         Keyspaces updated = before.withAddedOrUpdated(after);
 

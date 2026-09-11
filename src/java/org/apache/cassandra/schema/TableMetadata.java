@@ -81,7 +81,7 @@ import org.apache.cassandra.service.consensus.TransactionalMode;
 import org.apache.cassandra.service.consensus.migration.TransactionalMigrationFromMode;
 import org.apache.cassandra.service.reads.SpeculativeRetryPolicy;
 import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.tcm.serialization.UDTAndFunctionsAwareMetadataSerializer;
+import org.apache.cassandra.tcm.serialization.UDTAwareMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.AbstractIterator;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -2106,7 +2106,7 @@ public class TableMetadata implements SchemaElement
         }
     }
 
-    public static class Serializer implements UDTAndFunctionsAwareMetadataSerializer<TableMetadata>
+    public static class Serializer implements UDTAwareMetadataSerializer<TableMetadata>
     {
         public void serialize(TableMetadata t, DataOutputPlus out, Version version) throws IOException
         {
@@ -2140,7 +2140,7 @@ public class TableMetadata implements SchemaElement
             Indexes.serializer.serialize(t.indexes, out, version);
         }
 
-        public TableMetadata deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
+        public TableMetadata deserialize(DataInputPlus in, Types types, Version version) throws IOException
         {
             String ks = in.readUTF();
             String name = in.readUTF();
@@ -2163,11 +2163,11 @@ public class TableMetadata implements SchemaElement
             builder.flags(flags);
             int columnCount = in.readInt();
             for (int i = 0; i < columnCount; i++)
-                builder.addColumn(ColumnMetadata.serializer.deserialize(in, types, functions, version));
+                builder.addColumn(ColumnMetadata.serializer.deserialize(in, types, version));
             int droppedColCount = in.readInt();
             Map<ByteBuffer, DroppedColumn> droppedColumns = new HashMap<>();
             for (int i = 0; i < droppedColCount; i++)
-                droppedColumns.put(ByteBufferUtil.readWithShortLength(in), DroppedColumn.serializer.deserialize(in, types, functions, version));
+                droppedColumns.put(ByteBufferUtil.readWithShortLength(in), DroppedColumn.serializer.deserialize(in, types, version));
             builder.droppedColumns(droppedColumns);
             builder.indexes(Indexes.serializer.deserialize(in, version));
             return builder.build();

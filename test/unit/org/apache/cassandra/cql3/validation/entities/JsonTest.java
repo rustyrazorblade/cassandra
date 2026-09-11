@@ -251,12 +251,6 @@ public class JsonTest extends CQLTester
         // from_json() can only be used when the receiver type is known
         assertInvalidMessage("from_json() cannot be used in the selection clause", "SELECT from_json(textval) FROM %s", 0, 0);
 
-        String func1 = createFunction(KEYSPACE, "int", "CREATE FUNCTION %s (a int) CALLED ON NULL INPUT RETURNS text LANGUAGE java AS $$ return a.toString(); $$");
-        createFunctionOverload(func1, "int", "CREATE FUNCTION %s (a text) CALLED ON NULL INPUT RETURNS text LANGUAGE java AS $$ return new String(a); $$");
-
-        assertInvalidMessage("Ambiguous call to function",
-                "INSERT INTO %s (k, textval) VALUES (?, " + func1 + "(from_json(?)))", 0, "123");
-
         // fails JSON parsing
         assertInvalidMessage("Could not decode JSON string '\u038E\u0394\u03B4\u03E0'",
                 "INSERT INTO %s (k, asciival) VALUES (?, from_json(?))", 0, "\u038E\u0394\u03B4\u03E0");

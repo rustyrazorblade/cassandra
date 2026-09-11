@@ -653,7 +653,7 @@ public class StressCQLSSTableWriter implements Closeable
             statement.validate(state);
 
             //Build metadata with a portable tableId
-            tableMetadata = statement.builder(ksm.types, ksm.userFunctions)
+            tableMetadata = statement.builder(ksm.types)
                                      .id(deterministicId(schemaStatement.keyspace(), schemaStatement.table()))
                                      .build();
             Tables tables = Tables.of(tableMetadata);

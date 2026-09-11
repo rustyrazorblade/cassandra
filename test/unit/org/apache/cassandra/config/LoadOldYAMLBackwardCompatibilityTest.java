@@ -105,13 +105,10 @@ public class LoadOldYAMLBackwardCompatibilityTest
         assertEquals(new DurationSpec.IntSecondsBound(86400), config.trace_type_query_ttl);
         assertEquals(new DurationSpec.IntSecondsBound(604800), config.trace_type_repair_ttl);
         assertNull(config.prepared_statements_cache_size);
-        assertTrue(config.user_defined_functions_enabled);
-        assertFalse(config.scripted_user_defined_functions_enabled);
         assertTrue(config.materialized_views_enabled);
         assertFalse(config.transient_replication_enabled);
         assertTrue(config.sasi_indexes_enabled);
         assertTrue(config.drop_compact_storage_enabled);
-        assertTrue(config.user_defined_functions_threads_enabled);
         assertEquals(new DurationSpec.IntMillisecondsBound(2000), config.permissions_validity);
         assertNull(config.permissions_update_interval);
         assertEquals(new DurationSpec.IntMillisecondsBound(2000), config.roles_validity);

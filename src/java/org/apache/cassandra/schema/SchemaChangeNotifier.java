@@ -21,8 +21,6 @@ package org.apache.cassandra.schema;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import org.apache.cassandra.cql3.functions.UDAggregate;
-import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.schema.SchemaTransformation.SchemaTransformationResult;
 
@@ -52,15 +50,11 @@ public class SchemaChangeNotifier
         keyspace.types.forEach(this::notifyCreateType);
         keyspace.tables.forEach(this::notifyCreateTable);
         keyspace.views.forEach(this::notifyCreateView);
-        keyspace.userFunctions.udfs().forEach(this::notifyCreateFunction);
-        keyspace.userFunctions.udas().forEach(this::notifyCreateAggregate);
     }
 
     public void notifyKeyspaceAltered(KeyspaceMetadata.KeyspaceDiff delta, boolean dropData)
     {
         // notify on everything dropped
-        delta.udas.dropped.forEach(uda -> notifyDropAggregate((UDAggregate) uda));
-        delta.udfs.dropped.forEach(udf -> notifyDropFunction((UDFunction) udf));
         delta.views.dropped.forEach(view -> notifyDropView(view, dropData));
         delta.tables.dropped.forEach(metadata -> notifyDropTable(metadata, dropData));
         delta.types.dropped.forEach(this::notifyDropType);
@@ -69,8 +63,6 @@ public class SchemaChangeNotifier
         delta.types.created.forEach(this::notifyCreateType);
         delta.tables.created.forEach(this::notifyCreateTable);
         delta.views.created.forEach(this::notifyCreateView);
-        delta.udfs.created.forEach(udf -> notifyCreateFunction((UDFunction) udf));
-        delta.udas.created.forEach(uda -> notifyCreateAggregate((UDAggregate) uda));
 
         // notify on everything altered
         if (!delta.before.params.equals(delta.after.params))
@@ -78,14 +70,10 @@ public class SchemaChangeNotifier
         delta.types.altered.forEach(diff -> notifyAlterType(diff.before, diff.after));
         delta.tables.altered.forEach(diff -> notifyAlterTable(diff.before, diff.after));
         delta.views.altered.forEach(diff -> notifyAlterView(diff.before, diff.after));
-        delta.udfs.altered.forEach(diff -> notifyAlterFunction(diff.before, diff.after));
-        delta.udas.altered.forEach(diff -> notifyAlterAggregate(diff.before, diff.after));
     }
 
     public void notifyKeyspaceDropped(KeyspaceMetadata keyspace, boolean dropData)
     {
-        keyspace.userFunctions.udas().forEach(this::notifyDropAggregate);
-        keyspace.userFunctions.udfs().forEach(this::notifyDropFunction);
         keyspace.views.forEach(view -> notifyDropView(view, dropData));
         keyspace.tables.forEach(metadata -> notifyDropTable(metadata, dropData));
         keyspace.types.forEach(this::notifyDropType);
@@ -133,16 +121,6 @@ public class SchemaChangeNotifier
         changeListeners.forEach(l -> l.onCreateType(ut));
     }
 
-    private void notifyCreateFunction(UDFunction udf)
-    {
-        changeListeners.forEach(l -> l.onCreateFunction(udf));
-    }
-
-    private void notifyCreateAggregate(UDAggregate udf)
-    {
-        changeListeners.forEach(l -> l.onCreateAggregate(udf));
-    }
-
     private void notifyAlterKeyspace(KeyspaceMetadata before, KeyspaceMetadata after)
     {
         changeListeners.forEach(l -> l.onAlterKeyspace(before, after));
@@ -165,16 +143,6 @@ public class SchemaChangeNotifier
         changeListeners.forEach(l -> l.onAlterType(before, after));
     }
 
-    private void notifyAlterFunction(UDFunction before, UDFunction after)
-    {
-        changeListeners.forEach(l -> l.onAlterFunction(before, after));
-    }
-
-    private void notifyAlterAggregate(UDAggregate before, UDAggregate after)
-    {
-        changeListeners.forEach(l -> l.onAlterAggregate(before, after));
-    }
-
     private void notifyDropKeyspace(KeyspaceMetadata ksm, boolean dropData)
     {
         changeListeners.forEach(l -> l.onDropKeyspace(ksm, dropData));
@@ -193,15 +161,5 @@ public class SchemaChangeNotifier
     private void notifyDropType(UserType ut)
     {
         changeListeners.forEach(l -> l.onDropType(ut));
-    }
-
-    private void notifyDropFunction(UDFunction udf)
-    {
-        changeListeners.forEach(l -> l.onDropFunction(udf));
-    }
-
-    private void notifyDropAggregate(UDAggregate udf)
-    {
-        changeListeners.forEach(l -> l.onDropAggregate(udf));
     }
 }

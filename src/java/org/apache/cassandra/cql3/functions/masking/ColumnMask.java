@@ -50,7 +50,6 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.CQLTypeParser;
 import org.apache.cassandra.schema.Types;
-import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -127,7 +126,7 @@ public class ColumnMask
                                                   .addAll(partialArgumentTypes())
                                                   .build();
 
-        Function newFunction = FunctionResolver.get(function.name().keyspace, function.name(), args, null, null, null, UserFunctions.getCurrentUserFunctions(function.name()));
+        Function newFunction = FunctionResolver.get(function.name().keyspace, function.name(), args, null, null, null);
         assert newFunction != null;
         return new ColumnMask((ScalarFunction) newFunction, partialArgumentValues);
     }
@@ -226,20 +225,20 @@ public class ColumnMask
             this.rawPartialArguments = rawPartialArguments;
         }
 
-        public ColumnMask prepare(String keyspace, String table, ColumnIdentifier column, AbstractType<?> type, UserFunctions functions)
+        public ColumnMask prepare(String keyspace, String table, ColumnIdentifier column, AbstractType<?> type)
         {
-            ScalarFunction function = findMaskingFunction(keyspace, table, column, type, functions);
+            ScalarFunction function = findMaskingFunction(keyspace, table, column, type);
             ByteBuffer[] partialArguments = preparePartialArguments(keyspace, function);
             return new ColumnMask(function, partialArguments);
         }
 
-        private ScalarFunction findMaskingFunction(String keyspace, String table, ColumnIdentifier column, AbstractType<?> type, UserFunctions functions)
+        private ScalarFunction findMaskingFunction(String keyspace, String table, ColumnIdentifier column, AbstractType<?> type)
         {
             List<AssignmentTestable> args = new ArrayList<>(rawPartialArguments.size() + 1);
             args.add(type);
             args.addAll(rawPartialArguments);
 
-            Function function = FunctionResolver.get(keyspace, name, args, keyspace, table, type, functions);
+            Function function = FunctionResolver.get(keyspace, name, args, keyspace, table, type);
 
             if (function == null)
                 throw invalidRequest("Unable to find masking function for %s, " +
@@ -309,7 +308,7 @@ public class ColumnMask
             }
         }
 
-        public ColumnMask deserialize(DataInputPlus in, String keyspace, AbstractType<?> columnType, Types types, UserFunctions functions, Version version) throws IOException
+        public ColumnMask deserialize(DataInputPlus in, String keyspace, AbstractType<?> columnType, Types types, Version version) throws IOException
         {
             FunctionName functionName = new FunctionName(in.readUTF(), in.readUTF());
 
@@ -324,7 +323,7 @@ public class ColumnMask
                 partialArgValues[i] = valuePresent ? ByteBufferUtil.readWithVIntLength(in) : null;
             }
 
-            Function function = FunctionResolver.get(keyspace, functionName, argTypes, null, null, null, functions);
+            Function function = FunctionResolver.get(keyspace, functionName, argTypes, null, null, null);
             if (function == null)
             {
                 throw new AssertionError(format("Unable to find masking function %s(%s)", functionName, argTypes));

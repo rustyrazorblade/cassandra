@@ -125,7 +125,6 @@ public class JVMStabilityInspectorTest
         JVMStabilityInspector.Killer originalKiller = JVMStabilityInspector.replaceKiller(killerForTests);
 
         Config.DiskFailurePolicy oldPolicy = DatabaseDescriptor.getDiskFailurePolicy();
-        Config.UserFunctionTimeoutPolicy oldUserFunctionTimeoutPolicy = DatabaseDescriptor.getUserFunctionTimeoutPolicy();
         DiskErrorsHandlerService.configure();
         try
         {
@@ -139,12 +138,6 @@ public class JVMStabilityInspectorTest
             JVMStabilityInspector.inspectCommitLogThrowable(new Throwable());
             assertTrue(killerForTests.wasKilled());
             assertTrue(killerForTests.calledShutDownOnLogger());
-
-            DatabaseDescriptor.setUserFunctionTimeoutPolicy(Config.UserFunctionTimeoutPolicy.die_immediate);
-            killerForTests.reset();
-            JVMStabilityInspector.userFunctionTimeout(new Throwable());
-            assertTrue(killerForTests.wasKilled());
-            assertTrue(killerForTests.calledShutDownOnLogger());
         }
         catch (Exception | Error e)
         {
@@ -154,7 +147,6 @@ public class JVMStabilityInspectorTest
         {
             JVMStabilityInspector.replaceKiller(originalKiller);
             DatabaseDescriptor.setDiskFailurePolicy(oldPolicy);
-            DatabaseDescriptor.setUserFunctionTimeoutPolicy(oldUserFunctionTimeoutPolicy);
             StorageService.instance.registerDaemon(null);
             DiskErrorsHandlerService.set(DiskErrorsHandler.NoOpDiskErrorHandler.NO_OP);
         }

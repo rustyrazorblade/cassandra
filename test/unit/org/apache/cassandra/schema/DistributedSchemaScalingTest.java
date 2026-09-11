@@ -152,7 +152,7 @@ public class DistributedSchemaScalingTest
 
         KeyspaceMetadata ksm = KeyspaceMetadata.create("ks", KeyspaceParams.simple(1),
                                                        Tables.of(base), Views.builder().put(view).build(),
-                                                       Types.none(), UserFunctions.none());
+                                                       Types.none());
         DistributedSchema schema = new DistributedSchema(Keyspaces.of(ksm), Epoch.FIRST);
 
         assertSame("the base table", base, schema.getTableMetadata(base.id));

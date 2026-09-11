@@ -283,16 +283,12 @@ JUNK ::= /([ \t\r\f\v]+|(--|[/][/])[^\n\r]*([\n\r]|$)|[/][*].*?[*][/])/ ;
                           | <createIndexStatement>
                           | <createMaterializedViewStatement>
                           | <createUserTypeStatement>
-                          | <createFunctionStatement>
-                          | <createAggregateStatement>
                           | <addIdentityStatement>
                           | <dropKeyspaceStatement>
                           | <dropColumnFamilyStatement>
                           | <dropIndexStatement>
                           | <dropMaterializedViewStatement>
                           | <dropUserTypeStatement>
-                          | <dropFunctionStatement>
-                          | <dropAggregateStatement>
                           | <dropIdentityStatement>
                           | <alterTableStatement>
                           | <alterKeyspaceStatement>
@@ -1457,29 +1453,6 @@ syntax_rules += r'''
                             ")"
                          ;
 
-<createFunctionStatement> ::= "CREATE" ("OR" "REPLACE")? "FUNCTION"
-                            ("IF" "NOT" "EXISTS")?
-                            <userFunctionName>
-                            ( "(" ( newcol=<cident> <storageType>
-                              ( "," [newcolname]=<cident> <storageType> )* )?
-                            ")" )?
-                            ("RETURNS" "NULL" | "CALLED") "ON" "NULL" "INPUT"
-                            "RETURNS" <storageType>
-                            "LANGUAGE" <cident> "AS" <stringLiteral>
-                         ;
-
-<createAggregateStatement> ::= "CREATE" ("OR" "REPLACE")? "AGGREGATE"
-                            ("IF" "NOT" "EXISTS")?
-                            <userAggregateName>
-                            ( "("
-                                 ( <storageType> ( "," <storageType> )* )?
-                              ")" )?
-                            "SFUNC" <refUserFunctionName>
-                            "STYPE" <storageType>
-                            ( "FINALFUNC" <refUserFunctionName> )?
-                            ( "INITCOND" <term> )?
-                         ;
-
 '''
 
 explain_completion('createIndexStatement', 'indexname', '<new_index_name>')
@@ -1517,12 +1490,6 @@ syntax_rules += r'''
                                   ;
 
 <dropUserTypeStatement> ::= "DROP" "TYPE" ( "IF" "EXISTS" )? ut=<userTypeName>
-                          ;
-
-<dropFunctionStatement> ::= "DROP" "FUNCTION" ( "IF" "EXISTS" )? <userFunctionName>
-                          ;
-
-<dropAggregateStatement> ::= "DROP" "AGGREGATE" ( "IF" "EXISTS" )? <userAggregateName>
                           ;
 
 '''

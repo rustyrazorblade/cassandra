@@ -20,7 +20,6 @@ package org.apache.cassandra.auth;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 
 import com.google.common.base.Joiner;
@@ -32,7 +31,6 @@ import org.apache.commons.lang3.StringUtils;
 
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.functions.FunctionName;
-import org.apache.cassandra.cql3.functions.UserFunction;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -62,15 +60,10 @@ public class FunctionResource implements IResource
                                                                                               Permission.AUTHORIZE,
                                                                                               Permission.EXECUTE);
     // permissions which may be granted on resources representing a specific function
-    private static final Set<Permission> SCALAR_FUNCTION_PERMISSIONS = Sets.immutableEnumSet(Permission.ALTER,
-                                                                                             Permission.DROP,
-                                                                                             Permission.AUTHORIZE,
-                                                                                             Permission.EXECUTE);
-
-    private static final Set<Permission> AGGREGATE_FUNCTION_PERMISSIONS = Sets.immutableEnumSet(Permission.ALTER,
-                                                                                                Permission.DROP,
-                                                                                                Permission.AUTHORIZE,
-                                                                                                Permission.EXECUTE);
+    private static final Set<Permission> FUNCTION_PERMISSIONS = Sets.immutableEnumSet(Permission.ALTER,
+                                                                                      Permission.DROP,
+                                                                                      Permission.AUTHORIZE,
+                                                                                      Permission.EXECUTE);
 
     private static final String ROOT_NAME = "functions";
     private static final FunctionResource ROOT_RESOURCE = new FunctionResource();
@@ -135,11 +128,6 @@ public class FunctionResource implements IResource
     public static FunctionResource function(String keyspace, String name, List<AbstractType<?>> argTypes)
     {
         return new FunctionResource(keyspace, name, argTypes);
-    }
-
-    public static FunctionResource function(UserFunction function)
-    {
-        return new FunctionResource(function.name().keyspace, function.name().name, function.argTypes());
     }
 
     /**
@@ -281,7 +269,8 @@ public class FunctionResource implements IResource
             case KEYSPACE:
                 return Schema.instance.getKeyspaces().contains(keyspace);
             case FUNCTION:
-                return Schema.instance.findUserFunction(getFunctionName(), argTypes).isPresent();
+                // User-defined functions are removed, so a function-level resource can never exist.
+                return false;
         }
         throw new AssertionError();
     }
@@ -295,11 +284,7 @@ public class FunctionResource implements IResource
             case KEYSPACE:
                 return COLLECTION_LEVEL_PERMISSIONS;
             case FUNCTION:
-            {
-                Optional<UserFunction> function = Schema.instance.findUserFunction(getFunctionName(), argTypes);
-                assert function.isPresent() : "Unable to find function object for resource " + toString();
-                return function.get().isAggregate() ? AGGREGATE_FUNCTION_PERMISSIONS : SCALAR_FUNCTION_PERMISSIONS;
-            }
+                return FUNCTION_PERMISSIONS;
         }
         throw new AssertionError();
     }

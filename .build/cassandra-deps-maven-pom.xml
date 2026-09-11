@@ -252,10 +252,6 @@
       <artifactId>oshi-core</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.eclipse.jdt</groupId>
-      <artifactId>ecj</artifactId>
-    </dependency>
-    <dependency>
       <groupId>org.caffinitas.ohc</groupId>
       <artifactId>ohc-core</artifactId>
     </dependency>

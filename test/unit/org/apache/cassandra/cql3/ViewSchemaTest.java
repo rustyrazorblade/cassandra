@@ -258,9 +258,6 @@ public class ViewSchemaTest extends ViewAbstractTest
         // from_json() can only be used when the receiver type is known
         assertInvalidMessage("from_json() cannot be used in the selection clause", "SELECT from_json(asciival) FROM %s", 0, 0);
 
-        String func1 = createFunction(KEYSPACE, "int", "CREATE FUNCTION %s (a int) CALLED ON NULL INPUT RETURNS text LANGUAGE java AS $$ return a.toString(); $$");
-        createFunctionOverload(func1, "int", "CREATE FUNCTION %s (a text) CALLED ON NULL INPUT RETURNS text LANGUAGE java AS $$ return new String(a); $$");
-
         // ================ ascii ================
         updateView("INSERT INTO %s (k, asciival) VALUES (?, from_json(?))", 0, "\"ascii text\"");
         assertRows(execute("SELECT k, asciival FROM %s WHERE k = ?", 0), row(0, "ascii text"));

@@ -24,7 +24,6 @@ import java.nio.file.FileSystemException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -36,7 +35,6 @@ import net.nicoulaj.compilecommand.annotations.Exclude;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.virtual.ExceptionsTable;
@@ -234,23 +232,6 @@ public final class JVMStabilityInspector
     public static void killCurrentJVM(Throwable t, boolean quiet, boolean callShutDownOnLogger)
     {
         killer.killCurrentJVM(t, quiet, callShutDownOnLogger);
-    }
-
-    public static void userFunctionTimeout(Throwable t)
-    {
-        switch (DatabaseDescriptor.getUserFunctionTimeoutPolicy())
-        {
-            case die:
-                // policy to give 250ms grace time to
-                ScheduledExecutors.nonPeriodicTasks.schedule(() -> killer.killCurrentJVM(t, false, true), 250, TimeUnit.MILLISECONDS);
-                break;
-            case die_immediate:
-                killer.killCurrentJVM(t, false, true);
-                break;
-            case ignore:
-                logger.error(t.getMessage());
-                break;
-        }
     }
 
     @VisibleForTesting

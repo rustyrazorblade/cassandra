@@ -103,10 +103,28 @@ public class ConfigCompatibilityTest
                                                                  .add("native_transport_port_ssl")
                                                                  .build();
 
+    // user defined functions and aggregates were removed together with their settings
+    private static final Set<String> REMOVED_IN_60 = ImmutableSet.<String>builder()
+                                                                 .add("enable_user_defined_functions")
+                                                                 .add("enable_scripted_user_defined_functions")
+                                                                 .add("enable_user_defined_functions_threads")
+                                                                 .add("allow_insecure_udfs")
+                                                                 .add("allow_extra_insecure_udfs")
+                                                                 .add("user_defined_function_warn_timeout")
+                                                                 .add("user_defined_function_fail_timeout")
+                                                                 .add("user_function_timeout_policy")
+                                                                 .add("user_defined_functions_enabled")
+                                                                 .add("scripted_user_defined_functions_enabled")
+                                                                 .add("user_defined_functions_threads_enabled")
+                                                                 .add("user_defined_functions_warn_timeout")
+                                                                 .add("user_defined_functions_fail_timeout")
+                                                                 .build();
+
     private static final Set<String> ALLOW_LIST = ImmutableSet.<String>builder()
                                                               .addAll(REMOVED_IN_40)
                                                               .addAll(REMOVED_IN_50)
                                                               .addAll(REMOVED_IN_51)
+                                                              .addAll(REMOVED_IN_60)
                                                               .build();
 
     private static final Set<String> EXPECTED_FOR_50 = ImmutableSet.<String>builder()
@@ -166,6 +184,7 @@ public class ConfigCompatibilityTest
     {
         diff(TEST_DIR + "/version=5.0-alpha1.yml", ImmutableSet.<String>builder()
                                                                .addAll(REMOVED_IN_51)
+                                                               .addAll(REMOVED_IN_60)
                                                                .build(), EXPECTED_FOR_50);
     }
 
@@ -173,6 +192,7 @@ public class ConfigCompatibilityTest
     public void diff_6_0() throws IOException
     {
         diff(TEST_DIR + "/version=6.0-alpha1.yml", ImmutableSet.<String>builder()
+                                                               .addAll(REMOVED_IN_60)
                                                                .build(), ImmutableSet.of());
     }
 

@@ -75,21 +75,21 @@ public class FailStartupDuplicateParamsTest
     @Test
     public void testReplacementDupesOldFirst() throws IOException
     {
-        testYaml("[enable_user_defined_functions -> user_defined_functions_enabled]", true,
-                 "enable_user_defined_functions: true",
-                 "user_defined_functions_enabled: false");
+        testYaml("[enable_materialized_views -> materialized_views_enabled]", true,
+                 "enable_materialized_views: true",
+                 "materialized_views_enabled: false");
 
-        testYaml("[enable_user_defined_functions -> user_defined_functions_enabled]", true,
-                 "enable_user_defined_functions: true",
-                 "user_defined_functions_enabled: true");
+        testYaml("[enable_materialized_views -> materialized_views_enabled]", true,
+                 "enable_materialized_views: true",
+                 "materialized_views_enabled: true");
     }
 
     @Test
     public void testReplacementDupesNewFirst() throws IOException
     {
-        testYaml("[enable_user_defined_functions -> user_defined_functions_enabled]", true,
-                 "user_defined_functions_enabled: false",
-                 "enable_user_defined_functions: true");
+        testYaml("[enable_materialized_views -> materialized_views_enabled]", true,
+                 "materialized_views_enabled: false",
+                 "enable_materialized_views: true");
 
     }
 

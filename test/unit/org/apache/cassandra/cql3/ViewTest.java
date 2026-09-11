@@ -582,64 +582,6 @@ public class ViewTest extends ViewAbstractTest
                                               "k = token(1) AND v IS NOT NULL",
                                               "INSERT INTO %s(k, v) VALUES (0, 1)",
                                               "INSERT INTO %s(k, v) VALUES (2, 3)"));
-
-        // UDF with lowercase name, shouldn't be quoted in the schema where clause
-        assertRows(testFunctionInWhereClause("CREATE TABLE %s (k int PRIMARY KEY, v int)",
-                                             "CREATE FUNCTION fun()" +
-                                             "   CALLED ON NULL INPUT" +
-                                             "   RETURNS int LANGUAGE java" +
-                                             "   AS 'return 2;'",
-                                             "CREATE MATERIALIZED VIEW %s AS " +
-                                             "   SELECT * FROM %s WHERE k = fun() AND v IS NOT NULL" +
-                                             "   PRIMARY KEY (v, k)",
-                                             "k = fun() AND v IS NOT NULL",
-                                             "INSERT INTO %s(k, v) VALUES (0, 1)",
-                                             "INSERT INTO %s(k, v) VALUES (2, 3)"), row(3, 2));
-
-        // UDF with uppercase name, should be quoted in the schema where clause
-        assertRows(testFunctionInWhereClause("CREATE TABLE %s (k int PRIMARY KEY, v int)",
-                                             "CREATE FUNCTION \"FUN\"()" +
-                                             "   CALLED ON NULL INPUT" +
-                                             "   RETURNS int" +
-                                             "   LANGUAGE java" +
-                                             "   AS 'return 2;'",
-                                             "CREATE MATERIALIZED VIEW %s AS " +
-                                             "   SELECT * FROM %s WHERE k = \"FUN\"() AND v IS NOT NULL" +
-                                             "   PRIMARY KEY (v, k)",
-                                             "k = \"FUN\"() AND v IS NOT NULL",
-                                             "INSERT INTO %s(k, v) VALUES (0, 1)",
-                                             "INSERT INTO %s(k, v) VALUES (2, 3)"), row(3, 2));
-
-        // UDF with uppercase name conflicting with TOKEN keyword but not with native token function name,
-        // should be quoted in the schema where clause
-        assertRows(testFunctionInWhereClause("CREATE TABLE %s (k int PRIMARY KEY, v int)",
-                                             "CREATE FUNCTION \"TOKEN\"(x int)" +
-                                             "   CALLED ON NULL INPUT" +
-                                             "   RETURNS int" +
-                                             "   LANGUAGE java" +
-                                             "   AS 'return x;'",
-                                             "CREATE MATERIALIZED VIEW %s AS" +
-                                             "   SELECT * FROM %s WHERE k = \"TOKEN\"(2) AND v IS NOT NULL" +
-                                             "   PRIMARY KEY (v, k)",
-                                             "k = \"TOKEN\"(2) AND v IS NOT NULL",
-                                             "INSERT INTO %s(k, v) VALUES (0, 1)",
-                                             "INSERT INTO %s(k, v) VALUES (2, 3)"), row(3, 2));
-
-        // UDF with lowercase name conflicting with both TOKEN keyword and native token function name,
-        // requires specifying the keyspace and should be quoted in the schema where clause
-        assertRows(testFunctionInWhereClause("CREATE TABLE %s (k int PRIMARY KEY, v int)",
-                                             "CREATE FUNCTION \"token\"(x int)" +
-                                             "   CALLED ON NULL INPUT" +
-                                             "   RETURNS int" +
-                                             "   LANGUAGE java" +
-                                             "   AS 'return x;'",
-                                             "CREATE MATERIALIZED VIEW %s AS" +
-                                             "   SELECT * FROM %s " +
-                                             "   WHERE k = " + keyspace() + ".\"token\"(2) AND v IS NOT NULL" +
-                                             "   PRIMARY KEY (v, k)",
-                                             "k = " + keyspace() + ".\"token\"(2) AND v IS NOT NULL",
-                                             "INSERT INTO %s(k, v) VALUES (0, 1)",
-                                             "INSERT INTO %s(k, v) VALUES (2, 3)"), row(3, 2));
     }
 
     /**

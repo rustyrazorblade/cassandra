@@ -23,8 +23,6 @@ import java.util.List;
 
 import com.google.common.base.Objects;
 
-import org.apache.cassandra.cql3.functions.UDAggregate;
-import org.apache.cassandra.cql3.functions.UDFunction;
 import org.apache.cassandra.locator.InetAddressAndPort;
 
 import io.netty.buffer.ByteBuf;
@@ -269,16 +267,6 @@ public abstract class Event
         public SchemaChange(Change change, String keyspace)
         {
             this(change, Target.KEYSPACE, keyspace, null);
-        }
-
-        public static SchemaChange forFunction(Change change, UDFunction function)
-        {
-            return new SchemaChange(change, Target.FUNCTION, function.name().keyspace, function.name().name, function.argumentsList());
-        }
-
-        public static SchemaChange forAggregate(Change change, UDAggregate aggregate)
-        {
-            return new SchemaChange(change, Target.AGGREGATE, aggregate.name().keyspace, aggregate.name().name, aggregate.argumentsList());
         }
 
         // Assumes the type has already been deserialized

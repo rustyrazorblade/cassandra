@@ -262,10 +262,6 @@ cqlStatement returns [CQLStatement.Raw stmt]
     | st25=createTypeStatement             { $stmt = st25; }
     | st26=alterTypeStatement              { $stmt = st26; }
     | st27=dropTypeStatement               { $stmt = st27; }
-    | st28=createFunctionStatement         { $stmt = st28; }
-    | st29=dropFunctionStatement           { $stmt = st29; }
-    | st30=createAggregateStatement        { $stmt = st30; }
-    | st31=dropAggregateStatement          { $stmt = st31; }
     | st32=createRoleStatement             { $stmt = st32; }
     | st33=alterRoleStatement              { $stmt = st33; }
     | st34=dropRoleStatement               { $stmt = st34; }
@@ -845,104 +841,6 @@ txnColumnCondition[List<ConditionStatement.Raw> conditions]
         | (txnConditionKind term)=> op=txnConditionKind t=term { conditions.add(new ConditionStatement.Raw(lhs, op, t)); }
       )
     | lhs=term op=txnConditionKind rhs=rowDataReference { conditions.add(new ConditionStatement.Raw(lhs, op, rhs)); }
-    ;
-
-createAggregateStatement returns [CreateAggregateStatement.Raw stmt]
-    @init {
-        boolean orReplace = false;
-        boolean ifNotExists = false;
-
-        List<CQL3Type.Raw> argTypes = new ArrayList<>();
-    }
-    : K_CREATE (K_OR K_REPLACE { orReplace = true; })?
-      K_AGGREGATE
-      (K_IF K_NOT K_EXISTS { ifNotExists = true; })?
-      fn=functionName
-      '('
-        (
-          v=comparatorType { argTypes.add(v); }
-          ( ',' v=comparatorType { argTypes.add(v); } )*
-        )?
-      ')'
-      K_SFUNC sfunc = allowedFunctionName
-      K_STYPE stype = comparatorType
-      (
-        K_FINALFUNC ffunc = allowedFunctionName
-      )?
-      (
-        K_INITCOND ival = term
-      )?
-      { $stmt = new CreateAggregateStatement.Raw(fn, argTypes, stype, sfunc, ffunc, ival, orReplace, ifNotExists); }
-    ;
-
-dropAggregateStatement returns [DropAggregateStatement.Raw stmt]
-    @init {
-        boolean ifExists = false;
-        List<CQL3Type.Raw> argTypes = new ArrayList<>();
-        boolean argsSpecified = false;
-    }
-    : K_DROP K_AGGREGATE
-      (K_IF K_EXISTS { ifExists = true; } )?
-      fn=functionName
-      (
-        '('
-          (
-            v=comparatorType { argTypes.add(v); }
-            ( ',' v=comparatorType { argTypes.add(v); } )*
-          )?
-        ')'
-        { argsSpecified = true; }
-      )?
-      { $stmt = new DropAggregateStatement.Raw(fn, argTypes, argsSpecified, ifExists); }
-    ;
-
-createFunctionStatement returns [CreateFunctionStatement.Raw stmt]
-    @init {
-        boolean orReplace = false;
-        boolean ifNotExists = false;
-
-        List<ColumnIdentifier> argNames = new ArrayList<>();
-        List<CQL3Type.Raw> argTypes = new ArrayList<>();
-        boolean calledOnNullInput = false;
-    }
-    : K_CREATE (K_OR K_REPLACE { orReplace = true; })?
-      K_FUNCTION
-      (K_IF K_NOT K_EXISTS { ifNotExists = true; })?
-      fn=functionName
-      '('
-        (
-          k=noncol_ident v=comparatorType { argNames.add(k); argTypes.add(v); }
-          ( ',' k=noncol_ident v=comparatorType { argNames.add(k); argTypes.add(v); } )*
-        )?
-      ')'
-      ( (K_RETURNS K_NULL) | (K_CALLED { calledOnNullInput=true; })) K_ON K_NULL K_INPUT
-      K_RETURNS returnType = comparatorType
-      K_LANGUAGE language = IDENT
-      K_AS body = STRING_LITERAL
-      { $stmt = new CreateFunctionStatement.Raw(
-          fn, argNames, argTypes, returnType, calledOnNullInput, LocalizeString.toLowerCaseLocalized($language.text), $body.text, orReplace, ifNotExists);
-      }
-    ;
-
-dropFunctionStatement returns [DropFunctionStatement.Raw stmt]
-    @init {
-        boolean ifExists = false;
-        List<CQL3Type.Raw> argTypes = new ArrayList<>();
-        boolean argsSpecified = false;
-    }
-    : K_DROP K_FUNCTION
-      (K_IF K_EXISTS { ifExists = true; } )?
-      fn=functionName
-      (
-        '('
-          (
-            v=comparatorType { argTypes.add(v); }
-            ( ',' v=comparatorType { argTypes.add(v); } )*
-          )?
-        ')'
-        { argsSpecified = true; }
-      )?
-      { $stmt = new DropFunctionStatement.Raw(fn, argTypes, argsSpecified, ifExists); }
     ;
 
 /**

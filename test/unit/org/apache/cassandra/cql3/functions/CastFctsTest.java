@@ -271,19 +271,6 @@ public class CastFctsTest extends CQLTester
                 "CAST(CAST(CAST(b AS tinyint) AS double) AS text), " +
                 "CAST(CAST(CAST(c AS tinyint) AS double) AS text) FROM %s"),
                    row("1.0", "2.0", "6.0"));
-
-        String f = createFunction(KEYSPACE, "int",
-                                  "CREATE FUNCTION %s(val int) " +
-                                          "RETURNS NULL ON NULL INPUT " +
-                                          "RETURNS double " +
-                                          "LANGUAGE java " +
-                                          "AS 'return (double)val;'");
-
-        assertRows(execute("SELECT " + f + "(CAST(b AS int)) FROM %s"),
-                   row((double) 2));
-
-        assertRows(execute("SELECT CAST(" + f + "(CAST(b AS int)) AS text) FROM %s"),
-                   row("2.0"));
     }
 
     @Test
@@ -332,14 +319,6 @@ public class CastFctsTest extends CQLTester
         // Type hint of cast
         execute("INSERT INTO %s (k, v) VALUES (1, (int) CAST(4.9 AS int))");
         assertRows(execute("SELECT v FROM %s"), row(4));
-
-        // Function of cast
-        execute(String.format("INSERT INTO %%s (k, v) VALUES (1, %s(CAST(5 AS float)))", floatToInt()));
-        assertRows(execute("SELECT v FROM %s"), row(5));
-
-        // Cast of function
-        execute(String.format("INSERT INTO %%s (k, v) VALUES (1, CAST(%s(6) AS int))", intToFloat()));
-        assertRows(execute("SELECT v FROM %s"), row(6));
     }
 
     /**
@@ -369,14 +348,6 @@ public class CastFctsTest extends CQLTester
         // Type hint of cast
         execute("UPDATE %s SET v = (int) CAST(4.9 AS int) WHERE k = 1");
         assertRows(execute("SELECT v FROM %s"), row(4));
-
-        // Function of cast
-        execute(String.format("UPDATE %%s SET v = %s(CAST(5 AS float)) WHERE k = 1", floatToInt()));
-        assertRows(execute("SELECT v FROM %s"), row(5));
-
-        // Cast of function
-        execute(String.format("UPDATE %%s SET v = CAST(%s(6) AS int) WHERE k = 1", intToFloat()));
-        assertRows(execute("SELECT v FROM %s"), row(6));
     }
 
     /**
@@ -411,14 +382,6 @@ public class CastFctsTest extends CQLTester
         // Type hint of cast
         execute("UPDATE %s SET v = ? WHERE k = (int) CAST(4.9 AS int)", 4);
         assertRows(execute("SELECT v FROM %s WHERE k = ?", 4), row(4));
-
-        // Function of cast
-        execute(String.format("UPDATE %%s SET v = ? WHERE k = %s(CAST(5 AS float))", floatToInt()), 5);
-        assertRows(execute("SELECT v FROM %s WHERE k = ?", 5), row(5));
-
-        // Cast of function
-        execute(String.format("UPDATE %%s SET v = ? WHERE k = CAST(%s(6) AS int)", intToFloat()), 6);
-        assertRows(execute("SELECT v FROM %s WHERE k = ?", 6), row(6));
     }
 
     /**
@@ -449,12 +412,6 @@ public class CastFctsTest extends CQLTester
 
         // Type hint of cast
         assertRows(execute("SELECT k FROM %s WHERE k = (int) CAST(4.9 AS int)"), row(4));
-
-        // Function of cast
-        assertRows(execute(String.format("SELECT k FROM %%s WHERE k = %s(CAST(5 AS float))", floatToInt())), row(5));
-
-        // Cast of function
-        assertRows(execute(String.format("SELECT k FROM %%s WHERE k = CAST(%s(6) AS int)", intToFloat())), row(6));
     }
 
     /**
@@ -489,46 +446,6 @@ public class CastFctsTest extends CQLTester
         // Type hint of cast
         execute("DELETE FROM %s WHERE k = (int) CAST(4.9 AS int)");
         assertEmpty(execute("SELECT * FROM %s WHERE k = ?", 4));
-
-        // Function of cast
-        execute(String.format("DELETE FROM %%s WHERE k = %s(CAST(5 AS float))", floatToInt()));
-        assertEmpty(execute("SELECT * FROM %s WHERE k = ?", 5));
-
-        // Cast of function
-        execute(String.format("DELETE FROM %%s WHERE k = CAST(%s(6) AS int)", intToFloat()));
-        assertEmpty(execute("SELECT * FROM %s WHERE k = ?", 6));
-    }
-
-    /**
-     * Creates a CQL function that casts an {@code int} argument into a {@code float}.
-     *
-     * @return the name of the created function
-     */
-    private String floatToInt() throws Throwable
-    {
-        return createFunction(KEYSPACE,
-                              "int, int",
-                              "CREATE FUNCTION IF NOT EXISTS %s (x float) " +
-                              "CALLED ON NULL INPUT " +
-                              "RETURNS int " +
-                              "LANGUAGE java " +
-                              "AS 'return Float.valueOf(x).intValue();'");
-    }
-
-    /**
-     * Creates a CQL function that casts a {@code float} argument into an {@code int}.
-     *
-     * @return the name of the created function
-     */
-    private String intToFloat() throws Throwable
-    {
-        return createFunction(KEYSPACE,
-                              "int, int",
-                              "CREATE FUNCTION IF NOT EXISTS %s (x int) " +
-                              "CALLED ON NULL INPUT " +
-                              "RETURNS float " +
-                              "LANGUAGE java " +
-                              "AS 'return (float) x;'");
     }
 
     /**

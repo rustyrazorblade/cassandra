@@ -713,14 +713,6 @@ public class Config
     @Replaces(oldName = "prepared_statements_cache_size_mb", converter = Converters.MEBIBYTES_DATA_STORAGE_LONG, deprecated = true)
     public DataStorageSpec.LongMebibytesBound prepared_statements_cache_size = null;
 
-    @Replaces(oldName = "enable_user_defined_functions", converter = Converters.IDENTITY, deprecated = true)
-    public boolean user_defined_functions_enabled = false;
-
-    /** @deprecated See CASSANDRA-18252 */
-    @Deprecated(since = "5.0")
-    @Replaces(oldName = "enable_scripted_user_defined_functions", converter = Converters.IDENTITY, deprecated = true)
-    public boolean scripted_user_defined_functions_enabled = false;
-
     @Replaces(oldName = "enable_materialized_views", converter = Converters.IDENTITY, deprecated = true)
     public boolean materialized_views_enabled = false;
 
@@ -778,56 +770,7 @@ public class Config
 
     public volatile boolean use_statements_enabled = true;
 
-    /**
-     * Optionally disable asynchronous UDF execution.
-     * Disabling asynchronous UDF execution also implicitly disables the security-manager!
-     * By default, async UDF execution is enabled to be able to detect UDFs that run too long / forever and be
-     * able to fail fast - i.e. stop the Cassandra daemon, which is currently the only appropriate approach to
-     * "tell" a user that there's something really wrong with the UDF.
-     * When you disable async UDF execution, users MUST pay attention to read-timeouts since these may indicate
-     * UDFs that run too long or forever - and this can destabilize the cluster.
-     *
-     * This requires allow_insecure_udfs to be true
-     */
-    // Below parameter is not presented in cassandra.yaml but to be on the safe side that no one was directly using it
-    // I still added backward compatibility (CASSANDRA-15234)
-    @Replaces(oldName = "enable_user_defined_functions_threads", converter = Converters.IDENTITY, deprecated = true)
-    public boolean user_defined_functions_threads_enabled = true;
-
-    /**
-     * Set this to true to allow running insecure UDFs.
-     */
-    public boolean allow_insecure_udfs = false;
-
-    /**
-     * Set this to allow UDFs accessing java.lang.System.* methods, which basically allows UDFs to execute any arbitrary code on the system.
-     */
-    public boolean allow_extra_insecure_udfs = false;
-
     public boolean dynamic_data_masking_enabled = false;
-
-    /**
-     * Time in milliseconds after a warning will be emitted to the log and to the client that a UDF runs too long.
-     * (Only valid, if user_defined_functions_threads_enabled==true)
-     */
-    @Replaces(oldName = "user_defined_function_warn_timeout", converter = Converters.MILLIS_DURATION_LONG, deprecated = true)
-    public DurationSpec.LongMillisecondsBound user_defined_functions_warn_timeout = new DurationSpec.LongMillisecondsBound("500ms");
-    /**
-     * Time in milliseconds after a fatal UDF run-time situation is detected and action according to
-     * user_function_timeout_policy will take place.
-     * (Only valid, if user_defined_functions_threads_enabled==true)
-     */
-    @Replaces(oldName = "user_defined_function_fail_timeout", converter = Converters.MILLIS_DURATION_LONG, deprecated = true)
-    public DurationSpec.LongMillisecondsBound user_defined_functions_fail_timeout = new DurationSpec.LongMillisecondsBound("1500ms");
-    /**
-     * Defines what to do when a UDF ran longer than user_defined_functions_fail_timeout.
-     * Possible options are:
-     * - 'die' - i.e. it is able to emit a warning to the client before the Cassandra Daemon will shut down.
-     * - 'die_immediate' - shut down C* daemon immediately (effectively prevent the chance that the client will receive a warning).
-     * - 'ignore' - just log - the most dangerous option.
-     * (Only valid, if user_defined_functions_threads_enabled==true)
-     */
-    public UserFunctionTimeoutPolicy user_function_timeout_policy = UserFunctionTimeoutPolicy.die;
 
     /** @deprecated See CASSANDRA-15375 */
     @Deprecated(since = "4.0")
@@ -1472,13 +1415,6 @@ public class Config
         stop_commit,
         ignore,
         die,
-    }
-
-    public enum UserFunctionTimeoutPolicy
-    {
-        ignore,
-        die,
-        die_immediate
     }
 
     public enum DiskOptimizationStrategy

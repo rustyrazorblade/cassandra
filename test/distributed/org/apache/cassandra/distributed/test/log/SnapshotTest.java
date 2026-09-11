@@ -46,20 +46,12 @@ public class SnapshotTest extends TestBaseImpl
         try (Cluster cluster = init(builder().withDC("DC1", 3)
                                              .withDC("DC2", 3)
                                              .withConfig(config -> config.with(NETWORK, GOSSIP)
-                                                                         .set("user_defined_functions_enabled", "true")
                                                                          .set("materialized_views_enabled", "true"))
                                              .start()))
         {
             cluster.schemaChange(withKeyspace("create table %s.tbl (id int primary key, x int)"));
             cluster.schemaChange(withKeyspace("create table %s.tblconstraints (id int primary key, x int check x > 100 and x < 200, v text check LENGTH() > 10)"));
             cluster.schemaChange(withKeyspace("create table %s.tblconstraints2 (id int primary key, x int check NOT NULL, v text check LENGTH() > 10)"));
-            cluster.schemaChange(withKeyspace("CREATE OR REPLACE FUNCTION %s.fLog (input double) CALLED ON NULL INPUT RETURNS double LANGUAGE java AS 'return Double.valueOf(Math.log(input.doubleValue()));';"));
-            cluster.schemaChange(withKeyspace("CREATE OR REPLACE FUNCTION %s.avgState ( state tuple<int,bigint>, val int ) CALLED ON NULL INPUT RETURNS tuple<int,bigint> LANGUAGE java AS \n" +
-                                              "  'if (val !=null) { state.setInt(0, state.getInt(0)+1); state.setLong(1, state.getLong(1)+val.intValue()); } return state;'; "));
-            cluster.schemaChange(withKeyspace("CREATE OR REPLACE FUNCTION %s.avgFinal ( state tuple<int,bigint> ) CALLED ON NULL INPUT RETURNS double LANGUAGE java AS \n" +
-                                              "  'double r = 0; if (state.getInt(0) == 0) return null; r = state.getLong(1); r/= state.getInt(0); return Double.valueOf(r);';"));
-            cluster.schemaChange(withKeyspace("CREATE AGGREGATE IF NOT EXISTS %s.average ( int ) \n" +
-                                 "SFUNC avgState STYPE tuple<int,bigint> FINALFUNC avgFinal INITCOND (0,0);"));
             cluster.schemaChange(withKeyspace("CREATE MATERIALIZED VIEW %s.test_mv \n" +
                                               "AS SELECT x, id FROM distributed_test_keyspace.tbl \n" +
                                               "WHERE id IS NOT NULL AND x IS NOT NULL\n" +
@@ -88,7 +80,6 @@ public class SnapshotTest extends TestBaseImpl
                                              .withTokenSupplier(TokenSupplier.evenlyDistributedTokens(4))
                                              .withNodeIdTopology(NetworkTopology.singleDcNetworkTopology(4, "dc0", "rack0"))
                                              .withConfig(config -> config.with(NETWORK, GOSSIP)
-                                                                         .set("user_defined_functions_enabled", "true")
                                                                          .set("materialized_views_enabled", "true"))
                                              .start()))
         {
