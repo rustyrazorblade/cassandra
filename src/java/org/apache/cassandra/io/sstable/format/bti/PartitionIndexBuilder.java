@@ -18,7 +18,10 @@
 package org.apache.cassandra.io.sstable.format.bti;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.function.Consumer;
+
+import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.io.tries.IncrementalTrieWriter;
@@ -27,6 +30,7 @@ import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
+import org.apache.cassandra.utils.bytecomparable.ByteSource;
 
 /**
  * Partition index builder: stores index or data positions in an incrementally built, page aware on-disk trie.
@@ -60,10 +64,29 @@ class PartitionIndexBuilder implements AutoCloseable
     private DecoratedKey lastWrittenKey;
     private PartitionIndex.Payload lastPayload;
 
+    // Each key is encoded to its comparable bytes once and kept in a scratch slot, rather than re-encoded by the trie
+    // and diffPoint calls.  The trie retains the previous key and re-streams it on the next add, and diffPoint needs
+    // the current key materialized while that previous key is still live, so three key buffers are live at once.  A
+    // ring of SCRATCH_SLOTS slots, advanced one slot per key, keeps all three stable; two buffers would corrupt the
+    // retained previous key.  SCRATCH_SLOTS is 3 because that is the number of keys the pipeline holds at once.
+    private static final int SCRATCH_SLOTS = 3;
+    private static final int INITIAL_SCRATCH = 64;
+    private final byte[][] keyScratch = new byte[SCRATCH_SLOTS][];
+    private int slot = 0;           // ring slot for the next key
+    private byte[] lastKeyBytes;    // scratch slot backing lastKey
+    private int lastKeyLen;
+    private byte[] triePrev;        // scratch array last handed to the trie; the trie re-reads it on the next add
+
     public PartitionIndexBuilder(SequentialWriter writer, FileHandle.Builder fhBuilder)
     {
+        this(writer, fhBuilder, IncrementalTrieWriter.open(PartitionIndex.TRIE_SERIALIZER, writer));
+    }
+
+    @VisibleForTesting
+    PartitionIndexBuilder(SequentialWriter writer, FileHandle.Builder fhBuilder, IncrementalTrieWriter<PartitionIndex.Payload> trieWriter)
+    {
         this.writer = writer;
-        this.trieWriter = IncrementalTrieWriter.open(PartitionIndex.TRIE_SERIALIZER, writer);
+        this.trieWriter = trieWriter;
         this.fhBuilder = fhBuilder;
     }
 
@@ -129,6 +152,12 @@ class PartitionIndexBuilder implements AutoCloseable
     */
     public void addEntry(DecoratedKey decoratedKey, long position) throws IOException
     {
+        // The slot we are about to overwrite must not still hold the last key or the key the trie re-reads as prev.
+        assert keyScratch[slot] == null || (keyScratch[slot] != lastKeyBytes && keyScratch[slot] != triePrev)
+            : "scratch ring slot " + slot + " is still live";
+        int curLen = materialize(slot, decoratedKey);
+        byte[] curBytes = keyScratch[slot];
+
         if (lastKey == null)
         {
             firstKey = decoratedKey;
@@ -136,14 +165,55 @@ class PartitionIndexBuilder implements AutoCloseable
         }
         else
         {
-            int diffPoint = ByteComparable.diffPoint(lastKey, decoratedKey, Walker.BYTE_COMPARABLE_VERSION);
-            ByteComparable prevPrefix = ByteComparable.cut(lastKey, Math.max(diffPoint, lastDiffPoint));
-            trieWriter.add(prevPrefix, lastPayload);
+            int diffPoint = diffPoint(lastKeyBytes, lastKeyLen, curBytes, curLen);
+            // Clamp to lastKeyLen: ByteSource.cut stops at the stream length, but fixedLength has no such clamp, so we
+            // apply it here to reproduce the cut prefix exactly.
+            int m = Math.min(Math.max(diffPoint, lastDiffPoint), lastKeyLen);
+            trieWriter.add(ByteComparable.fixedLength(lastKeyBytes, 0, m), lastPayload);
+            triePrev = lastKeyBytes;
             lastWrittenKey = lastKey;
             lastDiffPoint = diffPoint;
         }
         lastKey = decoratedKey;
         lastPayload = new PartitionIndex.Payload(position, decoratedKey.filterHashLowerBits());
+        lastKeyBytes = curBytes;
+        lastKeyLen = curLen;
+        slot = slot + 1 == SCRATCH_SLOTS ? 0 : slot + 1;
+    }
+
+    /**
+     * Encodes the key's comparable bytes into the given scratch slot, growing it as needed, and returns the encoded
+     * length.  The caller reads the backing array from {@code keyScratch[slot]}.  That array must stay unchanged until
+     * the trie is done reading it as the previous key, which the ring guarantees.
+     */
+    private int materialize(int slot, DecoratedKey key)
+    {
+        byte[] buf = keyScratch[slot];
+        if (buf == null)
+            buf = keyScratch[slot] = new byte[INITIAL_SCRATCH];
+        ByteSource src = key.asComparableBytes(Walker.BYTE_COMPARABLE_VERSION);
+        int len = 0;
+        for (int b = src.next(); b != ByteSource.END_OF_STREAM; b = src.next())
+        {
+            if (len == buf.length)
+                buf = keyScratch[slot] = Arrays.copyOf(buf, buf.length * 2);
+            buf[len++] = (byte) b;
+        }
+        return len;
+    }
+
+    /**
+     * Returns the number of equal leading bytes plus one, matching {@link ByteComparable#diffPoint}.  {@link
+     * Arrays#mismatch} returns the first differing index over the two ranges, or -1 when the ranges are equal; when one
+     * range is a prefix of the other it returns the shorter length.  Both no-mismatch cases mean the shared prefix runs
+     * to the shorter length, so we map them to {@code lim} and add one to match the diffPoint convention.  A byte
+     * equality test is the same as an unsigned equality test, so no masking is needed.
+     */
+    private static int diffPoint(byte[] a, int la, byte[] b, int lb)
+    {
+        int lim = Math.min(la, lb);
+        int m = Arrays.mismatch(a, 0, la, b, 0, lb);
+        return (m < 0 ? lim : m) + 1;
     }
 
     public long complete() throws IOException
@@ -153,8 +223,9 @@ class PartitionIndexBuilder implements AutoCloseable
 
         if (lastKey != lastWrittenKey)
         {
-            ByteComparable prevPrefix = ByteComparable.cut(lastKey, lastDiffPoint);
-            trieWriter.add(prevPrefix, lastPayload);
+            // Clamp to lastKeyLen for the same reason as in addEntry: fixedLength has no implicit length clamp.
+            int m = Math.min(lastDiffPoint, lastKeyLen);
+            trieWriter.add(ByteComparable.fixedLength(lastKeyBytes, 0, m), lastPayload);
         }
 
         long root = trieWriter.complete();
