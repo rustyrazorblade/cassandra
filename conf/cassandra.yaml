@@ -39,7 +39,7 @@ cluster_name: 'Test Cluster'
 # See https://cassandra.apache.org/doc/latest/getting-started/production.html#tokens for
 # best practice information about num_tokens.
 #
-num_tokens: 16
+num_tokens: 4
 
 # Triggers automatic allocation of num_tokens tokens for this node. The allocation
 # algorithm attempts to choose tokens in a way that optimizes replicated load over
@@ -688,8 +688,16 @@ commitlog_segment_size: 32MiB
 # The default setting is legacy when the storage compatibility is set to 4 or auto otherwise.
 commitlog_disk_access_mode: legacy
 
-# Experimental.  New garbage free compaction path.  Does not yet support collections, counters, BTI.
-cursor_compaction_enabled: false
+# Garbage-free cursor compaction path.  Supports BTI and BIG, complex columns, and counters.
+# Unsupported edge cases (dropped multi-cell columns, non-latest sstable versions, tombstone
+# garbage-skipping, forcecompact, secondary indexes) fall back to the iterator path automatically.
+cursor_compaction_enabled: true
+
+# Cursor-based memtable flush path.
+cursor_flush_enabled: true
+
+# Cursor-based single-partition read path.
+cursor_reads_enabled: true
 
 # Experimental.  Hands each filled chunk buffer to a pool of reusable slots so the compressed
 # write path can be decoupled from the thread producing the data.
@@ -710,7 +718,7 @@ async_compaction_writer_enabled: false
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
-# compaction_read_disk_access_mode: auto
+compaction_read_disk_access_mode: direct
 
 # Set the disk access mode for writing compressed SSTables during background operations
 # (compaction, streaming, cleanup, repair, etc.). The allowed values are:
@@ -721,7 +729,7 @@ async_compaction_writer_enabled: false
 # data typically benefits from page cache for subsequent reads (workloads that
 # rarely read recently-flushed data, e.g. write-heavy time series, may see less
 # benefit from caching flush output).
-# background_write_disk_access_mode: standard
+background_write_disk_access_mode: direct
 
 # Size of the in-memory staging buffer for Direct IO background writes. Trades off syscall
 # frequency against per-flush blocking latency on the compaction thread.
@@ -841,7 +849,7 @@ memtable:
     trie:
       class_name: TrieMemtable
     default:
-      inherits: skiplist
+      inherits: trie
 
 # Total permitted memory to use for memtables. Cassandra will stop
 # accepting writes when the limit is exceeded until a flush completes,
@@ -876,7 +884,7 @@ memtable:
 #
 # offheap_objects
 #    off heap objects
-memtable_allocation_type: heap_buffers
+memtable_allocation_type: offheap_objects
 
 # Limit memory usage for Merkle tree calculations during repairs of a certain
 # table and common token range. Repair commands targetting multiple tables or
@@ -1219,8 +1227,8 @@ snapshot_links_per_second: 0
 # The default format is "big", the legacy SSTable format in use since Cassandra 3.0.
 # Cassandra versions 5.0 and later also support the trie-indexed "bti" format,
 # which offers better performance.
-#sstable:
-#  selected_format: big
+sstable:
+  selected_format: bti
 
 # Granularity of the collation index of rows within a partition.
 # Applies to both BIG and BTI SSTable formats. In both formats,
