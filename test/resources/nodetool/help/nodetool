@@ -110,7 +110,6 @@ The most commonly used nodetool commands are:
     reloadlocalschema                   Reload local node schema from system tables
     reloadseeds                         Reload the seed node list from the seed node provider
     reloadssl                           Signals Cassandra to reload SSL certificates
-    reloadtriggers                      Reload trigger classes
     relocatesstables                    Relocates sstables to the correct disk
     removenode                          Show status of current node removal, abort removal or remove provided ID
     repair                              Repair one or more tables

@@ -50,7 +50,6 @@ import org.apache.cassandra.tcm.membership.Location;
 import org.apache.cassandra.tcm.membership.NodeAddresses;
 import org.apache.cassandra.tcm.membership.NodeVersion;
 import org.apache.cassandra.tcm.transformations.Register;
-import org.apache.cassandra.triggers.ITrigger;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static java.lang.String.format;
@@ -492,69 +491,6 @@ public class CreateTest extends CQLTester
     }
 
     @Test
-    public void testCreateTrigger() throws Throwable
-    {
-        createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a))");
-        execute("CREATE TRIGGER trigger_1 ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("trigger_1");
-        execute("CREATE TRIGGER trigger_2 ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("trigger_2");
-        assertInvalid("CREATE TRIGGER trigger_1 ON %s USING '" + TestTrigger.class.getName() + "'");
-        execute("CREATE TRIGGER \"Trigger 3\" ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("Trigger 3");
-    }
-
-    @Test
-    public void testCreateTriggerIfNotExists() throws Throwable
-    {
-        createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a, b))");
-
-        execute("CREATE TRIGGER IF NOT EXISTS trigger_1 ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("trigger_1");
-
-        execute("CREATE TRIGGER IF NOT EXISTS trigger_1 ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("trigger_1");
-    }
-
-    @Test
-    public void testDropTrigger() throws Throwable
-    {
-        createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a))");
-
-        execute("CREATE TRIGGER trigger_1 ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("trigger_1");
-
-        execute("DROP TRIGGER trigger_1 ON %s");
-        assertTriggerDoesNotExists("trigger_1");
-
-        execute("CREATE TRIGGER trigger_1 ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("trigger_1");
-
-        assertInvalid("DROP TRIGGER trigger_2 ON %s");
-
-        execute("CREATE TRIGGER \"Trigger 3\" ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("Trigger 3");
-
-        execute("DROP TRIGGER \"Trigger 3\" ON %s");
-        assertTriggerDoesNotExists("Trigger 3");
-    }
-
-    @Test
-    public void testDropTriggerIfExists() throws Throwable
-    {
-        createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a))");
-
-        execute("DROP TRIGGER IF EXISTS trigger_1 ON %s");
-        assertTriggerDoesNotExists("trigger_1");
-
-        execute("CREATE TRIGGER trigger_1 ON %s USING '" + TestTrigger.class.getName() + "'");
-        assertTriggerExists("trigger_1");
-
-        execute("DROP TRIGGER IF EXISTS trigger_1 ON %s");
-        assertTriggerDoesNotExists("trigger_1");
-    }
-
-    @Test
     // tests CASSANDRA-4278
     public void testHyphenDatacenters() throws Throwable
     {
@@ -744,27 +680,6 @@ public class CreateTest extends CQLTester
             Throwable cause = e.getCause();
             assertTrue("The exception should be a ConfigurationException", cause instanceof ConfigurationException);
             assertEquals(errorMsg, cause.getMessage());
-        }
-    }
-
-    private void assertTriggerExists(String name)
-    {
-        TableMetadata metadata = Schema.instance.getTableMetadata(keyspace(), currentTable());
-        assertTrue("the trigger does not exist", metadata.triggers.get(name).isPresent());
-    }
-
-    private void assertTriggerDoesNotExists(String name)
-    {
-        TableMetadata metadata = Schema.instance.getTableMetadata(keyspace(), currentTable());
-        assertFalse("the trigger exists", metadata.triggers.get(name).isPresent());
-    }
-
-    public static class TestTrigger implements ITrigger
-    {
-        public TestTrigger() { }
-        public Collection<Mutation> augment(Partition update)
-        {
-            return Collections.emptyList();
         }
     }
 

@@ -23,7 +23,6 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
-import org.apache.cassandra.triggers.TriggersTest;
 
 import static java.lang.String.format;
 import static org.junit.Assert.assertTrue;
@@ -100,16 +99,6 @@ public class AlterSchemaStatementNoOpTest extends CQLTester
                                                   "PRIMARY KEY (v,k,c)",
                                                   view, table));
         assertMultipleExecutionSingleEpoch(format("DROP MATERIALIZED VIEW IF EXISTS %s", view));
-    }
-
-    @Test
-    public void testTriggerNoOps()
-    {
-        String table = createTable("create table %s (k int primary key, v int)");
-        String trigger = name();
-        assertMultipleExecutionSingleEpoch(format("CREATE TRIGGER IF NOT EXISTS %s ON %s.%s USING '%s'",
-                                                  trigger, KEYSPACE, table, TriggersTest.TestTrigger.class.getName()));
-        assertMultipleExecutionSingleEpoch(format("DROP TRIGGER IF EXISTS %s ON %s.%s", trigger, KEYSPACE, table));
     }
 
     @Test

@@ -2361,11 +2361,6 @@ public class NodeProbe implements AutoCloseable
         return compactionProxy.getCompactionHistory();
     }
 
-    public void reloadTriggers()
-    {
-        spProxy.reloadTriggerClasses();
-    }
-
     public void setLoggingLevel(String classQualifier, String level)
     {
         try

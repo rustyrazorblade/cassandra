@@ -52,7 +52,6 @@ import org.apache.cassandra.db.virtual.VirtualTable;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.StorageServiceMBean;
-import org.apache.cassandra.triggers.ITrigger;
 
 import static java.lang.String.format;
 import static org.junit.Assert.assertEquals;
@@ -998,20 +997,6 @@ public class VirtualTableTest extends CQLTester
 
         assertInvalidMessage("Virtual keyspace 'test_virtual_ks' is not user-modifiable",
                              "CREATE MATERIALIZED VIEW test_virtual_ks.mvt1 AS SELECT c, v1 FROM test_virtual_ks.vt1 WHERE c IS NOT NULL PRIMARY KEY(c)");
-
-        assertInvalidMessage("Virtual keyspace 'test_virtual_ks' is not user-modifiable",
-                             "CREATE TRIGGER test_trigger ON test_virtual_ks.vt1 USING '" + TestTrigger.class.getName() + '\'');
-    }
-
-    /**
-     * Noop trigger for audit log testing
-     */
-    public static class TestTrigger implements ITrigger
-    {
-        public Collection<Mutation> augment(Partition update)
-        {
-            return null;
-        }
     }
 
     @Test

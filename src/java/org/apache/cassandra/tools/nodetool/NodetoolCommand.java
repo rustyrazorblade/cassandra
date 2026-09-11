@@ -161,7 +161,6 @@ import static org.apache.cassandra.tools.nodetool.Help.printTopCommandUsage;
                          ReloadLocalSchema.class,
                          ReloadSeeds.class,
                          ReloadSslCertificates.class,
-                         ReloadTriggers.class,
                          RelocateSSTables.class,
                          RemoveNode.Abort.class,
                          RemoveNode.class,

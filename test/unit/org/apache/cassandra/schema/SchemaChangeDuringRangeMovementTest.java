@@ -25,7 +25,6 @@ import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.transformations.AlterSchema;
-import org.apache.cassandra.triggers.TriggersTest;
 
 import static org.apache.cassandra.tcm.sequences.SequencesUtils.ClearLockedRanges;
 import static org.apache.cassandra.tcm.sequences.SequencesUtils.LockRanges;
@@ -73,15 +72,6 @@ public class SchemaChangeDuringRangeMovementTest extends CQLTester
             dropIndex("DROP INDEX %s." + i);
             dropTable("DROP TABLE %s");
 
-        });
-
-        // create/drop trigger
-        withAndWithoutLockedRanges(() -> {
-            String t = createTable(KEYSPACE, "CREATE TABLE %s (id int primary key, v1 text, v2 text)");
-            execute(String.format("CREATE TRIGGER tr1 ON %s.%s USING '%s'",
-                                  KEYSPACE, t, TriggersTest.TestTrigger.class.getName()));
-            execute("DROP TRIGGER tr1 ON %s");
-            dropTable("DROP TABLE %s");
         });
 
         // create/alter/drop type

@@ -116,6 +116,8 @@ public class JMXCompatibilityTest extends CQLTester
 
                                                    // dropped tables
                                                    "org.apache.cassandra.metrics:type=Table,keyspace=system,scope=(schema_aggregates|schema_columnfamilies|schema_columns|schema_functions|schema_keyspaces|schema_triggers|schema_usertypes),name=.*",
+                                                   "org.apache.cassandra.metrics:type=(ColumnFamily|Table),keyspace=system_schema,scope=triggers,name=.*", // triggers feature removed
+                                                   "org.apache.cassandra.db:type=(ColumnFamilies|Tables),keyspace=system_schema,(columnfamily|table)=triggers", // triggers feature removed
                                                    ".*keyspace=system,(scope|table|columnfamily)=views_builds_in_progress.*",
                                                    ".*keyspace=system,(scope|table|columnfamily)=range_xfers.*",
                                                    ".*keyspace=system,(scope|table|columnfamily)=hints.*",
@@ -130,7 +132,8 @@ public class JMXCompatibilityTest extends CQLTester
                                                       "forceRepairRangeAsync", // -> repairAsync
                                                       "beginLocalSampling", // -> beginLocalSampling(p1: java.lang.String, p2: int, p3: int): void
                                                       "finishLocalSampling", // -> finishLocalSampling(p1: java.lang.String, p2: int): java.util.List
-                                                      "scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int" // removed in CASSANDRA-18959
+                                                      "scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int", // removed in CASSANDRA-18959
+                                                      "reloadTriggerClasses" // triggers feature removed
         );
 
         if (BtiFormat.isSelected())
@@ -154,6 +157,8 @@ public class JMXCompatibilityTest extends CQLTester
 
                                                    // dropped tables
                                                    "org.apache.cassandra.metrics:type=Table,keyspace=system,scope=(schema_aggregates|schema_columnfamilies|schema_columns|schema_functions|schema_keyspaces|schema_triggers|schema_usertypes),name=.*",
+                                                   "org.apache.cassandra.metrics:type=(ColumnFamily|Table),keyspace=system_schema,scope=triggers,name=.*", // triggers feature removed
+                                                   "org.apache.cassandra.db:type=(ColumnFamilies|Tables),keyspace=system_schema,(columnfamily|table)=triggers", // triggers feature removed
                                                    ".*keyspace=system,(scope|table|columnfamily)=views_builds_in_progress.*",
                                                    ".*keyspace=system,(scope|table|columnfamily)=range_xfers.*",
                                                    ".*keyspace=system,(scope|table|columnfamily)=hints.*",
@@ -170,7 +175,8 @@ public class JMXCompatibilityTest extends CQLTester
                                                       "forceRepairRangeAsync", // -> repairAsync
                                                       "beginLocalSampling", // -> beginLocalSampling(p1: java.lang.String, p2: int, p3: int): void
                                                       "finishLocalSampling", // -> finishLocalSampling(p1: java.lang.String, p2: int): java.util.List
-                                                      "scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int" // removed in CASSANDRA-18959
+                                                      "scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int", // removed in CASSANDRA-18959
+                                                      "reloadTriggerClasses" // triggers feature removed
         );
 
         if (BtiFormat.isSelected())
@@ -204,8 +210,11 @@ public class JMXCompatibilityTest extends CQLTester
                                                    "org.apache.cassandra.metrics:type=ThreadPools,path=internal,scope=PendingRangeCalculator,name=PendingTasks",
                                                    "org.apache.cassandra.metrics:type=ThreadPools,path=internal,scope=PendingRangeCalculator,name=TotalBlockedTasks"
                 );
+        excludeObjects.add("org.apache.cassandra.metrics:type=(ColumnFamily|Table),keyspace=system_schema,scope=triggers,name=.*"); // triggers feature removed
+        excludeObjects.add("org.apache.cassandra.db:type=(ColumnFamilies|Tables),keyspace=system_schema,(columnfamily|table)=triggers"); // triggers feature removed
         List<String> excludeAttributes = newArrayList("HostIdMap"); // removed in CASSANDRA-18959
-        List<String> excludeOperations = newArrayList("scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int"); // removed in CASSANDRA-18959
+        List<String> excludeOperations = newArrayList("scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int", // removed in CASSANDRA-18959
+                                                      "reloadTriggerClasses"); // triggers feature removed
 
         if (BtiFormat.isSelected())
         {
@@ -238,8 +247,11 @@ public class JMXCompatibilityTest extends CQLTester
                                                    "org.apache.cassandra.metrics:type=ThreadPools,path=internal,scope=PendingRangeCalculator,name=PendingTasks",
                                                    "org.apache.cassandra.metrics:type=ThreadPools,path=internal,scope=PendingRangeCalculator,name=TotalBlockedTasks"
         );
+        excludeObjects.add("org.apache.cassandra.metrics:type=(ColumnFamily|Table),keyspace=system_schema,scope=triggers,name=.*"); // triggers feature removed
+        excludeObjects.add("org.apache.cassandra.db:type=(ColumnFamilies|Tables),keyspace=system_schema,(columnfamily|table)=triggers"); // triggers feature removed
         List<String> excludeAttributes = newArrayList("HostIdMap"); // removed in CASSANDRA-18959
-        List<String> excludeOperations = newArrayList("scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int"); // removed in CASSANDRA-18959
+        List<String> excludeOperations = newArrayList("scrub\\(p1:boolean,p2:boolean,p3:java.lang.String,p4:java.lang.String\\[\\]\\):int", // removed in CASSANDRA-18959
+                                                      "reloadTriggerClasses"); // triggers feature removed
 
         if (BtiFormat.isSelected())
         {

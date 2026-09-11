@@ -67,8 +67,6 @@ public interface StorageProxyMBean
     public void setNativeTransportMaxConcurrentConnectionsPerIp(Long nativeTransportMaxConcurrentConnections);
     public Long getNativeTransportMaxConcurrentConnectionsPerIp();
 
-    public void reloadTriggerClasses();
-
     public long getReadRepairAttempted();
     public long getReadRepairRepairedBlocking();
     public long getReadRepairRepairedBackground();

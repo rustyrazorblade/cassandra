@@ -634,14 +634,6 @@ class Shell(cmd.Cmd):
 
         raise ObjectNotFound("'{}' not found in keyspace '{}'".format(name, ks))
 
-    def get_trigger_names(self, ksname=None):
-        if ksname is None:
-            ksname = self.current_keyspace
-
-        return [trigger.name
-                for table in list(self.get_keyspace_meta(ksname).tables.values())
-                for trigger in list(table.triggers.values())]
-
     def reset_statement(self):
         self.reset_prompt()
         self.statement.truncate(0)

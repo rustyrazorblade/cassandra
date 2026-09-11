@@ -133,7 +133,6 @@ import org.apache.cassandra.service.paxos.Commit.Proposal;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.messages.ResultMessage;
-import org.apache.cassandra.triggers.TriggerExecutor;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MD5Digest;
@@ -738,7 +737,7 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             );
         if (!mutations.isEmpty())
         {
-            StorageProxy.mutateWithTriggers(mutations, cl, false, requestTime, attrs.isTimestampSet() ? PreserveTimestamp.yes : PreserveTimestamp.no);
+            StorageProxy.mutate(mutations, cl, false, requestTime, attrs.isTimestampSet() ? PreserveTimestamp.yes : PreserveTimestamp.no);
 
             if (!SchemaConstants.isSystemKeyspace(metadata.keyspace))
                 ClientRequestSizeMetrics.recordRowAndColumnCountMetrics(mutations);
@@ -934,7 +933,6 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
             return current.rowIterator(false);
 
         PartitionUpdate updates = request.makeUpdates(current, state, ballot);
-        updates = TriggerExecutor.instance.execute(updates);
 
         Proposal proposal = Proposal.of(ballot, updates);
         proposal.makeMutation().apply();

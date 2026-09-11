@@ -6544,18 +6544,6 @@ public class DatabaseDescriptor
         return conf.secondary_indexes_per_table_fail_threshold;
     }
 
-    @VisibleForTesting
-    public static void setTriggersPolicy(Config.TriggersPolicy policy)
-    {
-        logger.info("triggers_policy set to {}", policy);
-        conf.triggers_policy = policy;
-    }
-
-    public static Config.TriggersPolicy getTriggersPolicy()
-    {
-        return conf.triggers_policy;
-    }
-
     public static boolean isPasswordPolicyReconfigurationEnabled()
     {
         return conf.password_policy_reconfiguration_enabled;

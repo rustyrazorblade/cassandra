@@ -615,7 +615,7 @@ class TestCqlshCompletion(CqlshCompletionCase):
         self.trycompletions('DROP ',
                             choices=['AGGREGATE', 'COLUMNFAMILY', 'FUNCTION', 'IDENTITY',
                                      'INDEX', 'KEYSPACE', 'ROLE', 'TABLE',
-                                     'TRIGGER', 'TYPE', 'USER', 'MATERIALIZED'])
+                                     'TYPE', 'USER', 'MATERIALIZED'])
 
     def test_complete_in_drop_keyspace(self):
         self.trycompletions('DROP K', immediate='EYSPACE ')
@@ -638,13 +638,6 @@ class TestCqlshCompletion(CqlshCompletionCase):
                                      'tags', 'system_traces.', 'system_distributed.', 'system_cluster_metadata.',
                                      'phone_number', 'quote_udt', 'band_info_type', 'address', 'system.', 'system_schema.',
                                      'system_auth.', 'system_virtual_schema.', self.cqlsh.keyspace + '.'])
-
-    def test_complete_in_create_trigger(self):
-        self.trycompletions('CREATE TRIGGER ', choices=['<identifier>', '<quotedName>', 'IF'])
-        self.trycompletions('CREATE TRIGGER foo ', immediate='ON ')
-        self.trycompletions('CREATE TRIGGER foo ON ', choices=['system.', 'system_auth.', 'system_distributed.',
-                                                               'system_schema.', 'system_traces.', 'system_views.',
-                                                               'system_virtual_schema.'], other_choices_ok=True)
 
     def create_columnfamily_table_template(self, name):
         """Parameterized test for CREATE COLUMNFAMILY and CREATE TABLE. Since
@@ -821,12 +814,12 @@ class TestCqlshCompletion(CqlshCompletionCase):
         self.trycompletions('CREATE MATERIALIZED VIEW AS SELECT * FROM system.peers WHERE host_id IS NOT NULL PRIMARY KEY ((a,b), c) ', choices=[';', 'WITH'])
 
     def test_complete_in_create_table(self):
-        self.trycompletions('CREATE T', choices=['TRIGGER', 'TABLE', 'TYPE'])
+        self.trycompletions('CREATE T', choices=['TABLE', 'TYPE'])
         self.trycompletions('CREATE TA', immediate='BLE ')
         self.create_columnfamily_table_template('TABLE')
 
     def test_complete_in_create_table_like(self):
-        self.trycompletions('CREATE T', choices=['TRIGGER', 'TABLE', 'TYPE'])
+        self.trycompletions('CREATE T', choices=['TABLE', 'TYPE'])
         self.trycompletions('CREATE TA', immediate='BLE ')
         quoted_keyspace = '"' + self.cqlsh.keyspace + '"'
         self.trycompletions('CREATE TABLE ',
@@ -1033,7 +1026,7 @@ class TestCqlshCompletion(CqlshCompletionCase):
                             other_choices_ok=True)
 
     def test_complete_in_drop_table(self):
-        self.trycompletions('DROP T', choices=['TABLE', 'TRIGGER', 'TYPE'])
+        self.trycompletions('DROP T', choices=['TABLE', 'TYPE'])
         self.trycompletions('DROP TA', immediate='BLE ')
 
     def test_complete_in_truncate(self):

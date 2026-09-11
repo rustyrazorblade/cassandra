@@ -569,16 +569,6 @@ public class CreateLikeTest extends CQLTester
     }
 
     @Test
-    public void testTriggerOperationOnCopiedTable()
-    {
-        String triggerName = "trigger_1";
-        String sourceTb = createTable(sourceKs, "CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a))");
-        String targetTb =  createTableLike("CREATE TABLE %s LIKE %s", sourceTb, sourceKs, targetKs);
-        execute("CREATE TRIGGER " + triggerName + " ON " + targetKs + "." + targetTb + " USING '" + CreateTest.TestTrigger.class.getName() + "'");
-        assertNotNull(getTableMetadata(targetKs, targetTb).triggers.get(triggerName));
-    }
-
-    @Test
     public void testUnSupportedSchema() throws Throwable
     {
         createTable(sourceKs, "CREATE TABLE %s (a int PRIMARY KEY, b int, c text)", "tb");

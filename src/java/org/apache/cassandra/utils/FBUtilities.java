@@ -104,7 +104,6 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.GIT_SHA;
 import static org.apache.cassandra.config.CassandraRelevantProperties.LINE_SEPARATOR;
 import static org.apache.cassandra.config.CassandraRelevantProperties.OS_NAME;
 import static org.apache.cassandra.config.CassandraRelevantProperties.RELEASE_VERSION;
-import static org.apache.cassandra.config.CassandraRelevantProperties.TRIGGERS_DIR;
 import static org.apache.cassandra.config.CassandraRelevantProperties.USER_HOME;
 import static org.apache.cassandra.utils.Clock.Global.currentTimeMillis;
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
@@ -121,7 +120,6 @@ public class FBUtilities
     private static final String UNKNOWN = "Unknown";
 
     public static final BigInteger TWO = new BigInteger("2");
-    private static final String DEFAULT_TRIGGER_DIR = "triggers";
 
     private static final String OPERATING_SYSTEM = toLowerCaseLocalized(OS_NAME.getString());
     public static final boolean isLinux = OPERATING_SYSTEM.contains("linux");
@@ -412,27 +410,6 @@ public class FBUtilities
             throw new ConfigurationException("unable to locate " + filename);
 
         return new File(scpurl.getFile()).absolutePath();
-    }
-
-    public static File cassandraTriggerDir()
-    {
-        File triggerDir = null;
-        if (TRIGGERS_DIR.getString() != null)
-        {
-            triggerDir = new File(TRIGGERS_DIR.getString());
-        }
-        else
-        {
-            URL confDir = FBUtilities.class.getClassLoader().getResource(DEFAULT_TRIGGER_DIR);
-            if (confDir != null)
-                triggerDir = new File(confDir.getFile());
-        }
-        if (triggerDir == null || !triggerDir.exists())
-        {
-            logger.warn("Trigger directory doesn't exist, please create it and try again.");
-            return null;
-        }
-        return triggerDir;
     }
 
     public static void setPreviousReleaseVersionString(String previousReleaseVersionString)

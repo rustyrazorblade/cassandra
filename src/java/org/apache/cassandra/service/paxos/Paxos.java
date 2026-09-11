@@ -104,7 +104,6 @@ import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.ownership.DataPlacement;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.Dispatcher;
-import org.apache.cassandra.triggers.TriggerExecutor;
 import org.apache.cassandra.utils.CassandraVersion;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.NoSpamLogger;
@@ -786,17 +785,7 @@ public class Paxos
                     // TODO "turn null updates into delete?" - what does this TODO even mean?
                     PartitionUpdate updates = request.makeUpdates(current, clientState, begin.ballot);
 
-                    // Update the metrics before triggers potentially add mutations.
                     ClientRequestSizeMetrics.recordRowAndColumnCountMetrics(updates);
-
-                    // Apply triggers to cas updates. A consideration here is that
-                    // triggers emit Mutations, and so a given trigger implementation
-                    // may generate mutations for partitions other than the one this
-                    // paxos round is scoped for. In this case, TriggerExecutor will
-                    // validate that the generated mutations are targetted at the same
-                    // partition as the initial updates and reject (via an
-                    // InvalidRequestException) any which aren't.
-                    updates = TriggerExecutor.instance.execute(updates);
 
                     proposal = Proposal.of(ballot, updates);
                     Tracing.trace("CAS precondition is met; proposing client-requested updates for {}", ballot);

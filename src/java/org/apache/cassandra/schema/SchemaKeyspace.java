@@ -110,7 +110,6 @@ import static org.apache.cassandra.schema.SchemaKeyspaceTables.FUNCTIONS;
 import static org.apache.cassandra.schema.SchemaKeyspaceTables.INDEXES;
 import static org.apache.cassandra.schema.SchemaKeyspaceTables.KEYSPACES;
 import static org.apache.cassandra.schema.SchemaKeyspaceTables.TABLES;
-import static org.apache.cassandra.schema.SchemaKeyspaceTables.TRIGGERS;
 import static org.apache.cassandra.schema.SchemaKeyspaceTables.TYPES;
 import static org.apache.cassandra.schema.SchemaKeyspaceTables.VIEWS;
 import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
@@ -224,16 +223,6 @@ public final class SchemaKeyspace
               + "type text,"
               + "PRIMARY KEY ((keyspace_name), table_name, column_name))");
 
-    private static final TableMetadata Triggers =
-        parse(TRIGGERS,
-              "trigger definitions",
-              "CREATE TABLE %s ("
-              + "keyspace_name text,"
-              + "table_name text,"
-              + "trigger_name text,"
-              + "options frozen<map<text, text>>,"
-              + "PRIMARY KEY ((keyspace_name), table_name, trigger_name))");
-
     private static final TableMetadata Views =
         parse(VIEWS,
               "view definitions",
@@ -322,7 +311,6 @@ public final class SchemaKeyspace
                                                                                    Tables,
                                                                                    Columns,
                                                                                    ColumnMasks,
-                                                                                   Triggers,
                                                                                    DroppedColumns,
                                                                                    Views,
                                                                                    Types,
@@ -648,7 +636,7 @@ public final class SchemaKeyspace
         return builder;
     }
 
-    private static void addTableToSchemaMutation(TableMetadata table, boolean withColumnsAndTriggers, Mutation.SimpleBuilder builder)
+    private static void addTableToSchemaMutation(TableMetadata table, boolean withColumnsAndIndexes, Mutation.SimpleBuilder builder)
     {
         Row.SimpleBuilder rowBuilder = builder.update(Tables)
                                               .row(table.name)
@@ -658,16 +646,13 @@ public final class SchemaKeyspace
 
         addTableParamsToRowBuilder(table.params, rowBuilder, false);
 
-        if (withColumnsAndTriggers)
+        if (withColumnsAndIndexes)
         {
             for (ColumnMetadata column : table.columns())
                 addColumnToSchemaMutation(table, column, builder);
 
             for (DroppedColumn column : table.droppedColumns.values())
                 addDroppedColumnToSchemaMutation(table, column, builder);
-
-            for (TriggerMetadata trigger : table.triggers)
-                addTriggerToSchemaMutation(table, trigger, builder);
 
             for (IndexMetadata index : table.indexes)
                 addIndexToSchemaMutation(table, index, builder);
@@ -756,16 +741,6 @@ public final class SchemaKeyspace
         for (ByteBuffer name : droppedColumnDiff.entriesDiffering().keySet())
             addDroppedColumnToSchemaMutation(newTable, newTable.droppedColumns.get(name), builder);
 
-        MapDifference<String, TriggerMetadata> triggerDiff = triggersDiff(oldTable.triggers, newTable.triggers);
-
-        // dropped triggers
-        for (TriggerMetadata trigger : triggerDiff.entriesOnlyOnLeft().values())
-            dropTriggerFromSchemaMutation(oldTable, trigger, builder);
-
-        // newly created triggers
-        for (TriggerMetadata trigger : triggerDiff.entriesOnlyOnRight().values())
-            addTriggerToSchemaMutation(newTable, trigger, builder);
-
         MapDifference<String, IndexMetadata> indexesDiff = indexesDiff(oldTable.indexes, newTable.indexes);
 
         // dropped indexes
@@ -803,26 +778,12 @@ public final class SchemaKeyspace
         return Maps.difference(beforeMap, afterMap);
     }
 
-    private static MapDifference<String, TriggerMetadata> triggersDiff(Triggers before, Triggers after)
-    {
-        Map<String, TriggerMetadata> beforeMap = new HashMap<>();
-        before.forEach(t -> beforeMap.put(t.name, t));
-
-        Map<String, TriggerMetadata> afterMap = new HashMap<>();
-        after.forEach(t -> afterMap.put(t.name, t));
-
-        return Maps.difference(beforeMap, afterMap);
-    }
-
     private static void addDropTableToSchemaMutation(TableMetadata table, Mutation.SimpleBuilder builder)
     {
         builder.update(Tables).row(table.name).delete();
 
         for (ColumnMetadata column : table.columns())
             dropColumnFromSchemaMutation(table, column, builder);
-
-        for (TriggerMetadata trigger : table.triggers)
-            dropTriggerFromSchemaMutation(table, trigger, builder);
 
         for (DroppedColumn column : table.droppedColumns.values())
             dropDroppedColumnFromSchemaMutation(table, column, builder);
@@ -910,18 +871,6 @@ public final class SchemaKeyspace
     private static void dropDroppedColumnFromSchemaMutation(TableMetadata table, DroppedColumn column, Mutation.SimpleBuilder builder)
     {
         builder.update(DroppedColumns).row(table.name, column.column.name.toString()).delete();
-    }
-
-    private static void addTriggerToSchemaMutation(TableMetadata table, TriggerMetadata trigger, Mutation.SimpleBuilder builder)
-    {
-        builder.update(Triggers)
-               .row(table.name, trigger.name)
-               .add("options", Collections.singletonMap("class", trigger.classOption));
-    }
-
-    private static void dropTriggerFromSchemaMutation(TableMetadata table, TriggerMetadata trigger, Mutation.SimpleBuilder builder)
-    {
-        builder.update(Triggers).row(table.name, trigger.name).delete();
     }
 
     private static void addViewToSchemaMutation(ViewMetadata view, boolean includeColumns, Mutation.SimpleBuilder builder)
@@ -1160,7 +1109,6 @@ public final class SchemaKeyspace
                             .addColumns(fetchColumns(keyspaceName, tableName, types, functions))
                             .droppedColumns(fetchDroppedColumns(keyspaceName, tableName))
                             .indexes(fetchIndexes(keyspaceName, tableName))
-                            .triggers(fetchTriggers(keyspaceName, tableName))
                             .build();
     }
 
@@ -1338,21 +1286,6 @@ public final class SchemaKeyspace
         IndexMetadata.Kind type = IndexMetadata.Kind.valueOf(row.getString("kind"));
         Map<String, String> options = row.getFrozenTextMap("options");
         return IndexMetadata.fromSchemaMetadata(name, type, options);
-    }
-
-    private static Triggers fetchTriggers(String keyspace, String table)
-    {
-        String query = String.format("SELECT * FROM %s.%s WHERE keyspace_name = ? AND table_name = ?", SchemaConstants.SCHEMA_KEYSPACE_NAME, TRIGGERS);
-        Triggers.Builder triggers = org.apache.cassandra.schema.Triggers.builder();
-        query(query, keyspace, table).forEach(row -> triggers.add(createTriggerFromRow(row)));
-        return triggers.build();
-    }
-
-    private static TriggerMetadata createTriggerFromRow(UntypedResultSet.Row row)
-    {
-        String name = row.getString("trigger_name");
-        String classOption = row.getFrozenTextMap("options").get("class");
-        return new TriggerMetadata(name, classOption);
     }
 
     private static Views fetchViews(String keyspaceName, Types types, UserFunctions functions)

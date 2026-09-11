@@ -190,7 +190,6 @@ public final class SchemaEvent extends DiagnosticEvent
         ret.put("flags", Lists.newArrayList(table.flags.stream().map(Enum::name).iterator()));
         ret.put("params", repr(table.params));
         ret.put("indexes", Lists.newArrayList(table.indexes.stream().map(this::repr).iterator()));
-        ret.put("triggers", Lists.newArrayList(repr(table.triggers)));
         ret.put("columns", Lists.newArrayList(table.columns.values().stream().map(this::repr).iterator()));
         ret.put("droppedColumns", Lists.newArrayList(table.droppedColumns.values().stream().map(this::repr).iterator()));
         ret.put("isCompactTable", table.isCompactTable());
@@ -266,24 +265,6 @@ public final class SchemaEvent extends DiagnosticEvent
         ret.put("isCustom", index.isCustom());
         ret.put("isKeys", index.isKeys());
         ret.put("isComposites", index.isComposites());
-        return ret;
-    }
-
-    private List<Map<String, Serializable>> repr(Triggers triggers)
-    {
-        List<Map<String, Serializable>> ret = new ArrayList<>();
-        if (triggers == null) return ret;
-        Iterator<TriggerMetadata> iter = triggers.iterator();
-        while (iter.hasNext()) ret.add(repr(iter.next()));
-        return ret;
-    }
-
-    private HashMap<String, Serializable> repr(TriggerMetadata trigger)
-    {
-        HashMap<String, Serializable> ret = new HashMap<>();
-        if (trigger == null) return ret;
-        ret.put("name", trigger.name);
-        ret.put("classOption", trigger.classOption);
         return ret;
     }
 

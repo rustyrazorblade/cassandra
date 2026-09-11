@@ -51,7 +51,6 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableParams;
-import org.apache.cassandra.schema.Triggers;
 import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.ClientWarn;
@@ -212,8 +211,7 @@ public final class CopyTableStatement extends AlterSchemaStatement
                                                                          targetTableName,
                                                                          sourceKeyspaceMeta.types,
                                                                          UserFunctions.none())
-                                                                  .indexes(Indexes.none())
-                                                                  .triggers(Triggers.none());
+                                                                  .indexes(Indexes.none());
 
         // Copy requested features using the CreateLikeHandler pattern
         for (CreateLikeOption option : createLikeOptions)

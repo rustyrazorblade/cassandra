@@ -179,7 +179,6 @@ import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.tcm.ownership.VersionedEndpoints;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.transport.Dispatcher;
-import org.apache.cassandra.triggers.TriggerExecutor;
 import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MBeanWrapper;
@@ -464,21 +463,11 @@ public class StorageProxy implements StorageProxyMBean
                 // Create the desired updates
                 PartitionUpdate updates = request.makeUpdates(current, clientState, ballot);
 
-                // Update the metrics before triggers potentially add mutations.
                 ClientRequestSizeMetrics.recordRowAndColumnCountMetrics(updates);
 
                 long size = updates.dataSize();
                 casWriteMetrics.mutationSize.update(size);
                 writeMetricsForLevel(consistencyForPaxos).mutationSize.update(size);
-
-                // Apply triggers to cas updates. A consideration here is that
-                // triggers emit Mutations, and so a given trigger implementation
-                // may generate mutations for partitions other than the one this
-                // paxos round is scoped for. In this case, TriggerExecutor will
-                // validate that the generated mutations are targetted at the same
-                // partition as the initial updates and reject (via an
-                // InvalidRequestException) any which aren't.
-                updates = TriggerExecutor.instance.execute(updates);
 
                 return Pair.create(updates, null);
             };
@@ -1221,11 +1210,11 @@ public class StorageProxy implements StorageProxyMBean
     }
 
     @SuppressWarnings("unchecked")
-    public static void mutateWithTriggers(List<? extends IMutation> mutations,
-                                          ConsistencyLevel consistencyLevel,
-                                          boolean mutateAtomically,
-                                          Dispatcher.RequestTime requestTime,
-                                          PreserveTimestamp preserveTimestamps)
+    public static void mutate(List<? extends IMutation> mutations,
+                              ConsistencyLevel consistencyLevel,
+                              boolean mutateAtomically,
+                              Dispatcher.RequestTime requestTime,
+                              PreserveTimestamp preserveTimestamps)
     throws WriteTimeoutException, WriteFailureException, UnavailableException, OverloadedException, InvalidRequestException
     {
         if (DatabaseDescriptor.getPartitionDenylistEnabled() && DatabaseDescriptor.getDenylistWritesEnabled())
@@ -1247,18 +1236,16 @@ public class StorageProxy implements StorageProxyMBean
             }
         }
 
-        List<Mutation> augmented = TriggerExecutor.instance.execute(mutations);
-
         String keyspaceName = mutations.iterator().next().getKeyspaceName();
         boolean updatesView = Keyspace.open(keyspaceName)
                               .viewManager
                               .updatesAffectView(mutations, true);
 
-        long size = IMutation.dataSize(augmented != null ? augmented : mutations);
+        long size = IMutation.dataSize(mutations);
         writeMetrics.mutationSize.update(size);
         writeMetricsForLevel(consistencyLevel).mutationSize.update(size);
-        if (augmented != null || mutateAtomically || updatesView)
-            mutateAtomically(augmented != null ? augmented : (List<Mutation>)mutations, consistencyLevel, updatesView, requestTime);
+        if (mutateAtomically || updatesView)
+            mutateAtomically((List<Mutation>)mutations, consistencyLevel, updatesView, requestTime);
         else
             dispatchMutationsWithRetryOnDifferentSystem(mutations, consistencyLevel, requestTime, preserveTimestamps);
     }
@@ -3436,8 +3423,6 @@ public class StorageProxy implements StorageProxyMBean
 
     public Long getNativeTransportMaxConcurrentConnectionsPerIp() { return DatabaseDescriptor.getNativeTransportMaxConcurrentConnectionsPerIp(); }
     public void setNativeTransportMaxConcurrentConnectionsPerIp(Long nativeTransportMaxConcurrentConnections) { DatabaseDescriptor.setNativeTransportMaxConcurrentConnectionsPerIp(nativeTransportMaxConcurrentConnections); }
-
-    public void reloadTriggerClasses() { TriggerExecutor.instance.reloadClasses(); }
 
     public long getReadRepairAttempted()
     {

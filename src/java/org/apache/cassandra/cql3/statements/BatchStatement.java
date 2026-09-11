@@ -552,7 +552,7 @@ public class BatchStatement implements CQLStatement.CompositeCQLStatement
         // tables to go through the batch log in order to preserve all or nothing application
         // see CASSANDRA-20588 for more details
         boolean mutateAtomic = (isLogged() && mutations.size() > 1) || (isSingleTokenStatementSpanningAccordAndNonAccordTables(ClusterMetadata.current(), mutations.get(0)));
-        StorageProxy.mutateWithTriggers(mutations, cl, mutateAtomic, requestTime, preserveTimestamp);
+        StorageProxy.mutate(mutations, cl, mutateAtomic, requestTime, preserveTimestamp);
         ClientRequestSizeMetrics.recordRowAndColumnCountMetrics(mutations);
     }
 

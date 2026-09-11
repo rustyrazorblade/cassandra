@@ -26,7 +26,6 @@ public class SchemaKeyspaceTables
     public static final String COLUMNS = "columns";
     public static final String COLUMN_MASKS = "column_masks";
     public static final String DROPPED_COLUMNS = "dropped_columns";
-    public static final String TRIGGERS = "triggers";
     public static final String VIEWS = "views";
     public static final String TYPES = "types";
     public static final String FUNCTIONS = "functions";
@@ -49,7 +48,6 @@ public class SchemaKeyspaceTables
     public static final ImmutableList<String> ALL = ImmutableList.of(COLUMN_MASKS,
                                                                      COLUMNS,
                                                                      DROPPED_COLUMNS,
-                                                                     TRIGGERS,
                                                                      TYPES,
                                                                      FUNCTIONS,
                                                                      AGGREGATES,

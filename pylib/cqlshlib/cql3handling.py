@@ -285,7 +285,6 @@ JUNK ::= /([ \t\r\f\v]+|(--|[/][/])[^\n\r]*([\n\r]|$)|[/][*].*?[*][/])/ ;
                           | <createUserTypeStatement>
                           | <createFunctionStatement>
                           | <createAggregateStatement>
-                          | <createTriggerStatement>
                           | <addIdentityStatement>
                           | <dropKeyspaceStatement>
                           | <dropColumnFamilyStatement>
@@ -294,7 +293,6 @@ JUNK ::= /([ \t\r\f\v]+|(--|[/][/])[^\n\r]*([\n\r]|$)|[/][*].*?[*][/])/ ;
                           | <dropUserTypeStatement>
                           | <dropFunctionStatement>
                           | <dropAggregateStatement>
-                          | <dropTriggerStatement>
                           | <dropIdentityStatement>
                           | <alterTableStatement>
                           | <alterKeyspaceStatement>
@@ -1782,31 +1780,6 @@ def rolename_completer(ctxt, cass):
 
     session = cass.session
     return map(maybe_escape_name, [row['role'] for row in session.execute("LIST ROLES")])
-
-
-syntax_rules += r'''
-<createTriggerStatement> ::= "CREATE" "TRIGGER" ( "IF" "NOT" "EXISTS" )? <cident>
-                               "ON" cf=<columnFamilyName> "USING" class=<stringLiteral>
-                           ;
-<dropTriggerStatement> ::= "DROP" "TRIGGER" ( "IF" "EXISTS" )? triggername=<cident>
-                             "ON" cf=<columnFamilyName>
-                         ;
-'''
-
-explain_completion('createTriggerStatement', 'class', '\'fully qualified class name\'')
-
-
-def get_trigger_names(ctxt, cass):
-    ks = ctxt.get_binding('ksname', None)
-    if ks is not None:
-        ks = dequote_name(ks)
-    return cass.get_trigger_names(ks)
-
-
-@completer_for('dropTriggerStatement', 'triggername')
-def drop_trigger_completer(ctxt, cass):
-    names = get_trigger_names(ctxt, cass)
-    return list(map(maybe_escape_name, names))
 
 
 syntax_rules += r'''

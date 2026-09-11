@@ -121,7 +121,6 @@ _have nodetool && _have cqlsh &&
             reloadlocalschema
             reloadseeds
             reloadssl
-            reloadtriggers
             repair_admin
             replaybatchlog
             resetfullquerylog

@@ -93,9 +93,6 @@
 # Set the port for inter-node communication. (Default: 7000)
 #-Dcassandra.storage_port=port
 
-# Set the default location for the trigger JARs. (Default: conf/triggers)
-#-Dcassandra.triggers_dir=directory
-
 # For testing new compaction and compression strategies. It allows you to experiment with different
 # strategies and benchmark write performance differences without affecting the production workload. 
 #-Dcassandra.write_survey=true

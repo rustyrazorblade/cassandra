@@ -207,7 +207,6 @@ K_POSITIVE_INFINITY:    I N F I N I T Y;
 K_NEGATIVE_INFINITY: '-' I N F I N I T Y;
 K_TUPLE:       T U P L E;
 
-K_TRIGGER:     T R I G G E R;
 K_STATIC:      S T A T I C;
 K_FROZEN:      F R O Z E N;
 K_FOR:         F O R;

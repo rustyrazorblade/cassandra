@@ -1654,18 +1654,6 @@ public class Config
     public boolean unsafe_tcm_mode = false;
     public boolean legacy_state_listener_sync_local_updates = true;
 
-    public enum TriggersPolicy
-    {
-        // Execute triggers
-        enabled,
-        // Don't execute triggers when executing queries
-        disabled,
-        // Throw an exception when attempting to execute a trigger
-        forbidden
-    }
-
-    public TriggersPolicy triggers_policy = TriggersPolicy.enabled;
-
     /**
      * Which timestamp should be used to represent a base for replica-side timeouts.
      * Client-side timeout is always based on the QUEUE, and is controlled by native_transport_timeout.

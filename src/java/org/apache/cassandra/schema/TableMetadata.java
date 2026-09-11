@@ -206,7 +206,6 @@ public class TableMetadata implements SchemaElement
     private final ColumnMetadata[] columnsById;
 
     public final Indexes indexes;
-    public final Triggers triggers;
 
     // derived automatically from flags and columns
     public final AbstractType<?> partitionKeyType;
@@ -260,7 +259,6 @@ public class TableMetadata implements SchemaElement
         columns = ImmutableMap.copyOf(builder.columns);
 
         indexes = builder.indexes;
-        triggers = builder.triggers;
 
         partitionKeyType = partitionKeyColumns.size() == 1
                          ? partitionKeyColumns.get(0).type
@@ -327,7 +325,6 @@ public class TableMetadata implements SchemaElement
                .addColumns(columns())
                .droppedColumns(droppedColumns)
                .indexes(indexes)
-               .triggers(triggers)
                .epoch(epoch);
     }
 
@@ -344,11 +341,6 @@ public class TableMetadata implements SchemaElement
     public TableMetadata withSwapped(Set<Flag> flags)
     {
         return unbuild().flags(flags).build();
-    }
-
-    public TableMetadata withSwapped(Triggers triggers)
-    {
-        return unbuild().triggers(triggers).build();
     }
 
     public TableMetadata withSwapped(Indexes indexes)
@@ -898,8 +890,7 @@ public class TableMetadata implements SchemaElement
             && params.equals(tm.params)
             && flags.equals(tm.flags)
             && droppedColumns.equals(tm.droppedColumns)
-            && indexes.equals(tm.indexes)
-            && triggers.equals(tm.triggers);
+            && indexes.equals(tm.indexes);
     }
 
     Optional<Difference> compare(TableMetadata other)
@@ -940,7 +931,7 @@ public class TableMetadata implements SchemaElement
     @Override
     public int hashCode()
     {
-        return Objects.hash(keyspace, name, id, partitioner, kind, params, flags, columns, droppedColumns, indexes, triggers);
+        return Objects.hash(keyspace, name, id, partitioner, kind, params, flags, columns, droppedColumns, indexes);
     }
 
     @Override
@@ -962,7 +953,6 @@ public class TableMetadata implements SchemaElement
                           .add("columns", columns())
                           .add("droppedColumns", droppedColumns.values())
                           .add("indexes", indexes)
-                          .add("triggers", triggers)
                           .toString();
     }
 
@@ -980,7 +970,6 @@ public class TableMetadata implements SchemaElement
 
         // See the comment on Flag.COMPOUND definition for why we (still) inconditionally add this flag.
         private Set<Flag> flags = EnumSet.of(Flag.COMPOUND);
-        private Triggers triggers = Triggers.none();
         private Indexes indexes = Indexes.none();
 
         private boolean isOffline = false;
@@ -1237,12 +1226,6 @@ public class TableMetadata implements SchemaElement
         private Builder flag(Flag flag, boolean set)
         {
             if (set) flags.add(flag); else flags.remove(flag);
-            return this;
-        }
-
-        public Builder triggers(Triggers val)
-        {
-            triggers = val;
             return this;
         }
 
@@ -2155,7 +2138,6 @@ public class TableMetadata implements SchemaElement
             }
 
             Indexes.serializer.serialize(t.indexes, out, version);
-            Triggers.serializer.serialize(t.triggers, out, version);
         }
 
         public TableMetadata deserialize(DataInputPlus in, Types types, UserFunctions functions, Version version) throws IOException
@@ -2188,7 +2170,6 @@ public class TableMetadata implements SchemaElement
                 droppedColumns.put(ByteBufferUtil.readWithShortLength(in), DroppedColumn.serializer.deserialize(in, types, functions, version));
             builder.droppedColumns(droppedColumns);
             builder.indexes(Indexes.serializer.deserialize(in, version));
-            builder.triggers(Triggers.serializer.deserialize(in, version));
             return builder.build();
         }
 
@@ -2221,7 +2202,6 @@ public class TableMetadata implements SchemaElement
             }
 
             size += Indexes.serializer.serializedSize(t.indexes, version);
-            size += Triggers.serializer.serializedSize(t.triggers, version);
 
             return size;
         }

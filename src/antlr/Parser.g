@@ -259,8 +259,6 @@ cqlStatement returns [CQLStatement.Raw stmt]
     | st20=alterUserStatement              { $stmt = st20; }
     | st21=dropUserStatement               { $stmt = st21; }
     | st22=listUsersStatement              { $stmt = st22; }
-    | st23=createTriggerStatement          { $stmt = st23; }
-    | st24=dropTriggerStatement            { $stmt = st24; }
     | st25=createTypeStatement             { $stmt = st25; }
     | st26=alterTypeStatement              { $stmt = st26; }
     | st27=dropTypeStatement               { $stmt = st27; }
@@ -1163,27 +1161,6 @@ viewProperty[CreateViewStatement.Raw stmt]
 viewClusteringOrder[CreateViewStatement.Raw stmt]
     @init{ boolean ascending = true; }
     : k=ident (K_ASC | K_DESC { ascending = false; } ) { $stmt.extendClusteringOrder(k, ascending); }
-    ;
-
-/**
- * CREATE TRIGGER triggerName ON columnFamily USING 'triggerClass';
- */
-createTriggerStatement returns [CreateTriggerStatement.Raw stmt]
-    @init {
-        boolean ifNotExists = false;
-    }
-    : K_CREATE K_TRIGGER (K_IF K_NOT K_EXISTS { ifNotExists = true; } )? (name=ident)
-        K_ON cf=columnFamilyName K_USING cls=STRING_LITERAL
-      { $stmt = new CreateTriggerStatement.Raw(cf, name.toString(), $cls.text, ifNotExists); }
-    ;
-
-/**
- * DROP TRIGGER [IF EXISTS] triggerName ON columnFamily;
- */
-dropTriggerStatement returns [DropTriggerStatement.Raw stmt]
-     @init { boolean ifExists = false; }
-    : K_DROP K_TRIGGER (K_IF K_EXISTS { ifExists = true; } )? (name=ident) K_ON cf=columnFamilyName
-      { $stmt = new DropTriggerStatement.Raw(cf, name.toString(), ifExists); }
     ;
 
 /**
@@ -2431,7 +2408,6 @@ basic_unreserved_keyword returns [String str]
         | K_HASHED
         | K_EXISTS
         | K_CUSTOM
-        | K_TRIGGER
         | K_CONTAINS
         | K_INTERNALS
         | K_ONLY
