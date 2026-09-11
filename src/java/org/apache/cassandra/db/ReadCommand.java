@@ -1366,7 +1366,6 @@ public abstract class ReadCommand extends AbstractReadQuery
                                       "TableId: {}, remote epoch: {}, local epoch: {}", 10L, TimeUnit.SECONDS);
 
         private static final int IS_DIGEST = 0x01;
-        private static final int IS_FOR_THRIFT = 0x02;
         private static final int HAS_INDEX = 0x04;
         private static final int ACCEPTS_TRANSIENT = 0x08;
         private static final int NEEDS_RECONCILIATION = 0x10;
@@ -1403,16 +1402,6 @@ public abstract class ReadCommand extends AbstractReadQuery
         private static int acceptsTransientFlag(boolean acceptsTransient)
         {
             return acceptsTransient ? ACCEPTS_TRANSIENT : 0;
-        }
-
-        // We don't set this flag anymore, but still look if we receive a
-        // command with it set in case someone is using thrift a mixed 3.0/4.0+
-        // cluster (which is unsupported). This is also a reminder for not
-        // re-using this flag until we drop 3.0/3.X compatibility (since it's
-        // used by these release for thrift and would thus confuse things)
-        private static boolean isForThrift(int flags)
-        {
-            return (flags & IS_FOR_THRIFT) != 0;
         }
 
         private static int indexFlag(boolean hasIndex)
@@ -1518,14 +1507,6 @@ public abstract class ReadCommand extends AbstractReadQuery
         {
             Kind kind = Kind.fromOrdinal(in.readByte());
             int flags = in.readByte();
-            // Shouldn't happen or it's a user error (see comment above) but
-            // better complain loudly than doing the wrong thing.
-            if (isForThrift(flags))
-                throw new IllegalStateException("Received a command with the thrift flag set. "
-                                                + "This means thrift is in use in a mixed 3.0/3.X and 4.0+ cluster, "
-                                                + "which is unsupported. Make sure to stop using thrift before "
-                                                + "upgrading to 4.0");
-
             int digestVersion = isDigest(flags) ? in.readUnsignedVInt32() : 0;
             TableId tableId = TableId.deserialize(in);
 
@@ -1556,8 +1537,8 @@ public abstract class ReadCommand extends AbstractReadQuery
         {
             Kind kind = Kind.fromOrdinal(in.readByte());
             int flags = in.readByte();
-            if (isDigest(flags) || isForThrift(flags) || acceptsTransient(flags))
-                throw new IllegalStateException("Received an Accord command with a digest/thrift/transient flag set.");
+            if (isDigest(flags) || acceptsTransient(flags))
+                throw new IllegalStateException("Received an Accord command with a digest/transient flag set.");
 
             TableMetadata tableMetadata = tables.deserialize(in);
 
