@@ -46,7 +46,6 @@ import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTree;
-import org.apache.cassandra.utils.MerkleTree.RowHash;
 import org.apache.cassandra.utils.MerkleTrees;
 
 import static org.apache.cassandra.net.Verb.VALIDATION_RSP;
@@ -217,10 +216,10 @@ public class Validator implements Runnable
         // only add a hash for the merkle tree in case the digest was actually updated - see CASSANDRA-8979
         if (inputBytes > 0)
         {
-            RowHash rowHash = new MerkleTree.RowHash(key.getToken(), digestBytes, inputBytes);
+            // add the digest bytes directly instead of allocating a MerkleTree.RowHash per partition (CASSANDRA-21568)
             if (topPartitionCollector != null)
-                topPartitionCollector.trackPartitionSize(key, rowHash.size);
-            range.addHash(rowHash);
+                topPartitionCollector.trackPartitionSize(key, inputBytes);
+            range.addHash(digestBytes, inputBytes);
         }
     }
 
