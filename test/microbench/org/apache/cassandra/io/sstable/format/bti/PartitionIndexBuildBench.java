@@ -79,7 +79,7 @@ public class PartitionIndexBuildBench
     public void setup()
     {
         DatabaseDescriptor.daemonInitialization();
-        Murmur3Partitioner partitioner = new Murmur3Partitioner();
+        Murmur3Partitioner partitioner = Murmur3Partitioner.instance;
         Random random = new Random(1);
         keys = new DecoratedKey[keyCount];
         for (int i = 0; i < keyCount; i++)

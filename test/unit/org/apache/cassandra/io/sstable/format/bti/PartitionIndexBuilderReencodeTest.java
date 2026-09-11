@@ -194,7 +194,7 @@ public class PartitionIndexBuilderReencodeTest
     @Test
     public void testMurmur3TokenKeyCombinations() throws IOException
     {
-        Murmur3Partitioner p = new Murmur3Partitioner();
+        Murmur3Partitioner p = Murmur3Partitioner.instance;
         List<DecoratedKey> keys = new ArrayList<>();
 
         // same key bytes, different tokens
@@ -307,7 +307,7 @@ public class PartitionIndexBuilderReencodeTest
         m3.add(new BufferDecoratedKey(new Murmur3Partitioner.LongToken(7), sharedKey));
         m3.add(new BufferDecoratedKey(new Murmur3Partitioner.LongToken(3), ByteBufferUtil.bytes("x")));
         m3.add(new BufferDecoratedKey(new Murmur3Partitioner.LongToken(3), ByteBufferUtil.bytes("y")));
-        Murmur3Partitioner p = new Murmur3Partitioner();
+        Murmur3Partitioner p = Murmur3Partitioner.instance;
         Random mr = new Random(13);
         for (int i = 0; i < 1000; i++)
             m3.add(p.decorateKey(ByteBufferUtil.bytes(new UUID(mr.nextLong(), mr.nextLong()))));
