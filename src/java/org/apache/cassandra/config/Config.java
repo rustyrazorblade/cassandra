@@ -177,6 +177,24 @@ public class Config
     @Replaces(oldName = "streaming_keep_alive_period_in_secs", converter = Converters.SECONDS_DURATION, deprecated = true)
     public DurationSpec.IntSecondsBound streaming_keep_alive_period = new DurationSpec.IntSecondsBound("300s");
 
+    // Bytes in flight before a streaming sender blocks. Every streaming path uses it except an
+    // unencrypted whole-SSTable transfer, which has its own fixed window. It must cover the
+    // bandwidth-delay product of the link. Must be at least stream_chunk_size.
+    public volatile DataStorageSpec.IntBytesBound stream_send_window = new DataStorageSpec.IntBytesBound("2MiB");
+
+    // Size of each buffer read from disk and written to the network, for transfers that do not send a
+    // whole SSTable. Must not exceed stream_send_window.
+    public volatile DataStorageSpec.IntBytesBound stream_chunk_size = new DataStorageSpec.IntBytesBound("128KiB");
+
+    // How far ahead of the sender the streaming read-ahead thread reads. Rounded down to whole
+    // chunks, at least one. Every queued chunk holds a networking buffer until the sender writes it.
+    public volatile DataStorageSpec.IntBytesBound stream_read_ahead = new DataStorageSpec.IntBytesBound("2MiB");
+
+    // How the compressed streaming writer reads the data file. It reads the file only over an encrypted
+    // connection; otherwise the bytes go from the page cache to the socket without entering the process.
+    // Only standard and direct are accepted.
+    public volatile DiskAccessMode stream_disk_access_mode = DiskAccessMode.standard;
+
     @Replaces(oldName = "cross_node_timeout", converter = Converters.IDENTITY, deprecated = true)
     public boolean internode_timeout = true;
 

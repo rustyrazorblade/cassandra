@@ -1478,6 +1478,45 @@ slow_query_log_timeout: 500ms
 # bound (for example a few nodes with big files).
 # streaming_connections_per_host: 1
 
+# Maximum bytes in flight before the streaming sender waits for the network to drain. It applies to
+# every streaming transfer but one: an unencrypted whole-SSTable transfer, which uses its own fixed
+# window. With internode encryption on it applies to whole-SSTable transfers as well.
+# Set this to the bandwidth-delay product of your inter-node links. A smaller window leaves a
+# high-latency link idle while it waits for acknowledgements.
+# The node never uses a window below the channel's own write limit, whatever this value is.
+# The node refuses to start if this value is smaller than stream_chunk_size.
+# Min unit: B
+# stream_send_window: 2MiB
+
+# Size of each buffer a transfer that does not send a whole SSTable reads from disk and writes to
+# the network. A larger value means fewer system calls, network frames and compression calls, and
+# costs more memory per concurrent transfer.
+# For an uncompressed SSTable that has a CRC component the setting has no effect: the CRC chunk
+# size decides the buffer size instead.
+# The format on the wire does not change, so a mixed-version cluster is safe.
+# The node refuses to start if this value is larger than stream_send_window.
+# Min unit: B
+# stream_chunk_size: 128KiB
+
+# How far a transfer that does not send a whole SSTable reads ahead of the sender. A separate thread
+# reads this far in front, so the disk keeps working while the sender waits for the network.
+# The node rounds the value down to whole chunks, and always uses at least one.
+# Each concurrent transfer holds this much extra memory until it finishes.
+# Min unit: B
+# stream_read_ahead: 2MiB
+
+# Set the disk access mode for reading compressed SSTables during streaming. The allowed values are:
+# - standard: use buffered I/O (default)
+# - direct: use direct I/O, bypassing the OS page cache
+# It applies only to a compressed SSTable sent over an encrypted connection. Without encryption the
+# bytes go from the page cache to the socket, and this setting has no effect. Uncompressed SSTables
+# always use buffered I/O.
+# Streaming reads each byte once and never reads it again, so buffered I/O evicts data that the read
+# path still needs.
+# If direct is set and any data directory is on a filesystem without direct I/O support, the node
+# refuses to start. Network filesystems (NFS, CIFS) and some virtual filesystems do not support it.
+# stream_disk_access_mode: standard
+
 # Settings for stream stats tracking; used by system_views.streaming table
 # How long before a stream is evicted from tracking; this impacts both historic and currently running
 # streams.

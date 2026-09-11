@@ -18,21 +18,25 @@
 package org.apache.cassandra.db.streaming;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.util.ChannelProxy;
+import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.streaming.ProgressInfo;
 import org.apache.cassandra.streaming.StreamSession;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
+import org.apache.cassandra.streaming.StreamingDataOutputPlus.Section;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -40,77 +44,46 @@ import org.apache.cassandra.utils.FBUtilities;
  */
 public class CassandraCompressedStreamWriter extends CassandraStreamWriter
 {
-    private static final int CHUNK_SIZE = 1 << 16;
     private static final int CRC_LENGTH = 4;
 
     private static final Logger logger = LoggerFactory.getLogger(CassandraCompressedStreamWriter.class);
 
     private final CompressionInfo compressionInfo;
-    private final long totalSize;
 
     public CassandraCompressedStreamWriter(SSTableReader sstable, CassandraStreamHeader header, StreamSession session)
     {
         super(sstable, header, session);
         this.compressionInfo = header.compressionInfo;
-        this.totalSize = header.size();
     }
 
     @Override
     public void write(StreamingDataOutputPlus out) throws IOException
     {
-        long totalSize = totalSize();
         logger.debug("[Stream #{}] Start streaming file {} to {}, repairedAt = {}, totalSize = {}", session.planId(),
                      sstable.getFilename(), session.peer, sstable.getSSTableMetadata().repairedAt, totalSize);
-        try (ChannelProxy fc = sstable.getDataChannel().newChannel())
-        {
-            long progress = 0L;
 
-            // we want to send continuous chunks together to minimise reads from disk and network writes
-            List<Section> sections = fuseAdjacentChunks(compressionInfo.chunks());
+        // contiguous chunks go out together, which reduces reads from disk and writes to the network
+        List<Section> sections = fuseAdjacentChunks(compressionInfo.chunks());
 
-            int sectionIdx = 0;
+        // the compressed chunks already have the form they go out in, so this writer sends file ranges
+        // instead of reading and transforming them; only an encrypted channel reads them into the process
+        File dataFile = sstable.descriptor.fileFor(Components.DATA);
+        String filename = dataFile.toString();
+        long[] progress = new long[1];
+        StreamingFileSource source = StreamingFileSource.open(dataFile, DatabaseDescriptor.getStreamDiskAccessMode());
+        long bytesTransferred = out.writeFileToChannel(source, limiter, sections, bytes -> {
+            progress[0] += bytes;
+            session.progress(filename, ProgressInfo.Direction.OUT, progress[0], bytes, totalSize);
+        }, session.getChannel().readAheadExecutor());
 
-            // stream each of the required sections of the file
-            String filename = sstable.descriptor.fileFor(Components.DATA).toString();
-            for (Section section : sections)
-            {
-                // length of the section to stream
-                long length = section.end - section.start;
-
-                logger.debug("[Stream #{}] Writing section {} with length {} to stream.", session.planId(), sectionIdx++, length);
-
-                // tracks write progress
-                long bytesTransferred = 0;
-                while (bytesTransferred < length)
-                {
-                    int toTransfer = (int) Math.min(CHUNK_SIZE, length - bytesTransferred);
-                    long position = section.start + bytesTransferred;
-
-                    out.writeToChannel(bufferSupplier -> {
-                        ByteBuffer outBuffer = bufferSupplier.get(toTransfer);
-                        long read = fc.read(outBuffer, position);
-                        assert read == toTransfer : String.format("could not read required number of bytes from file to be streamed: read %d bytes, wanted %d bytes", read, toTransfer);
-                        outBuffer.flip();
-                    }, limiter);
-
-                    bytesTransferred += toTransfer;
-                    progress += toTransfer;
-                    session.progress(filename, ProgressInfo.Direction.OUT, progress, toTransfer, totalSize);
-                }
-            }
-            logger.debug("[Stream #{}] Finished streaming file {} to {}, bytesTransferred = {}, totalSize = {}",
-                         session.planId(), sstable.getFilename(), session.peer, FBUtilities.prettyPrintMemory(progress), FBUtilities.prettyPrintMemory(totalSize));
-        }
+        logger.debug("[Stream #{}] Finished streaming file {} to {}, bytesTransferred = {}, totalSize = {}",
+                     session.planId(), sstable.getFilename(), session.peer,
+                     FBUtilities.prettyPrintMemory(bytesTransferred), FBUtilities.prettyPrintMemory(totalSize));
     }
 
-    @Override
-    protected long totalSize()
-    {
-        return totalSize;
-    }
-
-    // chunks are assumed to be sorted by offset
-    private List<Section> fuseAdjacentChunks(CompressionMetadata.Chunk[] chunks)
+    // chunks are assumed to be sorted by offset; each section contains 1..n adjacent compressed chunks
+    @VisibleForTesting
+    List<Section> fuseAdjacentChunks(CompressionMetadata.Chunk[] chunks)
     {
         if (chunks.length == 0)
             return Collections.emptyList();
@@ -141,17 +114,4 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
         return sections;
     }
 
-    // [start, end) positions in the compressed sstable file that we want to stream;
-    // each section contains 1..n adjacent compressed chunks in it.
-    private static class Section
-    {
-        private final long start;
-        private final long end;
-
-        private Section(long start, long end)
-        {
-            this.start = start;
-            this.end = end;
-        }
-    }
 }

@@ -778,6 +778,8 @@ public class DatabaseDescriptor
                                              false);
         }
 
+        validateStreamingConfig(conf);
+
         if (conf.column_index_size != null)
             checkValidForByteConversion(conf.column_index_size, "column_index_size");
         checkValidForByteConversion(conf.column_index_cache_size, "column_index_cache_size");
@@ -4669,6 +4671,81 @@ public class DatabaseDescriptor
     public static DurationSpec.LongMillisecondsBound getStreamTransferTaskTimeout()
     {
         return conf.stream_transfer_task_timeout;
+    }
+
+    @VisibleForTesting
+    static void validateStreamingConfig(Config conf)
+    {
+        if (conf.stream_chunk_size.toBytes() <= 0)
+            throw new ConfigurationException("stream_chunk_size must be positive, but was " + conf.stream_chunk_size, false);
+
+        if (conf.stream_read_ahead.toBytes() <= 0)
+            throw new ConfigurationException("stream_read_ahead must be positive, but was " + conf.stream_read_ahead, false);
+
+        checkChunkFitsSendWindow(conf.stream_chunk_size.toBytes(), conf.stream_send_window.toBytes());
+
+        if (conf.stream_disk_access_mode != DiskAccessMode.standard && conf.stream_disk_access_mode != DiskAccessMode.direct)
+            throw new ConfigurationException("Unsupported disk access mode for stream_disk_access_mode " +
+                                             "(options: standard/direct): " + conf.stream_disk_access_mode, false);
+    }
+
+    /**
+     * A chunk larger than the window makes the writer wait for the in-flight bytes to fall to half the
+     * window before every chunk. See {@link org.apache.cassandra.net.AsyncChannelOutputPlus#waitForSpace}.
+     */
+    private static void checkChunkFitsSendWindow(int chunkSize, int sendWindow)
+    {
+        if (chunkSize > sendWindow)
+            throw new ConfigurationException(String.format("stream_chunk_size (%dB) must not exceed stream_send_window (%dB), " +
+                                                           "or the sender drains the pipe before every chunk. Lower the chunk " +
+                                                           "size before lowering the window.",
+                                                           chunkSize, sendWindow), false);
+    }
+
+    public static int getStreamSendWindowInBytes()
+    {
+        return conf.stream_send_window.toBytes();
+    }
+
+    public static void setStreamSendWindowInBytes(int sendWindowInBytes)
+    {
+        checkChunkFitsSendWindow(conf.stream_chunk_size.toBytes(), sendWindowInBytes);
+        conf.stream_send_window = new DataStorageSpec.IntBytesBound(sendWindowInBytes);
+    }
+
+    public static DiskAccessMode getStreamDiskAccessMode()
+    {
+        return conf.stream_disk_access_mode;
+    }
+
+    public static void setStreamDiskAccessMode(DiskAccessMode mode)
+    {
+        conf.stream_disk_access_mode = mode;
+    }
+
+    public static int getStreamChunkSizeInBytes()
+    {
+        return conf.stream_chunk_size.toBytes();
+    }
+
+    public static int getStreamReadAheadInBytes()
+    {
+        return conf.stream_read_ahead.toBytes();
+    }
+
+    public static void setStreamReadAheadInBytes(int readAheadInBytes)
+    {
+        if (readAheadInBytes <= 0)
+            throw new IllegalArgumentException("stream_read_ahead must be positive, but was " + readAheadInBytes);
+        conf.stream_read_ahead = new DataStorageSpec.IntBytesBound(readAheadInBytes);
+    }
+
+    public static void setStreamChunkSizeInBytes(int chunkSizeInBytes)
+    {
+        if (chunkSizeInBytes <= 0)
+            throw new IllegalArgumentException("stream_chunk_size must be positive, but was " + chunkSizeInBytes);
+        checkChunkFitsSendWindow(chunkSizeInBytes, conf.stream_send_window.toBytes());
+        conf.stream_chunk_size = new DataStorageSpec.IntBytesBound(chunkSizeInBytes);
     }
 
     public static boolean getSkipStreamDiskSpaceCheck()

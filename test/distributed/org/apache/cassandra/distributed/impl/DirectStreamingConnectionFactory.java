@@ -24,11 +24,14 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.util.ArrayDeque;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.IntFunction;
+import java.util.function.LongConsumer;
 
+import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.distributed.api.ICluster;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.io.util.BufferedDataOutputStreamPlus;
@@ -39,7 +42,9 @@ import org.apache.cassandra.streaming.StreamingChannel;
 import org.apache.cassandra.streaming.StreamingDataInputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
 import org.apache.cassandra.streaming.StreamingDataOutputPlusFixed;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.memory.BufferPools;
 import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
@@ -157,6 +162,21 @@ public class DirectStreamingConnectionFactory
                     return length;
                 }
 
+                @Override
+                public int writeToChannel(ByteBuffer ready, RateLimiter limiter) throws IOException
+                {
+                    try
+                    {
+                        int length = ready.remaining();
+                        write(ready);
+                        return length;
+                    }
+                    finally
+                    {
+                        BufferPools.forNetworking().put(ready);
+                    }
+                }
+
                 // TODO (future): support RateLimiter
                 @Override
                 public long writeFileToChannel(FileChannel file, RateLimiter limiter) throws IOException
@@ -166,6 +186,50 @@ public class DirectStreamingConnectionFactory
                     {
                         count += buffer.position();
                         doFlush(0);
+                    }
+                    return count;
+                }
+
+                // TODO (future): support RateLimiter
+                @Override
+                public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException
+                {
+                    long count = 0;
+                    try
+                    {
+                        for (Section section : sections)
+                        {
+                            long position = section.start;
+                            long remaining = section.length();
+                            while (remaining > 0)
+                            {
+                                if (!buffer.hasRemaining())
+                                    doFlush(0);
+
+                                int limit = buffer.limit();
+                                buffer.limit((int) Math.min(buffer.position() + remaining, limit));
+                                int read;
+                                try
+                                {
+                                    read = buffer.remaining();
+                                    source.read(buffer, position);
+                                }
+                                finally
+                                {
+                                    buffer.limit(limit);
+                                }
+
+                                position += read;
+                                remaining -= read;
+                                count += read;
+                                progress.accept(read);
+                                doFlush(0);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        source.close();
                     }
                     return count;
                 }

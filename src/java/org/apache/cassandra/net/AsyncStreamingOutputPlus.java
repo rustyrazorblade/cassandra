@@ -22,16 +22,22 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
+import java.util.List;
+import java.util.function.LongConsumer;
 
 import com.google.common.annotations.VisibleForTesting;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.ExecutorPlus;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.net.SharedDefaultFileRegion.SharedFileChannel;
+import org.apache.cassandra.streaming.StreamReadAhead;
 import org.apache.cassandra.streaming.StreamingDataOutputPlus;
+import org.apache.cassandra.streaming.StreamingFileSource;
 import org.apache.cassandra.utils.memory.BufferPool;
 import org.apache.cassandra.utils.memory.BufferPools;
 
@@ -62,12 +68,20 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
     final int defaultLowWaterMark;
     final int defaultHighWaterMark;
 
+    // Send window for streaming. Every path here uses it except writeFileToChannelZeroCopy, which has
+    // its own fixed marks. The 64 KiB Netty channel default does not cover the bandwidth-delay
+    // product of a high-latency link.
+    final int streamingSendWindowLowWaterMark;
+    final int streamingSendWindowHighWaterMark;
+
     public AsyncStreamingOutputPlus(Channel channel)
     {
         super(channel);
         WriteBufferWaterMark waterMark = channel.config().getWriteBufferWaterMark();
         this.defaultLowWaterMark = waterMark.low();
         this.defaultHighWaterMark = waterMark.high();
+        this.streamingSendWindowHighWaterMark = Math.max(DatabaseDescriptor.getStreamSendWindowInBytes(), defaultHighWaterMark);
+        this.streamingSendWindowLowWaterMark = Math.max(streamingSendWindowHighWaterMark / 2, defaultLowWaterMark);
         allocateBuffer();
     }
 
@@ -123,7 +137,7 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
                 if (holder.buffer != null)
                     throw new IllegalStateException("Can only allocate one ByteBuffer");
                 limiter.acquire(size);
-                holder.promise = beginFlush(size, defaultLowWaterMark, defaultHighWaterMark);
+                holder.promise = beginFlush(size, streamingSendWindowLowWaterMark, streamingSendWindowHighWaterMark);
                 holder.buffer = bufferPool.get(size, BufferType.OFF_HEAP);
                 return holder.buffer;
             });
@@ -146,10 +160,33 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
         return length;
     }
 
+    @Override
+    public int writeToChannel(ByteBuffer buffer, RateLimiter limiter) throws IOException
+    {
+        doFlush(0);
+        bufferPool.putUnusedPortion(buffer);
+
+        int length = buffer.limit();
+        ChannelPromise promise;
+        try
+        {
+            limiter.acquire(length);
+            promise = beginFlush(length, streamingSendWindowLowWaterMark, streamingSendWindowHighWaterMark);
+        }
+        catch (Throwable t)
+        {
+            bufferPool.put(buffer);
+            throw t;
+        }
+
+        channel.writeAndFlush(GlobalBufferPoolAllocator.wrap(buffer), promise);
+        return length;
+    }
+
     /**
      * Writes all data in file channel to stream: <br>
      * * For zero-copy-streaming, 1MiB at a time, with at most 2MiB in flight at once. <br>
-     * * For streaming with SSL, 64KiB at a time, with at most 32+64KiB (default low water mark + batch size) in flight. <br>
+     * * For streaming with SSL, 64KiB at a time, with at most stream_send_window bytes in flight. <br>
      * <p>
      * This method takes ownership of the provided {@link FileChannel}.
      * <p>
@@ -202,6 +239,111 @@ public class AsyncStreamingOutputPlus extends AsyncChannelOutputPlus implements 
         }
 
         return bytesTransferred;
+    }
+
+    @Override
+    public long writeFileToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, ExecutorPlus readAhead) throws IOException
+    {
+        int batchSize = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        try
+        {
+            if (channel.pipeline().get(SslHandler.class) != null)
+                return writeSectionsToChannel(source, limiter, sections, progress, batchSize, readAhead);
+            else
+                return writeSectionsToChannelZeroCopy(source.channel(), limiter, sections, progress, batchSize);
+        }
+        finally
+        {
+            source.close();
+        }
+    }
+
+    /**
+     * Reads the sections on {@code readAhead}, so the disk keeps working while the send window is full.
+     */
+    @VisibleForTesting
+    long writeSectionsToChannel(StreamingFileSource source, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize, ExecutorPlus readAhead) throws IOException
+    {
+        long bytesTransferred = 0;
+        try (StreamReadAhead ahead = StreamReadAhead.start(readAhead, StreamReadAhead.depthFor(batchSize),
+                                                           sink -> readSections(source, sections, batchSize, sink)))
+        {
+            StreamReadAhead.Chunk chunk;
+            while ((chunk = ahead.take()) != null)
+            {
+                int written = writeToChannel(chunk.buffer, limiter);
+                bytesTransferred += written;
+                progress.accept(written);
+            }
+        }
+        return bytesTransferred;
+    }
+
+    private void readSections(StreamingFileSource source, List<Section> sections, int batchSize, StreamReadAhead.Sink sink)
+    throws IOException, InterruptedException
+    {
+        for (Section section : sections)
+        {
+            long length = section.length();
+            long sectionTransferred = 0;
+            while (sectionTransferred < length)
+            {
+                int toWrite = (int) min(batchSize, length - sectionTransferred);
+                long position = section.start + sectionTransferred;
+
+                ByteBuffer outBuffer = bufferPool.get(toWrite, BufferType.OFF_HEAP);
+                try
+                {
+                    outBuffer.limit(toWrite);
+                    source.read(outBuffer, position);
+                    outBuffer.flip();
+                }
+                catch (Throwable t)
+                {
+                    bufferPool.put(outBuffer);
+                    throw t;
+                }
+
+                sink.accept(new StreamReadAhead.Chunk(outBuffer, toWrite));
+                sectionTransferred += toWrite;
+            }
+        }
+    }
+
+    @VisibleForTesting
+    long writeSectionsToChannelZeroCopy(FileChannel file, RateLimiter limiter, List<Section> sections, LongConsumer progress, int batchSize) throws IOException
+    {
+        long bytesTransferred = 0;
+
+        final SharedFileChannel sharedFile = SharedDefaultFileRegion.share(file);
+        try
+        {
+            for (Section section : sections)
+            {
+                long length = section.length();
+                long sectionTransferred = 0;
+                while (sectionTransferred < length)
+                {
+                    int toWrite = (int) min(batchSize, length - sectionTransferred);
+                    long position = section.start + sectionTransferred;
+
+                    limiter.acquire(toWrite);
+                    ChannelPromise promise = beginFlush(toWrite, streamingSendWindowLowWaterMark, streamingSendWindowHighWaterMark);
+                    channel.writeAndFlush(new SharedDefaultFileRegion(sharedFile, position, toWrite), promise);
+
+                    logger.trace("Writing {} bytes at position {}", toWrite, position);
+
+                    sectionTransferred += toWrite;
+                    bytesTransferred += toWrite;
+                    progress.accept(toWrite);
+                }
+            }
+            return bytesTransferred;
+        }
+        finally
+        {
+            sharedFile.release();
+        }
     }
 
     @VisibleForTesting
