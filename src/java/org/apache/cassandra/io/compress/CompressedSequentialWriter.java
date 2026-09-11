@@ -17,11 +17,9 @@
  */
 package org.apache.cassandra.io.compress;
 
-import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.Channels;
 import java.nio.file.OpenOption;
 import java.util.Optional;
 import java.util.zip.CRC32;
@@ -35,6 +33,7 @@ import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.ChecksumWriter;
+import org.apache.cassandra.io.util.ChecksumWriter.SinkChecksumWriter;
 import org.apache.cassandra.io.util.DataPosition;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.SequentialWriter;
@@ -71,6 +70,20 @@ public class CompressedSequentialWriter extends SequentialWriter
 
     private final ByteBuffer crcCheckBuffer = ByteBuffer.allocate(4);
     protected final Optional<File> digestFile;
+
+    // Parks the per-chunk CRC so writeChunk emits it in the same gathering write as the chunk body.
+    // Pushing it through a channel-backed DataOutputStream cost a second write syscall per chunk.
+    // A subclass that overrides createChecksumWriter also overrides writeChunk, so this stays unread.
+    private ByteBuffer trailer = ByteBuffer.allocateDirect(4);
+
+    // Reused so writeChunk's gathering write allocates nothing per chunk.
+    private final ByteBuffer[] chunkAndTrailer = new ByteBuffer[2];
+
+    /**
+     * Non-null when the write path runs off this thread. Both this class and the O_DIRECT subclass
+     * get it from here, so neither carries a copy of the machinery.
+     */
+    protected final AsyncChunkPipeline pipeline;
 
     private final int maxCompressedLength;
     private final boolean isDictionaryEnabled;
@@ -122,6 +135,24 @@ public class CompressedSequentialWriter extends SequentialWriter
                                       @Nullable CompressionDictionaryManager compressionDictionaryManager,
                                       OpenOption... extraOpenOptions)
     {
+        this(file, offsetsFile, digestFile, option, parameters, sstableMetadataCollector,
+             compressionDictionaryManager, 0, extraOpenOptions);
+    }
+
+    /**
+     * @param asyncBufferBytes bytes the write path may keep in flight off the calling thread, or 0
+     *                         to compress and write inline as before
+     */
+    public CompressedSequentialWriter(File file,
+                                      File offsetsFile,
+                                      @Nullable File digestFile,
+                                      SequentialWriterOption option,
+                                      CompressionParams parameters,
+                                      MetadataCollector sstableMetadataCollector,
+                                      @Nullable CompressionDictionaryManager compressionDictionaryManager,
+                                      int asyncBufferBytes,
+                                      OpenOption... extraOpenOptions)
+    {
         super(file, allocateBuffer(parameters), buildOption(option, parameters), true, extraOpenOptions);
         ICompressor compressor = parameters.getSstableCompressor();
         this.digestFile = Optional.ofNullable(digestFile);
@@ -156,6 +187,9 @@ public class CompressedSequentialWriter extends SequentialWriter
 
         this.sstableMetadataCollector = sstableMetadataCollector;
         crcMetadata = createChecksumWriter();
+        this.pipeline = asyncBufferBytes > 0
+                        ? new AsyncChunkPipeline(this, parameters, option.trickleFsync(), asyncBufferBytes, file.name())
+                        : null;
     }
 
     /**
@@ -164,7 +198,7 @@ public class CompressedSequentialWriter extends SequentialWriter
      */
     protected ChecksumWriter createChecksumWriter()
     {
-        return new ChecksumWriter(new DataOutputStream(Channels.newOutputStream(channel)));
+        return new SinkChecksumWriter(this::stashTrailer);
     }
 
     @Override
@@ -188,7 +222,59 @@ public class CompressedSequentialWriter extends SequentialWriter
     @Override
     public long getEstimatedOnDiskBytesWritten()
     {
+        // chunkOffset is a plain long advanced on the pipeline's thread when one is running, so read
+        // the value it publishes rather than racing on the field.
+        return pipeline == null ? chunkOffset : pipeline.estimatedOnDiskBytesWritten();
+    }
+
+    /** The raw offset, for the pipeline to publish after it writes a chunk. */
+    long chunkOffsetSnapshot()
+    {
         return chunkOffset;
+    }
+
+    /** syncDataOnlyInternal is protected in another package, so the pipeline goes through here. */
+    void forceDataOnly()
+    {
+        syncDataOnlyInternal();
+    }
+
+    /**
+     * Hands the filled buffer to the pipeline and installs a fresh one, or falls through to the
+     * inline flush when there is no pipeline.
+     *
+     * bufferOffset is advanced before the swap because current() is bufferOffset + buffer.position(),
+     * and it is the outgoing buffer whose position records how much this flush consumed.
+     */
+    @Override
+    protected void doFlush(int count)
+    {
+        if (pipeline == null)
+        {
+            super.doFlush(count);
+            return;
+        }
+
+        pipeline.rethrowFailure();
+
+        ByteBuffer outgoing = buffer;
+        bufferOffset = current();
+        buffer = pipeline.nextSlot();
+
+        pipeline.submit(outgoing);
+        pipeline.firePostFlush();
+    }
+
+    @Override
+    public void setPostFlushListener(java.util.function.LongConsumer runPostFlush)
+    {
+        // The superclass fires this from whichever thread flushed. That would be the pipeline's
+        // thread, and the BIG-path consumer, IndexSummaryBuilder.markDataSynced, walks maps the
+        // producer mutates concurrently in maybeAddEntry.
+        if (pipeline != null)
+            pipeline.setPostFlushListener(runPostFlush);
+        else
+            super.setPostFlushListener(runPostFlush);
     }
 
     @Override
@@ -200,6 +286,18 @@ public class CompressedSequentialWriter extends SequentialWriter
     @Override
     protected void flushData()
     {
+        flushData(buffer);
+    }
+
+    /**
+     * Compresses, writes and checksums one filled chunk buffer.
+     *
+     * Every field touched here is order-dependent -- chunkOffset, chunkCount, the offsets table, the
+     * full-file checksum -- so this runs on one thread, in chunk order: the producer when there is no
+     * pipeline, otherwise the pipeline's writer thread.
+     */
+    protected void flushData(ByteBuffer src)
+    {
         // resetAndTruncate leaves fchannel.position() past EOF after its verification reads + truncate;
         // re-seek so the next chunk lands at chunkOffset. No-op under linear writes.
         seekToChunkStart();
@@ -207,22 +305,22 @@ public class CompressedSequentialWriter extends SequentialWriter
         try
         {
             // compressing data with buffer re-use
-            buffer.flip();
+            src.flip();
             compressed.clear();
-            compressor.compress(buffer, compressed);
+            compressor.compress(src, compressed);
         }
         catch (IOException e)
         {
             throw new RuntimeException("Compression exception", e); // shouldn't happen
         }
 
-        int uncompressedLength = buffer.position();
+        int uncompressedLength = src.position();
         int compressedLength = compressed.position();
         uncompressedSize += uncompressedLength;
         ByteBuffer toWrite = compressed;
         if (compressedLength >= maxCompressedLength)
         {
-            toWrite = buffer;
+            toWrite = src;
             if (uncompressedLength >= maxCompressedLength)
             {
                 compressedLength = uncompressedLength;
@@ -232,9 +330,9 @@ public class CompressedSequentialWriter extends SequentialWriter
                 // Pad the uncompressed data so that it reaches the max compressed length.
                 // This could make the chunk appear longer, but this path is only reached at the end of the file, where
                 // we use the file size to limit the buffer on reading.
-                assert maxCompressedLength <= buffer.capacity();   // verified by CompressionParams.validate
-                buffer.limit(maxCompressedLength);
-                ByteBufferUtil.writeZeroes(buffer, maxCompressedLength - uncompressedLength);
+                assert maxCompressedLength <= src.capacity();   // verified by CompressionParams.validate
+                src.limit(maxCompressedLength);
+                ByteBufferUtil.writeZeroes(src, maxCompressedLength - uncompressedLength);
                 compressedLength = maxCompressedLength;
             }
         }
@@ -247,10 +345,11 @@ public class CompressedSequentialWriter extends SequentialWriter
         // write out the compressed data and checksum
         toWrite.flip();
         writeChunk(toWrite);
+
         lastFlushOffset = uncompressedSize;
 
-        if (toWrite == buffer)
-            buffer.position(uncompressedLength);
+        if (toWrite == src)
+            src.position(uncompressedLength);
 
         // next chunk should be written right after current + length of the checksum (int)
         chunkOffset += compressedLength + 4;
@@ -258,13 +357,30 @@ public class CompressedSequentialWriter extends SequentialWriter
             runPostFlush.accept(getLastFlushOffset());
     }
 
+    private void stashTrailer(int chunkCrc)
+    {
+        trailer.clear();
+        trailer.putInt(chunkCrc);
+        trailer.flip();
+    }
+
+    private void gatheringWrite(ByteBuffer toWrite) throws IOException
+    {
+        chunkAndTrailer[0] = toWrite;
+        chunkAndTrailer[1] = trailer;
+        long remaining = (long) chunkAndTrailer[0].remaining() + chunkAndTrailer[1].remaining();
+        while (remaining > 0)
+            remaining -= fchannel.write(chunkAndTrailer);
+    }
+
     protected void writeChunk(ByteBuffer toWrite)
     {
         try
         {
-            channel.write(toWrite);
-            toWrite.rewind();
+            // Checksum first. appendDirect reads a duplicate, so toWrite keeps its position, and the
+            // chunk CRC lands in the trailer buffer rather than in a channel write of its own.
             crcMetadata.appendDirect(toWrite, true);
+            gatheringWrite(toWrite);
         }
         catch (IOException e)
         {
@@ -274,6 +390,8 @@ public class CompressedSequentialWriter extends SequentialWriter
 
     public CompressionMetadata open(long overrideLength)
     {
+        if (pipeline != null)
+            pipeline.drain();
         if (overrideLength <= 0)
             overrideLength = uncompressedSize;
         return metadataWriter.open(overrideLength, chunkOffset);
@@ -284,12 +402,33 @@ public class CompressedSequentialWriter extends SequentialWriter
     {
         if (!buffer.hasRemaining())
             doFlush(0);
+        // chunkOffset and chunkCount are advanced off this thread when a pipeline is running, so the
+        // mark has to be taken against a quiesced writer. Without the drain it names an earlier chunk
+        // than the file holds, and resetAndTruncate then takes its "mark lies in an earlier chunk"
+        // branch, rebuilds the buffer from the wrong chunk and truncates live data away.
+        if (pipeline != null)
+            pipeline.drain();
         return new CompressedFileWriterMark(chunkOffset, current(), buffer.position(), chunkCount + 1);
+    }
+
+    @Override
+    protected void syncInternal()
+    {
+        if (pipeline == null)
+        {
+            super.syncInternal();
+            return;
+        }
+        doFlush(0);
+        pipeline.drain();
+        syncDataOnlyInternal();
     }
 
     @Override
     public synchronized void resetAndTruncate(DataPosition mark)
     {
+        if (pipeline != null)
+            pipeline.drain();
         assert mark instanceof CompressedFileWriterMark;
 
         CompressedFileWriterMark realMark = (CompressedFileWriterMark) mark;
@@ -371,6 +510,11 @@ public class CompressedSequentialWriter extends SequentialWriter
         // truncate data and index file
         truncate(chunkOffset, bufferOffset);
         metadataWriter.resetAndTruncate(realMark.nextChunkIndex - 1);
+
+        // The truncate rewound chunkOffset and lastFlushOffset; republish both so neither the size
+        // estimate nor the early-open offset reports past the truncation point.
+        if (pipeline != null)
+            pipeline.republishOffsets(chunkOffset, getLastFlushOffset());
     }
 
     private void truncate(long toFileSize, long toBufferOffset)
@@ -471,6 +615,30 @@ public class CompressedSequentialWriter extends SequentialWriter
         @Override
         protected Throwable doPreCleanup(Throwable accumulate)
         {
+            if (pipeline != null)
+            {
+                try
+                {
+                    pipeline.quiesce();
+                }
+                catch (Throwable t) { accumulate = merge(accumulate, t); }
+
+                if (pipeline.stillRunning())
+                {
+                    // Free nothing. The thread may be inside compressor.compress writing into a
+                    // buffer, and MemoryUtil.clean under native code faults the JVM rather than
+                    // throwing. That includes the superclass's cleanup, which frees buffer, so it is
+                    // not called either. Close the channel, which unblocks a stuck write and lets
+                    // the abort finish; the buffers carry Cleaners and the collector reclaims them
+                    // once the thread finally exits.
+                    try { channel.close(); }
+                    catch (Throwable t) { accumulate = merge(accumulate, t); }
+                    return accumulate;
+                }
+
+                accumulate = pipeline.releaseBuffers(accumulate);
+            }
+
             accumulate = super.doPreCleanup(accumulate);
             if (compressed != null)
             {
@@ -480,6 +648,16 @@ public class CompressedSequentialWriter extends SequentialWriter
                 }
                 catch (Throwable t) { accumulate = merge(accumulate, t); }
                 compressed = null;
+            }
+
+            if (trailer != null)
+            {
+                try
+                {
+                    MemoryUtil.clean(trailer);
+                    trailer = null;
+                }
+                catch (Throwable t) { accumulate = merge(accumulate, t); }
             }
 
             return accumulate;
