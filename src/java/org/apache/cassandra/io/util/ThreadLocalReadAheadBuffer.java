@@ -23,6 +23,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Supplier;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.compress.CorruptBlockException;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
@@ -30,6 +32,7 @@ import org.apache.cassandra.utils.Closeable;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import io.netty.util.concurrent.FastThreadLocal;
+import sun.nio.ch.DirectBuffer;
 
 public class ThreadLocalReadAheadBuffer implements Closeable
 {
@@ -73,6 +76,12 @@ public class ThreadLocalReadAheadBuffer implements Closeable
         return block().buffer != null;
     }
 
+    @VisibleForTesting
+    int bufferSize()
+    {
+        return bufferSize;
+    }
+
     public int remaining()
     {
         return getBlock().buffer.remaining();
@@ -90,9 +99,14 @@ public class ThreadLocalReadAheadBuffer implements Closeable
         {
             block.buffer = bufferSupplier.get();
             block.buffer.clear();
-            if (bufferSize == -1)
-                bufferSize = block.buffer.capacity();
         }
+        // bufferSize is a per-instance field, but Block objects are cached in a static
+        // thread-local map keyed by file path and shared across instances. When this
+        // instance reuses a Block allocated by an earlier instance for the same path,
+        // block.buffer is already non-null, so bufferSize must still be initialised here;
+        // leaving it at -1 makes fill() call ByteBuffer.limit(-1) and abort compaction.
+        if (bufferSize == -1)
+            bufferSize = block.buffer.capacity();
         return block;
     }
 
@@ -166,6 +180,21 @@ public class ThreadLocalReadAheadBuffer implements Closeable
 
     protected void cleanBuffer(ByteBuffer buffer)
     {
+        // Block objects are cached in a static thread-local map keyed by file path and shared
+        // across instances. A DirectThreadLocalReadAheadBuffer stores an aligned SLICE (no
+        // cleaner; attachment = the backing DirectByteBuffer) in the shared Block. A base
+        // instance that reuses that Block for the same path must not free the slice as if it
+        // owned its memory; MemoryUtil.clean() rejects that and it is a latent double-free.
+        // Resolve to the root allocation here so any instance frees any buffer correctly.
+        if (buffer != null && buffer.isDirect())
+        {
+            DirectBuffer db = (DirectBuffer) buffer;
+            if (db.cleaner() == null && db.attachment() instanceof ByteBuffer)
+            {
+                MemoryUtil.clean((ByteBuffer) db.attachment());
+                return;
+            }
+        }
         MemoryUtil.clean(buffer);
     }
 

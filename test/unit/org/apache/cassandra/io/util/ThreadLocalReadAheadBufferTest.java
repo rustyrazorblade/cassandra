@@ -94,6 +94,99 @@ public class ThreadLocalReadAheadBufferTest implements WithQuickTheories
             .checkAssert(this::testReads);
     }
 
+    @Test
+    public void testReusedCachedBlockInitialisesBufferSize() throws CorruptBlockException
+    {
+        // Block objects are cached in a static thread-local map keyed by file path and
+        // shared across instances. A second instance on the same thread for the same path
+        // reuses the first instance's Block, so block.buffer is already non-null. If
+        // bufferSize is only initialised in the block.buffer == null branch, the second
+        // instance keeps bufferSize == -1 and fill() calls ByteBuffer.limit(-1).
+        try (ChannelProxy channel = new ChannelProxy(files[0]))
+        {
+            int bufferSize = new DataStorageSpec.IntKibibytesBound("256KiB").toBytes();
+
+            // Instance A allocates and populates the cached Block for this file path.
+            ThreadLocalReadAheadBuffer a = new ThreadLocalReadAheadBuffer(channel, bufferSize, BufferType.OFF_HEAP);
+            ThreadLocalReadAheadBuffer b = new ThreadLocalReadAheadBuffer(channel, bufferSize, BufferType.OFF_HEAP);
+            try
+            {
+                a.fill(0);
+
+                // B must see A's already-populated Block; this proves the shared-cache
+                // reuse that the bug depends on actually happens on this thread and path.
+                Assert.assertTrue("B should reuse A's cached Block", b.hasBuffer());
+
+                int readSize = 100;
+                ByteBuffer expected = ByteBuffer.allocate(readSize);
+                channel.read(expected, 0);
+                expected.flip();
+
+                // Instance B reuses A's cached Block without allocating first.
+                ByteBuffer actual = ByteBuffer.allocate(readSize);
+                b.fill(0);
+                b.read(actual, readSize);
+                actual.flip();
+
+                Assert.assertEquals(expected, actual);
+
+                // A reused Block self-corrects reads on each fill(), so byte equality alone
+                // passes for any positive bufferSize. Pin the exact invariant the fix
+                // restores: a reused instance initialises bufferSize from the buffer
+                // capacity, not -1 and not some other value.
+                Assert.assertEquals("reused instance must initialise bufferSize from capacity",
+                                    bufferSize, b.bufferSize());
+            }
+            finally
+            {
+                // Keep A open while B runs so the shared Block stays cached; close both here.
+                b.close();
+                a.close();
+            }
+        }
+    }
+
+    @Test
+    public void testReusedSliceIsFreedByBaseInstance() throws CorruptBlockException
+    {
+        // The shared per-thread, per-path Block cache is used by instances with different
+        // buffer ownership. A DirectThreadLocalReadAheadBuffer stores an aligned slice
+        // (no cleaner; attachment = backing DirectByteBuffer) in the Block. A base
+        // ThreadLocalReadAheadBuffer over the same path reuses that slice and, on close,
+        // frees it through the base cleanup path. If that path assumes the buffer owns its
+        // memory it calls MemoryUtil.clean(slice), which throws.
+        File file = files[0];
+        int blockSize = FileUtils.getFileBlockSize(file);
+        int bufferSize = blockSize * 64;
+        try (ChannelProxy directChannel = new ChannelProxy(file, ChannelProxy.IOMode.DIRECT);
+             ChannelProxy standardChannel = new ChannelProxy(file))
+        {
+            // Instance A (Direct) puts an aligned slice into the shared cached Block.
+            DirectThreadLocalReadAheadBuffer a = new DirectThreadLocalReadAheadBuffer(directChannel, bufferSize, blockSize);
+            ThreadLocalReadAheadBuffer b = new ThreadLocalReadAheadBuffer(standardChannel, bufferSize, BufferType.OFF_HEAP);
+            try
+            {
+                a.allocateBuffer();
+                a.fill(0);
+
+                // Instance B (base) reuses A's slice and frees it via the base cleanup path.
+                // Before the fix this throws IllegalArgumentException from MemoryUtil.clean.
+                b.close();
+
+                // B.close() must have freed the slice AND removed the shared Block from the
+                // map. A therefore sees no cached buffer, which makes A.close() below a
+                // genuine no-op rather than a silent second free of the same slice.
+                Assert.assertFalse("base close must free and remove the shared Block", a.hasBuffer());
+            }
+            finally
+            {
+                // B.close() removed the shared Block from the map, so this is a safe no-op
+                // and must not double-free or throw.
+                a.close();
+            }
+        }
+    }
+
     protected void testReads(InputData propertyInputs)
     {
         try (ChannelProxy channel = new ChannelProxy(propertyInputs.file);
