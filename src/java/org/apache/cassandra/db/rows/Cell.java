@@ -284,6 +284,42 @@ public abstract class Cell<V> extends ColumnData implements CellLivenessInfo
         public final static int USE_ROW_TIMESTAMP_MASK      = 0x08; // Wether the cell has the same timestamp than the row this is a cell of.
         public final static int USE_ROW_TTL_MASK            = 0x10; // Wether the cell has the same ttl than the row this is a cell of.
 
+        /**
+         * Computes a cell's flags byte from its already-extracted properties and the row's
+         * liveness. Used by {@link #serialize} below, and by any other writer producing this
+         * same on-disk cell header from a live {@link Cell} (e.g. the memtable cursor flush
+         * path, {@code MemtableCursorFlusher.writeCell}) — kept as one place so the two formulas
+         * can never independently drift on what a given cell/row combination encodes as.
+         * <p>
+         * Takes primitives rather than a {@link Cell} directly so {@link #serialize}'s
+         * per-cell-class dispatch (see its own comment on avoiding megamorphic calls) is
+         * unaffected: it already extracts every one of these fields through a single
+         * monomorphic call site before reaching here.
+         */
+        public static int encodeFlags(boolean hasValue, boolean isDeleted, boolean isExpiring,
+                                       long cellTimestamp, int ttl, long localDeletionTime,
+                                       LivenessInfo rowLiveness)
+        {
+            boolean useRowTimestamp = !rowLiveness.isEmpty() && cellTimestamp == rowLiveness.timestamp();
+            boolean useRowTTL = isExpiring
+                                && rowLiveness.isExpiring()
+                                && ttl == rowLiveness.ttl()
+                                && localDeletionTime == rowLiveness.localExpirationTime();
+
+            int flags = 0;
+            if (!hasValue)
+                flags |= HAS_EMPTY_VALUE_MASK;
+            if (isDeleted)
+                flags |= IS_DELETED_MASK;
+            else if (isExpiring)
+                flags |= IS_EXPIRING_MASK;
+            if (useRowTimestamp)
+                flags |= USE_ROW_TIMESTAMP_MASK;
+            if (useRowTTL)
+                flags |= USE_ROW_TTL_MASK;
+            return flags;
+        }
+
         public <T> void serialize(Cell<T> cell, ColumnMetadata column, DataOutputPlus out, LivenessInfo rowLiveness, SerializationHeader header) throws IOException
         {
             assert cell != null;
@@ -340,24 +376,9 @@ public abstract class Cell<V> extends ColumnData implements CellLivenessInfo
             }
 
 
-            boolean useRowTimestamp = !rowLiveness.isEmpty() && cellTimestamp == rowLiveness.timestamp();
-            boolean useRowTTL = isExpiring
-                                && rowLiveness.isExpiring()
-                                && ttl == rowLiveness.ttl()
-                                && localDeletionTime == rowLiveness.localExpirationTime();
-            int flags = 0;
-            if (!hasValue)
-                flags |= HAS_EMPTY_VALUE_MASK;
-
-            if (isDeleted)
-                flags |= IS_DELETED_MASK;
-            else if (isExpiring)
-                flags |= IS_EXPIRING_MASK;
-
-            if (useRowTimestamp)
-                flags |= USE_ROW_TIMESTAMP_MASK;
-            if (useRowTTL)
-                flags |= USE_ROW_TTL_MASK;
+            int flags = encodeFlags(hasValue, isDeleted, isExpiring, cellTimestamp, ttl, localDeletionTime, rowLiveness);
+            boolean useRowTimestamp = useRowTimestamp(flags);
+            boolean useRowTTL = useRowTTL(flags);
 
             out.writeByte((byte)flags);
 

@@ -24,6 +24,10 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 import java.util.function.Predicate;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.dht.Bounds;
@@ -43,6 +47,8 @@ import org.apache.cassandra.utils.TimeUUID;
 
 public class CassandraTableRepairManager implements TableRepairManager
 {
+    private static final Logger logger = LoggerFactory.getLogger(CassandraTableRepairManager.class);
+
     private final ColumnFamilyStore cfs;
     private final SharedContext ctx;
 
@@ -57,9 +63,35 @@ public class CassandraTableRepairManager implements TableRepairManager
         this.ctx = ctx;
     }
 
+    /**
+     * Tries the cursor-backed path first when enabled, falling back to
+     * {@link CassandraValidationIterator} either when the toggle is off or when
+     * {@link CursorValidationIterator} itself determines (against the REAL sstable set it
+     * acquires - live-selected or snapshot, whichever applies) that
+     * {@link org.apache.cassandra.db.compaction.CursorCompactor#isValidationSupported} rejects
+     * it. Deliberately does not pre-check support here: the real sstable set can only be known
+     * after acquiring it (snapshot lookup / {@code getSSTablesToValidate}), and an approximation
+     * (e.g. the table's current live sstables) can diverge from it - a snapshot's on-disk files
+     * in particular are independent of whatever's currently live. Catching
+     * {@link CursorValidationUnsupportedException} specifically (not a broad exception type)
+     * ensures only that exact, already-validated "not supported" signal triggers the fallback -
+     * any other failure still propagates as a real error instead of being silently absorbed.
+     */
     @Override
     public ValidationPartitionIterator getValidationIterator(Collection<Range<Token>> ranges, TimeUUID parentId, TimeUUID sessionID, boolean isIncremental, long nowInSec, boolean dontPurgeTombstones, TopPartitionTracker.Collector topPartitionCollector) throws IOException, NoSuchRepairSessionException
     {
+        if (DatabaseDescriptor.cursorCompactionEnabled())
+        {
+            try
+            {
+                return new CursorValidationIterator(cfs, ctx, ranges, parentId, sessionID, isIncremental, nowInSec, dontPurgeTombstones, topPartitionCollector);
+            }
+            catch (CursorValidationUnsupportedException e)
+            {
+                logger.debug("Cursor-backed validation not supported for {}.{}, falling back to the legacy path: {}",
+                            cfs.getKeyspaceName(), cfs.getTableName(), e.getMessage());
+            }
+        }
         return new CassandraValidationIterator(cfs, ctx, ranges, parentId, sessionID, isIncremental, nowInSec, dontPurgeTombstones, topPartitionCollector);
     }
 

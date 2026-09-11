@@ -24,14 +24,19 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Assume;
 import org.junit.Test;
+import org.mockito.Mockito;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CursorCompactor;
+import org.apache.cassandra.db.repair.ValidationCompactionController;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.notifications.INotificationConsumer;
 import org.apache.cassandra.notifications.SSTableListChangedNotification;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -146,11 +151,129 @@ public class CursorSupportMatrixTest extends CQLTester
                         "PRIMARY KEY (pk, ck))");
     }
 
-    /** Counter columns are a planned gap in the supported surface, not a permanent limit. */
+    /**
+     * BTI output is inside the supported surface, asserted through the gate production calls.
+     * <p>
+     * {@link #assertSupported} cannot carry this claim: it reaches only
+     * {@code CursorCompactor.unsupportedMetadata}, which reads {@link TableMetadata} and never the
+     * selected format, so the assertion would read the same with the format selection deleted. The
+     * format gate is in {@code CursorCompactor.isSupported}, which {@link #isSupportedNow} drives.
+     */
     @Test
-    public void countersUnsupported()
+    public void btiFormatSupported() throws Exception
     {
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        SSTableFormat<?, ?> original = DatabaseDescriptor.getSelectedSSTableFormat();
+        DatabaseDescriptor.setSelectedSSTableFormat(BtiFormat.NAME);
+        try
+        {
+            assertTrue("the BTI format must report cursor compaction support",
+                       DatabaseDescriptor.getSelectedSSTableFormat().supportsCursorCompaction());
+
+            ColumnFamilyStore cfs =
+                twoSSTableTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, bigint>, v text, " +
+                                "PRIMARY KEY (pk, ck))",
+                                "INSERT INTO %s (pk, ck, m, v) VALUES (1, 1, {'a': 1}, 'x')",
+                                "INSERT INTO %s (pk, ck, m, v) VALUES (1, 2, {'b': 2}, 'y')");
+
+            // the inputs have to be in the format under test, or the gate would be reading a
+            // selection nothing in this table reflects
+            for (SSTableReader reader : cfs.getLiveSSTables())
+                assertTrue("expected BTI input sstables, got " + reader.descriptor.version.format.name(),
+                           BtiFormat.is(reader.descriptor.version.format));
+
+            assertTrue("cursor compaction must accept a BTI table", isSupportedNow(cfs));
+        }
+        finally
+        {
+            DatabaseDescriptor.setSelectedSSTableFormat(original);
+        }
+    }
+
+    /**
+     * The negative half of the format gate: a selected format that does not support cursor
+     * compaction is refused.
+     * <p>
+     * No such format exists in tree. BIG and BTI both override
+     * {@link SSTableFormat#supportsCursorCompaction()} to return true, so the only way into the
+     * branch is the interface default at {@code SSTableFormat:60}, which is false and is what
+     * gates a format added later. The stand-in below is that default and nothing else: every
+     * other method is left at Mockito's default, and it is selected only across the
+     * {@code isSupported} call, after the inputs and the scanners have been built by a real format.
+     * <p>
+     * What this cannot see: {@code supportsCursorCompaction()} returning false is not
+     * distinguishable here from Mockito's own default for a boolean, because it is the sole
+     * default method on the interface. The assertion is about the gate's branch, not about where
+     * the false came from.
+     */
+    @Test
+    public void formatWithoutCursorSupportUnsupported() throws Exception
+    {
+        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
+
+        ColumnFamilyStore cfs =
+            twoSSTableTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))",
+                            "INSERT INTO %s (pk, ck, v) VALUES (1, 1, 'x')",
+                            "INSERT INTO %s (pk, ck, v) VALUES (1, 2, 'y')");
+
+        // control: the same table and the same two sstables under the real selected format are
+        // supported, so the rejection below is attributable to the format alone
+        assertTrue("expected a plain two-sstable table to be cursor-supported", isSupportedNow(cfs));
+
+        SSTableFormat<?, ?> original = DatabaseDescriptor.getSelectedSSTableFormat();
+        SSTableFormat<?, ?> noCursorSupport = Mockito.mock(SSTableFormat.class, Mockito.CALLS_REAL_METHODS);
+        assertFalse("the stand-in must report no cursor compaction support, or the gate below is " +
+                    "not the thing being observed",
+                    noCursorSupport.supportsCursorCompaction());
+
+        DatabaseDescriptor.setSelectedSSTableFormat(noCursorSupport);
+        try
+        {
+            assertFalse("cursor compaction must refuse a table whose selected output format does " +
+                        "not support it",
+                        isSupportedNow(cfs));
+        }
+        finally
+        {
+            DatabaseDescriptor.setSelectedSSTableFormat(original);
+        }
+
+        // the gate reopens once the real format is back, so the helper is not hardwired to one answer
+        assertTrue("expected the table to be cursor-supported again under the real format",
+                   isSupportedNow(cfs));
+    }
+
+    /** Creates {@code ddl} with auto-compaction off and flushes each insert into its own sstable. */
+    private ColumnFamilyStore twoSSTableTable(String ddl, String firstInsert, String secondInsert)
+    {
+        createTable(ddl);
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        execute(firstInsert);
+        flush();
+        execute(secondInsert);
+        flush();
+        assertEquals("expected one sstable per flush", 2, cfs.getLiveSSTables().size());
+        return cfs;
+    }
+
+    /** Nested types (collections of frozen collections, UDTs holding frozen collections,
+     *  UDT-in-UDT) are inside the supported surface. */
+    @Test
+    public void nestedTypesSupported()
+    {
+        String inner = createType("CREATE TYPE %s (xs frozen<list<int>>, name text)");
+        String outer = createType("CREATE TYPE %s (i frozen<" + inner + ">, tag text)");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, " +
+                        "m map<text, frozen<list<int>>>, u " + inner + ", o " + outer + ", " +
+                        "PRIMARY KEY (pk, ck))");
+    }
+
+    /** Flipped by increment 5: counter tables compact through the cursor. */
+    @Test
+    public void countersSupported()
+    {
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, s counter static, PRIMARY KEY (pk, ck))");
     }
 
     /** An indexed table keeps the iterator path. */
@@ -396,5 +519,81 @@ public class CursorSupportMatrixTest extends CQLTester
         {
             return CursorCompactor.isSupported(scanners, controller);
         }
+    }
+
+    /**
+     * {@link #droppedCollectionUnsupportedFromHeaders} pins this hole for the write-path gate
+     * ({@code isSupported}); {@code isValidationSupported} - the read-only gate repair's cursor
+     * validation goes through - has to refuse the exact same input for the exact same reason:
+     * the cursor reader's misparse of a dropped complex/counter column's header framing doesn't
+     * care which path invoked it. Nothing here differentially compares digests (that's
+     * {@code CursorValidationIteratorTest}/{@code DigestingCursorMergeSinkParityTest}'s job) -
+     * this only pins the gate itself, the same way its write-path sibling does.
+     */
+    @Test
+    public void droppedCollectionUnsupportedFromHeadersForValidation() throws Exception
+    {
+        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
+
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        execute("INSERT INTO %s (pk, ck, m, v) VALUES (1, 1, {'a':'b'}, 'x')");
+        flush();
+        execute("INSERT INTO %s (pk, ck, v) VALUES (1, 2, 'y')");
+        flush();
+
+        execute("ALTER TABLE %s DROP m");
+
+        assertFalse("cursor validation must refuse a table whose input headers still carry a " +
+                    "multi-cell column; the cursor cannot parse complex framing",
+                    isValidationSupportedNow(cfs));
+
+        // Positive control, same shape as isSupportedNow's: an equivalent table that never had
+        // the collection, so the rejection above is attributable to the dropped column alone.
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore plain = getCurrentColumnFamilyStore();
+        plain.disableAutoCompaction();
+        execute("INSERT INTO %s (pk, ck, v) VALUES (1, 1, 'x')");
+        flush();
+        execute("INSERT INTO %s (pk, ck, v) VALUES (1, 2, 'y')");
+        flush();
+        assertTrue("expected a plain table with no dropped collection to be cursor-validation-supported",
+                   isValidationSupportedNow(plain));
+    }
+
+    private boolean isValidationSupportedNow(ColumnFamilyStore cfs) throws Exception
+    {
+        Set<SSTableReader> inputs = cfs.getLiveSSTables();
+        try (ValidationCompactionController controller = new ValidationCompactionController(cfs, FBUtilities.nowInSeconds()))
+        {
+            return CursorCompactor.isValidationSupported(inputs, controller);
+        }
+    }
+
+    /**
+     * Materialized views are supported by this metadata-level gate (and therefore by regular
+     * cursor compaction - see {@code differential.MaterializedViewDifferentialCompactionTest},
+     * which differentially proves it out end to end): modern view maintenance hasn't produced a
+     * shadowable row deletion since CASSANDRA-13409 ({@code Row.Deletion.shadowable(...)} has no
+     * remaining caller in this codebase). Cursor *validation* is more conservative about the same
+     * risk - see {@code CursorValidationIteratorTest#constructorThrowsDedicatedExceptionForMaterializedView}
+     * - because a repair session that hits a shadowable deletion mid-merge fails the whole repair
+     * with a hard error, and repair sessions can run against sstables from any supported-upgrade
+     * Cassandra version, unlike compaction which can simply retry later. That gate lives directly
+     * in {@link CursorCompactor#isValidationSupported}, not in this shared metadata-only method.
+     */
+    @Test
+    public void materializedViewSupported()
+    {
+        requireNetwork();
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, PRIMARY KEY (pk, ck))");
+        String view = createView("CREATE MATERIALIZED VIEW %s AS SELECT pk, ck, v1 FROM %s " +
+                                 "WHERE pk IS NOT NULL AND ck IS NOT NULL AND v1 IS NOT NULL " +
+                                 "PRIMARY KEY (v1, pk, ck)");
+        TableMetadata viewMetadata = getColumnFamilyStore(KEYSPACE, view).metadata();
+        assertFalse("expected materialized view to be cursor-compaction-supported: " + viewMetadata,
+                    CursorCompactor.unsupportedMetadata(viewMetadata));
     }
 }

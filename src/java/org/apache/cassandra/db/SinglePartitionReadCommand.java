@@ -58,6 +58,7 @@ import org.apache.cassandra.db.partitions.SingletonUnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.BaseRowIterator;
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
@@ -91,6 +92,8 @@ import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.btree.BTreeSet;
+
+import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 /**
  * A read command that selects a (part of a) single partition.
@@ -551,6 +554,246 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         metric.readLatency.addNano(latencyNanos);
     }
 
+    /**
+     * M3.3b-i (CASSANDRA-20428): layer-1 gate — cheap, decided before any leg opens. Reuses the
+     * exact same "repaired-status tracking off" test the M3.1/M3.2 gates already use
+     * ({@code controller.isTrackingRepairedStatus()}), plus the two checks specific to this
+     * increment (no digest query — digest computation never reaches the serialization path the
+     * transcode sink mimics, see {@code ReadResponse.createDigestResponse}; no 2i index plan — the
+     * transcode path only ever resolves ordinary memtable/sstable legs). Any failure here falls
+     * back to the untouched base-class default ({@code ReadCommand.createResponseLocally}, today's
+     * exact {@code executeLocally}+{@code createResponse} behavior) with zero cursor state touched.
+     */
+    @Override
+    public ReadResponse createResponseLocally(ReadExecutionController controller)
+    {
+        if (DatabaseDescriptor.cursorReadsEnabled()
+            && !isDigestQuery()
+            && indexQueryPlan() == null
+            && !controller.isTrackingRepairedStatus())
+        {
+            ReadResponse response = queryStorageToResponseBytes(controller);
+            if (response != null)
+                return response;
+        }
+        return super.createResponseLocally(controller);
+    }
+
+    /**
+     * M3.3b-i: the parallel transcode-path entry point Jon's 2026-08-11 decision chose over
+     * extending {@link #queryMemtableAndDiskInternal} — deliberately duplicates that method's
+     * leg-resolution preamble (memtable + sstable candidate loop, {@code
+     * mostRecentPartitionTombstone} elimination) rather than sharing code with it, so the untouched
+     * function every M3.1/M3.2/M3.3a increment already depends on stays byte-for-byte as-is.
+     * {@code queryMemtableAndDiskInternal} is NOT called, modified, or extended by this method.
+     * <p>
+     * Returns null ("not eligible, caller must fall back to the base-class default") whenever ANY
+     * layer-2 condition fails. Zero-or-more sstable reference/leg opens may happen before that
+     * decision is final (the real leg count cannot be known any cheaper — the same structural
+     * limitation the M3.1 {@code finalLimitedStream} gate already has); every such leg/iterator is
+     * closed on decline via {@link CursorReads#closeAllQuietly}.
+     */
+    private ReadResponse queryStorageToResponseBytes(ReadExecutionController controller)
+    {
+        // Layer 2, part A: query-shape checks decidable without opening anything, and WITHOUT
+        // relying solely on CursorReads.limitBoundFor/filterPushdownFor returning null -- those
+        // two also return null for reasons OTHER than "nothing to apply" (an unpushable filter, a
+        // non-boundable limit kind like CQL_GROUP_BY_LIMIT), which would silently skip the
+        // top-level rowFilter().filter/limits().filter stages this response path never runs. Only
+        // a genuinely EMPTY filter and a genuinely UNLIMITED limit make skipping those stages safe.
+        if (!rowFilter().isEmpty() || !limits().isUnlimited())
+            return null;
+        // Defense in depth / explicit reuse of the established M3.1/M3.2 gate predicates, per the
+        // M3.3b plan's own §4 requirement -- already implied by the check above (limitBoundFor
+        // returns null whenever limits().isUnlimited(); filterPushdownFor returns null whenever
+        // rowFilter().isEmpty()), kept so a future change to either predicate's OTHER disengagement
+        // reasons cannot silently widen this gate without also touching this call.
+        if (CursorReads.limitBoundFor(this) != null || CursorReads.filterPushdownFor(this) != null)
+            return null;
+        // withQuerySizeTracking would engage independently of filter/limit shape (gated only by
+        // trackWarnings + configured thresholds) -- this response path never runs it, so a command
+        // that would trigger it must decline.
+        if (CursorReads.querySizeTrackingActive(this))
+            return null;
+
+        long startTimeNanos = nanoTime();
+        ColumnFamilyStore cfs = Keyspace.openAndGetStore(metadata());
+        ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
+        if (!CursorReads.isReadSupported(this, cfs, view.sstables))
+            return null;
+
+        view.sstables.sort(SSTableReader.maxTimestampDescending);
+        ClusteringIndexFilter filter = clusteringIndexFilter();
+        long mostRecentPartitionTombstone = Long.MIN_VALUE;
+
+        List<UnfilteredRowIterator> cursorMemtableIters = null;
+        List<CursorReads.PendingLeg> cursorLegs = null;
+        CursorReads.ValueTransfer cursorValueTransfer = null;
+        List<EncodingStats> absentSSTableStats = null;
+        SSTableReadMetricsCollector metricsCollector = new SSTableReadMetricsCollector();
+
+        try
+        {
+            for (Memtable memtable : view.memtables)
+            {
+                UnfilteredRowIterator iter = memtable.rowIterator(partitionKey(), filter.getSlices(metadata()), columnFilter(), filter.isReversed(), metricsCollector);
+                if (iter == null)
+                    continue;
+
+                // Memtable data is always considered unrepaired
+                controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
+                UnfilteredRowIterator validated = RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false);
+                if (cursorMemtableIters == null)
+                    cursorMemtableIters = new ArrayList<>();
+                cursorMemtableIters.add(validated);
+
+                mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                        iter.partitionLevelDeletion().markedForDeleteAt());
+            }
+
+            // M3.3b-i hard requirement (plan §0c): single-leg reads have no transcode path at all.
+            // A read with at most one candidate sstable and no memtable data structurally cannot
+            // reach the >= 2 legs the merge core requires, so decline before opening any sstable.
+            if (view.sstables.size() <= 1 && cursorMemtableIters == null)
+            {
+                CursorReads.closeAllQuietly(cursorMemtableIters);
+                return null;
+            }
+
+            for (SSTableReader sstable : view.sstables)
+            {
+                if (sstable.getMaxTimestamp() < mostRecentPartitionTombstone)
+                    break;
+
+                boolean intersects = intersects(sstable);
+                boolean hasRequiredStatics = hasRequiredStatics(sstable);
+                boolean hasPartitionLevelDeletions = hasPartitionLevelDeletions(sstable);
+
+                if (!intersects && !hasRequiredStatics && !hasPartitionLevelDeletions)
+                    continue;
+
+                if (intersects || hasRequiredStatics)
+                {
+                    if (!sstable.isRepaired())
+                        controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
+
+                    if (cursorValueTransfer == null)
+                        cursorValueTransfer = new CursorReads.ValueTransfer();
+                    CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
+                                                                     intersects ? filter.getSlices(metadata()) : Slices.NONE,
+                                                                     columnFilter(), metricsCollector, cursorValueTransfer);
+                    if (leg == null)
+                    {
+                        // the sstable does not contain the partition: keep parity with
+                        // queryMemtableAndDiskInternal's own leg == null branch, which still
+                        // contributes the SSTABLE's stats to the merge via a placeholder iterator
+                        // (CursorReads.absentPartitionIterator) -- the transcode path folds the
+                        // same stats contribution in directly (buildTranscodeResponseBytes'
+                        // extraStats) rather than needing an actual placeholder iterator, since a
+                        // live-partition-deletion/empty-static-row placeholder can never contribute
+                        // anything else to an outer object merge that no longer exists here.
+                        if (absentSSTableStats == null)
+                            absentSSTableStats = new ArrayList<>();
+                        absentSSTableStats.add(sstable.stats());
+                    }
+                    else
+                    {
+                        if (cursorLegs == null)
+                            cursorLegs = new ArrayList<>(view.sstables.size());
+                        cursorLegs.add(leg);
+                        mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                                leg.partitionLevelDeletion().markedForDeleteAt());
+                    }
+                }
+                else
+                {
+                    if (cursorValueTransfer == null)
+                        cursorValueTransfer = new CursorReads.ValueTransfer();
+                    CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
+                                                                     Slices.NONE, columnFilter(), metricsCollector,
+                                                                     cursorValueTransfer);
+                    if (leg != null)
+                    {
+                        if (!leg.partitionLevelDeletion().isLive())
+                        {
+                            if (!sstable.isRepaired())
+                                controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
+                            if (cursorLegs == null)
+                                cursorLegs = new ArrayList<>(view.sstables.size());
+                            cursorLegs.add(leg);
+                            mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                                    leg.partitionLevelDeletion().markedForDeleteAt());
+                        }
+                        else
+                        {
+                            leg.close();
+                        }
+                    }
+                }
+            }
+
+            int legCount = (cursorLegs == null ? 0 : cursorLegs.size()) + (cursorMemtableIters == null ? 0 : cursorMemtableIters.size());
+            if (cursorLegs == null || cursorLegs.isEmpty() || legCount < 2)
+            {
+                // M3.3b-i hard requirement (plan §0c): single-leg / no-surviving-sstable-leg reads
+                // have no transcode path at all -- decline, caller falls back to the untouched default.
+                CursorReads.closeAllQuietly(cursorLegs);
+                CursorReads.closeAllQuietly(cursorMemtableIters);
+                return null;
+            }
+
+            List<CursorReads.MergeLeg> allLegs;
+            if (cursorMemtableIters != null)
+            {
+                allLegs = new ArrayList<>(cursorMemtableIters.size() + cursorLegs.size());
+                for (UnfilteredRowIterator memtableIter : cursorMemtableIters)
+                    allLegs.add(new MemtableMergeLeg(memtableIter, filter.getSlices(metadata())));
+                cursorMemtableIters = null; // ownership passes to the adapters (closed by mergeLegsWithSink)
+                allLegs.addAll(cursorLegs);
+            }
+            else
+            {
+                allLegs = new ArrayList<>(cursorLegs);
+            }
+            cursorLegs = null; // ownership passes to buildTranscodeResponseBytes/mergeLegsWithSink (closes legs itself)
+
+            // Matches queryMemtableAndDiskInternal's own placement: a pluggable, off-by-default
+            // notification hook (external audit/CDC-adjacent tooling via -Dcassandra.storage_hook)
+            // must still see every read this response actually serves.
+            StorageHook.instance.reportRead(cfs.metadata().id, partitionKey());
+
+            if (metricsCollector.getMergedSSTables() > DatabaseDescriptor.getSSTablesPerReadLogThreshold())
+                noSpamLogger.info("The following query '{}' has read {} SSTables.", this.toCQLString(), metricsCollector.getMergedSSTables());
+
+            long nowInSec = nowInSec();
+            long gcBefore = nowInSec == 0 ? Long.MIN_VALUE : cfs.gcBefore(nowInSec);
+            boolean onlyPurgeRepairedTombstones = cfs.getCompactionStrategyManager().onlyPurgeRepairedTombstones();
+            long oldestUnrepairedTombstone = controller.oldestUnrepairedTombstone();
+
+            CursorReads.TombstoneScanGuard scanGuard =
+                new CursorReads.TombstoneScanGuard(this, cfs.metric, startTimeNanos, nowInSec, partitionKey());
+
+            ByteBuffer data = CursorReads.buildTranscodeResponseBytes(allLegs, metadata(), partitionKey(),
+                                                                       filter.getSlices(metadata()), columnFilter(),
+                                                                       nowInSec, gcBefore, onlyPurgeRepairedTombstones,
+                                                                       oldestUnrepairedTombstone, absentSSTableStats,
+                                                                       scanGuard);
+            ReadResponse response = ReadResponse.createTranscodedDataResponse(data, controller.getRepairedDataInfo());
+            CursorReads.countTranscodeResponseServed();
+            return response;
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException("transcode response construction failed for " + partitionKey(), e);
+        }
+        catch (RuntimeException | Error e)
+        {
+            CursorReads.closeAll(cursorLegs, e);
+            CursorReads.closeAll(cursorMemtableIters, e);
+            throw e;
+        }
+    }
+
     @VisibleForTesting
     @SuppressWarnings("resource") // we close the created iterator through closing the result of this method (and SingletonUnfilteredPartitionIterator ctor cannot fail)
     public UnfilteredPartitionIterator queryStorage(final ColumnFamilyStore cfs, ReadExecutionController executionController)
@@ -559,7 +802,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         // data is being tracked. This is only requested after an initial digest mismatch
         UnfilteredRowIterator partition = cfs.isRowCacheEnabled() && !executionController.isTrackingRepairedStatus()
                                         ? getThroughCache(cfs, executionController)
-                                        : queryMemtableAndDisk(cfs, executionController);
+                                        : queryMemtableAndDiskForExecuteLocally(cfs, executionController);
         return new SingletonUnfilteredPartitionIterator(partition);
     }
 
@@ -731,7 +974,28 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 
         Tracing.trace("Acquiring sstable references");
         ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
-        return queryMemtableAndDiskInternal(cfs, view, null, executionController);
+        return queryMemtableAndDiskInternal(cfs, view, null, executionController, false);
+    }
+
+    /**
+     * M3.1 (CASSANDRA-20428): the {@link #queryStorage} flavor of {@link #queryMemtableAndDisk} —
+     * identical except that it marks the result as the final merged stream
+     * {@code ReadCommand.executeLocally}'s {@code limits().filter} counter consumes, which is the
+     * routing condition for the cursor merge's limit-driven production bound
+     * ({@code CursorReads.limitBoundFor}). The PUBLIC entry points must keep passing false: their
+     * external callers (counter locks, 2i searchers, cache warming) consume the un-limited
+     * partition contents this method's javadoc promises, so bounding production there would
+     * truncate their view of the partition.
+     */
+    private UnfilteredRowIterator queryMemtableAndDiskForExecuteLocally(ColumnFamilyStore cfs,
+                                                                        ReadExecutionController executionController)
+    {
+        assert executionController != null && executionController.validForReadOn(cfs);
+        Tracing.trace("Executing single-partition query on {}", cfs.name);
+
+        Tracing.trace("Acquiring sstable references");
+        ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
+        return queryMemtableAndDiskInternal(cfs, view, null, executionController, true);
     }
 
     public UnfilteredRowIterator queryMemtableAndDisk(ColumnFamilyStore cfs,
@@ -742,13 +1006,20 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         assert executionController != null && executionController.validForReadOn(cfs);
         Tracing.trace("Executing single-partition query on {}", cfs.name);
 
-        return queryMemtableAndDiskInternal(cfs, view, rowTransformer, executionController);
+        return queryMemtableAndDiskInternal(cfs, view, rowTransformer, executionController, false);
     }
 
+    /**
+     * @param finalLimitedStream whether the returned iterator is the final merged stream consumed
+     *                           by {@code executeLocally}'s post-merge stack (true only from
+     *                           {@link #queryMemtableAndDiskForExecuteLocally}) — the routing
+     *                           gate for M3.1's limit-driven production bound
+     */
     private UnfilteredRowIterator queryMemtableAndDiskInternal(ColumnFamilyStore cfs,
                                                                ColumnFamilyStore.ViewFragment view,
                                                                Function<CellSourceIdentifier, Transformation<BaseRowIterator<?>>> rowTransformer,
-                                                               ReadExecutionController controller)
+                                                               ReadExecutionController controller,
+                                                               boolean finalLimitedStream)
     {
         /*
          * We have 2 main strategies:
@@ -779,6 +1050,33 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         ClusteringIndexFilter filter = clusteringIndexFilter();
         long minTimestamp = Long.MAX_VALUE;
         long mostRecentPartitionTombstone = Long.MIN_VALUE;
+        // Experimental cursor read path (flag-gated off by default): when the whole query passes
+        // the gate, every sstable leg below is served through SSTableCursorReader and (since M2.3)
+        // memtable legs join the same cursor-level merge through the object-backed adapter.
+        // Repaired-status tracking and row transformers stay on the iterator path for now (out of
+        // the verified surface).
+        boolean cursorReads = rowTransformer == null
+                              && !controller.isTrackingRepairedStatus()
+                              && CursorReads.isReadSupported(this, cfs, view.sstables);
+        // M2.3: memtable legs of a gate-supported read join the SAME cursor-level merge as the
+        // sstable legs (via the object-backed MemtableMergeLeg adapter), so their iterators are
+        // COLLECTED here instead of being handed to the object merge — unless no sstable leg
+        // survives the elimination loop below, in which case they fall back to the object path
+        // exactly as before (the gate's "at least one sstable leg" philosophy).
+        List<UnfilteredRowIterator> cursorMemtableIters = null;
+        // M2.1: with more than one candidate sstable, cursor-served legs are OPENED (cursor +
+        // partition header + static row — enough for the mostRecentPartitionTombstone elimination
+        // below) but their rows deferred, so that all surviving legs can be merged at the CURSOR
+        // level after the loop instead of each leg being independently materialized. A
+        // single-candidate read without memtable data keeps the Phase 1 per-leg call inside the
+        // loop, bit for bit; with memtable data (M2.3) even a single sstable leg is deferred so it
+        // can cursor-merge with the memtable leg(s).
+        boolean cursorMergedLegs;
+        List<CursorReads.PendingLeg> cursorLegs = null;
+        // ONE value-transfer scratch (4KB bounce buffer + one-copy capture) shared by every
+        // cursor leg of this read, created lazily with the first leg: legs consume cell values
+        // strictly one at a time on this thread, so per-leg copies are duplicate allocation
+        CursorReads.ValueTransfer cursorValueTransfer = null;
         InputCollector<UnfilteredRowIterator> inputCollector = iteratorsForPartition(view, controller);
         try
         {
@@ -798,11 +1096,27 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 
                 // Memtable data is always considered unrepaired
                 controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
-                inputCollector.addMemtableIterator(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false));
+                // The Stage.MEMTABLE RT-bound validation wraps the iterator on BOTH routes — on
+                // the M2.3 cursor route the adapter consumes the validated stream, preserving the
+                // same coverage the object merge had.
+                UnfilteredRowIterator validated = RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false);
+                if (cursorReads)
+                {
+                    if (cursorMemtableIters == null)
+                        cursorMemtableIters = new ArrayList<>();
+                    cursorMemtableIters.add(validated);
+                }
+                else
+                {
+                    inputCollector.addMemtableIterator(validated);
+                }
 
                 mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
                                                         iter.partitionLevelDeletion().markedForDeleteAt());
             }
+            // M2.3: with memtable data present, even a single-candidate sstable read defers its
+            // leg so the memtable leg(s) can join one cursor-level merge with it.
+            cursorMergedLegs = cursorReads && (view.sstables.size() > 1 || cursorMemtableIters != null);
 
             /*
              * We can't eliminate full sstables based on the timestamp of what we've already read like
@@ -851,9 +1165,40 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     if (!sstable.isRepaired())
                         controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
 
+                    if (cursorMergedLegs)
+                    {
+                        if (cursorValueTransfer == null)
+                            cursorValueTransfer = new CursorReads.ValueTransfer();
+                        CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
+                                                                         intersects ? filter.getSlices(metadata()) : Slices.NONE,
+                                                                         columnFilter(), metricsCollector, cursorValueTransfer);
+                        if (leg == null)
+                        {
+                            // the sstable does not contain the partition: keep parity with the
+                            // iterator path, which still contributes an empty iterator carrying
+                            // the SSTABLE's stats to the merge (see CursorReads.absentPartitionIterator)
+                            inputCollector.addSSTableIterator(sstable, CursorReads.absentPartitionIterator(metadata(), partitionKey(), sstable));
+                        }
+                        else
+                        {
+                            if (cursorLegs == null)
+                                cursorLegs = new ArrayList<>(view.sstables.size());
+                            cursorLegs.add(leg);
+                            mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                                    leg.partitionLevelDeletion().markedForDeleteAt());
+                        }
+                        continue;
+                    }
+
                     // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
-                    UnfilteredRowIterator iter = intersects ? makeRowIteratorWithLowerBound(cfs, sstable, metricsCollector)
-                                                            : makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
+                    UnfilteredRowIterator iter;
+                    if (cursorReads)
+                        iter = CursorReads.sstableRowIterator(sstable, metadata(), partitionKey(),
+                                                              intersects ? filter.getSlices(metadata()) : Slices.NONE,
+                                                              columnFilter(), metricsCollector);
+                    else
+                        iter = intersects ? makeRowIteratorWithLowerBound(cfs, sstable, metricsCollector)
+                                          : makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
 
                     if (rowTransformer != null)
                         iter = Transformation.apply(iter, rowTransformer.apply(sstable.getId()));
@@ -871,8 +1216,42 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     // however, we know that there are partition level deletions in this sstable and we need to make
                     // an iterator figure out that (see `StatsMetadata.hasPartitionLevelDeletions`)
 
+                    if (cursorMergedLegs)
+                    {
+                        if (cursorValueTransfer == null)
+                            cursorValueTransfer = new CursorReads.ValueTransfer();
+                        CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
+                                                                         Slices.NONE, columnFilter(), metricsCollector,
+                                                                         cursorValueTransfer);
+                        // as below: a leg with a live partition deletion contributes nothing and is
+                        // discarded; one with a real deletion must join the merge regardless of
+                        // whether it shadows anything seen locally
+                        if (leg != null)
+                        {
+                            if (!leg.partitionLevelDeletion().isLive())
+                            {
+                                if (!sstable.isRepaired())
+                                    controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
+                                if (cursorLegs == null)
+                                    cursorLegs = new ArrayList<>(view.sstables.size());
+                                cursorLegs.add(leg);
+                                includedDueToTombstones++;
+                                mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                                        leg.partitionLevelDeletion().markedForDeleteAt());
+                            }
+                            else
+                            {
+                                leg.close();
+                            }
+                        }
+                        continue;
+                    }
+
                     // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
-                    UnfilteredRowIterator iter = makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
+                    UnfilteredRowIterator iter = cursorReads
+                                                 ? CursorReads.sstableRowIterator(sstable, metadata(), partitionKey(),
+                                                                                  Slices.NONE, columnFilter(), metricsCollector)
+                                                 : makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
 
                     // if the sstable contains a partition delete, then we must include it regardless of whether it
                     // shadows any other data seen locally as we can't guarantee that other replicas have seen it
@@ -896,6 +1275,72 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 }
             }
 
+            if (cursorLegs != null && !cursorLegs.isEmpty())
+            {
+                // M2.1: one iterator for ALL surviving cursor legs. A single sstable leg with no
+                // memtable data completes exactly as Phase 1/M1 did (bit-for-bit, seek included);
+                // anything else runs the cursor-level merge, materializing only merge winners.
+                // M2.3: memtable legs join that SAME merge through the object-backed adapter
+                // (memtable legs FIRST, mirroring the object merge's memtables-then-sstables input
+                // order), so no object-level merge step remains for fully-supported reads.
+                List<CursorReads.PendingLeg> legs = cursorLegs;
+                cursorLegs = null; // ownership passes to completeSingleLeg/mergeLegs (both close the legs)
+                SSTableReader attribution = legs.get(0).sstable;
+                // M3.1: the limit-driven production bound engages only when this merge's output is
+                // the final stream executeLocally's own counter consumes (finalLimitedStream —
+                // the public queryMemtableAndDisk callers get unbounded production, as their
+                // javadoc promises) and the query shape passes CursorReads.limitBoundFor's gate.
+                // The downstream object merge with any absent-partition placeholders contributes
+                // no rows (they are empty stats-carriers), so it cannot need rows the bound
+                // stopped producing.
+                DataLimits.Counter productionBound = finalLimitedStream ? CursorReads.limitBoundFor(this) : null;
+                // M3.2a: RowFilter pushdown rides the exact same routing gate — only the final
+                // merged stream executeLocally's own rowFilter().filter consumes may skip
+                // producing what that filter would drop; the public queryMemtableAndDisk callers
+                // get unfiltered production, as their javadoc promises. Disengagement (null) never
+                // blocks the cursor path: the query still merges here, filtered up top as today.
+                CursorReads.FilterPushdown filterPushdown = finalLimitedStream ? CursorReads.filterPushdownFor(this) : null;
+                // M3.2b: clustering-column pushdown may DROP rows at production, so its
+                // scan-stats accumulator must exist before the (eager) merge runs — attached to
+                // the controller here so executeLocally's withMetricsRecording, created after the
+                // merge completes, folds the dropped rows' contributions into every scan metric,
+                // threshold and warning exactly as if they had flowed through it. Only the merged
+                // paths activate it: a single-leg read never attaches the context (M3.1's
+                // completeSingleLeg scope choice), so it must not carry an accumulator either.
+                if (filterPushdown != null && (cursorMemtableIters != null || legs.size() >= 2))
+                    filterPushdown.activateScanAccounting(controller, cfs, this);
+                UnfilteredRowIterator merged;
+                if (cursorMemtableIters != null)
+                {
+                    List<CursorReads.MergeLeg> allLegs = new ArrayList<>(cursorMemtableIters.size() + legs.size());
+                    List<UnfilteredRowIterator> memtableIters = cursorMemtableIters;
+                    cursorMemtableIters = null; // ownership passes to the adapters (closed by mergeLegs)
+                    for (UnfilteredRowIterator memtableIter : memtableIters)
+                        allLegs.add(new MemtableMergeLeg(memtableIter, filter.getSlices(metadata())));
+                    allLegs.addAll(legs);
+                    merged = CursorReads.mergeLegs(allLegs, metadata(), partitionKey(),
+                                                   filter.getSlices(metadata()), columnFilter(), productionBound,
+                                                   filterPushdown);
+                }
+                else
+                {
+                    merged = legs.size() == 1
+                             ? CursorReads.completeSingleLeg(legs.get(0))
+                             : CursorReads.mergeLegs(legs, metadata(), partitionKey(),
+                                                     filter.getSlices(metadata()), columnFilter(), productionBound,
+                                                     filterPushdown);
+                }
+                inputCollector.addSSTableIterator(attribution, merged);
+            }
+            else if (cursorMemtableIters != null)
+            {
+                // No surviving sstable leg (all eliminated, or none contained the partition):
+                // the memtable iterators take the object path exactly as before M2.3.
+                for (UnfilteredRowIterator memtableIter : cursorMemtableIters)
+                    inputCollector.addMemtableIterator(memtableIter);
+                cursorMemtableIters = null;
+            }
+
             if (Tracing.isTracing())
                 Tracing.trace("Skipped {}/{} non-slice-intersecting sstables, included {} due to tombstones",
                                nonIntersectingSSTables, view.sstables.size(), includedDueToTombstones);
@@ -916,6 +1361,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         }
         catch (RuntimeException | Error e)
         {
+            CursorReads.closeAll(cursorLegs, e);
+            CursorReads.closeAll(cursorMemtableIters, e);
             try
             {
                 inputCollector.close();
