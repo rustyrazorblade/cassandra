@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
@@ -42,6 +43,7 @@ import org.apache.cassandra.io.sstable.BigCursorIndexWriter;
 import org.apache.cassandra.io.sstable.CursorIndexWriter;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.Downsampling;
+import org.apache.cassandra.io.sstable.IndexInfo;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.DataComponent;
 import org.apache.cassandra.io.sstable.format.IndexComponent;
@@ -77,6 +79,7 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
     private final Map<DecoratedKey, AbstractRowIndexEntry> cachedKeys = new HashMap<>();
     private static final SSTableReader[] NO_ORIGINALS = new SSTableReader[0];
     private final SSTableReader[] originals;
+    private final long maxInputPartitionSize;
 
     public BigTableWriter(Builder builder, ILifecycleTransaction txn, SSTable.Owner owner)
     {
@@ -91,6 +94,30 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
         // this per partition. Safe to snapshot: the only cancel that drops a compaction's originals
         // runs in CompactionTask.runMayThrow before this writer.
         this.originals = migrateKeyCache ? txn.originals().toArray(NO_ORIGINALS) : NO_ORIGINALS;
+        this.maxInputPartitionSize = builder.getMaxInputPartitionSizeHint() > 0
+                                     ? builder.getMaxInputPartitionSizeHint()
+                                     : maxEstimatedPartitionSize(txn);
+    }
+
+    /**
+     * The largest partition recorded by any of the sstables this writer is rewriting, used as a per-writer ceiling
+     * when sizing the partition writer's index bookkeeping for a key the owner knows nothing specific about.
+     *
+     * @return the size in bytes, or {@code -1} if there are no input sstables, as when flushing a memtable
+     */
+    public static long maxEstimatedPartitionSize(ILifecycleTransaction txn)
+    {
+        long max = -1;
+        for (SSTableReader reader : txn.originals())
+        {
+            long readerMax = reader.getSSTableMetadata().estimatedPartitionSize.max();
+            // an overflowed histogram reports Long.MAX_VALUE, which says only "larger than the last bucket" and would
+            // otherwise presize every writer over these inputs straight to the cap, however small its first partition
+            if (readerMax == Long.MAX_VALUE)
+                return -1;
+            max = Math.max(max, readerMax);
+        }
+        return max;
     }
 
     @Override
@@ -148,7 +175,22 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
     @Override
     protected void onStartPartition(DecoratedKey key)
     {
+        partitionWriter.presizeIndexOffsets(estimatedPartitionSize(key));
         notifyObservers(o -> o.startPartition(key, partitionWriter.getPartitionStartPosition(), indexWriter.writer.position()));
+    }
+
+    /**
+     * The owner's figure is the partition's size across the whole table, recorded by a past repair, so it can be both
+     * stale and far larger than the slice these input sstables hold. Where both are available the smaller wins: an
+     * undershoot costs a doubling, an overshoot costs memory for every partition the writer touches.
+     */
+    private long estimatedPartitionSize(DecoratedKey key)
+    {
+        SSTable.Owner owner = owner().orElse(null);
+        long known = owner != null ? owner.getKnownPartitionSize(key) : -1;
+        if (known <= 0)
+            return maxInputPartitionSize;
+        return maxInputPartitionSize > 0 ? Math.min(known, maxInputPartitionSize) : known;
     }
 
     @Override
@@ -158,14 +200,17 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
         // serialized size to the index-writer position
         long indexFilePosition = ByteBufferUtil.serializedSizeWithShortLength(key.getKey()) + indexWriter.writer.position();
 
+        // RowIndexEntry.create reads the offsets only alongside index samples; a partition big enough to be shallow
+        // has none, and copying its offsets on heap would allocate megabytes only to discard them
+        List<IndexInfo> indexSamples = partitionWriter.indexSamples();
         RowIndexEntry entry = RowIndexEntry.create(partitionWriter.getPartitionStartPosition(),
                                                    indexFilePosition,
                                                    partitionLevelDeletion,
                                                    partitionWriter.getHeaderLength(),
                                                    partitionWriter.getColumnIndexCount(),
                                                    partitionWriter.indexInfoSerializedSize(),
-                                                   partitionWriter.indexSamples(),
-                                                   partitionWriter.offsets(),
+                                                   indexSamples,
+                                                   indexSamples != null ? partitionWriter.offsets() : null,
                                                    rowIndexEntrySerializer.indexInfoSerializer(),
                                                    descriptor.version);
 

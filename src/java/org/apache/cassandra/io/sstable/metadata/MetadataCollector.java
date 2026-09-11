@@ -178,7 +178,15 @@ public class MetadataCollector implements PartitionStatisticsCollector
     public MetadataCollector(Iterable<SSTableReader> sstables, ClusteringComparator comparator)
     {
         this(comparator);
+        commitLogIntervals(computeCommitLogIntervals(sstables, originatingHostId));
+    }
 
+    /**
+     * Unions the commit log intervals of the given sstables that originated on {@code originatingHostId}. Exposed
+     * separately from the constructor so a caller building several collectors over the same inputs can compute it once.
+     */
+    public static IntervalSet<CommitLogPosition> computeCommitLogIntervals(Iterable<SSTableReader> sstables, UUID originatingHostId)
+    {
         IntervalSet.Builder<CommitLogPosition> intervals = new IntervalSet.Builder<>();
         if (originatingHostId != null)
         {
@@ -188,7 +196,7 @@ public class MetadataCollector implements PartitionStatisticsCollector
                     intervals.addAll(sstable.getSSTableMetadata().commitLogIntervals);
             }
         }
-        commitLogIntervals(intervals.build());
+        return intervals.build();
     }
 
     public MetadataCollector addKey(ByteBuffer key)
