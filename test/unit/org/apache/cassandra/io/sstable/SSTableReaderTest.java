@@ -81,8 +81,6 @@ import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.io.sstable.format.big.IndexSummaryComponent;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummarySupport;
-import org.apache.cassandra.io.sstable.keycache.KeyCache;
-import org.apache.cassandra.io.sstable.keycache.KeyCacheSupport;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.MmappedRegions;
@@ -90,7 +88,6 @@ import org.apache.cassandra.io.util.PageAware;
 import org.apache.cassandra.schema.CachingParams;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.concurrent.Ref;
@@ -543,42 +540,6 @@ public class SSTableReaderTest
     }
 
     @Test
-    public void testGetPositionsForRangesWithKeyCache()
-    {
-        ColumnFamilyStore store = discardSSTables(KEYSPACE1, CF_STANDARD2);
-        partitioner = store.getPartitioner();
-        CacheService.instance.keyCache.setCapacity(100);
-
-        // insert data and compact to a single sstable
-        for (int j = 0; j < 10; j++)
-        {
-
-            new RowUpdateBuilder(store.metadata(), j, String.valueOf(j))
-            .clustering("0")
-            .add("val", ByteBufferUtil.EMPTY_BYTE_BUFFER)
-            .build()
-            .applyUnsafe();
-
-        }
-        Util.flush(store);
-        CompactionManager.instance.performMaximal(store);
-
-        SSTableReader sstable = store.getLiveSSTables().iterator().next();
-        long p2 = sstable.getPosition(dk(2), SSTableReader.Operator.EQ);
-        long p3 = sstable.getPosition(dk(3), SSTableReader.Operator.EQ);
-        long p6 = sstable.getPosition(dk(6), SSTableReader.Operator.EQ);
-        long p7 = sstable.getPosition(dk(7), SSTableReader.Operator.EQ);
-
-        SSTableReader.PartitionPositionBounds p = sstable.getPositionsForRanges(makeRanges(t(2), t(6))).get(0);
-
-        // range are start exclusive so we should start at 3
-        assert p.lowerPosition == p3;
-
-        // to capture 6 we have to stop at the start of 7
-        assert p.upperPosition == p7;
-    }
-
-    @Test
     public void testPersistentStatisticsWithSecondaryIndex()
     {
         // Create secondary index and flush to disk
@@ -595,43 +556,6 @@ public class SSTableReaderTest
 
         // check if opening and querying works
         assertIndexQueryWorks(store);
-    }
-
-    @Test
-    public void testGetPositionsKeyCacheStats()
-    {
-        Assume.assumeTrue(KeyCacheSupport.isSupportedBy(DatabaseDescriptor.getSelectedSSTableFormat()));
-        ColumnFamilyStore store = discardSSTables(KEYSPACE1, CF_STANDARD2);
-        partitioner = store.getPartitioner();
-        CacheService.instance.keyCache.setCapacity(1000);
-
-        // insert data and compact to a single sstable
-        for (int j = 0; j < 10; j++)
-        {
-            new RowUpdateBuilder(store.metadata(), j, String.valueOf(j))
-            .clustering("0")
-            .add("val", ByteBufferUtil.EMPTY_BYTE_BUFFER)
-            .build()
-            .applyUnsafe();
-        }
-        Util.flush(store);
-        CompactionManager.instance.performMaximal(store);
-
-        SSTableReader sstable = store.getLiveSSTables().iterator().next();
-        KeyCache keyCache = ((KeyCacheSupport<?>) sstable).getKeyCache();
-        assumeTrue(keyCache.isEnabled());
-        // existing, non-cached key
-        sstable.getPosition(dk(2), SSTableReader.Operator.EQ);
-        assertEquals(1, keyCache.getRequests());
-        assertEquals(0, keyCache.getHits());
-        // existing, cached key
-        sstable.getPosition(dk(2), SSTableReader.Operator.EQ);
-        assertEquals(2, keyCache.getRequests());
-        assertEquals(1, keyCache.getHits());
-        // non-existing key (it is specifically chosen to not be rejected by Bloom Filter check)
-        sstable.getPosition(dk(14), SSTableReader.Operator.EQ);
-        assertEquals(3, keyCache.getRequests());
-        assertEquals(1, keyCache.getHits());
     }
 
     @Test
@@ -706,25 +630,18 @@ public class SSTableReaderTest
         Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
         Mockito.reset(listener);
 
-        // existing key is read from Cache Key (if used)
-        // Note: key cache may fail to cache the partition if it is wide.
+        // existing key is read again from the index
         sstable.getPosition(dk(7), SSTableReader.Operator.EQ, listener);
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.KEY_CACHE_HIT);
-        else
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
-        Mockito.reset(listener);
-
-        // As above with other ops
-        sstable.getPosition(dk(7), SSTableReader.Operator.GT, listener);    // GT does not engage key cache
         Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
         Mockito.reset(listener);
 
-        sstable.getPosition(dk(7), SSTableReader.Operator.GE, listener);    // GE does
-        if (sstable instanceof BigTableReader)
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.KEY_CACHE_HIT);
-        else
-            Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
+        // As above with other ops
+        sstable.getPosition(dk(7), SSTableReader.Operator.GT, listener);
+        Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
+        Mockito.reset(listener);
+
+        sstable.getPosition(dk(7), SSTableReader.Operator.GE, listener);
+        Mockito.verify(listener).onSSTableSelected(sstable, SSTableReadsListener.SelectionReason.INDEX_ENTRY_FOUND);
         Mockito.reset(listener);
 
         // non-existing key is rejected by Bloom Filter check
@@ -792,7 +709,6 @@ public class SSTableReaderTest
         ColumnFamilyStore store = keyspace.getColumnFamilyStore(CF_STANDARD_SMALL_BLOOM_FILTER);
         store.truncateBlocking();
         partitioner = store.getPartitioner();
-        CacheService.instance.keyCache.setCapacity(1000);
 
         // insert data and compact to a single sstable
         for (int j = 0; j < 10; j++)

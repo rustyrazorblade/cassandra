@@ -894,11 +894,6 @@ public interface StorageServiceMBean extends NotificationEmitter
     public int getSSTablePreemptiveOpenIntervalInMB();
     public void setSSTablePreemptiveOpenIntervalInMB(int intervalInMB);
 
-    public boolean getMigrateKeycacheOnCompaction();
-    public void setMigrateKeycacheOnCompaction(boolean invalidateKeyCacheOnCompaction);
-    public boolean getInvalidateKeycacheOnSSTableDeletion();
-    public void setInvalidateKeycacheOnSSTableDeletion(boolean invalidate);
-
     public int getConcurrentViewBuilders();
     public void setConcurrentViewBuilders(int value);
 

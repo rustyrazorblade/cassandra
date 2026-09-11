@@ -7,8 +7,7 @@ SYNOPSIS
                 [(-pw <password> | --password <password>)]
                 [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
                 [(-u <username> | --username <username>)] setcachekeystosave [--]
-                <key-cache-keys-to-save> <row-cache-keys-to-save>
-                <counter-cache-keys-to-save>
+                <row-cache-keys-to-save> <counter-cache-keys-to-save>
 
 OPTIONS
         -h <host>, --host <host>
@@ -31,6 +30,5 @@ OPTIONS
             list of argument, (useful when arguments might be mistaken for
             command-line options
 
-        <key-cache-keys-to-save> <row-cache-keys-to-save>
-            <counter-cache-keys-to-save>
+        <row-cache-keys-to-save> <counter-cache-keys-to-save>
             The number of keys saved by each cache. 0 to disable

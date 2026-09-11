@@ -69,7 +69,6 @@ public class IntegrationTestBase extends TestBaseImpl
             cfg.set("row_cache_size", "50MiB")
                .set("index_summary_capacity", "50MiB")
                .set("counter_cache_size", "50MiB")
-               .set("key_cache_size", "50MiB")
                .set("file_cache_size", "50MiB")
                .set("index_summary_capacity", "50MiB")
                .set("memtable_heap_space", "128MiB")

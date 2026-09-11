@@ -77,7 +77,6 @@ final class CachesTable extends AbstractVirtualTable
         if (null != ChunkCache.instance)
             addRow(result, "chunks", ChunkCache.instance.metrics);
         addRow(result, "counters", CacheService.instance.counterCache.getMetrics());
-        addRow(result, "keys", CacheService.instance.keyCache.getMetrics());
         addRow(result, "rows", CacheService.instance.rowCache.getMetrics());
 
         return result;

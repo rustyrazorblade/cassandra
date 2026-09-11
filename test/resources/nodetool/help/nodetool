@@ -85,7 +85,6 @@ The most commonly used nodetool commands are:
     invalidatecountercache              Invalidate the counter cache
     invalidatecredentialscache          Invalidate the credentials cache
     invalidatejmxpermissionscache       Invalidate the JMX permissions cache
-    invalidatekeycache                  Invalidate the key cache
     invalidatenetworkpermissionscache   Invalidate the network permissions cache
     invalidatepermissionscache          Invalidate the permissions cache
     invalidaterolescache                Invalidate the roles cache
@@ -123,7 +122,7 @@ The most commonly used nodetool commands are:
     setauthcacheconfig                  Set configuration for Auth cache
     setautorepairconfig                 sets the autorepair configuration
     setbatchlogreplaythrottle           Set batchlog replay throttle in KB per second, or 0 to disable throttling. This will be reduced proportionally to the number of nodes in the cluster.
-    setcachecapacity                    Set global key, row, and counter cache capacities (in MB units)
+    setcachecapacity                    Set global row and counter cache capacities (in MB units)
     setcachekeystosave                  Set number of keys saved by each cache for faster post-restart warmup. 0 to disable
     setcolumnindexsize                  Set the granularity of the collation index of rows within a partition in KiB
     setcompactionthreshold              Set min and max compaction thresholds for a given table

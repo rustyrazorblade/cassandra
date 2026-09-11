@@ -48,7 +48,6 @@ public enum OperationType
     UNKNOWN("Unknown compaction type", false, 5),
 
     STREAM("Stream", true, 6),
-    KEY_CACHE_SAVE("Key cache save", false, 6),
     ROW_CACHE_SAVE("Row cache save", false, 6),
     COUNTER_CACHE_SAVE("Counter cache save", false, 6),
     INDEX_SUMMARY("Index summary redistribution", false, 6);

@@ -190,7 +190,7 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
             if (size() > 0)
                 logger.info("Completed loading ({} ms; {} keys) {} cache",
                         TimeUnit.NANOSECONDS.toMillis(nanoTime() - start),
-                        CacheService.instance.keyCache.size(),
+                        size(),
                         cacheType);
             es.shutdown();
         });
@@ -317,9 +317,7 @@ public class AutoSavingCache<K extends CacheKey, V> extends InstrumentingCache<K
             }
 
             OperationType type;
-            if (cacheType == CacheService.CacheType.KEY_CACHE)
-                type = OperationType.KEY_CACHE_SAVE;
-            else if (cacheType == CacheService.CacheType.ROW_CACHE)
+            if (cacheType == CacheService.CacheType.ROW_CACHE)
                 type = OperationType.ROW_CACHE_SAVE;
             else if (cacheType == CacheService.CacheType.COUNTER_CACHE)
                 type = OperationType.COUNTER_CACHE_SAVE;

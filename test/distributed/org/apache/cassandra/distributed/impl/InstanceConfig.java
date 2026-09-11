@@ -128,7 +128,6 @@ public class InstanceConfig implements IInstanceConfig
                 // capacities that are based on `totalMemory` that should be fixed size
                 .set("index_summary_capacity", "50MiB")
                 .set("counter_cache_size", "50MiB")
-                .set("key_cache_size", "50MiB")
                 .set("commitlog_disk_access_mode", "legacy");
         if (CassandraRelevantProperties.DTEST_JVM_DTESTS_USE_LATEST.getBoolean())
         {
@@ -144,8 +143,6 @@ public class InstanceConfig implements IInstanceConfig
                 .set("authorizer", Map.of("class_name", "AllowAllAuthorizer"))
                 .set("role_manager", Map.of("class_name", "CassandraRoleManager"))
                 .set("network_authorizer", Map.of("class_name", "AllowAllNetworkAuthorizer"))
-
-                .set("key_cache_size", "0MiB")
 
                 .set("memtable_allocation_type", "offheap_objects")
 

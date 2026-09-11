@@ -657,11 +657,6 @@ public class NodeProbe implements AutoCloseable
         jpcProxy.invalidatePermissions(roleName);
     }
 
-    public void invalidateKeyCache()
-    {
-        cacheService.invalidateKeyCache();
-    }
-
     public void invalidateNetworkPermissionsCache()
     {
         npcProxy.invalidate();
@@ -1165,18 +1160,16 @@ public class NodeProbe implements AutoCloseable
         return ssProxy.isIncrementalBackupsEnabled();
     }
 
-    public void setCacheCapacities(int keyCacheCapacity, int rowCacheCapacity, int counterCacheCapacity)
+    public void setCacheCapacities(int rowCacheCapacity, int counterCacheCapacity)
     {
         CacheServiceMBean cacheMBean = getCacheServiceMBean();
-        cacheMBean.setKeyCacheCapacityInMB(keyCacheCapacity);
         cacheMBean.setRowCacheCapacityInMB(rowCacheCapacity);
         cacheMBean.setCounterCacheCapacityInMB(counterCacheCapacity);
     }
 
-    public void setCacheKeysToSave(int keyCacheKeysToSave, int rowCacheKeysToSave, int counterCacheKeysToSave)
+    public void setCacheKeysToSave(int rowCacheKeysToSave, int counterCacheKeysToSave)
     {
         CacheServiceMBean cacheMBean = getCacheServiceMBean();
-        cacheMBean.setKeyCacheKeysToSave(keyCacheKeysToSave);
         cacheMBean.setRowCacheKeysToSave(rowCacheKeysToSave);
         cacheMBean.setCounterCacheKeysToSave(counterCacheKeysToSave);
     }
@@ -1849,7 +1842,7 @@ public class NodeProbe implements AutoCloseable
 
     // JMX getters for the o.a.c.metrics API below.
     /**
-     * Retrieve cache metrics based on the cache type (KeyCache, RowCache, or CounterCache)
+     * Retrieve cache metrics based on the cache type (RowCache or CounterCache)
      * @param cacheType KeyCach, RowCache, or CounterCache
      * @param metricName Capacity, Entries, HitRate, Size, Requests or Hits.
      */
@@ -2106,7 +2099,6 @@ public class NodeProbe implements AutoCloseable
                 case "EstimatedColumnCountHistogram":
                 case "EstimatedPartitionSizeHistogram":
                 case "EstimatedPartitionCount":
-                case "KeyCacheHitRate":
                 case "LiveSSTableCount":
                 case "MaxSSTableDuration":
                 case "MaxSSTableSize":

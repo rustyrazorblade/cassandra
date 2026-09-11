@@ -24,12 +24,10 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cache.AutoSavingCache;
 import org.apache.cassandra.cache.IRowCacheEntry;
-import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.cache.RowCacheKey;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.ThreadPoolMetrics;
 import org.apache.cassandra.net.MessagingService;
@@ -93,21 +91,13 @@ public class StatusLogger
         logger.info(String.format("%-25s%10s%10s",
                                   "MessagingService", "n/a", pendingLargeMessages + "/" + pendingSmallMessages));
 
-        // Global key/row cache information
-        AutoSavingCache<KeyCacheKey, AbstractRowIndexEntry> keyCache = CacheService.instance.keyCache;
+        // Global row cache information
         AutoSavingCache<RowCacheKey, IRowCacheEntry> rowCache = CacheService.instance.rowCache;
 
-        int keyCacheKeysToSave = DatabaseDescriptor.getKeyCacheKeysToSave();
         int rowCacheKeysToSave = DatabaseDescriptor.getRowCacheKeysToSave();
 
         logger.info(String.format("%-25s%10s%25s%25s",
                                   "Cache Type", "Size", "Capacity", "KeysToSave"));
-        logger.info(String.format("%-25s%10s%25s%25s",
-                                  "KeyCache",
-                                  keyCache.weightedSize(),
-                                  keyCache.getCapacity(),
-                                  keyCacheKeysToSave == Integer.MAX_VALUE ? "all" : keyCacheKeysToSave));
-
         logger.info(String.format("%-25s%10s%25s%25s",
                                   "RowCache",
                                   rowCache.weightedSize(),

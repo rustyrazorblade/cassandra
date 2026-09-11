@@ -242,7 +242,6 @@ public class DatabaseDescriptor
 
     private static long preparedStatementsCacheSizeInMiB;
 
-    private static long keyCacheSizeInMiB;
     private static long paxosCacheSizeInMiB;
     private static long accordCacheSizeInMiB;
     private static long accordWorkingSetSizeInMiB;
@@ -981,25 +980,6 @@ public class DatabaseDescriptor
         {
             throw new ConfigurationException("prepared_statements_cache_size option was set incorrectly to '"
                                              + (conf.prepared_statements_cache_size != null ? conf.prepared_statements_cache_size.toString() : null) + "', supported values are <integer> >= 0.", false);
-        }
-
-        try
-        {
-            // if key_cache_size option was set to "auto" then size of the cache should be "min(5% of Heap (in MiB), 100MiB)
-            keyCacheSizeInMiB = (conf.key_cache_size == null)
-                                ? Math.min(Math.max(1, (int) (Runtime.getRuntime().totalMemory() * 0.05 / 1024 / 1024)), 100)
-                                : conf.key_cache_size.toMebibytes();
-
-            if (keyCacheSizeInMiB < 0)
-                throw new NumberFormatException(); // to escape duplicating error message
-
-            // we need this assignment for the Settings Virtual Table - CASSANDRA-17734
-            conf.key_cache_size = new DataStorageSpec.LongMebibytesBound(keyCacheSizeInMiB);
-        }
-        catch (NumberFormatException e)
-        {
-            throw new ConfigurationException("key_cache_size option was set incorrectly to '"
-                                             + (conf.key_cache_size != null ? conf.key_cache_size.toString() : null) + "', supported values are <integer> >= 0.", false);
         }
 
         try
@@ -4441,26 +4421,6 @@ public class DatabaseDescriptor
         return conf.commitlog_total_space.toMebibytes();
     }
 
-    public static boolean shouldMigrateKeycacheOnCompaction()
-    {
-        return conf.key_cache_migrate_during_compaction;
-    }
-
-    public static void setMigrateKeycacheOnCompaction(boolean migrateCacheEntry)
-    {
-        conf.key_cache_migrate_during_compaction = migrateCacheEntry;
-    }
-
-    public static boolean shouldInvalidateKeycacheOnSSTableDeletion()
-    {
-        return conf.key_cache_invalidate_after_sstable_deletion;
-    }
-
-    public static void setInvalidateKeycacheOnSSTableDeletion(boolean invalidateCacheEntry)
-    {
-        conf.key_cache_invalidate_after_sstable_deletion = invalidateCacheEntry;
-    }
-
     /**
      * This method can return negative number for disabled
      */
@@ -4492,34 +4452,9 @@ public class DatabaseDescriptor
         return conf.trickle_fsync_interval.toBytesInLong();
     }
 
-    public static long getKeyCacheSizeInMiB()
-    {
-        return keyCacheSizeInMiB;
-    }
-
     public static long getIndexSummaryCapacityInMiB()
     {
         return indexSummaryCapacityInMiB;
-    }
-
-    public static int getKeyCacheSavePeriod()
-    {
-        return conf.key_cache_save_period.toSeconds();
-    }
-
-    public static void setKeyCacheSavePeriod(int keyCacheSavePeriod)
-    {
-        conf.key_cache_save_period = new DurationSpec.IntSecondsBound(keyCacheSavePeriod);
-    }
-
-    public static int getKeyCacheKeysToSave()
-    {
-        return conf.key_cache_keys_to_save;
-    }
-
-    public static void setKeyCacheKeysToSave(int keyCacheKeysToSave)
-    {
-        conf.key_cache_keys_to_save = keyCacheKeysToSave;
     }
 
     public static String getRowCacheClassName()

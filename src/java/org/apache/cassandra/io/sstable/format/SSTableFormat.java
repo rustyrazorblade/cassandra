@@ -27,14 +27,11 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.IScrubber;
 import org.apache.cassandra.io.sstable.MetricsProviders;
 import org.apache.cassandra.io.sstable.SSTable;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.OutputHandler;
 import org.apache.cassandra.utils.Pair;
@@ -91,8 +88,6 @@ public interface SSTableFormat<R extends SSTableReader, W extends SSTableWriter>
      */
     Set<Component> generatedOnLoadComponents();
 
-    KeyCacheValueSerializer<R, ?> getKeyCacheValueSerializer();
-
     /**
      * Returns a new scrubber for an sstable. Note that the transaction must contain only one reader
      * and the reader must match the provided cfs.
@@ -109,7 +104,7 @@ public interface SSTableFormat<R extends SSTableReader, W extends SSTableWriter>
     /**
      * Deletes the existing components of the sstables represented by the provided descriptor.
      * The method is also responsible for cleaning up the in-memory resources occupied by the stuff related to that
-     * sstables, such as row key cache entries.
+     * sstables.
      */
     void delete(Descriptor descriptor);
 
@@ -191,15 +186,6 @@ public interface SSTableFormat<R extends SSTableReader, W extends SSTableWriter>
         public final static Component DIGEST = Types.DIGEST.getSingleton();
         public final static Component CRC = Types.CRC.getSingleton();
         public final static Component TOC = Types.TOC.getSingleton();
-    }
-
-    interface KeyCacheValueSerializer<R extends SSTableReader, T extends AbstractRowIndexEntry>
-    {
-        void skip(DataInputPlus input) throws IOException;
-
-        T deserialize(R reader, DataInputPlus input) throws IOException;
-
-        void serialize(T entry, DataOutputPlus output) throws IOException;
     }
 
     interface Factory

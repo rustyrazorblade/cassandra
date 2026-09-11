@@ -18,12 +18,8 @@
 
 package org.apache.cassandra.io.sstable;
 
-import java.io.IOException;
-
 import org.apache.cassandra.cache.IMeasurableMemory;
 import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.io.sstable.format.SSTableFormat;
-import org.apache.cassandra.io.util.DataOutputPlus;
 
 /**
  * The base RowIndexEntry is not stored on disk, only specifies a position in the data file
@@ -63,13 +59,4 @@ public abstract class AbstractRowIndexEntry implements IMeasurableMemory
     {
         return 0;
     }
-
-    public abstract SSTableFormat<?, ?> getSSTableFormat();
-
-    /**
-     * Serialize this entry for key cache
-     *
-     * @param out the output stream for serialized entry
-     */
-    public abstract void serializeForCache(DataOutputPlus out) throws IOException;
 }

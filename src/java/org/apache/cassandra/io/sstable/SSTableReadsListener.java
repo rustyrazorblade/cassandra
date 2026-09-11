@@ -53,7 +53,6 @@ public interface SSTableReadsListener
      */
     enum SelectionReason
     {
-        KEY_CACHE_HIT("Key cache hit for sstable {}, size = {}"),
         INDEX_ENTRY_FOUND("Partition index found for sstable {}, size = {}");
 
         private final String message;

@@ -82,7 +82,6 @@ public class DataComponent
         m.put(OperationType.INDEX_BUILD, NOT_A_WRITER);
         m.put(OperationType.VIEW_BUILD, NOT_A_WRITER);
         m.put(OperationType.INDEX_SUMMARY, NOT_A_WRITER);
-        m.put(OperationType.KEY_CACHE_SAVE, NOT_A_WRITER);
         m.put(OperationType.ROW_CACHE_SAVE, NOT_A_WRITER);
         m.put(OperationType.COUNTER_CACHE_SAVE, NOT_A_WRITER);
 

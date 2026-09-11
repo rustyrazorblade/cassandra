@@ -21,7 +21,6 @@ import java.io.IOException;
 
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
-import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -56,23 +55,6 @@ final class TrieIndexEntry extends AbstractRowIndexEntry
     public int blockCount()
     {
         return rowIndexBlockCount;
-    }
-
-    @Override
-    public SSTableFormat<?, ?> getSSTableFormat()
-    {
-        throw noKeyCacheError();
-    }
-
-    @Override
-    public void serializeForCache(DataOutputPlus out)
-    {
-        throw noKeyCacheError();
-    }
-
-    private static AssertionError noKeyCacheError()
-    {
-        return new AssertionError("BTI SSTables should not use key cache");
     }
 
     @Override

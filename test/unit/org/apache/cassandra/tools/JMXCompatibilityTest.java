@@ -70,6 +70,14 @@ public class JMXCompatibilityTest extends CQLTester
 
     private static boolean CREATED_TABLE = false;
 
+    // the key cache and its JMX surface were removed
+    private static final List<String> KEY_CACHE_OBJECTS = newArrayList(
+        "org.apache.cassandra.metrics:type=Cache,scope=KeyCache,name=.*",
+        "org.apache.cassandra.metrics:type=(ColumnFamily|Table),.*,name=KeyCacheHitRate");
+    private static final List<String> KEY_CACHE_ATTRIBUTES = newArrayList(
+        "KeyCacheCapacityInMB", "KeyCacheKeysToSave", "KeyCacheSavePeriodInSeconds", "MigrateKeycacheOnCompaction");
+    private static final String KEY_CACHE_OPERATION = "invalidateKeyCache";
+
     @BeforeClass
     public static void setup() throws Exception
     {
@@ -141,6 +149,10 @@ public class JMXCompatibilityTest extends CQLTester
             excludeObjects.add("org.apache.cassandra.metrics:type=(ColumnFamily|Keyspace|Table).*,name=IndexSummary.*"); // -> when BTI format is used, index summary is not used (CASSANDRA-17056)
         }
 
+        excludeObjects.addAll(KEY_CACHE_OBJECTS);
+        excludeAttributes.addAll(KEY_CACHE_ATTRIBUTES);
+        excludeOperations.add(KEY_CACHE_OPERATION);
+
         diff(excludeObjects, excludeAttributes, excludeOperations, "test/data/jmxdump/cassandra-3.0-jmx.yaml");
     }
 
@@ -185,6 +197,10 @@ public class JMXCompatibilityTest extends CQLTester
             excludeObjects.add("org.apache.cassandra.metrics:type=Index,scope=RowIndexEntry.*");
         }
 
+        excludeObjects.addAll(KEY_CACHE_OBJECTS);
+        excludeAttributes.addAll(KEY_CACHE_ATTRIBUTES);
+        excludeOperations.add(KEY_CACHE_OPERATION);
+
         diff(excludeObjects, excludeAttributes, excludeOperations, "test/data/jmxdump/cassandra-3.11-jmx.yaml");
     }
 
@@ -222,6 +238,10 @@ public class JMXCompatibilityTest extends CQLTester
             excludeObjects.add("org.apache.cassandra.metrics:type=Index,scope=RowIndexEntry.*");
         }
 
+        excludeObjects.addAll(KEY_CACHE_OBJECTS);
+        excludeAttributes.addAll(KEY_CACHE_ATTRIBUTES);
+        excludeOperations.add(KEY_CACHE_OPERATION);
+
         diff(excludeObjects, excludeAttributes, excludeOperations, "test/data/jmxdump/cassandra-4.0-jmx.yaml");
     }
 
@@ -258,6 +278,10 @@ public class JMXCompatibilityTest extends CQLTester
             excludeObjects.add("org.apache.cassandra.metrics:type=(ColumnFamily|Keyspace|Table).*,name=IndexSummary.*"); // -> when BTI format is used, index summary is not used (CASSANDRA-17056)
             excludeObjects.add("org.apache.cassandra.metrics:type=Index,scope=RowIndexEntry.*");
         }
+
+        excludeObjects.addAll(KEY_CACHE_OBJECTS);
+        excludeAttributes.addAll(KEY_CACHE_ATTRIBUTES);
+        excludeOperations.add(KEY_CACHE_OPERATION);
 
         diff(excludeObjects, excludeAttributes, excludeOperations, "test/data/jmxdump/cassandra-4.1-jmx.yaml");
     }

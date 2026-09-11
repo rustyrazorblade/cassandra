@@ -24,7 +24,6 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -35,7 +34,6 @@ import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
@@ -45,18 +43,15 @@ import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.db.rows.UnfilteredRowIteratorWithLowerBound;
 import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.Downsampling;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.IVerifier;
-import org.apache.cassandra.io.sstable.IndexInfo;
 import org.apache.cassandra.io.sstable.KeyIterator;
 import org.apache.cassandra.io.sstable.KeyReader;
 import org.apache.cassandra.io.sstable.SSTable;
@@ -69,9 +64,6 @@ import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummary;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryBuilder;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummarySupport;
-import org.apache.cassandra.io.sstable.keycache.KeyCache;
-import org.apache.cassandra.io.sstable.keycache.KeyCacheSupport;
-import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.FileUtils;
@@ -86,8 +78,7 @@ import static org.apache.cassandra.utils.concurrent.SharedCloseable.sharedCopyOr
  * SSTableReaders are open()ed by Keyspace.onStart; after that they are created by SSTableWriter.renameAndOpen.
  * Do not re-call open() on existing SSTable files; use the references kept by ColumnFamilyStore post-start instead.
  */
-public class BigTableReader extends SSTableReaderWithFilter implements IndexSummarySupport<BigTableReader>,
-                                                                       KeyCacheSupport<BigTableReader>
+public class BigTableReader extends SSTableReaderWithFilter implements IndexSummarySupport<BigTableReader>
 {
     private static final Logger logger = LoggerFactory.getLogger(BigTableReader.class);
 
@@ -95,15 +86,12 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
     private final IndexSummary indexSummary;
     private final FileHandle ifile;
 
-    private final KeyCache keyCache;
-
     public BigTableReader(Builder builder, SSTable.Owner owner)
     {
         super(builder, owner);
         this.ifile = builder.getIndexFile();
         this.indexSummary = builder.getIndexSummary();
         this.rowIndexEntrySerializer = new RowIndexEntry.Serializer(descriptor.version, header, owner != null ? owner.getMetrics() : null);
-        this.keyCache = Objects.requireNonNull(builder.getKeyCache());
     }
 
     @Override
@@ -229,7 +217,7 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
     }
 
     /**
-     * Retrieves the position while updating the key cache and the stats.
+     * Retrieves the position while updating the stats.
      *
      * @param key The key to apply as the rhs to the given Operator. A 'fake' key is allowed to
      *            allow key selection by token bounds but only if op != * EQ
@@ -244,7 +232,7 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
      * @param key         The key to apply as the rhs to the given Operator. A 'fake' key is allowed to
      *                    allow key selection by token bounds but only if op != * EQ
      * @param operator    The Operator defining matching keys: the nearest key to the target matching the operator wins.
-     * @param updateStats true if updating stats and cache
+     * @param updateStats true if updating stats
      * @return The index entry corresponding to the key, or null if the key is not present
      */
     @Override
@@ -295,18 +283,6 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
             {
                 notifySkipped(SkippingReason.BLOOM_FILTER, listener, operator, updateStats);
                 return null;
-            }
-        }
-
-        // next, the key cache (only make sense for valid row key)
-        if ((searchOp == Operator.EQ || searchOp == Operator.GE) && (key instanceof DecoratedKey))
-        {
-            DecoratedKey decoratedKey = (DecoratedKey) key;
-            AbstractRowIndexEntry cachedPosition = getCachedPosition(decoratedKey, updateStats);
-            if (cachedPosition != null && cachedPosition.getSSTableFormat() == descriptor.getFormat())
-            {
-                notifySelected(SelectionReason.KEY_CACHE_HIT, listener, operator, updateStats, cachedPosition);
-                return (RowIndexEntry) cachedPosition;
             }
         }
 
@@ -366,24 +342,17 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
                 {
                     // read data position from index entry
                     RowIndexEntry indexEntry = rowIndexEntrySerializer.deserialize(in);
-                    if (exactMatch && updateStats)
+                    if (exactMatch && updateStats && logger.isTraceEnabled())
                     {
                         assert key instanceof DecoratedKey; // key can be == to the index key only if it's a true row key
-                        DecoratedKey decoratedKey = (DecoratedKey) key;
 
-                        if (logger.isTraceEnabled())
+                        // expensive sanity check!  see CASSANDRA-4687
+                        try (FileDataInput fdi = dfile.createReader(indexEntry.position))
                         {
-                            // expensive sanity check!  see CASSANDRA-4687
-                            try (FileDataInput fdi = dfile.createReader(indexEntry.position))
-                            {
-                                DecoratedKey keyInDisk = decorateKey(ByteBufferUtil.readWithShortLength(fdi));
-                                if (!keyInDisk.equals(key))
-                                    throw new AssertionError(String.format("%s != %s in %s", keyInDisk, key, fdi.getPath()));
-                            }
+                            DecoratedKey keyInDisk = decorateKey(ByteBufferUtil.readWithShortLength(fdi));
+                            if (!keyInDisk.equals(key))
+                                throw new AssertionError(String.format("%s != %s in %s", keyInDisk, key, fdi.getPath()));
                         }
-
-                        // store exact match for the key
-                        cacheKey(decoratedKey, indexEntry);
                     }
                     notifySelected(SelectionReason.INDEX_ENTRY_FOUND, listener, operator, updateStats, indexEntry);
                     return indexEntry;
@@ -429,44 +398,9 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
                 return null;
 
             key = decorateKey(ByteBufferUtil.readWithShortLength(in));
-
-            // hint read path about key location if caching is enabled
-            // this saves index summary lookup and index file iteration which whould be pretty costly
-            // especially in presence of promoted column indexes
-            cacheKey(key, rowIndexEntrySerializer.deserialize(in));
         }
 
         return key;
-    }
-
-    @Override
-    public RowIndexEntry deserializeKeyCacheValue(DataInputPlus input) throws IOException
-    {
-        return rowIndexEntrySerializer.deserializeForCache(input);
-    }
-
-    @Override
-    public ClusteringBound<?> getLowerBoundPrefixFromCache(DecoratedKey partitionKey, boolean isReversed)
-    {
-        AbstractRowIndexEntry rie = getCachedPosition(partitionKey, false);
-        if (!(rie instanceof RowIndexEntry))
-            return null;
-
-        RowIndexEntry rowIndexEntry = (RowIndexEntry) rie;
-        if (!rowIndexEntry.indexOnHeap())
-            return null;
-
-        try (RowIndexEntry.IndexInfoRetriever onHeapRetriever = rowIndexEntry.openWithIndex(null))
-        {
-            IndexInfo columns = onHeapRetriever.columnsIndex(isReversed ? rowIndexEntry.blockCount() - 1 : 0);
-            ClusteringBound<?> bound = isReversed ? columns.lastName.asEndBound() : columns.firstName.asStartBound();
-            UnfilteredRowIteratorWithLowerBound.assertBoundSize(bound, this);
-            return bound.artificialLowerBound(isReversed);
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException("should never occur", e);
-        }
     }
 
     /**
@@ -548,8 +482,6 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
             b.setIndexFile(sharedCopy ? sharedCopyOrNull(ifile) : ifile);
         if (builder.getIndexSummary() == null)
             b.setIndexSummary(sharedCopy ? sharedCopyOrNull(indexSummary) : indexSummary);
-
-        b.setKeyCache(keyCache);
 
         return b;
     }
@@ -689,19 +621,12 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
         }
     }
 
-    @Override
-    public KeyCache getKeyCache()
-    {
-        return this.keyCache;
-    }
-
     public static class Builder extends SSTableReaderWithFilter.Builder<BigTableReader, Builder>
     {
         private static final Logger logger = LoggerFactory.getLogger(Builder.class);
 
         private IndexSummary indexSummary;
         private FileHandle indexFile;
-        private KeyCache keyCache = KeyCache.NO_CACHE;
 
         public Builder(Descriptor descriptor)
         {
@@ -720,12 +645,6 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
             return this;
         }
 
-        public Builder setKeyCache(KeyCache keyCache)
-        {
-            this.keyCache = keyCache;
-            return this;
-        }
-
         public IndexSummary getIndexSummary()
         {
             return indexSummary;
@@ -734,11 +653,6 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
         public FileHandle getIndexFile()
         {
             return indexFile;
-        }
-
-        public KeyCache getKeyCache()
-        {
-            return keyCache;
         }
 
         @Override

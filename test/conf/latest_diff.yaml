@@ -40,8 +40,6 @@ role_manager:
 network_authorizer:
   class_name: AllowAllNetworkAuthorizer
 
-key_cache_size: 0MiB
-
 memtable_allocation_type: offheap_objects
 
 commitlog_disk_access_mode: auto

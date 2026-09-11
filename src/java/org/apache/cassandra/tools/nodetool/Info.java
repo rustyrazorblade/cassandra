@@ -86,17 +86,6 @@ public class Info extends AbstractCommand
 
         CacheServiceMBean cacheService = probe.getCacheServiceMBean();
 
-        // Key Cache: Hits, Requests, RecentHitRate, SavePeriodInSeconds
-        out.printf("%-23s: entries %d, size %s, capacity %s, %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
-                "Key Cache",
-                probe.getCacheMetric("KeyCache", "Entries"),
-                FileUtils.stringifyFileSize((long) probe.getCacheMetric("KeyCache", "Size")),
-                FileUtils.stringifyFileSize((long) probe.getCacheMetric("KeyCache", "Capacity")),
-                probe.getCacheMetric("KeyCache", "Hits"),
-                probe.getCacheMetric("KeyCache", "Requests"),
-                probe.getCacheMetric("KeyCache", "HitRate"),
-                cacheService.getKeyCacheSavePeriodInSeconds());
-
         // Row Cache: Hits, Requests, RecentHitRate, SavePeriodInSeconds
         out.printf("%-23s: entries %d, size %s, capacity %s, %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
                 "Row Cache",

@@ -175,8 +175,6 @@ protected final Builder unbuildTo(Builder builder, boolean sharedCopy)
     if (builder.getIndexSummary() == null)
         b.setIndexSummary(sharedCopy ? sharedCopyOrNull(indexSummary) : indexSummary);
 
-    b.setKeyCache(keyCache);
-
     return b;
 }
 ```
@@ -203,16 +201,6 @@ summaries_ it should implement the [`IndexSummarySupport`](indexsummary/IndexSum
 
 The support for _index summaries_ comes with additional [metrics](indexsummary/IndexSummaryMetrics.java) - read more 
 about custom metrics support [here](#metrics).
-
-#### Key cache
-
-If an sstable format implementation uses row key cache, it should implement 
-the[`KeyCacheSupport`](keycache/KeyCacheSupport.java) interface. In particular, it should store a `KeyCache` instance 
-and return it with the `getKeyCache()` method. The interface has the default implementations of several methods 
-the system relies on if the reader implements the `KeyCacheSupport` interface.
-
-The interface comes with additional [metrics](keycache/KeyCacheMetrics.java) - read more about custom metrics support 
-[here](#metrics).
 
 #### Metrics
 

@@ -61,7 +61,6 @@ import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
-import org.apache.cassandra.io.sstable.keycache.KeyCacheSupport;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.io.util.FileOutputStreamPlus;
@@ -182,7 +181,6 @@ public class LegacySSTableTest
     public void testLoadLegacyCqlTables() throws Exception
     {
         DatabaseDescriptor.setColumnIndexCacheSize(99999);
-        CacheService.instance.invalidateKeyCache();
         doTestLegacyCqlTables();
     }
 
@@ -190,7 +188,6 @@ public class LegacySSTableTest
     public void testLoadLegacyCqlTablesShallow() throws Exception
     {
         DatabaseDescriptor.setColumnIndexCacheSize(0);
-        CacheService.instance.invalidateKeyCache();
         doTestLegacyCqlTables();
     }
 
@@ -203,7 +200,6 @@ public class LegacySSTableTest
             logger.info("Loading legacy version: {}", legacyVersion);
             truncateLegacyTables(legacyVersion);
             loadLegacyTables(legacyVersion);
-            CacheService.instance.invalidateKeyCache();
 
             for (ColumnFamilyStore cfs : Keyspace.open(LEGACY_TABLES_KEYSPACE).getColumnFamilyStores())
             {
@@ -292,7 +288,6 @@ public class LegacySSTableTest
             logger.info("Loading legacy version: {}", legacyVersion);
             truncateLegacyTables(legacyVersion);
             loadLegacyTables(legacyVersion);
-            CacheService.instance.invalidateKeyCache();
 
             for (ColumnFamilyStore cfs : Keyspace.open(LEGACY_TABLES_KEYSPACE).getColumnFamilyStores())
             {
@@ -313,10 +308,7 @@ public class LegacySSTableTest
             logger.info("Loading legacy version: {}", legacyVersion);
             truncateLegacyTables(legacyVersion);
             loadLegacyTables(legacyVersion);
-            CacheService.instance.invalidateKeyCache();
-            long startCount = CacheService.instance.keyCache.size();
             verifyReads(legacyVersion);
-            verifyCache(legacyVersion, startCount);
             compactLegacyTables(legacyVersion);
         }
     }
@@ -537,7 +529,6 @@ public class LegacySSTableTest
         Keyspace.open(LEGACY_TABLES_KEYSPACE).getColumnFamilyStore(String.format("legacy_%s_tuple", legacyVersion)).truncateBlocking();
         Keyspace.open(LEGACY_TABLES_KEYSPACE).getColumnFamilyStore(String.format("legacy_%s_clust_be_index_summary", legacyVersion)).truncateBlocking();
         CacheService.instance.invalidateCounterCache();
-        CacheService.instance.invalidateKeyCache();
     }
 
     private static void compactLegacyTables(String legacyVersion) throws Exception
@@ -560,25 +551,6 @@ public class LegacySSTableTest
         loadLegacyTable(legacyVersion, "clust_counter");
         loadLegacyTable(legacyVersion, "tuple");
         loadLegacyTable(legacyVersion, "clust_be_index_summary");
-    }
-
-    private static void verifyCache(String legacyVersion, long startCount) throws InterruptedException, java.util.concurrent.ExecutionException
-    {
-        // Only perform test if format uses cache.
-        SSTableReader sstable = Iterables.getFirst(Keyspace.open("legacy_tables").getColumnFamilyStore(String.format("legacy_%s_simple", legacyVersion)).getLiveSSTables(), null);
-        if (!(sstable instanceof KeyCacheSupport) || DatabaseDescriptor.getKeyCacheSizeInMiB() == 0)
-            return;
-
-        //For https://issues.apache.org/jira/browse/CASSANDRA-10778
-        //Validate whether the key cache successfully saves in the presence of old keys as
-        //well as loads the correct number of keys
-        long endCount = CacheService.instance.keyCache.size();
-        Assert.assertTrue(endCount > startCount);
-        CacheService.instance.keyCache.submitWrite(Integer.MAX_VALUE).get();
-        CacheService.instance.invalidateKeyCache();
-        Assert.assertEquals(startCount, CacheService.instance.keyCache.size());
-        CacheService.instance.keyCache.loadSaved();
-        Assert.assertEquals(endCount, CacheService.instance.keyCache.size());
     }
 
     private static void verifyReads(String legacyVersion)
@@ -683,7 +655,6 @@ public class LegacySSTableTest
         QueryProcessor.executeInternal(String.format("TRUNCATE legacy_tables.legacy_%s_clust_counter", legacyVersion));
         QueryProcessor.executeInternal(String.format("TRUNCATE legacy_tables.legacy_%s_clust_be_index_summary", legacyVersion));
         CacheService.instance.invalidateCounterCache();
-        CacheService.instance.invalidateKeyCache();
     }
 
     private static void assertLegacyClustRows(int count, UntypedResultSet rs)

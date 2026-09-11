@@ -194,12 +194,6 @@ public class BtiFormat extends AbstractSSTableFormat<BtiTableReader, BtiTableWri
     }
 
     @Override
-    public SSTableFormat.KeyCacheValueSerializer<BtiTableReader, TrieIndexEntry> getKeyCacheValueSerializer()
-    {
-        throw new AssertionError("BTI sstables do not use key cache");
-    }
-
-    @Override
     public IScrubber getScrubber(ColumnFamilyStore cfs, LifecycleTransaction transaction, OutputHandler outputHandler, IScrubber.Options options)
     {
         Preconditions.checkArgument(cfs.metadata().equals(transaction.onlyOne().metadata()), "SSTable metadata does not match current definition");

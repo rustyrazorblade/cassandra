@@ -2216,7 +2216,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
 
     private void invalidateCaches()
     {
-        CacheService.instance.invalidateKeyCacheForCf(metadata());
         CacheService.instance.invalidateRowCacheForCf(metadata());
         if (metadata().isCounter())
             CacheService.instance.invalidateCounterCacheForCf(metadata());
@@ -3233,11 +3232,6 @@ public <T> T withAllSSTables(final OperationType operationType, Function<Lifecyc
     public boolean isCounterCacheEnabled()
     {
         return metadata().isCounter() && CacheService.instance.counterCache.getCapacity() > 0;
-    }
-
-    public boolean isKeyCacheEnabled()
-    {
-        return metadata().params.caching.cacheKeys() && CacheService.instance.keyCache.getCapacity() > 0;
     }
 
     public boolean isAutoSnapshotEnabled()

@@ -2900,7 +2900,6 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                      .stream()
                      .map(CompactionInfo.Holder::getCompactionInfo)
                      .filter(task -> task.getTaskType() != OperationType.COUNTER_CACHE_SAVE
-                                     && task.getTaskType() != OperationType.KEY_CACHE_SAVE
                                      && task.getTaskType() != OperationType.ROW_CACHE_SAVE)
                      .collect(Collectors.toList());
     }

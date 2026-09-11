@@ -29,8 +29,7 @@ public class SetCacheKeysToSaveMockTest extends AbstractNodetoolMock
     public void testSetCacheKeysToSave()
     {
         CacheServiceMBean mock = getMock(CACHE_SERVICE_MBEAN);
-        invokeNodetool("setcachekeystosave", "5", "10", "15").assertOnCleanExit();
-        Mockito.verify(mock).setKeyCacheKeysToSave(5);
+        invokeNodetool("setcachekeystosave", "10", "15").assertOnCleanExit();
         Mockito.verify(mock).setRowCacheKeysToSave(10);
         Mockito.verify(mock).setCounterCacheKeysToSave(15);
     }

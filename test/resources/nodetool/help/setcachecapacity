@@ -1,13 +1,13 @@
 NAME
-        nodetool setcachecapacity - Set global key, row, and counter cache
-        capacities (in MB units)
+        nodetool setcachecapacity - Set global row and counter cache capacities
+        (in MB units)
 
 SYNOPSIS
         nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
                 [(-pw <password> | --password <password>)]
                 [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
                 [(-u <username> | --username <username>)] setcachecapacity [--]
-                <key-cache-capacity> <row-cache-capacity> <counter-cache-capacity>
+                <row-cache-capacity> <counter-cache-capacity>
 
 OPTIONS
         -h <host>, --host <host>
@@ -30,5 +30,5 @@ OPTIONS
             list of argument, (useful when arguments might be mistaken for
             command-line options
 
-        <key-cache-capacity> <row-cache-capacity> <counter-cache-capacity>
-            Key cache, row cache, and counter cache (in MB)
+        <row-cache-capacity> <counter-cache-capacity>
+            Row cache and counter cache (in MB)

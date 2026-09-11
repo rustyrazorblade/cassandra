@@ -37,7 +37,6 @@ import org.apache.cassandra.db.transform.RTBoundValidator;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.keycache.KeyCacheSupport;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.IteratorWithLowerBound;
@@ -92,12 +91,7 @@ public class UnfilteredRowIteratorWithLowerBound extends LazilyInitializedUnfilt
         if (lowerBoundComputed)
             return lowerBoundMarker;
 
-        // lower bound from cache may be more accurate as it stores information about clusterings range for that exact
-        // row, so we try it first (without initializing iterator)
-        ClusteringBound<?> lowerBound = maybeGetLowerBoundFromKeyCache();
-        if (lowerBound == null)
-            // If we couldn't get the lower bound from cache, we try with metadata
-            lowerBound = maybeGetLowerBoundFromMetadata();
+        ClusteringBound<?> lowerBound = maybeGetLowerBoundFromMetadata();
 
         lowerBoundMarker = lowerBound != null ? makeBound(lowerBound) : null;
         lowerBoundComputed = true;
@@ -186,17 +180,6 @@ public class UnfilteredRowIteratorWithLowerBound extends LazilyInitializedUnfilt
             return Rows.EMPTY_STATIC_ROW;
 
         return super.staticRow();
-    }
-
-    /**
-     * @return the lower bound stored on the index entry for this partition, if available.
-     */
-    private ClusteringBound<?> maybeGetLowerBoundFromKeyCache()
-    {
-        if (sstable instanceof KeyCacheSupport<?>)
-            return ((KeyCacheSupport<?>) sstable).getLowerBoundPrefixFromCache(partitionKey(), isReverseOrder);
-
-        return null;
     }
 
     /**

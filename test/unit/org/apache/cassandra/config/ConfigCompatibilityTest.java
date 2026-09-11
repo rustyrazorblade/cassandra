@@ -103,7 +103,7 @@ public class ConfigCompatibilityTest
                                                                  .add("native_transport_port_ssl")
                                                                  .build();
 
-    // user defined functions and aggregates were removed together with their settings
+    // user defined functions, user defined aggregates, and the key cache were removed together with their settings
     private static final Set<String> REMOVED_IN_60 = ImmutableSet.<String>builder()
                                                                  .add("enable_user_defined_functions")
                                                                  .add("enable_scripted_user_defined_functions")
@@ -118,6 +118,11 @@ public class ConfigCompatibilityTest
                                                                  .add("user_defined_functions_threads_enabled")
                                                                  .add("user_defined_functions_warn_timeout")
                                                                  .add("user_defined_functions_fail_timeout")
+                                                                 .add("key_cache_size")
+                                                                 .add("key_cache_size_in_mb")
+                                                                 .add("key_cache_keys_to_save")
+                                                                 .add("key_cache_save_period")
+                                                                 .add("key_cache_migrate_during_compaction")
                                                                  .build();
 
     private static final Set<String> ALLOW_LIST = ImmutableSet.<String>builder()

@@ -18,7 +18,6 @@
 package org.apache.cassandra.io.sstable.format.big;
 
 import java.io.IOException;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -33,7 +32,6 @@ import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -54,12 +52,8 @@ import org.apache.cassandra.io.sstable.format.SSTableWriter;
 import org.apache.cassandra.io.sstable.format.SortedTableScrubber;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryMetrics;
-import org.apache.cassandra.io.sstable.keycache.KeyCacheMetrics;
-import org.apache.cassandra.io.util.DataInputPlus;
-import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.TableMetadataRef;
-import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.OutputHandler;
 import org.apache.cassandra.utils.Pair;
@@ -301,12 +295,6 @@ public class BigFormat extends AbstractSSTableFormat<BigTableReader, BigTableWri
     }
 
     @Override
-    public SSTableFormat.KeyCacheValueSerializer<BigTableReader, RowIndexEntry> getKeyCacheValueSerializer()
-    {
-        return KeyCacheValueSerializer.instance;
-    }
-
-    @Override
     public IScrubber getScrubber(ColumnFamilyStore cfs, LifecycleTransaction transaction, OutputHandler outputHandler, IScrubber.Options options)
     {
         Preconditions.checkArgument(cfs.metadata().equals(transaction.onlyOne().metadata()), "SSTable metadata does not match current definition");
@@ -346,46 +334,11 @@ public class BigFormat extends AbstractSSTableFormat<BigTableReader, BigTableWri
     {
         try
         {
-            if (DatabaseDescriptor.shouldInvalidateKeycacheOnSSTableDeletion())
-            {
-                // remove key cache entries for the sstable being deleted
-                Iterator<KeyCacheKey> it = CacheService.instance.keyCache.keyIterator();
-                while (it.hasNext())
-                {
-                    KeyCacheKey key = it.next();
-                    if (key.desc.equals(desc))
-                        it.remove();
-                }
-            }
-
             delete(desc, Lists.newArrayList(Sets.intersection(allComponents(), desc.discoverComponents())));
         }
         catch (Throwable t)
         {
             JVMStabilityInspector.inspectThrowable(t);
-        }
-    }
-
-    static class KeyCacheValueSerializer implements SSTableFormat.KeyCacheValueSerializer<BigTableReader, RowIndexEntry>
-    {
-        private final static KeyCacheValueSerializer instance = new KeyCacheValueSerializer();
-
-        @Override
-        public void skip(DataInputPlus input) throws IOException
-        {
-            RowIndexEntry.Serializer.skipForCache(input, getInstance().latestVersion);
-        }
-
-        @Override
-        public RowIndexEntry deserialize(BigTableReader reader, DataInputPlus input) throws IOException
-        {
-            return reader.deserializeKeyCacheValue(input);
-        }
-
-        @Override
-        public void serialize(RowIndexEntry entry, DataOutputPlus output) throws IOException
-        {
-            entry.serializeForCache(output);
         }
     }
 
@@ -631,8 +584,7 @@ public class BigFormat extends AbstractSSTableFormat<BigTableReader, BigTableWri
         private final static BigTableSpecificMetricsProviders instance = new BigTableSpecificMetricsProviders();
 
         private final Iterable<GaugeProvider<?>> gaugeProviders = Iterables.concat(BloomFilterMetrics.instance.getGaugeProviders(),
-                                                                                   IndexSummaryMetrics.instance.getGaugeProviders(),
-                                                                                   KeyCacheMetrics.instance.getGaugeProviders());
+                                                                                   IndexSummaryMetrics.instance.getGaugeProviders());
 
         @Override
         public Iterable<GaugeProvider<?>> getGaugeProviders()

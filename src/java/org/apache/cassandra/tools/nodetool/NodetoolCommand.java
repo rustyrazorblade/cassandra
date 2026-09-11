@@ -136,7 +136,6 @@ import static org.apache.cassandra.tools.nodetool.Help.printTopCommandUsage;
                          InvalidateCounterCache.class,
                          InvalidateCredentialsCache.class,
                          InvalidateJmxPermissionsCache.class,
-                         InvalidateKeyCache.class,
                          InvalidateNetworkPermissionsCache.class,
                          InvalidatePermissionsCache.class,
                          InvalidateRolesCache.class,

@@ -32,7 +32,7 @@ import static org.apache.cassandra.config.DataRateSpec.DataRateUnit.MEBIBYTES_PE
  * It is important to be noted that this converter is not intended to be used when we don't change name of a configuration
  * parameter but we want to add unit. This would always default to the old value provided without a unit at the moment.
  * In case this functionality is needed at some point, please, raise a Jira ticket. There is only one exception handling
- * three parameters (key_cache_save_period, row_cache_save_period, counter_cache_save_period) - the SECONDS_CUSTOM_DURATION
+ * two parameters (row_cache_save_period, counter_cache_save_period) - the SECONDS_CUSTOM_DURATION
  * converter.
  */
 public enum Converters
@@ -68,8 +68,8 @@ public enum Converters
                               o -> o == null ? null : o.toSeconds()),
     /**
      * This converter is used to support backward compatibility for Duration parameters where we added the opportunity
-     * for the users to add a unit in the parameters' values but we didn't change the names. (key_cache_save_period,
-     * row_cache_save_period, counter_cache_save_period)
+     * for the users to add a unit in the parameters' values but we didn't change the names. (row_cache_save_period,
+     * counter_cache_save_period)
      * Example: row_cache_save_period = 0 and row_cache_save_period = 0s (quantity of 0s) are equal.
      */
     SECONDS_CUSTOM_DURATION(String.class, DurationSpec.IntSecondsBound.class,

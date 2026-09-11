@@ -153,3 +153,65 @@ Run each command from the worktree root with JDK 21.
 This change breaks the TCM `KeyspaceMetadata` metadata format.  The metadata no longer carries a `UserFunctions` section, and there is no `Version` gate.  A node on this branch cannot exchange keyspace metadata with a node that still has the old format.  This break is accepted.
 
 The `system_schema.functions` and `system_schema.aggregates` tables stay as empty, read-only stub tables.  They exist only for live driver connectivity.  The DataStax java-driver control connection reads these two tables during a schema refresh; a missing table breaks all native-protocol clients.  The stub tables keep that path working.  They do not hold data and they are not for old data.
+
+## Key cache
+
+### Purpose
+
+This change removes the key cache.  The key cache mapped a partition key to a position in an SSTable data file.  Only the BIG SSTable format used it.  The BTI format never used it; BTI holds its own partition index in memory.  The BIG read path works without the cache; it falls through to the partition index summary and the on-disk index.  This branch removes bad old technology, so the removal is a goal.
+
+The row cache and the counter cache stay.  This change removes only the key cache.
+
+### What changes
+
+The BIG read path no longer consults or fills a key cache.  A read seeks through the partition index summary and the on-disk index, as it already does on a cache miss.
+
+The `CacheService` no longer creates a `keyCache`.  The `CacheType` enum drops its `KEY_CACHE` value.  The `SSTableFormat` interface drops the `KeyCacheValueSerializer` contract; a reader no longer supplies a key cache.
+
+The `nodetool setcachecapacity` command takes two arguments instead of three.  The order is now `<row-cache-capacity> <counter-cache-capacity>`.  The `nodetool setcachekeystosave` command takes two arguments instead of three.  The order is now `<row-cache-keys-to-save> <counter-cache-keys-to-save>`.  The `nodetool invalidatekeycache` command is gone.
+
+The `CacheServiceMBean` drops its key cache attributes and operations.
+
+The `key_cache_*` options are gone from `cassandra.yaml` and `cassandra_latest.yaml`.
+
+### What is removed
+
+- The `org.apache.cassandra.io.sstable.keycache` package: `KeyCache`, `KeyCacheSupport`, and `KeyCacheMetrics`.
+- The `KeyCacheKey` cache key class.
+- The `keyCache` field, the `initKeyCache()` method, the `KeyCacheSerializer`, and the key cache JMX methods in `CacheService`: `getKeyCacheSavePeriodInSeconds`, `setKeyCacheSavePeriodInSeconds`, `getKeyCacheKeysToSave`, `setKeyCacheKeysToSave`, `invalidateKeyCache`, `invalidateKeyCacheForCf`, and `setKeyCacheCapacityInMB`.
+- The matching key cache attributes and operations on `CacheServiceMBean`.
+- The `KEY_CACHE` value in the `CacheService.CacheType` enum.
+- The `KeyCacheValueSerializer` interface and `getKeyCacheValueSerializer()` in `SSTableFormat`, and the key cache wiring in `BigFormat`, `BigTableReader`, `BigTableWriter`, and `BigSSTableReaderLoadingBuilder`.
+- The `KEY_CACHE_SAVE` value in `OperationType`.
+- The `KEY_CACHE_HIT` value in `SSTableReadsListener.SelectionReason`.
+- The key cache config in `Config`, `DatabaseDescriptor`, and both `cassandra.yaml` files: `key_cache_size`, `key_cache_size_in_mb`, `key_cache_keys_to_save`, `key_cache_save_period`, `key_cache_migrate_during_compaction`, and `key_cache_invalidate_after_sstable_deletion`.
+- The `nodetool invalidatekeycache` command and `NodeProbe.invalidateKeyCache()`.
+- The third argument of `nodetool setcachecapacity` and `nodetool setcachekeystosave`, and the matching key cache parameters on `StorageServiceMBean`.
+- The key cache lines in `Info`, `StatusLogger`, and the `CachesTable` virtual table.
+- The `KeyCacheTest`, `AutoSavingCacheTest`, `KeyCacheCqlTest`, `CursorKeyCacheMigrationTest`, and `CacheLoaderBench`, plus the key cache cases in shared tests.
+
+### Tests
+
+Run each command from the worktree root with JDK 21.
+
+- `ant build`: BUILD SUCCESSFUL.
+- `ant build-test`: BUILD SUCCESSFUL.
+- `ant test -Dtest.name=RowCacheTest`: 11 tests, 0 failures, 0 errors.
+- `ant test -Dtest.name=CounterCacheTest`: 5 tests, 0 failures, 0 errors.
+- `ant test -Dtest.name=CacheProviderTest`: 2 tests, 0 failures, 0 errors.
+- `ant test -Dtest.name=CacheMetricsTest`: 1 test, 0 failures, 0 errors.
+- `ant test -Dtest.name=SetCacheKeysToSaveMockTest`: 1 test, 0 failures, 0 errors.
+- `ant test -Dtest.name=SSTableReaderTest`: 23 tests, 0 failures, 0 errors.  This test covers the read path for the default format.
+- `ant test -Dtest.name=LegacySSTableTest`: 13 tests, 0 failures, 0 errors, 1 skipped.  This test covers the BIG legacy read path.
+- `ant test -Dtest.name=PartitionIndexTest`: 28 tests, 0 failures, 0 errors.  This test covers the BTI partition index read path.
+- `ant test -Dtest.name=JMXCompatibilityTest`: 4 tests, 0 failures, 0 errors.
+
+`JMXCompatibilityTest` excludes the key cache MBeans from the old baselines.  The excludes cover the `KeyCache` cache metrics, the `KeyCacheHitRate` table metric, the key cache attributes on `CacheServiceMBean`, and the `invalidateKeyCache` operation.
+
+`ConfigCompatibilityTest` adds the removed key cache options to its allow list.  The list covers `key_cache_size`, `key_cache_size_in_mb`, `key_cache_keys_to_save`, `key_cache_save_period`, and `key_cache_migrate_during_compaction`.
+
+### Risks
+
+This change breaks two command line contracts.  The `nodetool setcachecapacity` and `nodetool setcachekeystosave` commands drop their key cache argument.  Each now takes two arguments, not three.  A script that passes three arguments fails.  This break is accepted.
+
+This change breaks a JMX contract.  The `CacheServiceMBean` drops its key cache attributes and operations: `KeyCacheCapacityInMB`, `KeyCacheKeysToSave`, `KeyCacheSavePeriodInSeconds`, `MigrateKeycacheOnCompaction`, and `invalidateKeyCache`.  A client that calls these fails.  This break is accepted.

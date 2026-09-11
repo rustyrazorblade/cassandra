@@ -475,13 +475,10 @@ public class YamlConfigurationLoaderTest
     @Test
     public void typeChange()
     {
-        Config old = YamlConfigurationLoader.fromMap(ImmutableMap.of("key_cache_save_period", 42,
-                                                                     "row_cache_save_period", 42,
+        Config old = YamlConfigurationLoader.fromMap(ImmutableMap.of("row_cache_save_period", 42,
                                                                      "counter_cache_save_period", 42), Config.class);
-        Config latest = YamlConfigurationLoader.fromMap(ImmutableMap.of("key_cache_save_period", "42s",
-                                                                        "row_cache_save_period", "42s",
+        Config latest = YamlConfigurationLoader.fromMap(ImmutableMap.of("row_cache_save_period", "42s",
                                                                         "counter_cache_save_period", "42s"), Config.class);
-        assertThat(old.key_cache_save_period).isEqualTo(latest.key_cache_save_period).isEqualTo(new DurationSpec.IntSecondsBound(42));
         assertThat(old.row_cache_save_period).isEqualTo(latest.row_cache_save_period).isEqualTo(new DurationSpec.IntSecondsBound(42));
         assertThat(old.counter_cache_save_period).isEqualTo(latest.counter_cache_save_period).isEqualTo(new DurationSpec.IntSecondsBound(42));
     }

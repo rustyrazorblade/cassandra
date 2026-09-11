@@ -20,9 +20,7 @@ package org.apache.cassandra.io.sstable.format.big;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.function.Consumer;
 
 import com.google.common.collect.ImmutableSet;
@@ -30,7 +28,6 @@ import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.SerializationHeader;
@@ -38,7 +35,6 @@ import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.FSWriteError;
-import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.io.sstable.BigCursorIndexWriter;
 import org.apache.cassandra.io.sstable.CursorIndexWriter;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -52,14 +48,11 @@ import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummary;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryBuilder;
-import org.apache.cassandra.io.sstable.keycache.KeyCache;
-import org.apache.cassandra.io.sstable.keycache.KeyCacheSupport;
 import org.apache.cassandra.io.util.DataPosition;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.MmappedRegionsCache;
 import org.apache.cassandra.io.util.SequentialWriter;
-import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.EstimatedHistogram;
 import org.apache.cassandra.utils.IFilter;
@@ -76,9 +69,6 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
     private static final Logger logger = LoggerFactory.getLogger(BigTableWriter.class);
 
     private final RowIndexEntry.IndexSerializer rowIndexEntrySerializer;
-    private final Map<DecoratedKey, AbstractRowIndexEntry> cachedKeys = new HashMap<>();
-    private static final SSTableReader[] NO_ORIGINALS = new SSTableReader[0];
-    private final SSTableReader[] originals;
     private final long maxInputPartitionSize;
 
     public BigTableWriter(Builder builder, ILifecycleTransaction txn, SSTable.Owner owner)
@@ -88,12 +78,6 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
         this.rowIndexEntrySerializer = builder.getRowIndexEntrySerializer();
         checkNotNull(this.rowIndexEntrySerializer);
 
-        boolean migrateKeyCache = DatabaseDescriptor.shouldMigrateKeycacheOnCompaction() && !txn.isOffline();
-        // Empty unless the key cache is being migrated, so shouldCacheKey needs no second guard.
-        // LifecycleTransaction.originals() wraps a fresh set on each call, and shouldCacheKey scans
-        // this per partition. Safe to snapshot: the only cancel that drops a compaction's originals
-        // runs in CompactionTask.runMayThrow before this writer.
-        this.originals = migrateKeyCache ? txn.originals().toArray(NO_ORIGINALS) : NO_ORIGINALS;
         this.maxInputPartitionSize = builder.getMaxInputPartitionSizeHint() > 0
                                      ? builder.getMaxInputPartitionSizeHint()
                                      : maxEstimatedPartitionSize(txn);
@@ -124,52 +108,6 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
     public CursorIndexWriter newCursorIndexWriter(SerializationHeader header)
     {
         return new BigCursorIndexWriter(this, indexWriter, DeletionTime.getSerializer(descriptor.version));
-    }
-
-    /**
-     * Carries a key that is hot in the originals into this sstable's key cache, as
-     * {@link #createRowIndexEntry} does on the iterator path.
-     *
-     * <p>The cursor path serialises the promoted index straight into Index.db and never builds the
-     * IndexInfo list, so a multi-block partition caches a shallow entry where the iterator path
-     * would cache a full one. Both find the same rows; the shallow one reads its index blocks from
-     * Index.db on a hit.
-     *
-     * @param key a key the caller does not reuse. It becomes a key of this sstable's key cache, so a
-     *            key whose bytes are later overwritten resolves a hit to another partition's data.
-     */
-    public void maybeCacheKey(DecoratedKey key, long dataFilePosition, long indexFilePosition,
-                              DeletionTime partitionLevelDeletion, long headerLength,
-                              int columnIndexCount, int indexedPartSize)
-    {
-        if (!shouldCacheKey(key))
-            return;
-
-        // cachedKeys retains the key, so it must be a copy.
-        // SSTableCursorWriter.writePartitionEnd passes one.
-        cachedKeys.put(key, RowIndexEntry.create(dataFilePosition,
-                                                 indexFilePosition,
-                                                 partitionLevelDeletion,
-                                                 headerLength,
-                                                 columnIndexCount,
-                                                 indexedPartSize,
-                                                 null,
-                                                 null,
-                                                 rowIndexEntrySerializer.indexInfoSerializer(),
-                                                 descriptor.version));
-    }
-
-    /**
-     * True when one of the transaction's originals has a cached position for this key. The array is
-     * empty unless key cache migration is on, so that setting is already folded in.
-     */
-    private boolean shouldCacheKey(DecoratedKey key)
-    {
-        for (SSTableReader reader : originals)
-            if (reader instanceof KeyCacheSupport<?> && ((KeyCacheSupport<?>) reader).getCachedPosition(key, false) != null)
-                return true;
-
-        return false;
     }
 
     @Override
@@ -215,9 +153,6 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
                                                    descriptor.version);
 
         indexWriter.append(key, entry, dataWriter.position(), partitionWriter.buffer());
-
-        if (shouldCacheKey(key))
-            cachedKeys.put(key, entry);
 
         return entry;
     }
@@ -268,7 +203,6 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
             builder.setIndexFile(indexFile);
             dataFile = openDataFile(boundary != null ? boundary.dataLength : NO_LENGTH_OVERRIDE, builder.getStatsMetadata());
             builder.setDataFile(dataFile);
-            builder.setKeyCache(metadata().params.caching.cacheKeys() ? new KeyCache(CacheService.instance.keyCache) : KeyCache.NO_CACHE);
 
             reader = builder.build(owner().orElse(null), true, true);
         }
@@ -277,20 +211,6 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
             JVMStabilityInspector.inspectThrowable(t);
             Throwables.closeNonNullAndAddSuppressed(t, dataFile, indexFile, indexSummary, filter);
             throw t;
-        }
-
-        try
-        {
-            for (Map.Entry<DecoratedKey, AbstractRowIndexEntry> cachedKey : cachedKeys.entrySet())
-                reader.cacheKey(cachedKey.getKey(), cachedKey.getValue());
-
-            // clearing the collected cache keys so that we will not have to cache them again when opening partial or
-            // final later - cache key refer only to the descriptor, not to the particular SSTableReader instance.
-            cachedKeys.clear();
-        }
-        catch (Throwable t)
-        {
-            JVMStabilityInspector.inspectThrowable(t);
         }
 
         return reader;

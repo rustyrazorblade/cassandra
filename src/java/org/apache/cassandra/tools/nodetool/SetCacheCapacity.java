@@ -29,30 +29,26 @@ import picocli.CommandLine.Parameters;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-@Command(name = "setcachecapacity", description = "Set global key, row, and counter cache capacities (in MB units)")
+@Command(name = "setcachecapacity", description = "Set global row and counter cache capacities (in MB units)")
 public class SetCacheCapacity extends AbstractCommand
 {
-    @CassandraUsage(usage = "<key-cache-capacity> <row-cache-capacity> <counter-cache-capacity>",
-                    description = "Key cache, row cache, and counter cache (in MB)")
+    @CassandraUsage(usage = "<row-cache-capacity> <counter-cache-capacity>",
+                    description = "Row cache and counter cache (in MB)")
     private List<Integer> args = new ArrayList<>();
 
-    @Parameters(paramLabel = "key-cache-capacity", description = "Key cache capacity in MB", arity = "0..1", index = "0")
-    private Integer keyCacheCapacity = null;
-
-    @Parameters(paramLabel = "row-cache-capacity", description = "Row cache capacity in MB", arity = "0..1", index = "1")
+    @Parameters(paramLabel = "row-cache-capacity", description = "Row cache capacity in MB", arity = "0..1", index = "0")
     private Integer rowCacheCapacity = null;
 
-    @Parameters(paramLabel = "counter-cache-capacity", description = "Counter cache capacity in MB", arity = "0..1", index = "2")
+    @Parameters(paramLabel = "counter-cache-capacity", description = "Counter cache capacity in MB", arity = "0..1", index = "1")
     private Integer counterCacheCapacity = null;
 
     @Override
     public void execute(NodeProbe probe)
     {
-        Optional.ofNullable(keyCacheCapacity).ifPresent(args::add);
         Optional.ofNullable(rowCacheCapacity).ifPresent(args::add);
         Optional.ofNullable(counterCacheCapacity).ifPresent(args::add);
 
-        checkArgument(args.size() == 3, "setcachecapacity requires key-cache-capacity, row-cache-capacity, and counter-cache-capacity args.");
-        probe.setCacheCapacities(args.get(0), args.get(1), args.get(2));
+        checkArgument(args.size() == 2, "setcachecapacity requires row-cache-capacity and counter-cache-capacity args.");
+        probe.setCacheCapacities(args.get(0), args.get(1));
     }
 }

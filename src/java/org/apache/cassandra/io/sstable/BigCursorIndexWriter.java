@@ -27,7 +27,6 @@ import org.agrona.collections.IntArrayList;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter;
 import org.apache.cassandra.io.sstable.format.big.BigTableWriter;
@@ -175,8 +174,6 @@ public class BigCursorIndexWriter extends CursorIndexWriter
         if (bloomFilter != null)
             bloomFilter.add(key, 0, keyLength, reusableIndexes);
         long indexStart = indexFileWriter.position();
-        int columnIndexCount = 0;
-        int indexedPartSize = 0;
         try
         {
             ByteArrayUtil.writeWithShortLength(key, 0, keyLength, indexFileWriter);
@@ -218,10 +215,6 @@ public class BigCursorIndexWriter extends CursorIndexWriter
 
                 int entriesAndOffsetsSize = rowIndexEntries.getLength() + rowIndexEntriesOffsets.size() * 4;
                 assert entriesAndOffsetsSize > 0;
-                columnIndexCount = rowIndexEntriesOffsets.size();
-                // What RowIndexEntry calls indexedPartSize: the entries and their offsets, without the
-                // header fields that entriesAndOffsetsSize also counts.
-                indexedPartSize = endOfEntries + rowIndexEntriesOffsets.size() * 4;
                 indexFileWriter.writeUnsignedVInt32(entriesAndOffsetsSize); // size != 0
                 // copy the header elements
                 indexFileWriter.write(rowIndexEntries.getData(), endOfEntries, rowIndexEntries.getLength() - endOfEntries);
@@ -241,9 +234,5 @@ public class BigCursorIndexWriter extends CursorIndexWriter
         // preemptive reopen has nothing to publish and never fires.
         indexWriter.summary.maybeAddEntry(decoratedKey, key, 0, keyLength,
                                           indexStart, indexFileWriter.position(), partitionEnd);
-
-        // The entry starts after the key, which was written at indexStart with a short length prefix.
-        writer.maybeCacheKey(decoratedKey, partitionStart, indexStart + TypeSizes.SHORT_SIZE + keyLength,
-                             partitionDeletionTime, headerLength, columnIndexCount, indexedPartSize);
     }
 }

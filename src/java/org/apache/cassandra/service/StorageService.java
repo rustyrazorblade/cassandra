@@ -4759,26 +4759,6 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         return DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
     }
 
-    public boolean getMigrateKeycacheOnCompaction()
-    {
-        return DatabaseDescriptor.shouldMigrateKeycacheOnCompaction();
-    }
-
-    public void setMigrateKeycacheOnCompaction(boolean invalidateKeyCacheOnCompaction)
-    {
-        DatabaseDescriptor.setMigrateKeycacheOnCompaction(invalidateKeyCacheOnCompaction);
-    }
-
-    public boolean getInvalidateKeycacheOnSSTableDeletion()
-    {
-        return DatabaseDescriptor.shouldInvalidateKeycacheOnSSTableDeletion();
-    }
-
-    public void setInvalidateKeycacheOnSSTableDeletion(boolean invalidate)
-    {
-        DatabaseDescriptor.setInvalidateKeycacheOnSSTableDeletion(invalidate);
-    }
-
     public int getSSTablesPerReadLogThreshold()
     {
         return DatabaseDescriptor.getSSTablesPerReadLogThreshold();

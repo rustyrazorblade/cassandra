@@ -94,7 +94,6 @@ public class LoadOldYAMLBackwardCompatibilityTest
         assertEquals(new DataStorageSpec.IntMebibytesBound(128), config.max_hints_file_size);
         assertEquals(new DataStorageSpec.IntKibibytesBound(10240), config.trickle_fsync_interval);
         assertEquals(new DataStorageSpec.IntMebibytesBound(50), config.sstable_preemptive_open_interval);
-        assertNull( config.key_cache_size);
         assertEquals(new DataStorageSpec.LongMebibytesBound(16), config.row_cache_size);
         assertNull(config.counter_cache_size);
         assertNull(config.networking_cache_size);
@@ -118,9 +117,6 @@ public class LoadOldYAMLBackwardCompatibilityTest
         assertEquals(new DurationSpec.IntMinutesBound(60), config.index_summary_resize_interval);
 
         //parameters which names have not changed with CASSANDRA-15234
-        assertEquals(DurationSpec.IntSecondsBound.inSecondsString("14400"), config.key_cache_save_period);
-        assertEquals(DurationSpec.IntSecondsBound.inSecondsString("14400s"), config.key_cache_save_period);
-        assertEquals(new DurationSpec.IntSecondsBound(4, TimeUnit.HOURS), config.key_cache_save_period);
         assertEquals(DurationSpec.IntSecondsBound.inSecondsString("0"), config.row_cache_save_period);
         assertEquals(new DurationSpec.IntSecondsBound(0), config.row_cache_save_period);
         assertEquals(new DurationSpec.IntSecondsBound(2, TimeUnit.HOURS), config.counter_cache_save_period);

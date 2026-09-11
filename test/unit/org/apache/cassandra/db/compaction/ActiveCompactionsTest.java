@@ -237,7 +237,7 @@ public class ActiveCompactionsTest extends CQLTester
     @Test
     public void testSubmitCacheWrite() throws ExecutionException, InterruptedException
     {
-        AutoSavingCache.Writer writer = CacheService.instance.keyCache.getWriter(100);
+        AutoSavingCache.Writer writer = CacheService.instance.rowCache.getWriter(100);
         MockActiveCompactions mockActiveCompactions = new MockActiveCompactions();
         CompactionManager.instance.submitCacheWrite(writer, mockActiveCompactions).get();
         assertTrue(mockActiveCompactions.finished);

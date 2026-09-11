@@ -45,7 +45,6 @@ import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistryListener;
 import com.codahale.metrics.SharedMetricRegistries;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
 
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -106,7 +105,6 @@ import org.apache.cassandra.utils.MBeanWrapper;
 import org.apache.cassandra.utils.Mx4jTool;
 import org.apache.cassandra.utils.NativeLibrary;
 import org.apache.cassandra.utils.concurrent.Future;
-import org.apache.cassandra.utils.concurrent.FutureCombiner;
 import org.apache.cassandra.utils.logging.AbstractVirtualTableAppender;
 import org.apache.cassandra.utils.logging.LoggingSupportFactory;
 import org.apache.cassandra.utils.logging.SlowQueriesAppender;
@@ -332,7 +330,7 @@ public class CassandraDaemon
 
         try
         {
-            loadRowAndKeyCacheAsync().get();
+            loadRowCacheAsync().get();
         }
         catch (Throwable t)
         {
@@ -675,19 +673,12 @@ public class CassandraDaemon
     }
 
     /*
-     * Asynchronously load the row and key cache in one off threads and return a compound future of the result.
+     * Asynchronously load the row cache in a one off thread and return a future of the result.
      * Error handling is pushed into the cache load since cache loads are allowed to fail and are handled by logging.
      */
-    private Future<?> loadRowAndKeyCacheAsync()
+    private Future<?> loadRowCacheAsync()
     {
-        final Future<Integer> keyCacheLoad = CacheService.instance.keyCache.loadSavedAsync();
-
-        final Future<Integer> rowCacheLoad = CacheService.instance.rowCache.loadSavedAsync();
-
-        @SuppressWarnings("unchecked")
-        Future<List<Integer>> retval = FutureCombiner.allOf(ImmutableList.of(keyCacheLoad, rowCacheLoad));
-
-        return retval;
+        return CacheService.instance.rowCache.loadSavedAsync();
     }
 
     @VisibleForTesting

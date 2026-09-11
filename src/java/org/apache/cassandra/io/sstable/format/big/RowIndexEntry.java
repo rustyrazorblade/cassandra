@@ -45,7 +45,6 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.RandomAccessReader;
-import org.apache.cassandra.io.util.TrackedDataInputPlus;
 import org.apache.cassandra.metrics.DefaultNameFactory;
 import org.apache.cassandra.metrics.MetricNameFactory;
 import org.apache.cassandra.metrics.TableMetrics;
@@ -141,13 +140,7 @@ import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 public class RowIndexEntry extends AbstractRowIndexEntry
 {
     public static final String TYPE_NAME = "Index";
-    private static final BigFormat FORMAT = BigFormat.getInstance();
     private static final long EMPTY_SIZE = ObjectSizes.measure(new RowIndexEntry(0));
-
-    // constants for type of row-index-entry as serialized for saved-cache
-    static final int CACHE_NOT_INDEXED = 0;
-    static final int CACHE_INDEXED = 1;
-    static final int CACHE_INDEXED_SHALLOW = 2;
 
     static final Histogram indexEntrySizeHistogram;
     static final Histogram indexInfoCountHistogram;
@@ -193,12 +186,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
     public int blockCount()
     {
         return 0;
-    }
-
-    @Override
-    public BigFormat getSSTableFormat()
-    {
-        return FORMAT;
     }
 
     @Override
@@ -265,10 +252,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
             return deserialize(input, input.getFilePointer());
         }
 
-        void serializeForCache(RowIndexEntry rie, DataOutputPlus out) throws IOException;
-
-        RowIndexEntry deserializeForCache(DataInputPlus in) throws IOException;
-
         long deserializePositionAndSkip(DataInputPlus in) throws IOException;
 
         ISerializer indexInfoSerializer();
@@ -297,48 +280,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
         public void serialize(RowIndexEntry rie, DataOutputPlus out, ByteBuffer indexInfo) throws IOException
         {
             rie.serialize(out, indexInfo);
-        }
-
-        @Override
-        public void serializeForCache(RowIndexEntry rie, DataOutputPlus out) throws IOException
-        {
-            rie.serializeForCache(out);
-        }
-
-        @Override
-        public RowIndexEntry deserializeForCache(DataInputPlus in) throws IOException
-        {
-            long position = in.readUnsignedVInt();
-
-            switch (in.readByte())
-            {
-                case CACHE_NOT_INDEXED:
-                    return new RowIndexEntry(position);
-                case CACHE_INDEXED:
-                    return new IndexedEntry(position, in, idxInfoSerializer, version);
-                case CACHE_INDEXED_SHALLOW:
-                    return new ShallowIndexedEntry(position, in, idxInfoSerializer, version);
-                default:
-                    throw new AssertionError();
-            }
-        }
-
-        public static void skipForCache(DataInputPlus in, Version version) throws IOException
-        {
-            in.readUnsignedVInt();
-            switch (in.readByte())
-            {
-                case CACHE_NOT_INDEXED:
-                    break;
-                case CACHE_INDEXED:
-                    IndexedEntry.skipForCache(in, version);
-                    break;
-                case CACHE_INDEXED_SHALLOW:
-                    ShallowIndexedEntry.skipForCache(in, version);
-                    break;
-                default:
-                    assert false;
-            }
         }
 
         @Override
@@ -478,13 +419,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
         out.writeUnsignedVInt32(0);
     }
 
-    public void serializeForCache(DataOutputPlus out) throws IOException
-    {
-        out.writeUnsignedVInt(position);
-
-        out.writeByte(CACHE_NOT_INDEXED);
-    }
-
     /**
      * An entry in the row index for a row whose columns are indexed - used for both legacy and current formats.
      */
@@ -546,32 +480,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
 
             this.idxInfoSerializer = idxInfoSerializer;
             this.version = version;
-        }
-
-        /**
-         * Constructor called from {@link Serializer#deserializeForCache(org.apache.cassandra.io.util.DataInputPlus)}.
-         */
-        private IndexedEntry(long dataFilePosition, DataInputPlus in, ISerializer<IndexInfo> idxInfoSerializer, Version version) throws IOException
-        {
-            super(dataFilePosition);
-
-            this.headerLength = in.readUnsignedVInt();
-            this.version = version;
-            this.deletionTime = DeletionTime.getSerializer(version).deserialize(in);
-            int columnsIndexCount = in.readUnsignedVInt32();
-
-
-            TrackedDataInputPlus trackedIn = new TrackedDataInputPlus(in);
-
-            this.columnsIndex = new IndexInfo[columnsIndexCount];
-            for (int i = 0; i < columnsIndexCount; i++)
-                this.columnsIndex[i] = idxInfoSerializer.deserialize(trackedIn);
-
-            this.offsets = null;
-
-            this.indexedPartSize = (int) trackedIn.getBytesRead();
-
-            this.idxInfoSerializer = idxInfoSerializer;
         }
 
         @Override
@@ -648,29 +556,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
         }
 
         @Override
-        public void serializeForCache(DataOutputPlus out) throws IOException
-        {
-            out.writeUnsignedVInt(position);
-            out.writeByte(CACHE_INDEXED);
-
-            out.writeUnsignedVInt(headerLength);
-            DeletionTime.getSerializer(version).serialize(deletionTime, out);
-            out.writeUnsignedVInt32(blockCount());
-
-            for (IndexInfo indexInfo : columnsIndex)
-                idxInfoSerializer.serialize(indexInfo, out);
-        }
-
-        static void skipForCache(DataInputPlus in, Version version) throws IOException
-        {
-            in.readUnsignedVInt();
-            DeletionTime.getSerializer(version).skip(in);
-            in.readUnsignedVInt();
-
-            in.readUnsignedVInt();
-        }
-
-        @Override
         public String toString()
         {
             return "IndexedEntry{" +
@@ -688,7 +573,7 @@ public class RowIndexEntry extends AbstractRowIndexEntry
 
     /**
      * An entry in the row index for a row whose columns are indexed and the {@link IndexInfo} objects
-     * are not read into the key cache.
+     * are read from disk on demand.
      */
     private static final class ShallowIndexedEntry extends RowIndexEntry
     {
@@ -699,7 +584,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
             BASE_SIZE = ObjectSizes.measure(new ShallowIndexedEntry(0, 0, DeletionTime.LIVE, 0, 10, 0, null, BigFormat.getInstance().getLatestVersion()));
         }
 
-        // only for cache serialization
         private final long indexFilePosition;
 
         private final DeletionTime deletionTime;
@@ -733,29 +617,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
 
             this.version = version;
             this.fieldsSerializedSize = serializedSize(deletionTime, headerLength, columnIndexCount, this.version);
-            this.offsetsOffset = indexedPartSize + fieldsSerializedSize - columnsIndexCount * TypeSizes.INT_SIZE;
-        }
-
-        /**
-         * Constructor for key-cache deserialization
-         */
-        private ShallowIndexedEntry(long dataFilePosition, DataInputPlus in, IndexInfo.Serializer idxInfoSerializer, Version version) throws IOException
-        {
-            super(dataFilePosition);
-
-            this.indexFilePosition = in.readUnsignedVInt();
-
-            this.headerLength = in.readUnsignedVInt();
-            this.version = version;
-
-            this.deletionTime = DeletionTime.getSerializer(version).deserialize(in);
-            this.columnsIndexCount = in.readUnsignedVInt32();
-
-            this.indexedPartSize = in.readUnsignedVInt32();
-
-            this.idxInfoSerializer = idxInfoSerializer;
-
-            this.fieldsSerializedSize = serializedSize(deletionTime, headerLength, columnsIndexCount, this.version);
             this.offsetsOffset = indexedPartSize + fieldsSerializedSize - columnsIndexCount * TypeSizes.INT_SIZE;
         }
 
@@ -803,32 +664,6 @@ public class RowIndexEntry extends AbstractRowIndexEntry
             out.writeUnsignedVInt32(columnsIndexCount);
 
             out.write(indexInfo);
-        }
-
-        @Override
-        public void serializeForCache(DataOutputPlus out) throws IOException
-        {
-            out.writeUnsignedVInt(position);
-            out.writeByte(CACHE_INDEXED_SHALLOW);
-
-            out.writeUnsignedVInt(indexFilePosition);
-
-            out.writeUnsignedVInt(headerLength);
-
-            DeletionTime.getSerializer(version).serialize(deletionTime, out);
-            out.writeUnsignedVInt32(columnsIndexCount);
-            out.writeUnsignedVInt32(indexedPartSize);
-        }
-
-        static void skipForCache(DataInputPlus in, Version version) throws IOException
-        {
-            in.readUnsignedVInt();
-
-            in.readUnsignedVInt();
-            DeletionTime.getSerializer(version).skip(in);
-            in.readUnsignedVInt();
-
-            in.readUnsignedVInt();
         }
 
         @Override
