@@ -273,17 +273,16 @@ public class SSTableCursorWriter implements AutoCloseable, CursorMergeSink
         long partitionSize = partitionEnd - partitionStart;
         addPartitionMetadata(partitionKey, partitionKeyLength, partitionSize, partitionDeletionTime);
 
-        // Per partition, not once at rollover: BigTableWriter.openInternal reads this field, so an sstable
-        // opened early at a writer switch would otherwise carry a stale last.
+        // Per partition, not once at rollover: an sstable opened early at a writer switch reads this field, so it
+        // would otherwise carry a stale last.
         DecoratedKey detachedKey = detachKey(partitionKey, partitionKeyLength);
         ssTableWriter.setLast(detachedKey);
 
         /** {@link SortedTableWriter#endPartition(DecoratedKey, DeletionTime)}
          lastWrittenKey = key; // tracked for verification, see {@link SortedTableWriter#verifyPartition(DecoratedKey)}, checking the key size and sorting
-         // this is implemented differently for BIG/BTI
          createRowIndexEntry(key, partitionLevelDeletion, partitionEnd - 1);
          */
-        // IndexSummaryBuilder.maybeAddEntry calls DecoratedKey.retainable(), which copies the key bytes
+        // endPartition retains the key via DecoratedKey.retainable(), which copies the key bytes
         // but keeps the caller's Token. ReusableDecoratedKey.recalculateToken moves that token every
         // partition.
         cursorIndexWriter.endPartition(detachedKey, partitionKey, partitionKeyLength, headerLength, partitionDeletionTime, partitionEnd, lastName);
@@ -937,7 +936,6 @@ public class SSTableCursorWriter implements AutoCloseable, CursorMergeSink
 
         long unfilteredEndPosition = getPosition();
 
-        /** {@link org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter#addUnfiltered(org.apache.cassandra.db.rows.Unfiltered)} */
         // The index writer cuts a new index block when this marker takes the block past its size.
         updateMetadataAndIndexBlock(rangeTombstone, unfilteredStartPosition, unfilteredEndPosition, updateClusteringMetadata);
     }

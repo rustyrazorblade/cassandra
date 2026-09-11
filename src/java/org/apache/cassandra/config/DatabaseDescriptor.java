@@ -99,7 +99,7 @@ import org.apache.cassandra.gms.IFailureDetector;
 import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.util.DiskOptimizationStrategy;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
@@ -247,7 +247,6 @@ public class DatabaseDescriptor
     private static long accordWorkingSetSizeInMiB;
     private static long consensusMigrationCacheSizeInMiB;
     private static long counterCacheSizeInMiB;
-    private static long indexSummaryCapacityInMiB;
 
     private static volatile long nativeTransportMaxMessageSizeInBytes;
     private static volatile boolean nativeTransportMaxMessageSizeConfiguredExplicitly;
@@ -1062,18 +1061,6 @@ public class DatabaseDescriptor
 
         // we need this assignment for the Settings virtual table - CASSANDRA-17735
         conf.counter_cache_size = new DataStorageSpec.LongMebibytesBound(counterCacheSizeInMiB);
-
-        // if set to empty/"auto" then use 5% of Heap size
-        indexSummaryCapacityInMiB = (conf.index_summary_capacity == null)
-                                    ? Math.max(1, (int) (Runtime.getRuntime().totalMemory() * 0.05 / 1024 / 1024))
-                                    : conf.index_summary_capacity.toMebibytes();
-
-        if (indexSummaryCapacityInMiB < 0)
-            throw new ConfigurationException("index_summary_capacity option was set incorrectly to '"
-                                             + conf.index_summary_capacity.toString() + "', it should be a non-negative integer.", false);
-
-        // we need this assignment for the Settings virtual table - CASSANDRA-17735
-        conf.index_summary_capacity = new DataStorageSpec.LongMebibytesBound(indexSummaryCapacityInMiB);
 
         if (conf.commitlog_segment_size.toMebibytes() == 0)
             throw new ConfigurationException("commitlog_segment_size must be positive, but was "
@@ -1919,7 +1906,7 @@ public class DatabaseDescriptor
     {
         SSTableFormat<?, ?> selectedFormat;
         if (StringUtils.isBlank(selectedFormatName))
-            selectedFormatName = BigFormat.NAME;
+            selectedFormatName = BtiFormat.NAME;
         selectedFormat = sstableFormats.get(selectedFormatName);
         if (selectedFormat == null)
             throw new ConfigurationException(String.format("Selected sstable format '%s' is not available.", selectedFormatName));
@@ -1943,7 +1930,7 @@ public class DatabaseDescriptor
         ServiceLoader<SSTableFormat.Factory> loader = ServiceLoader.load(SSTableFormat.Factory.class, DatabaseDescriptor.class.getClassLoader());
         List<SSTableFormat.Factory> factories = Iterables.toList(loader);
         if (factories.isEmpty())
-            factories = ImmutableList.of(new BigFormat.BigFormatFactory());
+            factories = ImmutableList.of(new BtiFormat.BtiFormatFactory());
         applySSTableFormats(factories, conf.sstable);
     }
 
@@ -4452,11 +4439,6 @@ public class DatabaseDescriptor
         return conf.trickle_fsync_interval.toBytesInLong();
     }
 
-    public static long getIndexSummaryCapacityInMiB()
-    {
-        return indexSummaryCapacityInMiB;
-    }
-
     public static String getRowCacheClassName()
     {
         return conf.row_cache_class_name;
@@ -4779,22 +4761,6 @@ public class DatabaseDescriptor
         if (conf == null || conf.memtable == null)
             return null;
         return conf.memtable.configurations;
-    }
-
-    public static int getIndexSummaryResizeIntervalInMinutes()
-    {
-        if (conf.index_summary_resize_interval == null)
-            return -1;
-
-        return conf.index_summary_resize_interval.toMinutes();
-    }
-
-    public static void setIndexSummaryResizeIntervalInMinutes(int value)
-    {
-        if (value == -1)
-            conf.index_summary_resize_interval = null;
-        else
-            conf.index_summary_resize_interval = new DurationSpec.IntMinutesBound(value);
     }
 
     public static boolean hasLargeAddressSpace()

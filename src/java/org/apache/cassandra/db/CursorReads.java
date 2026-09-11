@@ -563,7 +563,7 @@ public final class CursorReads
     {
         PendingLeg leg = openLeg(sstable, metadata, key, slices, columnFilter, listener, new ValueTransfer());
         if (leg == null)
-            // mirrors BigTableReader/BtiTableReader.rowIterator with a null index entry
+            // mirrors BtiTableReader.rowIterator with a null index entry
             return absentPartitionIterator(metadata, key, sstable);
         return completeSingleLeg(leg);
     }

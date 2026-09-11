@@ -76,8 +76,8 @@ public enum Converters
                             DurationSpec.IntSecondsBound::inSecondsString,
                             o -> o == null ? null : Long.toString(o.toSeconds())),
     /**
-     * This converter is used to support backward compatibility for parameters where in the past -1 was used as a value
-     * Example:  index_summary_resize_interval_in_minutes = -1 and  index_summary_resize_interval = null are equal.
+     * This converter is used to support backward compatibility for parameters where in the past -1 was used as a value.
+     * A legacy value of -1 and a new value of null are equal.
      */
     MINUTES_CUSTOM_DURATION(Integer.class, DurationSpec.IntMinutesBound.class,
                             o -> o == -1 ? null : new DurationSpec.IntMinutesBound(o),

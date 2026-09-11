@@ -339,8 +339,7 @@ final class OnDiskIndex<K> extends Index<K>
     }
 
     /*
-     * This has been lifted from {@see IndexSummary}'s implementation,
-     * which itself was lifted from Harmony's Collections implementation.
+     * This has been lifted from Harmony's Collections implementation.
      */
     private int binarySearch(K key)
     {

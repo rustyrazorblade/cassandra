@@ -28,14 +28,13 @@ import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.ISerializer;
 import org.apache.cassandra.io.sstable.format.Version;
-import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ObjectSizes;
 
 /**
- * {@code IndexInfo} is embedded in the indexed version of {@link RowIndexEntry}.
+ * {@code IndexInfo} is embedded in the row index of the on-disk primary index.
  * Each instance roughly covers a range of {@link org.apache.cassandra.config.Config#column_index_size column_index_size} KiB
  * and contains the first and last clustering value (or slice bound), its offset in the data file and width in the data file.
  * <p>

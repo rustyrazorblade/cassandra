@@ -56,7 +56,7 @@ import org.apache.cassandra.io.sstable.SSTableTxnSingleStreamWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -470,7 +470,7 @@ public class StreamReaderTest
     private static CassandraStreamHeader streamMessageHeader(int...tokens)
     {
         TableMetadata tmd = Keyspace.open(KEYSPACE).getColumnFamilyStore(TABLE).metadata();
-        Version version = BigFormat.getInstance().getLatestVersion();
+        Version version = BtiFormat.getInstance().getLatestVersion();
         List<SSTableReader.PartitionPositionBounds> fakeSections = new ArrayList<>();
         // each decorated key takes up (2 + 8) bytes, so this enables the
         // StreamReader to calculate the expected number of bytes to read

@@ -46,7 +46,6 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.SerializationHeader;
@@ -68,8 +67,6 @@ import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.SSTableTxnWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigTableReader;
-import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
 import org.apache.cassandra.io.util.DirectIoTestUtils;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -538,14 +535,7 @@ public class AntiCompactionTest
                 }
 
                 if (sawContainedKey)
-                {
-                    DecoratedKey dk = store.decorateKey(ByteBufferUtil.bytes(containedKey));
-                    RowIndexEntry rie = ((BigTableReader) output).getRowIndexEntry(dk, SSTableReader.Operator.EQ);
-                    assertNotNull(rie);
-                    assertTrue("expected >500 index blocks for the ~1MiB contained partition, got " + rie.blockCount(),
-                              rie.blockCount() > 500);
                     checkedContainedKeyBlockCount = true;
-                }
             }
             assertTrue("contained key was never found in any anticompaction output", checkedContainedKeyBlockCount);
         }

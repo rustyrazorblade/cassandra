@@ -91,7 +91,6 @@ public class TableStatsTestBase
         template.bloomFilterFalsePositives = 0L;
         template.bloomFilterFalseRatio = 0D;
         template.bloomFilterSpaceUsed = "0";
-        template.indexSummaryOffHeapMemoryUsed = "0";
         template.compressionDictionariesMemoryUsed = "0";
         template.compressionMetadataOffHeapMemoryUsed = "0";
         template.compactedPartitionMinimumBytes = 0L;
@@ -319,9 +318,6 @@ public class TableStatsTestBase
         table2.compressionMetadataOffHeapUsed = true;
         table4.compressionMetadataOffHeapUsed = true;
         table6.compressionMetadataOffHeapUsed = true;
-        table2.indexSummaryOffHeapUsed = true;
-        table4.indexSummaryOffHeapUsed = true;
-        table6.indexSummaryOffHeapUsed = true;
         // offheap memory total: 4 > 2 > 6 > 1 = 3 = 5
         table2.offHeapMemoryUsedTotal = "314159367";
         table4.offHeapMemoryUsedTotal = "441213818";
@@ -334,10 +330,6 @@ public class TableStatsTestBase
         table2.compressionMetadataOffHeapMemoryUsed = "3";
         table4.compressionMetadataOffHeapMemoryUsed = "2";
         table6.compressionMetadataOffHeapMemoryUsed = "1";
-        // index summary offheap: 6 > 4 > 2 > 1 = 3 = 5
-        table2.indexSummaryOffHeapMemoryUsed = "1";
-        table4.indexSummaryOffHeapMemoryUsed = "2";
-        table6.indexSummaryOffHeapMemoryUsed = "3";
         // memtable offheap: 2 > 6 > 4 > 1 = 3 = 5
         table2.memtableOffHeapMemoryUsed = "314159265";
         table4.memtableOffHeapMemoryUsed = "141421356";

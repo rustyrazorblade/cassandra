@@ -269,8 +269,7 @@ public class CompressedSequentialWriter extends SequentialWriter
     public void setPostFlushListener(java.util.function.LongConsumer runPostFlush)
     {
         // The superclass fires this from whichever thread flushed. That would be the pipeline's
-        // thread, and the BIG-path consumer, IndexSummaryBuilder.markDataSynced, walks maps the
-        // producer mutates concurrently in maybeAddEntry.
+        // thread, and a post-flush consumer can walk maps the producer mutates concurrently.
         if (pipeline != null)
             pipeline.setPostFlushListener(runPostFlush);
         else

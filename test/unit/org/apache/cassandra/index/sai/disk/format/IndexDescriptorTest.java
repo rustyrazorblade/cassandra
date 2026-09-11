@@ -55,7 +55,7 @@ public class IndexDescriptorTest
     public void setup() throws Throwable
     {
         temporaryFolder.create();
-        descriptor = Descriptor.fromFile(new File(temporaryFolder.newFolder().getAbsolutePath() + "/nb-1-big-Data.db"));
+        descriptor = Descriptor.fromFile(new File(temporaryFolder.newFolder().getAbsolutePath() + "/da-1-bti-Data.db"));
     }
 
     @After

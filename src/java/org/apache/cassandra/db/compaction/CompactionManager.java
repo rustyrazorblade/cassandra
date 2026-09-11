@@ -105,7 +105,6 @@ import org.apache.cassandra.io.sstable.SSTableRewriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
-import org.apache.cassandra.io.sstable.format.big.BigTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.File;
@@ -2211,7 +2210,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             UUID originatingHostId = StorageService.instance.getLocalHostUUID();
             IntervalSet<CommitLogPosition> commitLogIntervals = MetadataCollector.computeCommitLogIntervals(sstableAsSet, originatingHostId);
             SerializationHeader serializationHeader = SerializationHeader.make(cfs.metadata(), sstableAsSet);
-            long maxInputPartitionSize = BigTableWriter.maxEstimatedPartitionSize(txn);
+            long maxInputPartitionSize = maxEstimatedPartitionSize(txn);
 
             fullWriter.switchWriter(createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, pendingRepair, false, txn, minLevel, originatingHostId, commitLogIntervals, serializationHeader, maxInputPartitionSize));
             transWriter.switchWriter(createWriterForAntiCompaction(cfs, destination, expectedBloomFilterSize, UNREPAIRED_SSTABLE, pendingRepair, true, txn, minLevel, originatingHostId, commitLogIntervals, serializationHeader, maxInputPartitionSize));
@@ -2299,6 +2298,21 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             }
             throw e;
         }
+    }
+
+    private static long maxEstimatedPartitionSize(ILifecycleTransaction txn)
+    {
+        long max = -1;
+        for (SSTableReader reader : txn.originals())
+        {
+            long readerMax = reader.getSSTableMetadata().estimatedPartitionSize.max();
+            // an overflowed histogram reports Long.MAX_VALUE, which says only "larger than the last bucket" and would
+            // otherwise presize every writer over these inputs straight to the cap, however small its first partition
+            if (readerMax == Long.MAX_VALUE)
+                return -1;
+            max = Math.max(max, readerMax);
+        }
+        return max;
     }
 
     @VisibleForTesting
@@ -2907,7 +2921,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     /**
      * Return whether "global" compactions should be paused, used by ColumnFamilyStore#runWithCompactionsDisabled
      *
-     * a global compaction is one that includes several/all tables, currently only IndexSummaryBuilder
+     * a global compaction is one that includes several/all tables
      */
     public boolean isGlobalCompactionPaused()
     {

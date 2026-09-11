@@ -329,7 +329,7 @@ public class SSTableMetadataViewer
         }
 
         field("SSTable", descriptor);
-        if (scan && descriptor.version.version.compareTo("ma") >= 0)
+        if (scan)
         {
             printScannedOverview(descriptor, stats);
         }

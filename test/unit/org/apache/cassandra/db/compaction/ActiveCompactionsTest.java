@@ -29,7 +29,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.Uninterruptibles;
@@ -51,8 +50,6 @@ import org.apache.cassandra.index.SecondaryIndexBuilder;
 import org.apache.cassandra.io.sstable.IScrubber;
 import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryRedistribution;
-import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -132,38 +129,6 @@ public class ActiveCompactionsTest extends CQLTester
         assertEquals(sstables, mockActiveCompactions.holder.getCompactionInfo().getSSTables());
     }
 
-    @Test
-    public void testIndexSummaryRedistributionTracking() throws Throwable
-    {
-        createTable("CREATE TABLE %s (pk int, ck int, a int, b int, PRIMARY KEY (pk, ck))");
-        getCurrentColumnFamilyStore().disableAutoCompaction();
-        for (int i = 0; i < 5; i++)
-        {
-            execute("INSERT INTO %s (pk, ck, a, b) VALUES (" + i + ", 2, 3, 4)");
-            flush();
-        }
-        Set<SSTableReader> sstables = getCurrentColumnFamilyStore().getLiveSSTables();
-        try (LifecycleTransaction txn = getCurrentColumnFamilyStore().getTracker().tryModify(sstables, OperationType.INDEX_SUMMARY))
-        {
-            Map<TableId, LifecycleTransaction> transactions = ImmutableMap.<TableId, LifecycleTransaction>builder().put(getCurrentColumnFamilyStore().metadata().id, txn).build();
-            IndexSummaryRedistribution isr = new IndexSummaryRedistribution(transactions, 0, 1000);
-            MockActiveCompactions mockActiveCompactions = new MockActiveCompactions();
-            mockActiveCompactions.beginCompaction(isr);
-            try
-            {
-                isr.redistributeSummaries();
-            }
-            finally
-            {
-                mockActiveCompactions.finishCompaction(isr);
-            }
-            assertTrue(mockActiveCompactions.finished);
-            assertNotNull(mockActiveCompactions.holder);
-            // index redistribution operates over all keyspaces/tables, we always cancel them
-            assertTrue(mockActiveCompactions.holder.getCompactionInfo().getSSTables().isEmpty());
-            assertTrue(mockActiveCompactions.holder.getCompactionInfo().shouldStop((sstable) -> false));
-        }
-    }
 
     @Test
     public void testViewBuildTracking() throws Throwable

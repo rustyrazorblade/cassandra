@@ -25,7 +25,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DeletionTime;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 
@@ -74,20 +74,20 @@ public class DeletionTimeDeSerTest
 
         try(DataOutputBuffer out = new DataOutputBuffer(12)) // Long + Int = 8 + 4
         {
-            DeletionTime.getSerializer(BigFormat.getInstance().getLatestVersion()).serialize(dt, out);
+            DeletionTime.getSerializer(BtiFormat.getInstance().getLatestVersion()).serialize(dt, out);
             
             try(DataInputBuffer in = new DataInputBuffer(out.toByteArray()))
             {
                 // Test *both* deserializers
 
-                readDt = DeletionTime.getSerializer(BigFormat.getInstance().getLatestVersion()).deserialize(in);
+                readDt = DeletionTime.getSerializer(BtiFormat.getInstance().getLatestVersion()).deserialize(in);
 
                 ByteBuffer bbOrig = out.buffer();
                 bbOrig.rewind();
                 ByteBuffer bb = ByteBuffer.allocate(bbOrig.capacity() + offset);
                 bb.position(offset);
                 bb.put(bbOrig);
-                DeletionTime readDt2 = DeletionTime.getSerializer(BigFormat.getInstance().getLatestVersion()).deserialize(bb, offset);
+                DeletionTime readDt2 = DeletionTime.getSerializer(BtiFormat.getInstance().getLatestVersion()).deserialize(bb, offset);
                 assertEquals(readDt, readDt2);
             }
         }

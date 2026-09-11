@@ -122,6 +122,11 @@ public class BtiFormat extends AbstractSSTableFormat<BtiTableReader, BtiTableWri
         return format.name().equals(NAME);
     }
 
+    public static BtiFormat getInstance()
+    {
+        return (BtiFormat) java.util.Objects.requireNonNull(DatabaseDescriptor.getSSTableFormats().get(NAME), "Unknown SSTable format: " + NAME);
+    }
+
     public static boolean isSelected()
     {
         return is(DatabaseDescriptor.getSelectedSSTableFormat());

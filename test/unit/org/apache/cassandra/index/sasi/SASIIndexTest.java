@@ -119,7 +119,6 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryManager;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
@@ -1033,80 +1032,6 @@ public class SASIIndexTest
         assertRows(rows, "key9");
     }
 
-    @Test
-    public void testIndexRedistribution() throws IOException
-    {
-        Map<String, Pair<String, Integer>> part1 = new HashMap<String, Pair<String, Integer>>()
-        {{
-            put("key01", Pair.create("a", 33));
-            put("key02", Pair.create("a", 41));
-        }};
-
-        Map<String, Pair<String, Integer>> part2 = new HashMap<String, Pair<String, Integer>>()
-        {{
-            put("key03", Pair.create("a", 22));
-            put("key04", Pair.create("a", 45));
-        }};
-
-        Map<String, Pair<String, Integer>> part3 = new HashMap<String, Pair<String, Integer>>()
-        {{
-            put("key05", Pair.create("a", 32));
-            put("key06", Pair.create("a", 38));
-        }};
-
-        Map<String, Pair<String, Integer>> part4 = new HashMap<String, Pair<String, Integer>>()
-        {{
-            put("key07", Pair.create("a", 36));
-            put("key08", Pair.create("a", 36));
-        }};
-
-        Map<String, Pair<String, Integer>> part5 = new HashMap<String, Pair<String, Integer>>()
-        {{
-            put("key09", Pair.create("a", 21));
-            put("key10", Pair.create("a", 35));
-        }};
-
-        ColumnFamilyStore store = loadData(part1, true);
-        loadData(part2, true);
-        loadData(part3, true);
-
-        final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
-
-        Set<String> rows = getIndexed(store, 100, buildExpression(firstName, Operator.LIKE_CONTAINS, UTF8Type.instance.decompose("a")));
-        assertRowsSize(rows, 6);
-
-        loadData(part4, true);
-        rows = getIndexed(store, 100, buildExpression(firstName, Operator.LIKE_CONTAINS, UTF8Type.instance.decompose("a")));
-        assertRowsSize(rows, 8);
-
-        loadData(part5, true);
-
-        int minIndexInterval = store.metadata().params.minIndexInterval;
-        try
-        {
-            redistributeSummaries(10, store, firstName, minIndexInterval * 2);
-            redistributeSummaries(10, store, firstName, minIndexInterval * 4);
-            redistributeSummaries(10, store, firstName, minIndexInterval * 8);
-            redistributeSummaries(10, store, firstName, minIndexInterval * 16);
-        } finally
-        {
-            setMinIndexInterval(minIndexInterval);
-        }
-    }
-
-    private void redistributeSummaries(int expected, ColumnFamilyStore store, ByteBuffer firstName, int minIndexInterval) throws IOException
-    {
-        setMinIndexInterval(minIndexInterval);
-        IndexSummaryManager.instance.redistributeSummaries();
-        Util.flush(store);
-
-        Set<String> rows = getIndexed(store, 100, buildExpression(firstName, Operator.LIKE_CONTAINS, UTF8Type.instance.decompose("a")));
-        Assert.assertEquals(rows.toString(), expected, rows.size());
-    }
-
-    private void setMinIndexInterval(int minIndexInterval) {
-        QueryProcessor.executeOnceInternal(String.format("ALTER TABLE %s.%s WITH min_index_interval = %d;", KS_NAME, CF_NAME, minIndexInterval));
-    }
 
     @Test
     public void testTruncate()

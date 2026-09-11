@@ -46,11 +46,8 @@ import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.SinglePartitionSliceCommandTest;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.repair.PendingAntiCompaction;
-import org.apache.cassandra.db.rows.RangeTombstoneMarker;
-import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.streaming.CassandraOutgoingFile;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
@@ -59,8 +56,8 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.format.Version;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.io.util.FileOutputStreamPlus;
@@ -118,7 +115,7 @@ public class LegacySSTableTest
     private static String[] getValidLegacyVersions()
     {
         String[] versions = {"da", "oa", "nb", "na", "me", "md", "mc", "mb", "ma"};
-        return Arrays.stream(versions).filter((v) -> v.compareTo(BigFormat.getInstance().getLatestVersion().toString()) <= 0).toArray(String[]::new);
+        return Arrays.stream(versions).filter((v) -> v.compareTo(BtiFormat.getInstance().getLatestVersion().toString()) <= 0).toArray(String[]::new);
     }
 
     // 1200 chars
@@ -323,26 +320,6 @@ public class LegacySSTableTest
         }
     }
 
-    @Test
-    public void testInaccurateSSTableMinMax() throws Exception
-    {
-        QueryProcessor.executeInternal("CREATE TABLE legacy_tables.legacy_mc_inaccurate_min_max (k int, c1 int, c2 int, c3 int, v int, primary key (k, c1, c2, c3))");
-        loadLegacyTable("mc", "inaccurate_min_max");
-
-        /*
-         sstable has the following mutations:
-            INSERT INTO legacy_tables.legacy_mc_inaccurate_min_max (k, c1, c2, c3, v) VALUES (100, 4, 4, 4, 4)
-            DELETE FROM legacy_tables.legacy_mc_inaccurate_min_max WHERE k=100 AND c1<3
-         */
-
-        String query = "SELECT * FROM legacy_tables.legacy_mc_inaccurate_min_max WHERE k=100 AND c1=1 AND c2=1";
-        List<Unfiltered> unfiltereds = SinglePartitionSliceCommandTest.getUnfilteredsFromSinglePartition(query);
-        Assert.assertEquals(2, unfiltereds.size());
-        Assert.assertTrue(unfiltereds.get(0).isRangeTombstoneMarker());
-        Assert.assertTrue(((RangeTombstoneMarker) unfiltereds.get(0)).isOpen(false));
-        Assert.assertTrue(unfiltereds.get(1).isRangeTombstoneMarker());
-        Assert.assertTrue(((RangeTombstoneMarker) unfiltereds.get(1)).isClose(false));
-    }
 
     @Test
     public void testVerifyOldSimpleSSTables() throws IOException
@@ -688,7 +665,7 @@ public class LegacySSTableTest
     /**
      * Generates sstables for CQL tables (see {@link #createTables(String)}) in <i>current</i>
      * sstable format (version) into {@code test/data/legacy-sstables/VERSION}, where
-     * {@code VERSION} matches {@link Version#version BigFormat.latestVersion.getVersion()}.
+     * {@code VERSION} matches the current sstable format latest version.
      *
      * Sequence numbers are changed to represent the C* version used when creating the SSTable.
      * <p>

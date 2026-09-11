@@ -62,7 +62,7 @@ public class SSTableReadingFileBench
     {
         DatabaseDescriptor.toolInitialization(!TEST_UTIL_ALLOW_TOOL_REINIT_FOR_TEST.getBoolean());
     }
-    @Param("test/data/compaction/oa-70-big-Data.db")
+    @Param("test/data/legacy-sstables/da/legacy_tables/legacy_da_clust/da-500-bti-Data.db")
     String sstableFileName;
     private Descriptor desc;
     private SSTableReader ssTableReader;

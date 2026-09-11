@@ -54,8 +54,8 @@ public class TOCComponentTest
     @Test
     public void testAppendComponentsInSortedOrder() throws Exception
     {
-        File dataFile = new File(tempDir.newFile("nb-1-big-Data.db"));
-        File tocFile = new File(tempDir.getRoot().toPath().resolve("nb-1-big-TOC.txt"));
+        File dataFile = new File(tempDir.newFile("da-1-bti-Data.db"));
+        File tocFile = new File(tempDir.getRoot().toPath().resolve("da-1-bti-TOC.txt"));
         Descriptor descriptor = Descriptor.fromFile(dataFile);
         Set<Component> components = Set.of(Components.DATA, Components.STATS, Components.DIGEST,
                                            Components.TOC, Components.COMPRESSION_INFO, Components.FILTER, Components.CRC);
@@ -75,8 +75,8 @@ public class TOCComponentTest
     @Test
     public void testUpdateTOCIdempotent() throws Exception
     {
-        File dataFile = new File(tempDir.newFile("nb-1-big-Data.db"));
-        File tocFile = new File(tempDir.getRoot().toPath().resolve("nb-1-big-TOC.txt"));
+        File dataFile = new File(tempDir.newFile("da-1-bti-Data.db"));
+        File tocFile = new File(tempDir.getRoot().toPath().resolve("da-1-bti-TOC.txt"));
         Descriptor descriptor = Descriptor.fromFile(dataFile);
         Set<Component> components = Set.of(Components.DATA, Components.STATS, Components.FILTER);
         // call twice to check no duplication
@@ -89,7 +89,7 @@ public class TOCComponentTest
     @Test(expected = FSWriteError.class)
     public void testUpdateTOCNonExistentDirectory()
     {
-        File dataFile = new File(tempDir.getRoot(), "nonexistent/nb-1-big-Data.db");
+        File dataFile = new File(tempDir.getRoot(), "nonexistent/da-1-bti-Data.db");
         Descriptor descriptor = Descriptor.fromFile(dataFile);
         TOCComponent.updateTOC(descriptor, Set.of(Components.DATA));
     }
@@ -97,7 +97,7 @@ public class TOCComponentTest
     @Test
     public void testLoadOrCreateSSTableExistButNotToc() throws Exception
     {
-        java.io.File dataFile = tempDir.newFile("nb-1-big-Data.db");
+        java.io.File dataFile = tempDir.newFile("da-1-bti-Data.db");
         Descriptor descriptor = Descriptor.fromFile(new File(dataFile));
 
         Set<Component> components = TOCComponent.loadOrCreate(descriptor);
@@ -110,8 +110,8 @@ public class TOCComponentTest
     @Test
     public void testLoadOrCreateWithDiscoveredComponents() throws Exception
     {
-        java.io.File dataFile = tempDir.newFile("nb-1-big-Data.db");
-        tempDir.newFile("nb-1-big-Filter.db");
+        java.io.File dataFile = tempDir.newFile("da-1-bti-Data.db");
+        tempDir.newFile("da-1-bti-Filter.db");
 
         Descriptor descriptor = Descriptor.fromFile(new File(dataFile));
         Set<Component> components = TOCComponent.loadOrCreate(descriptor);
@@ -127,7 +127,7 @@ public class TOCComponentTest
     @Test
     public void testLoadOrCreateWhenNoComponents()
     {
-        java.io.File dataFile = new java.io.File(tempDir.getRoot(), "nb-1-big-Data.db");
+        java.io.File dataFile = new java.io.File(tempDir.getRoot(), "da-1-bti-Data.db");
         Descriptor descriptor = Descriptor.fromFile(new File(dataFile));
         Set<Component> components = TOCComponent.loadOrCreate(descriptor);
         assertTrue(components.isEmpty());
@@ -138,8 +138,8 @@ public class TOCComponentTest
 
     private Set<Component> loadTOC(boolean skipMissing) throws Exception
     {
-        File dataFile = new File(tempDir.newFile("nb-1-big-Data.db"));
-        File tocFile = new File(tempDir.newFile("nb-1-big-TOC.txt"));
+        File dataFile = new File(tempDir.newFile("da-1-bti-Data.db"));
+        File tocFile = new File(tempDir.newFile("da-1-bti-TOC.txt"));
         Descriptor desc = Descriptor.fromFile(dataFile);
         Files.write(tocFile.toPath(), List.of("Data.db", "Statistics.db"));
         return TOCComponent.loadTOC(desc, skipMissing);
@@ -161,7 +161,7 @@ public class TOCComponentTest
     public void testRewriteTOCReplacesFileWithSortedComponents() throws Exception
     {
         // Base file for descriptor
-        Descriptor descriptor = Descriptor.fromFile(new File(tempDir.newFile("nb-1-big-Data.db")));
+        Descriptor descriptor = Descriptor.fromFile(new File(tempDir.newFile("da-1-bti-Data.db")));
 
         File tocFile = descriptor.fileFor(Components.TOC);
         assertFalse(tocFile.exists());

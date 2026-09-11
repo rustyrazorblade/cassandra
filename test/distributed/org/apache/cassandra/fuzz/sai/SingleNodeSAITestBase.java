@@ -334,10 +334,8 @@ public abstract class SingleNodeSAITestBase extends TestBaseImpl
     {
         return (cfg) -> {
             cfg.set("row_cache_size", "50MiB")
-               .set("index_summary_capacity", "50MiB")
                .set("counter_cache_size", "50MiB")
                .set("file_cache_size", "50MiB")
-               .set("index_summary_capacity", "50MiB")
                .set("memtable_heap_space", "128MiB")
                .set("memtable_offheap_space", "128MiB")
                .set("memtable_flush_writers", 1)

@@ -139,7 +139,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
         "\tBloom filter false ratio: 0.010\n" +
         "\tBloom filter space used: 161718\n" +
         "\tBloom filter off heap memory used: 98\n" +
-        "\tIndex summary off heap memory used: 1\n" +
         "\tCompression metadata off heap memory used: 3\n" +
         "\tCompacted partition minimum bytes: 4\n" +
         "\tCompacted partition maximum bytes: 30\n" +
@@ -181,7 +180,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
         "\tBloom filter false ratio: 0.010\n" +
         "\tBloom filter space used: 161718\n" +
         "\tBloom filter off heap memory used: 98\n" +
-        "\tIndex summary off heap memory used: 1\n" +
         "\tCompression metadata off heap memory used: 3\n" +
         "\tCompacted partition minimum bytes: 4 bytes\n" +
         "\tCompacted partition maximum bytes: 30 bytes\n" +
@@ -297,7 +295,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
         "\tBloom filter false ratio: 0.020\n" +
         "\tBloom filter space used: 131415\n" +
         "\tBloom filter off heap memory used: 299792458\n" +
-        "\tIndex summary off heap memory used: 2\n" +
         "\tCompression metadata off heap memory used: 2\n" +
         "\tCompacted partition minimum bytes: 5\n" +
         "\tCompacted partition maximum bytes: 20\n" +
@@ -339,7 +336,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
         "\tBloom filter false ratio: 0.020\n" +
         "\tBloom filter space used: 131415\n" +
         "\tBloom filter off heap memory used: 299792458\n" +
-        "\tIndex summary off heap memory used: 2\n" +
         "\tCompression metadata off heap memory used: 2\n" +
         "\tCompacted partition minimum bytes: 5 bytes\n" +
         "\tCompacted partition maximum bytes: 20 bytes\n" +
@@ -471,7 +467,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
         "\tBloom filter false ratio: 0.030\n" +
         "\tBloom filter space used: 101112\n" +
         "\tBloom filter off heap memory used: 667408\n" +
-        "\tIndex summary off heap memory used: 3\n" +
         "\tCompression metadata off heap memory used: 1\n" +
         "\tCompacted partition minimum bytes: 6\n" +
         "\tCompacted partition maximum bytes: 20\n" +
@@ -513,7 +508,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
         "\tBloom filter false ratio: 0.030\n" +
         "\tBloom filter space used: 101112\n" +
         "\tBloom filter off heap memory used: 667408\n" +
-        "\tIndex summary off heap memory used: 3\n" +
         "\tCompression metadata off heap memory used: 1\n" +
         "\tCompacted partition minimum bytes: 6 bytes\n" +
         "\tCompacted partition maximum bytes: 20 bytes\n" +
@@ -762,7 +756,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
                                  "        \"top_size_partitions\" : null,\n" +
                                  "        \"bloom_filter_false_positives\" : 400,\n" +
                                  "        \"off_heap_memory_used_total\" : \"162470810\",\n" +
-                                 "        \"index_summary_off_heap_memory_used\" : \"3\",\n" +
                                  "        \"sai_local_query_latency_ms\" : \"NaN\",\n" +
                                  "        \"sstables_in_each_level\" : [ ],\n" +
                                  "        \"sstable_bytes_in_each_level\" : [ ],\n" +
@@ -841,7 +834,6 @@ public class TableStatsPrinterTest extends TableStatsTestBase
                                  "      top_size_partitions: null\n" +
                                  "      bloom_filter_false_positives: 400\n" +
                                  "      off_heap_memory_used_total: '162470810'\n" +
-                                 "      index_summary_off_heap_memory_used: '3'\n" +
                                  "      sai_local_query_latency_ms: NaN\n" +
                                  "      sstables_in_each_level: []\n" +
                                  "      sstable_bytes_in_each_level: []\n" +

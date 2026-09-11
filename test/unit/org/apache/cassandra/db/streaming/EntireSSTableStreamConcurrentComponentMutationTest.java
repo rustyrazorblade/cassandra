@@ -57,8 +57,6 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableTxnSingleStreamWriter;
 import org.apache.cassandra.io.sstable.SSTableUtils;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryManager;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryRedistribution;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.RangesAtEndpoint;
@@ -67,7 +65,6 @@ import org.apache.cassandra.net.BufferPoolAllocator;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.SharedDefaultFileRegion;
 import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.SchemaTestUtil;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.streaming.OutgoingStream;
@@ -187,27 +184,7 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
         }, NO_OP);
     }
 
-    @Test
-    @BMRule(name = "Delay saving index summary, manifest may link partially written file if there is no lock",
-            targetClass = "SSTableReader",
-            targetMethod = "saveSummary(Descriptor, DecoratedKey, DecoratedKey, IndexSummary)",
-            targetLocation = "AFTER INVOKE serialize",
-            condition = "$descriptor.cfname.contains(\"Standard1\")",
-            action = "org.apache.cassandra.db.streaming.EntireSSTableStreamConcurrentComponentMutationTest.countDown();Thread.sleep(5000);")
-    public void testStreamWithIndexSummaryRedistributionDelaySavingSummary() throws Throwable
-    {
-        testStreamWithConcurrentComponentMutation(() -> {
-            // wait until new index summary is partially written
-            latch.await(1, TimeUnit.MINUTES);
-            return null;
-        }, this::indexSummaryRedistribution);
-    }
 
-    // used by byteman
-    private static void countDown()
-    {
-        latch.countDown();
-    }
 
     private void testStreamWithConcurrentComponentMutation(Callable<?> runBeforeStreaming, Callable<?> runConcurrentWithStreaming) throws Throwable
     {
@@ -248,26 +225,6 @@ public class EntireSSTableStreamConcurrentComponentMutationTest
         }
     }
 
-    private boolean indexSummaryRedistribution() throws IOException
-    {
-        long nonRedistributingOffHeapSize = 0;
-        long memoryPoolBytes = 1024 * 1024;
-
-        // rewrite index summary file with new min/max index interval
-        TableMetadata origin = store.metadata();
-        SchemaTestUtil.announceTableUpdate(origin.unbuild().minIndexInterval(1).maxIndexInterval(2).build());
-
-        try (LifecycleTransaction txn = store.getTracker().tryModify(sstable, OperationType.INDEX_SUMMARY))
-        {
-            IndexSummaryManager.redistributeSummaries(new IndexSummaryRedistribution(ImmutableMap.of(store.metadata().id, txn),
-                                                                                     nonRedistributingOffHeapSize,
-                                                                                     memoryPoolBytes));
-        }
-
-        // reset min/max index interval
-        SchemaTestUtil.announceTableUpdate(origin);
-        return true;
-    }
 
     private Future<?> executeAsync(Callable<?> task)
     {

@@ -98,7 +98,6 @@ public class LoadOldYAMLBackwardCompatibilityTest
         assertNull(config.counter_cache_size);
         assertNull(config.networking_cache_size);
         assertNull(config.file_cache_size);
-        assertNull(config.index_summary_capacity);
         assertEquals(new DurationSpec.IntMillisecondsBound(200), config.gc_log_threshold);
         assertEquals(new DurationSpec.IntMillisecondsBound(1000), config.gc_warn_threshold);
         assertEquals(new DurationSpec.IntSecondsBound(86400), config.trace_type_query_ttl);
@@ -114,7 +113,6 @@ public class LoadOldYAMLBackwardCompatibilityTest
         assertNull(config.roles_update_interval);
         assertEquals(new DurationSpec.IntMillisecondsBound(2000), config.credentials_validity);
         assertNull(config.credentials_update_interval);
-        assertEquals(new DurationSpec.IntMinutesBound(60), config.index_summary_resize_interval);
 
         //parameters which names have not changed with CASSANDRA-15234
         assertEquals(DurationSpec.IntSecondsBound.inSecondsString("0"), config.row_cache_save_period);

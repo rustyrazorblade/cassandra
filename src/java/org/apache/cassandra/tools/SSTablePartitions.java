@@ -59,8 +59,8 @@ import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
@@ -280,7 +280,7 @@ public class SSTablePartitions
             {
                 try
                 {
-                    if (Descriptor.componentFromFile(file) != BigFormat.Components.DATA)
+                    if (Descriptor.componentFromFile(file) != SSTableFormat.Components.DATA)
                         continue;
 
                     ExtendedDescriptor desc = ExtendedDescriptor.guessFromFile(file);
@@ -475,7 +475,7 @@ public class SSTablePartitions
             System.out.printf("Summary of %s:%n" +
                               "  File: %s%n" +
                               "  %d partitions match%n" +
-                              "  Keys:", desc, desc.descriptor.fileFor(BigFormat.Components.DATA), matches.size());
+                              "  Keys:", desc, desc.descriptor.fileFor(SSTableFormat.Components.DATA), matches.size());
 
             for (PartitionStats match : matches)
                 System.out.print(" " + maybeEscapeKeyForSummary(metadata, match.key));
@@ -730,7 +730,7 @@ public class SSTablePartitions
                               rowCount, cellCount, tombstoneCount(),
                               rowTombstoneCount, rangeTombstoneCount, complexTombstoneCount, cellTombstoneCount,
                               rowTtlExpired, cellTtlExpired,
-                              desc.descriptor.fileFor(BigFormat.Components.DATA),
+                              desc.descriptor.fileFor(SSTableFormat.Components.DATA),
                               notNull(desc.keyspace),
                               notNull(desc.table),
                               notNull(desc.index),

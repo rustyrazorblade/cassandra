@@ -40,7 +40,6 @@ import org.apache.cassandra.distributed.shared.WithProperties;
 import org.apache.cassandra.io.sstable.VerifyTest;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigTableVerifier;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tools.ToolRunner.ToolResult;
@@ -53,7 +52,7 @@ import static org.junit.Assert.assertEquals;
 /**
  * Class that tests tables for {@link StandaloneVerifier} by updating using {@link SchemaLoader}
  * Similar in vein to other {@link SchemaLoader} type tests, as well as {@link StandaloneUpgraderOnSStablesTest}.
- * Since the tool mainly exercises the {@link BigTableVerifier}, we elect to
+ * Since the tool mainly exercises the sstable verifier, we elect to
  * not run every conceivable option as many tests are already covered by {@link VerifyTest}.
  * 
  * Note: the complete coverage is composed of:
@@ -100,11 +99,11 @@ public class StandaloneVerifierOnSSTablesTest extends OfflineToolUtils
     public void testCheckVersionWithWrongVersion() throws Exception
     {
         String keyspace = "StandaloneVerifierTestWrongVersions";
-        String tableName = "legacy_ma_simple";
+        String tableName = "legacy_da_simple";
 
         createAndPopulateTable(keyspace, tableName, cfs -> {
             // let's just copy old version files from test data into the source dir
-            File testDataDir = new File("test/data/legacy-sstables/ma/legacy_tables/legacy_ma_simple");
+            File testDataDir = new File("test/data/legacy-sstables/da/legacy_tables/legacy_da_simple");
             for (org.apache.cassandra.io.util.File cfsDir : cfs.getDirectories().getCFDirectories())
             {
                 FileUtils.copyDirectory(testDataDir, cfsDir.toJavaIOFile());

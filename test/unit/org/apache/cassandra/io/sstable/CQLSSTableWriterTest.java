@@ -80,7 +80,6 @@ import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
 import org.apache.cassandra.index.sai.utils.IndexIdentifier;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.PathUtils;
@@ -130,13 +129,6 @@ public abstract class CQLSSTableWriterTest
         qualifiedTable = keyspace + '.' + table;
         dataDir = new File(tempFolder.newFolder().getAbsolutePath() + File.pathSeparator() + keyspace + File.pathSeparator() + table);
         assert dataDir.tryCreateDirectories();
-    }
-
-    @Test
-    public void testUnsortedWriterBig() throws Exception
-    {
-        BigFormat format = BigFormat.getInstance();
-        testWritingSstableWithFormat(format);
     }
 
     @Test
@@ -1426,7 +1418,7 @@ public abstract class CQLSSTableWriterTest
         }
         writer.close();
 
-        File[] dataFiles = dataDir.list(f -> f.name().endsWith(BigFormat.Components.DATA.type.repr));
+        File[] dataFiles = dataDir.list(f -> f.name().endsWith(SSTableFormat.Components.DATA.type.repr));
         assertNotNull(dataFiles);
         assertEquals("The sorted writer should produce 2 sstables when max sstable size is configured",
                      2, dataFiles.length);
@@ -1516,12 +1508,12 @@ public abstract class CQLSSTableWriterTest
         // another sstable is finished on closing the writer
         assertEquals(2, produced.size());
 
-        File[] dataFiles = dataDir.list(f -> f.name().endsWith(BigFormat.Components.DATA.type.repr));
+        File[] dataFiles = dataDir.list(f -> f.name().endsWith(SSTableFormat.Components.DATA.type.repr));
         assertNotNull(dataFiles);
         assertEquals("The sorted writer should produce 2 sstables when max sstable size is configured",
                      2, dataFiles.length);
         Set<File> notifiedDataFileSet = produced.stream()
-                                                .map(sstable -> sstable.descriptor.fileFor(BigFormat.Components.DATA))
+                                                .map(sstable -> sstable.descriptor.fileFor(SSTableFormat.Components.DATA))
                                                 .collect(Collectors.toSet());
         Set<File> listedDataFileSet = Arrays.stream(dataFiles)
                                             .map(File::toCanonical)
@@ -1607,7 +1599,7 @@ public abstract class CQLSSTableWriterTest
 
         writer.close();
 
-        File[] dataFiles = dataDir.list(f -> f.name().endsWith('-' + BigFormat.Components.DATA.type.repr));
+        File[] dataFiles = dataDir.list(f -> f.name().endsWith('-' + SSTableFormat.Components.DATA.type.repr));
         assertNotNull(dataFiles);
 
         IndexDescriptor indexDescriptor = IndexDescriptor.create(Descriptor.fromFile(dataFiles[0]),
@@ -1650,7 +1642,7 @@ public abstract class CQLSSTableWriterTest
 
         writer.close();
 
-        File[] dataFiles = dataDir.list(f -> f.name().endsWith('-' + BigFormat.Components.DATA.type.repr));
+        File[] dataFiles = dataDir.list(f -> f.name().endsWith('-' + SSTableFormat.Components.DATA.type.repr));
         assertNotNull(dataFiles);
 
         IndexDescriptor indexDescriptor = IndexDescriptor.create(Descriptor.fromFile(dataFiles[0]),

@@ -46,7 +46,6 @@ import org.apache.commons.lang3.ArrayUtils;
 import org.jboss.byteman.contrib.bmunit.BMRule;
 import org.jboss.byteman.contrib.bmunit.BMUnitRunner;
 import org.junit.AfterClass;
-import org.junit.Assume;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -91,8 +90,6 @@ import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.sstable.format.CompressionInfoComponent;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
-import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.File;
@@ -277,8 +274,6 @@ public class ScrubTest
 
     private List<File> sstableIndexPaths(SSTableReader reader)
     {
-        if (BigFormat.is(reader.descriptor.getFormat()))
-            return Arrays.asList(reader.descriptor.fileFor(BigFormat.Components.PRIMARY_INDEX));
         if (BtiFormat.is(reader.descriptor.getFormat()))
             return Arrays.asList(reader.descriptor.fileFor(BtiFormat.Components.PARTITION_INDEX),
                                  reader.descriptor.fileFor(BtiFormat.Components.ROW_INDEX));
@@ -409,9 +404,7 @@ public class ScrubTest
         performScrub(cfs, false, true, false, 2);
 
         // check data is still there
-        if (BigFormat.is(sstable.descriptor.getFormat()))
-            assertOrderedAll(cfs, 4);
-        else if (BtiFormat.is(sstable.descriptor.getFormat()))
+        if (BtiFormat.is(sstable.descriptor.getFormat()))
             // For Trie format we won't be able to recover the damaged partition key (partion index doesn't store the whole key)
             assertOrderedAll(cfs, 3);
         else
@@ -466,87 +459,6 @@ public class ScrubTest
 
         // check data is still there
         assertOrderedAll(cfs, 10);
-    }
-
-    @Test
-    @BMRule(name = "skip partition order verification", targetClass = "SortedTableWriter", targetMethod = "verifyPartition", action = "return true")
-    public void testScrubOutOfOrder()
-    {
-        // Run only for Big Table format because Big Table Format does not complain if partitions are given in invalid
-        // order. Legacy SSTables with out-of-order partitions exist in production systems and must be corrected
-        // by scrubbing. The trie index format does not permit such partitions.
-
-        Assume.assumeTrue(BigFormat.isSelected());
-
-        // This test assumes ByteOrderPartitioner to create out-of-order SSTable
-        IPartitioner oldPartitioner = DatabaseDescriptor.getPartitioner();
-        DatabaseDescriptor.setPartitionerUnsafe(ByteOrderedPartitioner.instance);
-
-        // Create out-of-order SSTable
-        File tempDir = FileUtils.createTempFile("ScrubTest.testScrubOutOfOrder", "").parent();
-        // create ks/cf directory
-        File tempDataDir = new File(tempDir, String.join(File.pathSeparator(), ksName, CF));
-        assertTrue(tempDataDir.tryCreateDirectories());
-        try
-        {
-            CompactionManager.instance.disableAutoCompaction();
-            ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF);
-
-            List<String> keys = Arrays.asList("t", "a", "b", "z", "c", "y", "d");
-            Descriptor desc = cfs.newSSTableDescriptor(tempDataDir);
-
-            try (LifecycleTransaction txn = LifecycleTransaction.offline(OperationType.WRITE);
-                 SSTableTxnWriter writer = new SSTableTxnWriter(txn, createTestWriter(desc, keys.size(), cfs, txn)))
-            {
-                for (String k : keys)
-                {
-                    PartitionUpdate update = UpdateBuilder.create(cfs.metadata(), Util.dk(k))
-                                                          .newRow("someName").add("val", "someValue")
-                                                          .build();
-
-                    writer.append(update.unfilteredIterator());
-                }
-                writer.finish(false);
-            }
-
-            try
-            {
-                SSTableReader.open(cfs, desc, cfs.metadata);
-                fail("SSTR validation should have caught the out-of-order rows");
-            }
-            catch (CorruptSSTableException ise)
-            { /* this is expected */ }
-
-            // open without validation for scrubbing
-            Set<Component> components = new HashSet<>();
-            if (desc.fileFor(Components.COMPRESSION_INFO).exists())
-                components.add(Components.COMPRESSION_INFO);
-            components.add(Components.DATA);
-            components.add(Components.PRIMARY_INDEX);
-            components.add(Components.FILTER);
-            components.add(Components.STATS);
-            components.add(Components.SUMMARY);
-            components.add(Components.TOC);
-
-            SSTableReader sstable = SSTableReader.openNoValidation(desc, components, cfs);
-//            if (sstable.last.compareTo(sstable.first) < 0)
-//                sstable.last = sstable.first;
-
-            try (LifecycleTransaction scrubTxn = LifecycleTransaction.offline(OperationType.SCRUB, sstable);
-                 IScrubber scrubber = sstable.descriptor.getFormat().getScrubber(cfs, scrubTxn, new OutputHandler.LogOutput(), new IScrubber.Options.Builder().checkData().build()))
-            {
-                scrubber.scrub();
-            }
-            LifecycleTransaction.waitForDeletions();
-            cfs.loadNewSSTables();
-            assertOrderedAll(cfs, 7);
-        }
-        finally
-        {
-            FileUtils.deleteRecursive(tempDataDir);
-            // reset partitioner
-            DatabaseDescriptor.setPartitionerUnsafe(oldPartitioner);
-        }
     }
 
     public static void overrideWithGarbage(SSTableReader sstable, ByteBuffer key1, ByteBuffer key2) throws IOException
@@ -852,60 +764,6 @@ public class ScrubTest
         TestMultiWriter(SSTableWriter writer, ILifecycleTransaction txn)
         {
             super(writer, txn);
-        }
-    }
-
-    /**
-     * Tests with invalid sstables (containing duplicate entries in 2.0 and 3.0 storage format),
-     * that were caused by upgrading from 2.x with duplicate range tombstones.
-     * <p>
-     * See CASSANDRA-12144 for details.
-     */
-    @Test
-    public void testFilterOutDuplicates() throws Exception
-    {
-        Assume.assumeTrue(BigFormat.isSelected());
-
-        IPartitioner oldPart = DatabaseDescriptor.getPartitioner();
-        try
-        {
-            DatabaseDescriptor.setPartitionerUnsafe(Murmur3Partitioner.instance);
-            QueryProcessor.process(String.format("CREATE TABLE \"%s\".cf_with_duplicates_3_0 (a int, b int, c int, PRIMARY KEY (a, b))", ksName), ConsistencyLevel.ONE);
-
-            ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("cf_with_duplicates_3_0");
-
-            Path legacySSTableRoot = Paths.get(TEST_INVALID_LEGACY_SSTABLE_ROOT.getString(),
-                                               "Keyspace1",
-                                               "cf_with_duplicates_3_0");
-
-            for (String filename : new String[]{ "mb-3-big-CompressionInfo.db",
-                                                 "mb-3-big-Digest.crc32",
-                                                 "mb-3-big-Index.db",
-                                                 "mb-3-big-Summary.db",
-                                                 "mb-3-big-Data.db",
-                                                 "mb-3-big-Filter.db",
-                                                 "mb-3-big-Statistics.db",
-                                                 "mb-3-big-TOC.txt" })
-            {
-                Files.copy(Paths.get(legacySSTableRoot.toString(), filename), cfs.getDirectories().getDirectoryForNewSSTables().toPath().resolve(filename));
-            }
-
-            cfs.loadNewSSTables();
-
-            cfs.scrub(true, false, IScrubber.options().skipCorrupted().build(), 1);
-
-            UntypedResultSet rs = QueryProcessor.executeInternal(String.format("SELECT * FROM \"%s\".cf_with_duplicates_3_0", ksName));
-            assertNotNull(rs);
-            assertEquals(1, rs.size());
-
-            QueryProcessor.executeInternal(String.format("DELETE FROM \"%s\".cf_with_duplicates_3_0 WHERE a=1 AND b =2", ksName));
-            rs = QueryProcessor.executeInternal(String.format("SELECT * FROM \"%s\".cf_with_duplicates_3_0", ksName));
-            assertNotNull(rs);
-            assertEquals(0, rs.size());
-        }
-        finally
-        {
-            DatabaseDescriptor.setPartitionerUnsafe(oldPart);
         }
     }
 

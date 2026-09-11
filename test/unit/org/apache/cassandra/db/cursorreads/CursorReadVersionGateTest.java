@@ -34,7 +34,6 @@ import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.schema.MockSchema;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -69,12 +68,6 @@ public class CursorReadVersionGateTest
     public void resetCursorReadsFlag()
     {
         DatabaseDescriptor.setCursorReadsEnabled(false);
-    }
-
-    @Test
-    public void nonLatestBigVersionClosesGate()
-    {
-        assertVersionArm(BigFormat.getInstance(), "ma");
     }
 
     @Test

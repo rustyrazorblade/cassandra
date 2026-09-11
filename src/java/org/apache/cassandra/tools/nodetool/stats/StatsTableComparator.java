@@ -55,7 +55,7 @@ public class StatsTableComparator implements Comparator<StatsTable>
                                                        "compacted_partition_minimum_bytes",
                                                        "compression_dictionaries_memory_used",
                                                        "compression_metadata_off_heap_memory_used", "dropped_mutations",
-                                                       "full_name", "index_summary_off_heap_memory_used",
+                                                       "full_name",
                                                        "local_read_count", "local_read_latency_ms",
                                                        "local_write_latency_ms",
                                                        "maximum_live_cells_per_slice_last_five_minutes",
@@ -202,20 +202,6 @@ public class StatsTableComparator implements Comparator<StatsTable>
         else if (sortKey.equals("full_name"))
         {
             return sign * stx.fullName.compareTo(sty.fullName);
-        }
-        else if (sortKey.equals("index_summary_off_heap_memory_used"))
-        {
-            if (stx.indexSummaryOffHeapUsed && !sty.indexSummaryOffHeapUsed)
-                return sign;
-            else if (!stx.indexSummaryOffHeapUsed && sty.indexSummaryOffHeapUsed)
-                return sign * -1;
-            else if (!stx.indexSummaryOffHeapUsed && !sty.indexSummaryOffHeapUsed)
-                result = 0;
-            else
-            {
-                result = compareFileSizes(stx.indexSummaryOffHeapMemoryUsed,
-                                          sty.indexSummaryOffHeapMemoryUsed);
-            }
         }
         else if (sortKey.equals("local_read_count") || sortKey.equals("reads"))
         {

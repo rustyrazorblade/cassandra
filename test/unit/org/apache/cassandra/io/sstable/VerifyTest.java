@@ -63,8 +63,7 @@ import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
 import org.apache.cassandra.io.sstable.format.SortedTableVerifier.RangeOwnHelper;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
-import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
@@ -557,9 +556,7 @@ public class VerifyTest
     @Test
     public void testVerifyIndex() throws IOException
     {
-        if (BigFormat.isSelected())
-            testBrokenComponentHelper(BigFormat.Components.PRIMARY_INDEX);
-        else if (BtiFormat.isSelected())
+        if (BtiFormat.isSelected())
             testBrokenComponentHelper(BtiFormat.Components.PARTITION_INDEX);
         else
             throw Util.testMustBeImplementedForSSTableFormat();
@@ -570,13 +567,6 @@ public class VerifyTest
     {
         Assume.assumeTrue(SSTableReaderWithFilter.class.isAssignableFrom(DatabaseDescriptor.getSelectedSSTableFormat().getReaderFactory().getReaderClass()));
         testBrokenComponentHelper(Components.FILTER);
-    }
-
-    @Test
-    public void testVerifyIndexSummary() throws IOException
-    {
-        Assume.assumeTrue(BigFormat.isSelected());
-        testBrokenComponentHelper(Components.SUMMARY);
     }
 
     private void testBrokenComponentHelper(Component componentToBreak) throws IOException

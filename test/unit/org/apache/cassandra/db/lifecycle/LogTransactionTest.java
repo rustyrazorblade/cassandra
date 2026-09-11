@@ -56,10 +56,8 @@ import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableId;
 import org.apache.cassandra.io.sstable.SequenceBasedSSTableId;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
-import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
-import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.io.sstable.format.bti.BtiTableReader;
 import org.apache.cassandra.io.sstable.format.bti.PartitionIndex;
@@ -1426,42 +1424,7 @@ public class LogTransactionTest extends AbstractTransactionalTest
     private static SSTableReader sstable(File dataFolder, ColumnFamilyStore cfs, int generation, int size) throws IOException
     {
         Descriptor descriptor = new Descriptor(dataFolder, cfs.getKeyspaceName(), cfs.getTableName(), new SequenceBasedSSTableId(generation), DatabaseDescriptor.getSelectedSSTableFormat());
-        if (BigFormat.isSelected())
-        {
-            Set<Component> components = ImmutableSet.of(Components.DATA, Components.PRIMARY_INDEX, Components.FILTER, Components.TOC, Components.STATS);
-            for (Component component : components)
-            {
-                File file = descriptor.fileFor(component);
-                if (!file.exists())
-                    assertTrue(file.createFileIfNotExists());
-
-                Util.setFileLength(file, size);
-            }
-
-            FileHandle dFile = new FileHandle.Builder(descriptor.fileFor(Components.DATA)).complete();
-            FileHandle iFile = new FileHandle.Builder(descriptor.fileFor(Components.PRIMARY_INDEX)).complete();
-
-            DecoratedKey key = MockSchema.readerBounds(generation);
-            SerializationHeader header = SerializationHeader.make(cfs.metadata(), Collections.emptyList());
-            StatsMetadata metadata = (StatsMetadata) new MetadataCollector(cfs.metadata().comparator)
-                                                     .finalizeMetadata(cfs.metadata().partitioner.getClass().getCanonicalName(), 0.01f, -1, null, false, header, key.getKey().slice(), key.getKey().slice())
-                                                     .get(MetadataType.STATS);
-            SSTableReader reader = new BigTableReader.Builder(descriptor).setComponents(components)
-                                                                         .setTableMetadataRef(cfs.metadata)
-                                                                         .setDataFile(dFile)
-                                                                         .setIndexFile(iFile)
-                                                                         .setIndexSummary(MockSchema.indexSummary.sharedCopy())
-                                                                         .setFilter(FilterFactory.AlwaysPresent)
-                                                                         .setMaxDataAge(1L)
-                                                                         .setStatsMetadata(metadata)
-                                                                         .setOpenReason(SSTableReader.OpenReason.NORMAL)
-                                                                         .setSerializationHeader(header)
-                                                                         .setFirst(key)
-                                                                         .setLast(key)
-                                                                         .build(cfs, false, false);
-            return reader;
-        }
-        else if (BtiFormat.isSelected())
+        if (BtiFormat.isSelected())
         {
             Set<Component> components = ImmutableSet.of(Components.DATA, BtiFormat.Components.PARTITION_INDEX, BtiFormat.Components.ROW_INDEX, Components.FILTER, Components.TOC, Components.STATS);
             for (Component component : components)

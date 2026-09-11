@@ -74,13 +74,7 @@ public class ColumnIndexTest extends CQLTester
     }
 
     @Test
-    @BMRules(rules = { @BMRule(name = "force_add_index_block_after_range_tombstone_boundary_marker_big",
-                               targetClass = "org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter",
-                               targetMethod = "addUnfiltered",
-                               targetLocation = "AT EXIT",
-                               condition = "$1 instanceof org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker",
-                               action = "$this.addIndexBlock()"),
-                       @BMRule(name = "force_add_index_block_after_range_tombstone_boundary_marker_bti",
+    @BMRules(rules = { @BMRule(name = "force_add_index_block_after_range_tombstone_boundary_marker_bti",
                                targetClass = "org.apache.cassandra.io.sstable.format.bti.BtiFormatPartitionWriter",
                                targetMethod = "addUnfiltered",
                                targetLocation = "AT EXIT",
@@ -119,13 +113,7 @@ public class ColumnIndexTest extends CQLTester
     }
 
     @Test
-    @BMRules(rules = { @BMRule(name = "test_big",
-                               targetClass = "org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter",
-                               targetMethod = "addUnfiltered",
-                               targetLocation = "AT INVOKE addIndexBlock ALL",
-                               condition = "$1 instanceof org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker",
-                               action = "org.apache.cassandra.io.sstable.format.ColumnIndexTest.setRTBMLastInIndexBlock()"),
-                       @BMRule(name = "test_bti",
+    @BMRules(rules = { @BMRule(name = "test_bti",
                                targetClass = "org.apache.cassandra.io.sstable.format.bti.BtiFormatPartitionWriter",
                                targetMethod = "addUnfiltered",
                                targetLocation = "AT INVOKE addIndexBlock ALL",

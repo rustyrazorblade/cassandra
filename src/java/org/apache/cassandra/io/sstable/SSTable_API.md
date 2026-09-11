@@ -15,7 +15,7 @@ of the implementation and a method for creating the format instance.
 SSTable format factories are discovered using 
 [Java Service Loader](https://docs.oracle.com/javase/8/docs/api/java/util/ServiceLoader.html) mechanism. The loaded 
 format implementations can be used to read the existing sstables. The write format is chosen based on the configuration. 
-If it is not specified, `BigFormat` implementation is assumed. 
+If it is not specified, the `BtiFormat` implementation is assumed. 
 
 Optional SSTable formats configuration can be supplied in the _cassandra.yaml_ file under the `sstable` key. 
 
@@ -44,17 +44,14 @@ implementation. All of those parameters are optional and depend on the implement
 The assumed default configuration - which is equivalent to empty configuration:
 ```yaml
 sstable:
-  selected_format: big
+  selected_format: bti
 ```
 
-Example configuration which uses `bti` as the default:
+Example configuration which passes parameters to the `bti` format:
 ```yaml
 sstable:
   selected_format: bti
   format:
-    big:
-      param1: value1
-      param2: value2
     bti:
       param1: value1
       param2: value2
@@ -74,22 +71,22 @@ A set of generic types of components that are thought of as common to all the ss
 instances, as well as non-singleton types like `SECONDARY_INDEX` and `CUSTOM`.
 
 Apart from the generic components, each sstable format implementation may describe its specific component types.
-For example, the _big table_ format describes additionally `PRIMARY_INDEX` and `SUMMARY` singleton types and 
-the corresponding singleton components (see [`BigFormat.Components`](format/big/BigFormat.java)).
+For example, the _bti_ format describes additionally `PARTITION_INDEX` and `ROW_INDEX` singleton types and 
+the corresponding singleton components (see [`BtiFormat.Components`](format/bti/BtiFormat.java)).
 
 Custom types can be created with one of the `Component.Type.create(name, repr, streamable, formatClass)`,
 `Component.Type.createSingleton(name, repr, streamable, formatClass)` methods. Each created type is registered in 
 a global types' registry. Types registry is hierarchical which means that an sstable implementation may use types 
-defined for its format class and for all parent format classes (for example, the types defined for the `BigFormat` class
+defined for its format class and for all parent format classes (for example, the types defined for the `BtiFormat` class
 extend the set of types defined for the `SSTableFormat` interface).
 
-For example, types defined for `BigFormat`:
+For example, types defined for `BtiFormat`:
 
 ```java
-public static class Types extends SSTableFormat.Components.Types
+public static class Types extends AbstractSSTableFormat.Components.Types
 {
-    public static final Component.Type PRIMARY_INDEX = Component.Type.createSingleton("PRIMARY_INDEX", "Index.db", true, BigFormat.class);
-    public static final Component.Type SUMMARY = Component.Type.createSingleton("SUMMARY", "Summary.db", true, BigFormat.class);
+    public static final Component.Type PARTITION_INDEX = Component.Type.createSingleton("PARTITION_INDEX", "Partitions.db", true, BtiFormat.class);
+    public static final Component.Type ROW_INDEX = Component.Type.createSingleton("ROW_INDEX", "Rows.db", true, BtiFormat.class);
 }
 ```
 
@@ -97,10 +94,10 @@ Singleton components are immediately associated with the singleton types and ret
 method:
 
 ```java
-public static class Components extends AbstractSSTableFormat.Components
+public static class Components extends SSTableFormat.Components
 {
-    public final static Component PRIMARY_INDEX = Types.PRIMARY_INDEX.getSingleton();
-    public final static Component SUMMARY = Types.SUMMARY.getSingleton();
+    public final static Component PARTITION_INDEX = Types.PARTITION_INDEX.getSingleton();
+    public final static Component ROW_INDEX = Types.ROW_INDEX.getSingleton();
 }
 ```
 
@@ -164,16 +161,16 @@ also requires copying the resources only if they are unset in the builder (the f
 the `super.unbuildTo` method as a first step so that all the fields managed by the parent class are copied and in
 the actual implementation only the fields specific to this format have to be assigned.
 
-For example, the implementation of that method in a reader for the _big table_ format is as follows:
+For example, the implementation of that method in a reader for the _bti_ format is as follows:
 
 ```java
 protected final Builder unbuildTo(Builder builder, boolean sharedCopy)
 {
     Builder b = super.unbuildTo(builder, sharedCopy);
-    if (builder.getIndexFile() == null)
-        b.setIndexFile(sharedCopy ? sharedCopyOrNull(ifile) : ifile);
-    if (builder.getIndexSummary() == null)
-        b.setIndexSummary(sharedCopy ? sharedCopyOrNull(indexSummary) : indexSummary);
+    if (builder.getPartitionIndex() == null)
+        b.setPartitionIndex(sharedCopy ? sharedCopyOrNull(partitionIndex) : partitionIndex);
+    if (builder.getRowIndexFile() == null)
+        b.setRowIndexFile(sharedCopy ? sharedCopyOrNull(rowIndexFile) : rowIndexFile);
 
     return b;
 }
@@ -194,14 +191,6 @@ component in the appropriate component sets.
 The reader with filter implementation comes with additional [metrics](filter/BloomFilterMetrics.java) - read more about custom
 metrics support [here](#metrics).
 
-#### Index summary
-
-Some sstable format implementations, such as _big table_ format, may use _index summaries_. If a reader uses _index 
-summaries_ it should implement the [`IndexSummarySupport`](indexsummary/IndexSummarySupport.java) interface. 
-
-The support for _index summaries_ comes with additional [metrics](indexsummary/IndexSummaryMetrics.java) - read more 
-about custom metrics support [here](#metrics).
-
 #### Metrics
 
 A custom sstable format implementation may provide additional metrics on a table, keyspace, and global level. Those 
@@ -216,13 +205,13 @@ class expects the implementation to provide a gauge for each level of aggregatio
 is [`AbstractMetricsProviders`](AbstractMetricsProviders.java) class which is a partial implementation of the
 `MetricsProviders` interface and leverages `SimpleGaugeProvider` in the offered methods.
 
-Example - additional metrics for sstables supporting index summaries (see 
-[`IndexSummaryMetrics`](indexsummary/IndexSummaryMetrics.java) for a full example):
+Example - additional metrics for sstables supporting a bloom filter (see 
+[`BloomFilterMetrics`](filter/BloomFilterMetrics.java) for a full example):
 ```java
-private final GaugeProvider<Long> indexSummaryOffHeapMemoryUsed = newGaugeProvider("IndexSummaryOffHeapMemoryUsed",
-                                                                                   0L,
-                                                                                   r -> r.getIndexSummary().getOffHeapSize(),
-                                                                                   Long::sum);
+private final GaugeProvider<Long> bloomFilterOffHeapMemoryUsed = newGaugeProvider("BloomFilterOffHeapMemoryUsed",
+                                                                                  0L,
+                                                                                  r -> r.getFilterOffHeapSize(),
+                                                                                  Long::sum);
 ```
 
 ### Writer

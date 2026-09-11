@@ -56,8 +56,6 @@ public class StatsTable
     public String bloomFilterSpaceUsed;
     public boolean bloomFilterOffHeapUsed = false;
     public String bloomFilterOffHeapMemoryUsed;
-    public boolean indexSummaryOffHeapUsed = false;
-    public String indexSummaryOffHeapMemoryUsed;
     public boolean compressionDictionariesUsed = false;
     public String compressionDictionariesMemoryUsed;
     public boolean compressionMetadataOffHeapUsed = false;

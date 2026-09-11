@@ -83,8 +83,7 @@ public class SetLoggingLevel extends AbstractCommand
         {
             classQualifiers = Lists.newArrayList(
                     "org.apache.cassandra.db.compaction",
-                    "org.apache.cassandra.db.ColumnFamilyStore",
-                    "org.apache.cassandra.io.sstable.IndexSummaryRedistribution");
+                    "org.apache.cassandra.db.ColumnFamilyStore");
         }
         else if (target.equals("cql"))
         {

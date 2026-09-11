@@ -126,7 +126,6 @@ public class InstanceConfig implements IInstanceConfig
                 .set("diagnostic_events_enabled", true)
                 .set("auto_bootstrap", false)
                 // capacities that are based on `totalMemory` that should be fixed size
-                .set("index_summary_capacity", "50MiB")
                 .set("counter_cache_size", "50MiB")
                 .set("commitlog_disk_access_mode", "legacy");
         if (CassandraRelevantProperties.DTEST_JVM_DTESTS_USE_LATEST.getBoolean())

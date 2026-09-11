@@ -28,7 +28,6 @@ import java.util.concurrent.ExecutionException;
 
 import org.junit.After;
 import org.junit.AfterClass;
-import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.runner.RunWith;
@@ -43,7 +42,6 @@ import org.apache.cassandra.db.compaction.CompactionController;
 import org.apache.cassandra.db.compaction.CompactionPipelineCounts;
 import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.TestHelper;
 
@@ -104,13 +102,6 @@ public abstract class SimpleCompactionTest extends CQLTester
         if (!cursorCompactionEnabled)
             return;
 
-        // Cursor compaction only supports BIG output, so under a non-BIG selected format — which is
-        // what `ant test-latest` runs — the assertion below would fail for a reason that is not a
-        // defect. Skip, and keep the assertion for every other unsupported-ness reason.
-        Assume.assumeTrue("cursor compaction requires the BIG sstable format; selected=" +
-                          DatabaseDescriptor.getSelectedSSTableFormat().name(),
-                          BigFormat.isSelected());
-
         Set<SSTableReader> inputs = new HashSet<>(cfs.getLiveSSTables());
         try (CompactionController controller = new CompactionController(cfs, inputs, cfs.gcBefore(FBUtilities.nowInSeconds()));
              AbstractCompactionStrategy.ScannerList scanners =
@@ -132,14 +123,12 @@ public abstract class SimpleCompactionTest extends CQLTester
      * <p>
      * The expectation is derived from the parameterization and the selected format rather than from
      * {@code isSupported}, so that it cannot become a tautology restating the predicate the pipeline
-     * itself consults. Under a non-BIG selected format — {@code ant test-latest} selects BTI — the
-     * cursor path is refused outright, so the iterator pipeline is the correct expectation there
-     * rather than a skip: asserting it is true, cheap, and still non-vacuous.
+     * itself consults.
      */
     protected void majorCompact(ColumnFamilyStore cfs)
     {
         CompactionPipelineCounts before = CompactionPipelineCounts.mark();
         cfs.forceMajorCompaction();
-        CompactionPipelineCounts.assertPipelineRan(cursorCompactionEnabled && BigFormat.isSelected(), before);
+        CompactionPipelineCounts.assertPipelineRan(cursorCompactionEnabled, before);
     }
 }

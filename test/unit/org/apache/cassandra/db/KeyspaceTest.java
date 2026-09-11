@@ -39,9 +39,7 @@ import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
-import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.metrics.ClearableHistogram;
 import org.apache.cassandra.service.snapshot.SnapshotManager;
 import org.apache.cassandra.service.snapshot.TableSnapshot;
@@ -420,14 +418,6 @@ public class KeyspaceTest extends CQLTester
         // compact so we have a big row with more than the minimum index count
         if (cfs.getLiveSSTables().size() > 1)
             CompactionManager.instance.performMaximal(cfs);
-
-        // verify that we do indeed have multiple index entries
-        SSTableReader sstable = cfs.getLiveSSTables().iterator().next();
-        if (sstable instanceof BigTableReader)
-        {
-            AbstractRowIndexEntry indexEntry = ((BigTableReader) sstable).getRowIndexEntry(Util.dk("0"), SSTableReader.Operator.EQ);
-            assert indexEntry.blockCount() > 2;
-        }
 
         validateSliceLarge(cfs);
     }

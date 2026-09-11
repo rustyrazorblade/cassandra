@@ -40,15 +40,11 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
-import org.apache.cassandra.io.sstable.format.big.BigTableReader;
-import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
 import org.apache.cassandra.metrics.TopPartitionTracker;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.OutputHandler;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -320,16 +316,6 @@ public class CompactionColumnIndexSizeTest extends CQLTester
                                                                          .extendedVerification(true).build()))
         {
             verifier.verify();
-        }
-
-        // (f) the 1KiB cases must have produced a deeply-indexed row index entry
-        if (expectManyBlocks)
-        {
-            Assume.assumeTrue(BigFormat.isSelected());
-            DecoratedKey bigKey = cfs.decorateKey(ByteBufferUtil.bytes(bigKeyStr));
-            RowIndexEntry rie = ((BigTableReader) output).getRowIndexEntry(bigKey, SSTableReader.Operator.EQ);
-            assertNotNull(rie);
-            assertTrue("expected >1000 index blocks, got " + rie.blockCount(), rie.blockCount() > 1000);
         }
     }
 }

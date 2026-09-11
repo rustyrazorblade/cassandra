@@ -85,7 +85,6 @@ public class SettingsTableTest extends CQLTester
         config.jmx_server_options = new JMXServerOptions();
         config.jmx_server_options.jmx_encryption_options.applyConfig();
         config.sstable_preemptive_open_interval = null;
-        config.index_summary_resize_interval = null;
         config.cache_load_timeout = new DurationSpec.IntSecondsBound(0);
         config.commitlog_sync_group_window = new DurationSpec.IntMillisecondsBound(0);
         config.credentials_update_interval = null;
@@ -190,12 +189,6 @@ public class SettingsTableTest extends CQLTester
         assertRowsNet(executeNet(q), new Object[] {"sstable_preemptive_open_interval", null});
         q = "SELECT * FROM vts.settings WHERE name = 'sstable_preemptive_open_interval_in_mb';";
         assertRowsNet(executeNet(q), new Object[] {"sstable_preemptive_open_interval_in_mb", "-1"});
-
-        // test MINUTES_CUSTOM_DURATION converter
-        q = "SELECT * FROM vts.settings WHERE name = 'index_summary_resize_interval';";
-        assertRowsNet(executeNet(q), new Object[] {"index_summary_resize_interval", null});
-        q = "SELECT * FROM vts.settings WHERE name = 'index_summary_resize_interval_in_minutes';";
-        assertRowsNet(executeNet(q), new Object[] {"index_summary_resize_interval_in_minutes", "-1"});
 
         // test NEGATIVE_SECONDS_DURATION converter
         q = "SELECT * FROM vts.settings WHERE name = 'cache_load_timeout';";

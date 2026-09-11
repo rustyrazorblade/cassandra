@@ -333,12 +333,10 @@ public class YamlConfigurationLoaderTest
     {
         Config c = load("test/conf/cassandra-converters-special-cases.yaml");
         assertThat(c.sstable_preemptive_open_interval).isNull();
-        assertThat(c.index_summary_resize_interval).isNull();
         assertThat(c.cache_load_timeout).isEqualTo(new DurationSpec.IntSecondsBound("0s"));
 
         c = load("test/conf/cassandra-converters-special-cases-old-names.yaml");
         assertThat(c.sstable_preemptive_open_interval).isNull();
-        assertThat(c.index_summary_resize_interval).isNull();
         assertThat(c.cache_load_timeout).isEqualTo(new DurationSpec.IntSecondsBound("0s"));
     }
 
@@ -347,24 +345,20 @@ public class YamlConfigurationLoaderTest
     {
         Map<String, Object> map = new HashMap<>();
         map.put("sstable_preemptive_open_interval", null);
-        map.put("index_summary_resize_interval", null);
         map.put("credentials_update_interval", null);
 
         Config c = YamlConfigurationLoader.fromMap(map, true, Config.class);
         assertThat(c.sstable_preemptive_open_interval).isNull();
-        assertThat(c.index_summary_resize_interval).isNull();
         assertThat(c.credentials_update_interval).isNull();
 
         map = ImmutableMap.of(
         "sstable_preemptive_open_interval_in_mb", "-1",
-        "index_summary_resize_interval_in_minutes", "-1",
         "cache_load_timeout_seconds", "-1",
         "credentials_update_interval_in_ms", "-1"
         );
         c = YamlConfigurationLoader.fromMap(map, Config.class);
 
         assertThat(c.sstable_preemptive_open_interval).isNull();
-        assertThat(c.index_summary_resize_interval).isNull();
         assertThat(c.cache_load_timeout).isEqualTo(new DurationSpec.IntSecondsBound("0s"));
         assertThat(c.credentials_update_interval).isNull();
     }
@@ -529,13 +523,6 @@ public class YamlConfigurationLoaderTest
         assertThat(from("validation_preview_purge_head_start_in_sec", 42).validation_preview_purge_head_start.toSeconds()).isEqualTo(42);
 
         // SECONDS_CUSTOM_DURATION already tested in type change
-
-        // MINUTES_CUSTOM_DURATION
-        assertThat(from("index_summary_resize_interval_in_minutes", "42").index_summary_resize_interval.toMinutes()).isEqualTo(42);
-        assertThat(from("index_summary_resize_interval_in_minutes", "-1").index_summary_resize_interval).isNull();
-        assertThatThrownBy(() -> from("index_summary_resize_interval_in_minutes", -2).index_summary_resize_interval.toMinutes())
-        .hasRootCauseInstanceOf(IllegalArgumentException.class)
-        .hasRootCauseMessage("Invalid duration: value must be non-negative");
 
         // BYTES_CUSTOM_DATASTORAGE
         assertThat(from("native_transport_max_concurrent_requests_in_bytes_per_ip", -1).native_transport_max_request_data_in_flight_per_ip).isEqualTo(null);

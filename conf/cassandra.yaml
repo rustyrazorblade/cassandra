@@ -947,24 +947,6 @@ memtable_allocation_type: heap_buffers
 # Min unit: ms
 # cdc_free_space_check_interval: 250ms
 
-# A fixed memory pool size in MB for for SSTable index summaries. If left
-# empty, this will default to 5% of the heap size. If the memory usage of
-# all index summaries exceeds this limit, SSTables with low read rates will
-# shrink their index summaries in order to meet this limit.  However, this
-# is a best-effort process. In extreme conditions Cassandra may need to use
-# more than this amount of memory.
-# Only relevant to formats that use an index summary, e.g. BIG.
-# Min unit: KiB
-index_summary_capacity:
-
-# How frequently index summaries should be resampled.  This is done
-# periodically to redistribute memory from the fixed-size pool to sstables
-# proportional their recent read rates.  Setting to null value will disable this
-# process, leaving existing index summaries at their current sampling level.
-# Only relevant to formats that use an index summary, e.g. BIG.
-# Min unit: m
-index_summary_resize_interval: 60m
-
 # Whether to, when doing sequential writing, fsync() at intervals in
 # order to force the operating system to flush the dirty
 # buffers. Enable this to avoid sudden dirty buffer flushing from
@@ -1181,25 +1163,16 @@ snapshot_links_per_second: 0
 # loaded using the service loader mechanism. In this section, one can select
 # the format for created sstables and pass additional parameters for the formats
 # available on the classpath.
-# The default format is "big", the legacy SSTable format in use since Cassandra 3.0.
-# Cassandra versions 5.0 and later also support the trie-indexed "bti" format,
-# which offers better performance.
+# The only format is the trie-indexed "bti" format.
 #sstable:
-#  selected_format: big
+#  selected_format: bti
 
 # Granularity of the collation index of rows within a partition.
-# Applies to both BIG and BTI SSTable formats. In both formats,
-# a smaller granularity results in faster lookup of rows within
+# A smaller granularity results in faster lookup of rows within
 # a partition, but a bigger index file size.
-# Using smaller granularities with the BIG format is not recommended
-# because bigger collation indexes cannot be cached efficiently
-# or at all if they become sufficiently large. Further, if
-# large rows, or a very large number of rows per partition are
-# present, it is recommended to increase the index granularity
-# or switch to the BTI SSTable format.
 #
-# Leave undefined to use a default suitable for the SSTable format
-# in use (64 KiB for BIG, 16KiB for BTI).
+# Leave undefined to use the default suitable for the BTI SSTable format
+# (16KiB).
 # Min unit: KiB
 # column_index_size: 4KiB
 
@@ -1211,7 +1184,6 @@ snapshot_links_per_second: 0
 # Note that this size refers to the size of the
 # serialized index information and not the size of the partition.
 #
-# This is only relevant to SSTable formats that use key cache, e.g. BIG.
 # Min unit: KiB
 column_index_cache_size: 2KiB
 
@@ -2822,7 +2794,7 @@ max_security_label_length: 48
 #
 # The chosen storage compatibility mode will determine the versions of the written sstables, commitlogs, hints, etc.
 # For example, if we're going to remain compatible with Cassandra 4.x, the value of this property should be 4, which
-# will make us use sstables in the latest N version of the BIG format.
+# will constrain the commitlog, hints, and messaging versions to that major version.
 #
 # This will also determine if certain features that depend on newer formats are available. For example, extended TTL
 # (up to 2106) depends on the sstable, commit-log, hints, and messaging versions introduced by Cassandra 5.0, so that

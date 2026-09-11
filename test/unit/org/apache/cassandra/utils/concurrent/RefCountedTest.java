@@ -527,8 +527,8 @@ public class RefCountedTest
     {
         DatabaseDescriptor.clientInitialization();
         DatabaseDescriptor.setPartitionerUnsafe(ByteOrderedPartitioner.instance);
-        Descriptor descriptor = Descriptor.fromFileWithComponent(new File("test/data/legacy-sstables/nb/legacy_tables/legacy_nb_simple/nb-400-big-Data.db"), false).left;
-        TableMetadata tm = TableMetadata.builder("legacy_tables", "legacy_nb_simple").addPartitionKeyColumn("pk", UTF8Type.instance).addRegularColumn("val", UTF8Type.instance).build();
+        Descriptor descriptor = Descriptor.fromFileWithComponent(new File("test/data/legacy-sstables/da/legacy_tables/legacy_da_simple/da-500-bti-Data.db"), false).left;
+        TableMetadata tm = TableMetadata.builder("legacy_tables", "legacy_da_simple").addPartitionKeyColumn("pk", UTF8Type.instance).addRegularColumn("val", UTF8Type.instance).build();
         AtomicBoolean leakDetected = new AtomicBoolean();
         AtomicBoolean runOnCloseExecuted1 = new AtomicBoolean();
         AtomicBoolean runOnCloseExecuted2 = new AtomicBoolean();

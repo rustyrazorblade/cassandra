@@ -25,7 +25,6 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,15 +35,11 @@ import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
-import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigTableReader;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummarySupport;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.locator.BaseProximity;
 import org.apache.cassandra.locator.Endpoint;
@@ -382,23 +377,5 @@ public final class ServerTestUtils
 
     private ServerTestUtils()
     {
-    }
-
-    public static List<BigTableReader> getLiveBigTableReaders(ColumnFamilyStore cfs)
-    {
-        return cfs.getLiveSSTables()
-                  .stream()
-                  .filter(BigTableReader.class::isInstance)
-                  .map(BigTableReader.class::cast)
-                  .collect(Collectors.toList());
-    }
-
-    public static <R extends SSTableReader & IndexSummarySupport<R>> List<R> getLiveIndexSummarySupportingReaders(ColumnFamilyStore cfs)
-    {
-        return cfs.getLiveSSTables()
-                  .stream()
-                  .filter(IndexSummarySupport.class::isInstance)
-                  .map(r -> (R) r)
-                  .collect(Collectors.toList());
     }
 }

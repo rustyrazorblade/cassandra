@@ -69,7 +69,6 @@ public class ParseAndConvertUnitsTest
         assertNull(config.roles_update_interval);
         assertEquals(new DurationSpec.IntMillisecondsBound(2000), config.credentials_validity);
         assertNull(config.credentials_update_interval);
-        assertEquals(new DurationSpec.IntMinutesBound(60), config.index_summary_resize_interval);
         assertEquals(new DurationSpec.IntSecondsBound(30), config.cache_load_timeout);
         assertEquals(new DurationSpec.IntSecondsBound(3600), config.validation_preview_purge_head_start);
 
@@ -99,7 +98,6 @@ public class ParseAndConvertUnitsTest
         assertEquals(new DataStorageSpec.IntMebibytesBound(50), config.sstable_preemptive_open_interval);
         assertNull(config.counter_cache_size);
         assertNull(config.file_cache_size);
-        assertNull(config.index_summary_capacity);
         assertEquals(new DataStorageSpec.LongMebibytesBound(1), config.prepared_statements_cache_size);
         assertEquals(new DataStorageSpec.LongMebibytesBound(16), config.row_cache_size);
         assertNull(config.native_transport_max_request_data_in_flight);

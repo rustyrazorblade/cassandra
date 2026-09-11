@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.junit.Assume;
 import org.junit.Test;
 import org.mockito.Mockito;
 
@@ -35,7 +34,6 @@ import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.db.repair.ValidationCompactionController;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.notifications.INotificationConsumer;
 import org.apache.cassandra.notifications.SSTableListChangedNotification;
@@ -193,7 +191,7 @@ public class CursorSupportMatrixTest extends CQLTester
      * The negative half of the format gate: a selected format that does not support cursor
      * compaction is refused.
      * <p>
-     * No such format exists in tree. BIG and BTI both override
+     * No such format exists in tree. BTI overrides
      * {@link SSTableFormat#supportsCursorCompaction()} to return true, so the only way into the
      * branch is the interface default at {@code SSTableFormat:60}, which is false and is what
      * gates a format added later. The stand-in below is that default and nothing else: every
@@ -208,8 +206,6 @@ public class CursorSupportMatrixTest extends CQLTester
     @Test
     public void formatWithoutCursorSupportUnsupported() throws Exception
     {
-        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
-
         ColumnFamilyStore cfs =
             twoSSTableTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))",
                             "INSERT INTO %s (pk, ck, v) VALUES (1, 1, 'x')",
@@ -300,10 +296,6 @@ public class CursorSupportMatrixTest extends CQLTester
     @Test
     public void ignoreGcGraceForAnyKeyUnsupported() throws Throwable
     {
-        // cursor compaction only supports BIG output. Under another format isSupported is false for
-        // every table, so the assertions below could not tell the ignore-gc-grace gate apart
-        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
-
         createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
@@ -423,10 +415,6 @@ public class CursorSupportMatrixTest extends CQLTester
 
     private void assertDroppedCollectionUnsupported(String ddl, String insert, boolean isStatic) throws Exception
     {
-        // cursor compaction only supports BIG output. Under another format isSupported is false
-        // for every table, so the assertion below could not tell the header check apart
-        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
-
         createTable(ddl);
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
@@ -478,8 +466,6 @@ public class CursorSupportMatrixTest extends CQLTester
     @Test
     public void droppedCounterUnsupportedFromHeaders() throws Exception
     {
-        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
-
         // ONE counter column, so the drop leaves no counter in the schema. With a second counter
         // still live, unsupportedSchema would reject the table on its own and this test would pass
         // without the header gate doing anything.
@@ -533,8 +519,6 @@ public class CursorSupportMatrixTest extends CQLTester
     @Test
     public void droppedCollectionUnsupportedFromHeadersForValidation() throws Exception
     {
-        Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
-
         createTable("CREATE TABLE %s (pk bigint, ck bigint, m map<text, text>, v text, PRIMARY KEY (pk, ck))");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();

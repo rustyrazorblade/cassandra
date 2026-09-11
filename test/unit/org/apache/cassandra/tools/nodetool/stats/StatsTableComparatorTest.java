@@ -247,12 +247,6 @@ public class StatsTableComparatorTest extends TableStatsTestBase
                        "table2 > table4 > table6 > table1 > table3 > table5",
                        humanReadable,
                        ascending);
-        // index summary offheap: 6 > 4 > 2 > 1 = 3 = 5
-        runCompareTest(testTables,
-                       "index_summary_off_heap_memory_used",
-                       "table6 > table4 > table2 > table1 > table3 > table5",
-                       humanReadable,
-                       ascending);
         // memtable offheap: 2 > 6 > 4 > 1 = 3 = 5
         runCompareTest(testTables,
                        "memtable_off_heap_memory_used",

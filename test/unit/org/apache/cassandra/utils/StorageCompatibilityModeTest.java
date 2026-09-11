@@ -23,7 +23,6 @@ import org.junit.Test;
 
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 
 public class StorageCompatibilityModeTest
@@ -31,7 +30,6 @@ public class StorageCompatibilityModeTest
     @Test
     public void testBtiFormatAndStorageCompatibilityMode()
     {
-        SSTableFormat<?, ?> big = new BigFormat(null);
         SSTableFormat<?, ?> trie = new BtiFormat(null);
 
         for (StorageCompatibilityMode mode : StorageCompatibilityMode.values())
@@ -41,11 +39,9 @@ public class StorageCompatibilityModeTest
                 case UPGRADING:
                 case NONE:
                 case CASSANDRA_5:
-                    mode.validateSstableFormat(big);
                     mode.validateSstableFormat(trie);
                     break;
                 case CASSANDRA_4:
-                    mode.validateSstableFormat(big);
                     Assertions.assertThatThrownBy(() -> mode.validateSstableFormat(trie))
                               .isInstanceOf(ConfigurationException.class)
                               .hasMessageContaining("is not available when in storage compatibility mode");

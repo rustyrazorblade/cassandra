@@ -66,7 +66,6 @@ import org.apache.cassandra.db.virtual.walker.MetricGroupRowWalker;
 import org.apache.cassandra.db.virtual.walker.MetricRowWalker;
 import org.apache.cassandra.db.virtual.walker.TimerMetricRowWalker;
 import org.apache.cassandra.index.sai.metrics.AbstractMetrics;
-import org.apache.cassandra.io.sstable.format.big.RowIndexEntry;
 import org.apache.cassandra.utils.MBeanWrapper;
 import org.apache.cassandra.utils.memory.MemtablePool;
 
@@ -147,7 +146,6 @@ public class CassandraMetricsRegistry extends MetricRegistry
                                    .add(PaxosMetrics.TYPE_NAME)
                                    .add(ReadRepairMetrics.TYPE_NAME)
                                    .add(RepairMetrics.TYPE_NAME)
-                                   .add(RowIndexEntry.TYPE_NAME)
                                    .add(StorageMetrics.TYPE_NAME)
                                    .add(StreamingMetrics.TYPE_NAME)
                                    .add(TCMMetrics.TYPE_NAME)

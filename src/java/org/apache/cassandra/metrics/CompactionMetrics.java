@@ -58,8 +58,6 @@ public class CompactionMetrics
     public final Counter compressedBytesCompacted;
     /** Recent/current throughput of compactions take */
     public final Meter bytesCompactedThroughput;
-    /** Time spent redistributing index summaries */
-    public final Timer indexSummaryRedistributionTime;
 
     /** Total number of compactions that have had sstables drop out of them */
     public final Counter compactionsReduced;
@@ -159,6 +157,5 @@ public class CompactionMetrics
         compactionsReduced = Metrics.counter(factory.createMetricName("CompactionsReduced"));
         sstablesDropppedFromCompactions = Metrics.counter(factory.createMetricName("SSTablesDroppedFromCompaction"));
         compactionsAborted = Metrics.counter(factory.createMetricName("CompactionsAborted"));
-        indexSummaryRedistributionTime = Metrics.timer(factory.createMetricName("IndexSummaryRedistributionTime"));
     }
 }

@@ -1146,25 +1146,16 @@ snapshot_links_per_second: 0
 # loaded using the service loader mechanism. In this section, one can select
 # the format for created sstables and pass additional parameters for the formats
 # available on the classpath.
-# The default format is "big", the legacy SSTable format in use since Cassandra 3.0.
-# Cassandra versions 5.0 and later also support the trie-indexed "bti" format,
-# which offers better performance.
+# The only format is the trie-indexed "bti" format.
 sstable:
   selected_format: bti
 
 # Granularity of the collation index of rows within a partition.
-# Applies to both BIG and BTI SSTable formats. In both formats,
-# a smaller granularity results in faster lookup of rows within
+# A smaller granularity results in faster lookup of rows within
 # a partition, but a bigger index file size.
-# Using smaller granularities with the BIG format is not recommended
-# because bigger collation indexes cannot be cached efficiently
-# or at all if they become sufficiently large. Further, if
-# large rows, or a very large number of rows per partition are
-# present, it is recommended to increase the index granularity
-# or switch to the BTI SSTable format.
 #
-# Leave undefined to use a default suitable for the SSTable format
-# in use (64 KiB for BIG, 16KiB for BTI).
+# Leave undefined to use the default suitable for the BTI SSTable format
+# (16KiB).
 # Min unit: KiB
 column_index_size: 4KiB
 
@@ -2526,7 +2517,7 @@ default_secondary_index_enabled: true
 #
 # The chosen storage compatibility mode will determine the versions of the written sstables, commitlogs, hints, etc.
 # For example, if we're going to remain compatible with Cassandra 4.x, the value of this property should be 4, which
-# will make us use sstables in the latest N version of the BIG format.
+# will constrain the commitlog, hints, and messaging versions to that major version.
 #
 # This will also determine if certain features that depend on newer formats are available. For example, extended TTL
 # (up to 2106) depends on the sstable, commit-log, hints, and messaging versions introduced by Cassandra 5.0, so that

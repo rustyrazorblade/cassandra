@@ -55,7 +55,6 @@ import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormatPartitionWriter;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.net.MessagingService;
@@ -352,13 +351,13 @@ public class StreamingTransferTest
 
         // add columns of size slightly less than column_index_size to force insert column index
         updates.clustering(1)
-                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize(BigFormatPartitionWriter.DEFAULT_GRANULARITY) - 64]))
+                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize(16 * 1024) - 64]))
                 .build()
                 .apply();
 
         updates = new RowUpdateBuilder(cfs.metadata(), FBUtilities.timestampMicros(), key);
         updates.clustering(6)
-                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize(BigFormatPartitionWriter.DEFAULT_GRANULARITY)]))
+                .add("val", ByteBuffer.wrap(new byte[DatabaseDescriptor.getColumnIndexSize(16 * 1024)]))
                 .build()
                 .apply();
 

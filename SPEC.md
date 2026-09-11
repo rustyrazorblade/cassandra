@@ -215,3 +215,51 @@ Run each command from the worktree root with JDK 21.
 This change breaks two command line contracts.  The `nodetool setcachecapacity` and `nodetool setcachekeystosave` commands drop their key cache argument.  Each now takes two arguments, not three.  A script that passes three arguments fails.  This break is accepted.
 
 This change breaks a JMX contract.  The `CacheServiceMBean` drops its key cache attributes and operations: `KeyCacheCapacityInMB`, `KeyCacheKeysToSave`, `KeyCacheSavePeriodInSeconds`, `MigrateKeycacheOnCompaction`, and `invalidateKeyCache`.  A client that calls these fails.  This break is accepted.
+
+## BIG format
+
+### Purpose
+
+This change removes the BIG SSTable format.  BIG is the legacy format in use since Cassandra 3.0.  The trie-indexed BTI format replaces it.  After this change, BTI is the only format.  BTI is the sole registered format and the hard default.
+
+BIG holds its partition index in two files: an on-disk primary index and an in-memory index summary.  BTI holds a trie-based partition index.  BTI is faster and needs less memory.  This branch removes bad old technology, so the removal is a goal.
+
+A fresh cluster with BTI SSTables is the only supported case.  This change does not read, upgrade, or migrate BIG SSTables on disk.
+
+### What changes
+
+BTI is the only registered format.  The service loader file lists only the BTI factory.  The `DatabaseDescriptor` fallback default is BTI.  The `Config.selected_format` default is `BtiFormat.NAME`.
+
+The BIG read path and write path are gone.  The on-disk primary index, the row index entry, and the index summary are gone.
+
+The `index_summary_capacity` and `index_summary_resize_interval` options are gone from `cassandra.yaml` and `cassandra_latest.yaml`.  The index summary redistribution task is gone.  The `nodetool` index summary output is gone.
+
+### What is removed
+
+- The `org.apache.cassandra.io.sstable.format.big` package: `BigFormat`, `BigTableReader`, `BigTableWriter`, `BigTableScanner`, `BigTableScrubber`, `BigTableVerifier`, `BigTableKeyReader`, `BigFormatPartitionWriter`, `BigSSTableReaderLoadingBuilder`, `RowIndexEntry`, `IndexState`, `IndexSummaryComponent`, `PooledIntArray`, `SSTableIterator`, and `SSTableReversedIterator`.
+- The `org.apache.cassandra.io.sstable.indexsummary` package: `IndexSummary`, `IndexSummaryBuilder`, `IndexSummaryManager`, `IndexSummaryManagerMBean`, `IndexSummaryMetrics`, `IndexSummaryRedistribution`, and `IndexSummarySupport`.
+- The BIG cursor index writer `BigCursorIndexWriter` and the `Downsampling` helper.
+- The `BigFormat$BigFormatFactory` entry in the service loader file.
+- The `index_summary_capacity` and `index_summary_resize_interval` options in `Config`, `DatabaseDescriptor`, and both `cassandra.yaml` files.
+- The index summary lines in `Info`, `TableStats`, the stats holder, the stats printer, and the stats comparator.
+- The BIG format tests: `BigFormatPartitionWriterTest`, `PooledIntArrayTest`, `RowIndexEntryTest`, and `VersionSupportedFeaturesTest`.
+- The index summary tests: `IndexSummaryManagerTest`, `IndexSummaryRedistributionTest`, and `IndexSummaryTest`.
+- The `SSTableLoaderLegacyTest`, `RowIndexSizeWarningTest`, and `LargePartitionWriteOverheadTest`.
+
+### Tests
+
+Run each command from the worktree root with JDK 21.
+
+- `ant build`: BUILD SUCCESSFUL.
+- `ant build-test`: BUILD SUCCESSFUL.
+- `ant test -Dtest.name=PartitionIndexTest`: covers the BTI partition index read path.
+- `ant test -Dtest.name=SSTableReaderTest`: covers the BTI read path for the default format.
+- `ant test -Dtest.name=TOCComponentTest`: covers the component TOC with BTI descriptors.
+
+The BTI legacy fixtures under `test/data/legacy-sstables` keep only the `da` format.  The BIG fixtures under `ma`, `mb`, `mc`, `md`, `me`, `na`, `nb`, and `oa` are gone.  Tests that named a BIG fixture now name the `da` BTI fixture.
+
+### Risks
+
+This change breaks the on-disk format contract.  A node cannot read a BIG SSTable.  A fresh BTI cluster is the only supported case.  This break is accepted.
+
+This change breaks a JMX contract.  The `IndexSummaryManagerMBean` is gone, and the `IndexSummary` metrics are gone.  A client that calls these fails.  This break is accepted.

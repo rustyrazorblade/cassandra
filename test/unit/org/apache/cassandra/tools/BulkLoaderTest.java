@@ -73,7 +73,7 @@ public class BulkLoaderTest extends OfflineToolUtils
         ToolResult tool = ToolRunner.invokeClass(BulkLoader.class,
                                                  "-d",
                                                  "127.9.9.1",
-                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_da_simple"));
 
         assertEquals(-1, tool.getExitCode());
         if (!(tool.getException().getCause() instanceof BulkLoadException))
@@ -98,7 +98,7 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                  "127.9.9.1",
                                                  "--port",
                                                  "9042",
-                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_da_simple"));
 
         assertEquals(-1, tool.getExitCode());
         if (!(tool.getException().getCause() instanceof BulkLoadException))
@@ -122,7 +122,7 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                  "127.9.9.1:9042",
                                                  "--port",
                                                  "9041",
-                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_da_simple"));
 
         assertEquals(-1, tool.getExitCode());
         if (!(tool.getException().getCause() instanceof BulkLoadException))
@@ -146,7 +146,7 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                  "127.9.9.1",
                                                  "--port",
                                                  "9041",
-                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_da_simple"));
         assertEquals(-1, tool.getExitCode());
         throw tool.getException().getCause().getCause().getCause();
     }
@@ -157,7 +157,7 @@ public class BulkLoaderTest extends OfflineToolUtils
         ToolResult tool = ToolRunner.invokeClass(BulkLoader.class,
                                                  "-d",
                                                  "127.9.9.1:9041",
-                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_da_simple"));
         assertEquals(-1, tool.getExitCode());
         throw tool.getException().getCause().getCause().getCause();
     }
@@ -176,7 +176,7 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                  "20",
                                                  "--entire-sstable-inter-dc-throttle-mib",
                                                  "25",
-                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_da_simple"));
         assertEquals(-1, tool.getExitCode());
         assertEquals(10 * 125_000, DatabaseDescriptor.getStreamThroughputOutboundBytesPerSec(), 0.0);
         assertEquals(15 * 125_000, DatabaseDescriptor.getInterDCStreamThroughputOutboundBytesPerSec(), 0.0);
@@ -199,7 +199,7 @@ public class BulkLoaderTest extends OfflineToolUtils
                                                  "5",
                                                  "--entire-sstable-inter-dc-throttle-mib",
                                                  "6",
-                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_ma_simple"));
+                                                 OfflineToolUtils.sstableDirName("legacy_sstables", "legacy_da_simple"));
         assertEquals(-1, tool.getExitCode());
         assertEquals(3 * 1024 * 1024, DatabaseDescriptor.getStreamThroughputOutboundBytesPerSec(), 0.0);
         assertEquals(4 * 1024 * 1024, DatabaseDescriptor.getInterDCStreamThroughputOutboundBytesPerSec(), 0.0);

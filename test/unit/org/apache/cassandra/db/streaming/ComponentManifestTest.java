@@ -26,7 +26,7 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.serializers.SerializationUtils;
 
 public class ComponentManifestTest
@@ -41,7 +41,7 @@ public class ComponentManifestTest
     public void testSerialization()
     {
         ComponentManifest expected = new ComponentManifest(new LinkedHashMap<Component, Long>() {{ put(Components.DATA, 100L); }});
-        SerializationUtils.assertSerializationCycle(expected, ComponentManifest.serializers.get(BigFormat.getInstance().name()));
+        SerializationUtils.assertSerializationCycle(expected, ComponentManifest.serializers.get(BtiFormat.getInstance().name()));
     }
 
     // Propose removing this test which now fails on VIntOutOfRange

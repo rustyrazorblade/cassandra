@@ -32,7 +32,7 @@ import org.apache.cassandra.io.sstable.Component.Type;
 import org.apache.cassandra.io.sstable.SSTableFormatTest.Format1;
 import org.apache.cassandra.io.sstable.SSTableFormatTest.Format2;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 
 import static org.apache.cassandra.io.sstable.SSTableFormatTest.factory;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,7 +47,7 @@ public class ComponentTest
     {
         DatabaseDescriptor.daemonInitialization(() -> {
             Config config = DatabaseDescriptor.loadConfig();
-            SSTableFormatTest.configure(new Config.SSTableConfig(), new BigFormat.BigFormatFactory(), factory("first", Format1.class), factory("second", Format2.class));
+            SSTableFormatTest.configure(new Config.SSTableConfig(), new BtiFormat.BtiFormatFactory(), factory("first", Format1.class), factory("second", Format2.class));
             return config;
         });
     }
@@ -71,8 +71,8 @@ public class ComponentTest
 
         assertThatExceptionOfType(NullPointerException.class).isThrownBy(() -> Type.createSingleton(null, "-Three.db", true, Format1.class));
 
-        assertThat(Type.fromRepresentation("should be custom", BigFormat.getInstance())).isSameAs(Components.Types.CUSTOM);
-        assertThat(Type.fromRepresentation(Components.Types.TOC.repr, BigFormat.getInstance())).isSameAs(Components.Types.TOC);
+        assertThat(Type.fromRepresentation("should be custom", BtiFormat.getInstance())).isSameAs(Components.Types.CUSTOM);
+        assertThat(Type.fromRepresentation(Components.Types.TOC.repr, BtiFormat.getInstance())).isSameAs(Components.Types.TOC);
         assertThat(Type.fromRepresentation(t1.repr, DatabaseDescriptor.getSSTableFormats().get(FIRST))).isSameAs(t1);
         assertThat(Type.fromRepresentation(t2f1.repr, DatabaseDescriptor.getSSTableFormats().get(FIRST))).isSameAs(t2f1);
         assertThat(Type.fromRepresentation(t2f2.repr, DatabaseDescriptor.getSSTableFormats().get(SECOND))).isSameAs(t2f2);

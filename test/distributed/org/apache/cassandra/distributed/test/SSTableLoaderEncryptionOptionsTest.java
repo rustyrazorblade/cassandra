@@ -142,7 +142,7 @@ public class SSTableLoaderEncryptionOptionsTest extends AbstractEncryptionOption
                                                             "--keystore-password", validKeyStorePassword,
                                                             "--truststore", validTrustStorePath,
                                                             "--truststore-password", validTrustStorePassword,
-                                                            "test/data/legacy-sstables/na/legacy_tables/legacy_na_clust");
+                                                            "test/data/legacy-sstables/da/legacy_tables/legacy_da_clust");
         assertNotEquals(0, tool.getExitCode());
         assertTrue(tool.getStderr().contains("Unable to initialise " + NativeSSTableLoaderClient.class.getName()));
     }

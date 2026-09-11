@@ -190,9 +190,8 @@ class AsyncChunkPipeline
 
     /**
      * The writer's superclass fires the post-flush listener from whichever thread flushed. That
-     * would be the writer thread here, and the BIG-path consumer,
-     * {@code IndexSummaryBuilder.markDataSynced}, walks maps the producer mutates concurrently in
-     * {@code maybeAddEntry}. Keep the callback on the producer and feed it the durable offset.
+     * would be the writer thread here, and a post-flush consumer can walk maps the producer
+     * mutates concurrently. Keep the callback on the producer and feed it the durable offset.
      */
     void setPostFlushListener(LongConsumer runPostFlush)
     {

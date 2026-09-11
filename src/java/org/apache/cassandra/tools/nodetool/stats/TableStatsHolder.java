@@ -172,8 +172,6 @@ public class TableStatsHolder implements StatsHolder
         mpTable.put("bloom_filter_space_used", table.bloomFilterSpaceUsed);
         if (table.bloomFilterOffHeapUsed)
             mpTable.put("bloom_filter_off_heap_memory_used", table.bloomFilterOffHeapMemoryUsed);
-        if (table.indexSummaryOffHeapUsed)
-            mpTable.put("index_summary_off_heap_memory_used", table.indexSummaryOffHeapMemoryUsed);
         if (table.compressionDictionariesUsed)
             mpTable.put("compression_dictionaries_memory_used", table.compressionDictionariesMemoryUsed);
         if (table.compressionMetadataOffHeapUsed)
@@ -312,7 +310,6 @@ public class TableStatsHolder implements StatsHolder
 
                 Long memtableOffHeapSize = null;
                 Long bloomFilterOffHeapSize = null;
-                Long indexSummaryOffHeapSize = null;
                 Long compressionMetadataOffHeapSize = null;
                 Long compressionDictionariesMemoryUsed = null;
                 Long offHeapSize = null;
@@ -327,10 +324,9 @@ public class TableStatsHolder implements StatsHolder
                 {
                     memtableOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "MemtableOffHeapSize");
                     bloomFilterOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "BloomFilterOffHeapMemoryUsed");
-                    indexSummaryOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "IndexSummaryOffHeapMemoryUsed");
                     compressionDictionariesMemoryUsed = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "CompressionDictionariesMemoryUsed");
                     compressionMetadataOffHeapSize = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "CompressionMetadataOffHeapMemoryUsed");
-                    offHeapSize = memtableOffHeapSize + bloomFilterOffHeapSize + indexSummaryOffHeapSize + compressionMetadataOffHeapSize;
+                    offHeapSize = memtableOffHeapSize + bloomFilterOffHeapSize + compressionMetadataOffHeapSize;
                     percentRepaired = (Double) probe.getColumnFamilyMetric(keyspaceName, tableName, "PercentRepaired");
                     bytesRepaired = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "BytesRepaired");
                     bytesUnrepaired = (Long) probe.getColumnFamilyMetric(keyspaceName, tableName, "BytesUnrepaired");
@@ -409,11 +405,6 @@ public class TableStatsHolder implements StatsHolder
                     statsTable.bloomFilterOffHeapMemoryUsed = FileUtils.stringifyFileSize(bloomFilterOffHeapSize, humanReadable);
                 }
 
-                if (indexSummaryOffHeapSize != null)
-                {
-                    statsTable.indexSummaryOffHeapUsed = true;
-                    statsTable.indexSummaryOffHeapMemoryUsed = FileUtils.stringifyFileSize(indexSummaryOffHeapSize, humanReadable);
-                }
                 if (compressionDictionariesMemoryUsed != null)
                 {
                     statsTable.compressionDictionariesUsed = true;

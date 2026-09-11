@@ -50,7 +50,6 @@ import org.apache.cassandra.db.lifecycle.LogRecord.Type;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.TimeUUID;
@@ -108,7 +107,7 @@ final class LogFile implements AutoCloseable
         assert matched && matcher.groupCount() == 3;
 
         // For now we don't need this but it is there in case we need to change
-        // file format later on, the version is the sstable version as defined in BigFormat
+        // file format later on, the version is the sstable version.
         //String version = matcher.group(1);
 
         OperationType operationType = OperationType.fromFileName(matcher.group(2));
@@ -540,10 +539,8 @@ final class LogFile implements AutoCloseable
 
     private String getFileName()
     {
-        // For pre-5.0 versions, only BigFormat is supported, and the file name includes only the version string.
-        // To retain the ability to downgrade to 4.x, we keep the old file naming scheme for BigFormat sstables
-        // and add format names for other formats as they are supported only in 5.0 and above.
-        return StringUtils.join(BigFormat.is(version.format) ? version.toString() : version.toFormatAndVersionString(), LogFile.SEP, // remove version and separator when downgrading to 4.x is becomes unsupported
+        // The file name includes the format name and the version string.
+        return StringUtils.join(version.toFormatAndVersionString(), LogFile.SEP,
                                 "txn", LogFile.SEP,
                                 type.fileName, LogFile.SEP,
                                 id.toString(), LogFile.EXT);

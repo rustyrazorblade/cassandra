@@ -123,6 +123,10 @@ public class ConfigCompatibilityTest
                                                                  .add("key_cache_keys_to_save")
                                                                  .add("key_cache_save_period")
                                                                  .add("key_cache_migrate_during_compaction")
+                                                                 .add("index_summary_capacity")
+                                                                 .add("index_summary_capacity_in_mb")
+                                                                 .add("index_summary_resize_interval")
+                                                                 .add("index_summary_resize_interval_in_minutes")
                                                                  .build();
 
     private static final Set<String> ALLOW_LIST = ImmutableSet.<String>builder()

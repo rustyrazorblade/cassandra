@@ -22,32 +22,21 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
 
 import org.junit.Assert;
-import org.junit.Assume;
 import org.junit.Test;
 
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.compaction.CompactionInterruptedException;
-import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryManager;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryRedistribution;
-import org.apache.cassandra.io.sstable.indexsummary.IndexSummarySupport;
 import org.apache.cassandra.metrics.StorageMetrics;
-import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.utils.ExpMovingAverage;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MovingAverage;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -74,31 +63,6 @@ public class DiskSpaceMetricsTest extends CQLTester
         assertDiskSpaceEqual(cfs);
     }
 
-    /**
-     * If index summary downsampling is interrupted in the middle, the metrics still reflect the real data
-     */
-    @Test
-    public void summaryRedistribution() throws Throwable
-    {
-        Assume.assumeTrue(IndexSummarySupport.isSupportedBy(DatabaseDescriptor.getSelectedSSTableFormat()));
-        createTable("CREATE TABLE %s (pk bigint, PRIMARY KEY (pk)) WITH min_index_interval=1");
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-
-        // disable compaction so nothing changes between calculations
-        cfs.disableAutoCompaction();
-
-        // create 100 sstables, make sure they have more than 1 value, else sampling can't happen
-        for (int i = 0; i < 100; i++)
-            insertN(cfs, 10, i);
-        assertDiskSpaceEqual(cfs);
-
-        // summary downsample
-        for (int i = 0; i < 100; i++)
-        {
-            indexDownsampleCancelLastSSTable(cfs);
-            assertDiskSpaceEqual(cfs);
-        }
-    }
 
     @Test
     public void testFlushSize() throws Throwable
@@ -175,42 +139,4 @@ public class DiskSpaceMetricsTest extends CQLTester
         assertEquals("bytes on disk does not match current metric totalDiskSpaceUsed", actual, totalDiskSpaceUsed);
     }
 
-    private static void indexDownsampleCancelLastSSTable(ColumnFamilyStore cfs)
-    {
-        List<SSTableReader> sstables = Lists.newArrayList(cfs.getSSTables(SSTableSet.CANONICAL));
-        LifecycleTransaction txn = cfs.getTracker().tryModify(sstables, OperationType.UNKNOWN);
-        Map<TableId, LifecycleTransaction> txns = ImmutableMap.of(cfs.metadata.id, txn);
-        // fail on the last file (* 3 because we call isStopRequested 3 times for each sstable, and we should fail on the last)
-        AtomicInteger countdown = new AtomicInteger(3 * sstables.size() - 1);
-        IndexSummaryRedistribution redistribution = new IndexSummaryRedistribution(txns, 0, 0) {
-            public boolean isStopRequested()
-            {
-                return countdown.decrementAndGet() == 0;
-            }
-        };
-        try
-        {
-            IndexSummaryManager.redistributeSummaries(redistribution);
-            Assert.fail("Should throw CompactionInterruptedException");
-        }
-        catch (CompactionInterruptedException e)
-        {
-            // trying to get this to happen
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
-        finally
-        {
-            try
-            {
-                FBUtilities.closeAll(txns.values());
-            }
-            catch (Exception e)
-            {
-                throw new RuntimeException(e);
-            }
-        }
-    }
 }

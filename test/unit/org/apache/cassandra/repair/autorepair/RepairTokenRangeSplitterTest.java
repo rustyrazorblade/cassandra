@@ -45,7 +45,6 @@ import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
 import org.apache.cassandra.repair.autorepair.AutoRepairConfig.RepairType;
 import org.apache.cassandra.repair.autorepair.AutoRepairUtils.SizeEstimate;
@@ -80,7 +79,7 @@ public class RepairTokenRangeSplitterTest extends CQLTester
     @Parameterized.Parameters(name = "sstableFormat={0}")
     public static Collection<String> sstableFormats()
     {
-        return List.of(BtiFormat.NAME, BigFormat.NAME);
+        return List.of(BtiFormat.NAME);
     }
 
     @BeforeClass
@@ -99,14 +98,7 @@ public class RepairTokenRangeSplitterTest extends CQLTester
         repairRangeSplitter = new RepairTokenRangeSplitter(RepairType.FULL, Collections.emptyMap());
         tableName = createTable("CREATE TABLE %s (k INT PRIMARY KEY, v INT)");
         // ensure correct format is selected.
-        if (sstableFormat.equalsIgnoreCase(BigFormat.NAME))
-        {
-            assertTrue(BigFormat.isSelected());
-        }
-        else
-        {
-            assertTrue(BtiFormat.isSelected());
-        }
+        assertTrue(BtiFormat.isSelected());
     }
 
     @Test
