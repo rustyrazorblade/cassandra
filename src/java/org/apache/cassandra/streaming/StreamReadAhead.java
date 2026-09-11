@@ -23,7 +23,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ArrayBlockingQueue; // checkstyle: permit this import
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 

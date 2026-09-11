@@ -66,12 +66,12 @@ import org.apache.cassandra.db.rows.WrappingUnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.ClusteringDescriptor;
 import org.apache.cassandra.io.sstable.PartitionDescriptor;
 import org.apache.cassandra.io.sstable.SSTableCursorReader;
+import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.io.sstable.format.bti.BtiCursorSeekSupport;
 import org.apache.cassandra.io.sstable.format.bti.BtiTableReader;
-import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.metrics.TableMetrics;
@@ -4044,9 +4044,9 @@ public final class CursorReads
             rowMinDeletionTime = Long.MIN_VALUE;
         }
 
-        /** @param timestamp/ttl/localDeletionTime the POST-purge values {@link TranscodeMergeSink}
-         *          is about to write — exactly what a materialize-then-purge {@code Cell} would
-         *          report, including the expired-but-not-gcable convert-to-tombstone hijack. */
+        /** The timestamp, ttl and localDeletionTime are the POST-purge values {@link TranscodeMergeSink}
+         *  is about to write — exactly what a materialize-then-purge {@code Cell} would
+         *  report, including the expired-but-not-gcable convert-to-tombstone hijack. */
         void cell(long timestamp, int ttl, long localDeletionTime)
         {
             boolean isTombstone = localDeletionTime != Cell.NO_DELETION_TIME && ttl == Cell.NO_TTL;
