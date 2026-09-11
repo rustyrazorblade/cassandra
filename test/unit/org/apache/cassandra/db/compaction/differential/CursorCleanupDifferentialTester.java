@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.stream.Collectors;
 
 import org.junit.After;
 import org.junit.Before;
@@ -292,7 +293,7 @@ public abstract class CursorCleanupDifferentialTester extends DifferentialCompac
 
         try (java.util.stream.Stream<Path> files = Files.list(preserved))
         {
-            for (Path saved : files.toList())
+            for (Path saved : files.collect(Collectors.toList()))
                 Files.copy(saved, descriptor.fileFor(Component.parse(saved.getFileName().toString(),
                                                                      descriptor.getFormat())).toPath());
         }
@@ -340,7 +341,7 @@ public abstract class CursorCleanupDifferentialTester extends DifferentialCompac
             keepTokens.add(key.getToken());
 
         List<Range<Token>> ranges = new ArrayList<>();
-        List<Token> tokens = new ArrayList<>(new TreeSet<>(all.stream().map(DecoratedKey::getToken).toList()));
+        List<Token> tokens = new ArrayList<>(new TreeSet<>(all.stream().map(DecoratedKey::getToken).collect(Collectors.toList())));
         for (int i = 0; i < tokens.size(); i++)
         {
             if (!keepTokens.contains(tokens.get(i)))

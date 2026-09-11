@@ -24,6 +24,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 
+import com.google.common.io.ByteStreams;
+
 /**
  * Byte/JSON-diff helpers shared by this branch's differential test harnesses -
  * {@code DifferentialCompactionTester} (compaction: iterator vs. cursor) and
@@ -92,7 +94,7 @@ public final class DifferentialTestUtils
         byte[] window = new byte[Math.max(len, 0)];
         try (java.io.InputStream in = Files.newInputStream(file))
         {
-            in.skipNBytes(from);
+            ByteStreams.skipFully(in, from);
             in.readNBytes(window, 0, window.length);
         }
         StringBuilder sb = new StringBuilder();
