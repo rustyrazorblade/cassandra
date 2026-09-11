@@ -646,6 +646,20 @@ public enum CassandraRelevantProperties
     TEST_CASSANDRA_TESTTAG("cassandra.testtag", "cassandra.testtag_IS_UNDEFINED"),
     /** Generated examples for the ClusteringDescriptorPrefixView property test; the cost is flat in this range. */
     TEST_CLUSTERING_PREFIX_VIEW_EXAMPLES("cassandra.test.clustering_prefix_view.examples", "1000"),
+    /**
+     * Scale knobs for the commit log property tests and the stateful model test.
+     * <ul>
+     * <li>examples: the baseline case count, which the costlier classes scale down;</li>
+     * <li>mutations_per_example: how many mutations one case writes;</li>
+     * <li>seed: pins a run so a failure reproduces;</li>
+     * <li>stateful.steps: the length of the command sequence the stateful model test runs.</li>
+     * </ul>
+     * Override down for a quick local check.
+     */
+    TEST_COMMITLOG_EXAMPLES("cassandra.test.commitlog.examples", "200"),
+    TEST_COMMITLOG_MUTATIONS_PER_EXAMPLE("cassandra.test.commitlog.mutations_per_example", "40"),
+    TEST_COMMITLOG_SEED("cassandra.test.commitlog.seed"),
+    TEST_COMMITLOG_STATEFUL_STEPS("cassandra.test.commitlog.stateful.steps", "150"),
     TEST_COMPRESSION("cassandra.test.compression"),
     TEST_COMPRESSION_ALGO("cassandra.test.compression.algo", "lz4"),
     TEST_DEBUG_REF_COUNT("cassandra.debugrefcount"),
