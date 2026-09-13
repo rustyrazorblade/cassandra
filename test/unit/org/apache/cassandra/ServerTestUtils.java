@@ -50,7 +50,6 @@ import org.apache.cassandra.locator.BaseProximity;
 import org.apache.cassandra.locator.Endpoint;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Replica;
-import org.apache.cassandra.security.ThreadAwareSecurityManager;
 import org.apache.cassandra.service.DiskErrorsHandlerService;
 import org.apache.cassandra.service.EmbeddedCassandraService;
 import org.apache.cassandra.tcm.AtomicLongBackedProcessor;
@@ -74,6 +73,7 @@ import org.apache.cassandra.tcm.transformations.UnsafeJoin;
 import org.apache.cassandra.tcm.transformations.cms.Initialize;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Sortable;
+import org.apache.cassandra.utils.logging.LoggingSupportFactory;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.ORG_APACHE_CASSANDRA_DISABLE_MBEAN_REGISTRATION;
 
@@ -189,7 +189,7 @@ public final class ServerTestUtils
             }
         });
 
-        ThreadAwareSecurityManager.install();
+        LoggingSupportFactory.getLoggingSupport().onStartup();
 
         CassandraRelevantProperties.GOSSIPER_SKIP_WAITING_TO_SETTLE.setInt(0);
         initCMS();
