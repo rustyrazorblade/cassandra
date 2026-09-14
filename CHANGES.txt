@@ -15,6 +15,7 @@
  * Allow nodetool cms reconfigure to ignore nodes via --ignore, excluding them from the new CMS (CASSANDRA-21627)
  * Accord: Compute Dependencies Incrementally (CASSANDRA-21682)
  * Avoid double chunk read for BTI small partitions during a select query execution (CASSANDRA-21637)
+ * Give each compressed scan reader its own read-ahead buffer and keep the chunk cache for partition reads while one-shot scans bypass it (CASSANDRA-21671)
  * Report the number of rows replica filtering protection cached when it warns (CASSANDRA-21623)
  * Fix non-printable characters in Gossiper log for TOKENS (CASSANDRA-21417)
  * Fix compression dictionary training failing with "insufficient samples" on large-chunk tables (CASSANDRA-21666)
