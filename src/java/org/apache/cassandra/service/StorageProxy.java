@@ -89,7 +89,6 @@ import org.apache.cassandra.db.partitions.FilteredPartition;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.partitions.PartitionIterators;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
-import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.db.view.ViewUtils;
 import org.apache.cassandra.dht.AbstractBounds;
@@ -2750,10 +2749,16 @@ public class StorageProxy implements StorageProxyMBean
                 command.setMonitoringTime(requestTime.startedAtNanos(), false, deadline - requestTime.startedAtNanos(), DatabaseDescriptor.getSlowQueryTimeout(NANOSECONDS));
 
                 ReadResponse response;
-                try (ReadExecutionController controller = command.executionController(trackRepairedStatus);
-                     UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+                // M3.3b-ii (CASSANDRA-20428): createResponseLocally's default implementation is
+                // exactly the executeLocally + createResponse pair this replaced (see
+                // ReadCommand.createResponseLocally's own javadoc) -- SinglePartitionReadCommand may
+                // additionally attempt a flag-gated transcode fast path first, falling back to that
+                // same default whenever its own gate declines. The exception types/conditions this
+                // method can throw are unchanged either way; the catch blocks below do not need to
+                // change.
+                try (ReadExecutionController controller = command.executionController(trackRepairedStatus))
                 {
-                    response = command.createResponse(iterator, controller.getRepairedDataInfo());
+                    response = command.createResponseLocally(controller);
                 }
                 catch (RejectException e)
                 {

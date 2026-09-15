@@ -456,10 +456,31 @@ public abstract class ReadCommand extends AbstractReadQuery
     public ReadResponse createEmptyResponse()
     {
         UnfilteredPartitionIterator iterator = EmptyIterators.unfilteredPartition(metadata());
-        
+
         return isDigestQuery()
                ? ReadResponse.createDigestResponse(iterator, this)
                : ReadResponse.createDataResponse(iterator, this, RepairedDataInfo.NO_OP_REPAIRED_DATA_INFO);
+    }
+
+    /**
+     * M3.3b-i (CASSANDRA-20428): the single entry point both real replica-serving call sites
+     * ({@link ReadCommandVerbHandler#doRead} now; {@code StorageProxy.LocalReadRunnable} in a
+     * later increment) use to go from a {@link ReadExecutionController} to a wire-ready
+     * {@link ReadResponse}. This default implementation is EXACTLY today's
+     * {@link #executeLocally(ReadExecutionController)} + {@link #createResponse} pair — the same
+     * two statements {@code ReadCommandVerbHandler.doRead} used to run inline, moved here
+     * unchanged, so every {@code ReadCommand} that does not override this method (in particular
+     * {@code PartitionRangeReadCommand}, which never does) is byte-for-byte unchanged by this
+     * increment. {@link SinglePartitionReadCommand} overrides it to attempt a flag-gated
+     * (cursor_reads_enabled) transcode fast path first, falling back to this exact default
+     * whenever that path's own gate declines.
+     */
+    public ReadResponse createResponseLocally(ReadExecutionController executionController)
+    {
+        try (UnfilteredPartitionIterator iterator = executeLocally(executionController))
+        {
+            return createResponse(iterator, executionController.getRepairedDataInfo());
+        }
     }
 
     long indexSerializedSize(int version)
@@ -548,7 +569,7 @@ public abstract class ReadCommand extends AbstractReadQuery
                 iterator = withQueryCancellation(iterator);
                 iterator = maybeRecordPurgeableTombstones(iterator, cfs);
                 iterator = RTBoundValidator.validate(withoutPurgeableTombstones(iterator, cfs, executionController), Stage.PURGED, false);
-                iterator = withMetricsRecording(iterator, cfs.metric, startTimeNanos);
+                iterator = withMetricsRecording(iterator, cfs.metric, startTimeNanos, executionController);
 
                 // If we've used a 2ndary index, we know the result already satisfy the primary expression used, so
                 // no point in checking it again.
@@ -617,7 +638,7 @@ public abstract class ReadCommand extends AbstractReadQuery
      * Wraps the provided iterator so that metrics on what is scanned by the command are recorded.
      * This also log warning/trow TombstoneOverwhelmingException if appropriate.
      */
-    private UnfilteredPartitionIterator withMetricsRecording(UnfilteredPartitionIterator iter, final TableMetrics metric, final long startTimeNanos)
+    private UnfilteredPartitionIterator withMetricsRecording(UnfilteredPartitionIterator iter, final TableMetrics metric, final long startTimeNanos, ReadExecutionController controller)
     {
         class MetricRecording extends Transformation<UnfilteredRowIterator>
         {
@@ -627,12 +648,37 @@ public abstract class ReadCommand extends AbstractReadQuery
             private final boolean respectTombstoneThresholds = !SchemaConstants.isLocalSystemKeyspace(ReadCommand.this.metadata().keyspace);
             private final boolean enforceStrictLiveness = metadata().enforceStrictLiveness();
 
+            /**
+             * CASSANDRA-20428 (M3.2b): scan contributions of rows the cursor merge's filter
+             * pushdown DROPPED at production instead of materializing — null (the common case)
+             * when pushdown accounting is not engaged. On the iterator path those rows flow
+             * through this very transformation (it sits below the row filter) before the filter
+             * discards them; the cursor path accounts them in the accumulator instead, so every
+             * count here folds the dropped totals in. The totals are final before this wrapper is
+             * even created: the cursor merge is eager, completing inside queryStorage. The
+             * production side carries its own abort twin that fires at the same crossing element
+             * the in-flow check below would have hit, so at most one site ever throws per query
+             * (if production did not abort, the combined count here can never exceed the
+             * production-time total, which stayed at or under the threshold).
+             */
+            private final CursorReads.ScanStatsAccumulator scanStats = controller.scanStats();
+
             private int liveRows = 0;
             private int lastReportedLiveRows = 0;
             private int tombstones = 0;
             private int lastReportedTombstones = 0;
 
             private DecoratedKey currentKey;
+
+            private int droppedLiveRows()
+            {
+                return scanStats == null ? 0 : scanStats.droppedLiveRows();
+            }
+
+            private int droppedTombstones()
+            {
+                return scanStats == null ? 0 : scanStats.droppedTombstones();
+            }
 
             @Override
             public UnfilteredRowIterator applyToPartition(UnfilteredRowIterator iter)
@@ -688,7 +734,11 @@ public abstract class ReadCommand extends AbstractReadQuery
             private void countTombstone(ClusteringPrefix<?> clustering)
             {
                 ++tombstones;
-                if (tombstones > failureThreshold && respectTombstoneThresholds)
+                // combined with the production-dropped rows' tombstones (zero unless cursor
+                // filter pushdown engaged), so the abort fires at the same scan count the
+                // iterator path's full stream would have reached
+                int combinedTombstones = tombstones + droppedTombstones();
+                if (combinedTombstones > failureThreshold && respectTombstoneThresholds)
                 {
                     String query = ReadCommand.this.toCQLString();
                     Tracing.trace("Scanned over {} tombstones for query {}; query aborted (see tombstone_failure_threshold)", failureThreshold, query);
@@ -696,9 +746,9 @@ public abstract class ReadCommand extends AbstractReadQuery
                     if (trackWarnings)
                     {
                         MessageParams.remove(ParamType.TOMBSTONE_WARNING);
-                        MessageParams.add(ParamType.TOMBSTONE_FAIL, tombstones);
+                        MessageParams.add(ParamType.TOMBSTONE_FAIL, combinedTombstones);
                     }
-                    throw new TombstoneOverwhelmingException(tombstones, query, ReadCommand.this.metadata(), currentKey, clustering);
+                    throw new TombstoneOverwhelmingException(combinedTombstones, query, ReadCommand.this.metadata(), currentKey, clustering);
                 }
             }
 
@@ -707,6 +757,13 @@ public abstract class ReadCommand extends AbstractReadQuery
             {
                 int lr = liveRows - lastReportedLiveRows;
                 int ts = tombstones - lastReportedTombstones;
+                if (scanStats != null)
+                {
+                    // fold the production-dropped rows into this partition's samples (fold-once
+                    // accessors; single-partition commands have exactly one partition)
+                    lr += scanStats.unsampledDroppedLiveRows();
+                    ts += scanStats.unsampledDroppedTombstones();
+                }
 
                 if (lr > 0)
                     metric.topReadPartitionRowCount.addSample(currentKey.getKey(), lr);
@@ -723,21 +780,23 @@ public abstract class ReadCommand extends AbstractReadQuery
             {
                 recordLatency(metric, nanoTime() - startTimeNanos);
 
-                metric.tombstoneScannedHistogram.update(tombstones);
-                metric.liveScannedHistogram.update(liveRows);
-                metric.totalRowsRead.inc(liveRows);
+                int totalLiveRows = liveRows + droppedLiveRows();
+                int totalTombstones = tombstones + droppedTombstones();
+                metric.tombstoneScannedHistogram.update(totalTombstones);
+                metric.liveScannedHistogram.update(totalLiveRows);
+                metric.totalRowsRead.inc(totalLiveRows);
 
-                boolean warnTombstones = tombstones > warningThreshold && respectTombstoneThresholds;
+                boolean warnTombstones = totalTombstones > warningThreshold && respectTombstoneThresholds;
                 if (warnTombstones)
                 {
                     String msg = String.format(
                             "Read %d live rows and %d tombstone cells for query %1.512s; token %s (see tombstone_warn_threshold)",
-                            liveRows, tombstones, ReadCommand.this.toCQLString(), currentKey.getToken());
+                            totalLiveRows, totalTombstones, ReadCommand.this.toCQLString(), currentKey.getToken());
                     if (trackWarnings)
-                        MessageParams.add(ParamType.TOMBSTONE_WARNING, tombstones);
+                        MessageParams.add(ParamType.TOMBSTONE_WARNING, totalTombstones);
                     else
                         ClientWarn.instance.warn(msg);
-                    if (tombstones < failureThreshold)
+                    if (totalTombstones < failureThreshold)
                     {
                         metric.tombstoneWarnings.inc();
                     }
@@ -746,7 +805,7 @@ public abstract class ReadCommand extends AbstractReadQuery
                 }
 
                 Tracing.trace("Read {} live rows and {} tombstone cells{}",
-                        liveRows, tombstones,
+                        totalLiveRows, totalTombstones,
                         (warnTombstones ? " (see tombstone_warn_threshold)" : ""));
             }
         }

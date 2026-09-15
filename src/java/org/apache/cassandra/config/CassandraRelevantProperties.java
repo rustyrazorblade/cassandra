@@ -206,6 +206,8 @@ public enum CassandraRelevantProperties
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),
     /** Experimental. */
     CURSOR_FLUSH_ENABLED("cassandra.cursor_flush_enabled", "false"),
+    /** Experimental: serve the sstable legs of supported single-partition reads through SSTableCursorReader. Off by default. */
+    CURSOR_READS_ENABLED("cassandra.cursor_reads_enabled", "false"),
     CUSTOM_DISK_ERROR_HANDLER("cassandra.custom_disk_error_handler"),
     CUSTOM_GUARDRAILS_CONFIG_PROVIDER_CLASS("cassandra.custom_guardrails_config_provider_class"),
     CUSTOM_QUERY_HANDLER_CLASS("cassandra.custom_query_handler_class"),

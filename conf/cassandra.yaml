@@ -694,6 +694,9 @@ cursor_compaction_enabled: false
 # Experimental.  New garbage free memtable flush path, the flush counterpart of cursor_compaction_enabled.
 cursor_flush_enabled: false
 
+# Experimental.  New garbage free single-partition read path, gated by CursorReads.isReadSupported.
+cursor_reads_enabled: false
+
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache

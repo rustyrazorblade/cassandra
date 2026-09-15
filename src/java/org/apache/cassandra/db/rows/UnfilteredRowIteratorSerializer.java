@@ -76,10 +76,13 @@ public class UnfilteredRowIteratorSerializer
     protected static final Logger logger = LoggerFactory.getLogger(UnfilteredRowIteratorSerializer.class);
 
     public  static final int IS_EMPTY               = 0x01;
-    private static final int IS_REVERSED            = 0x02;
-    private static final int HAS_PARTITION_DELETION = 0x04;
-    private static final int HAS_STATIC_ROW         = 0x08;
-    private static final int HAS_ROW_ESTIMATE       = 0x10;
+    // M3.3a-i: package-private (not private) so ResponseWireWriter, the read-owned MESSAGING-flavor
+    // transcode writer co-located in this package, can reuse these exact bit values instead of
+    // redefining them — a visibility-only change, no behavior affected.
+    static final int IS_REVERSED            = 0x02;
+    static final int HAS_PARTITION_DELETION = 0x04;
+    static final int HAS_STATIC_ROW         = 0x08;
+    static final int HAS_ROW_ESTIMATE       = 0x10;
 
     public static final UnfilteredRowIteratorSerializer serializer = new UnfilteredRowIteratorSerializer();
 

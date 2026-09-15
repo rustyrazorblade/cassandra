@@ -49,6 +49,19 @@ public class ReadExecutionController implements AutoCloseable
     private final RepairedDataInfo repairedDataInfo;
     private long oldestUnrepairedTombstone = Long.MAX_VALUE;
 
+    /**
+     * M3.2b (CASSANDRA-20428): dropped-row scan-stats accumulator for cursor-read filter
+     * pushdown, or null (the overwhelmingly common case) when pushdown accounting is not engaged
+     * for this execution. Attached by the cursor merge's call site
+     * ({@code SinglePartitionReadCommand.queryMemtableAndDiskInternal}, under the same
+     * final-stream routing gate as the pushdown itself) BEFORE the eager merge runs, and read by
+     * {@code ReadCommand.withMetricsRecording} — created later in the same {@code executeLocally}
+     * run — so the metrics recorded for the query still include the rows the merge dropped at
+     * production instead of materializing. One accumulator per execution: a fresh attach replaces
+     * any previous one (each {@code executeLocally} run attaches its own).
+     */
+    private CursorReads.ScanStatsAccumulator scanStats;
+
     ReadExecutionController(ReadCommand command,
                             OpOrder.Group baseOp,
                             TableMetadata baseMetadata,
@@ -104,6 +117,18 @@ public class ReadExecutionController implements AutoCloseable
     void updateMinOldestUnrepairedTombstone(long candidate)
     {
         oldestUnrepairedTombstone = Math.min(oldestUnrepairedTombstone, candidate);
+    }
+
+    /** See {@link #scanStats}. */
+    void attachScanStats(CursorReads.ScanStatsAccumulator accumulator)
+    {
+        scanStats = accumulator;
+    }
+
+    /** See {@link #scanStats}; null when cursor-read filter-pushdown accounting is not engaged. */
+    CursorReads.ScanStatsAccumulator scanStats()
+    {
+        return scanStats;
     }
 
     boolean validForReadOn(ColumnFamilyStore cfs)

@@ -323,6 +323,31 @@ public abstract class DataLimits
             return assumeLiveData || row.hasLiveData(nowInSec, enforceStrictLiveness);
         }
 
+        /**
+         * CASSANDRA-20428 (M3.1, cursor reads): public bridge so the cursor merge's production
+         * bound can drive a DETACHED counter over merged output directly, outside the
+         * transformation framework. Must be called once, before any {@link #countRow}, with the
+         * partition's key and (merged) static row — this is what seeds the paging-resume
+         * {@code rowsInCurrentPartition} state on {@code CQLPagingLimits}' counter. The counter is
+         * never attached to an iterator, so the {@code stop()}/{@code stopInPartition()} signals
+         * its counting fires are harmless no-ops; callers consult {@link #isDone()}/
+         * {@link #isDoneForPartition()} instead.
+         */
+        public void countPartition(DecoratedKey partitionKey, Row staticRow)
+        {
+            applyToPartition(partitionKey, staticRow);
+        }
+
+        /**
+         * CASSANDRA-20428 (M3.1, cursor reads): public bridge counting one row exactly as this
+         * counter's {@code applyToRow} would (live-row test included) — see
+         * {@link #countPartition} for the detached-counter contract.
+         */
+        public void countRow(Row row)
+        {
+            applyToRow(row);
+        }
+
         @Override
         protected BaseRowIterator<?> applyToPartition(BaseRowIterator<?> partition)
         {

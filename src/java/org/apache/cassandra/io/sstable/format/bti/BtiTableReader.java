@@ -83,6 +83,13 @@ public class BtiTableReader extends SSTableReaderWithFilter
         this.partitionIndex = builder.getPartitionIndex();
     }
 
+    /** The Rows.db handle, for same-package collaborators that open their own {@link RowIndexReader}
+     *  (see {@link BtiCursorSeekSupport}). Purely an accessor; ownership stays with this reader. */
+    FileHandle rowIndexFile()
+    {
+        return rowIndexFile;
+    }
+
     protected final Builder unbuildTo(Builder builder, boolean sharedCopy)
     {
         Builder b = super.unbuildTo(builder, sharedCopy);
