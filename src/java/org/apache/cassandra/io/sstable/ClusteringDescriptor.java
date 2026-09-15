@@ -20,6 +20,7 @@ package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.List;
 
 import org.apache.cassandra.db.Clustering;
@@ -28,6 +29,7 @@ import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.io.util.DataInputBuffer;
+import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.ResizableByteBuffer;
 
@@ -54,9 +56,14 @@ public class ClusteringDescriptor extends ResizableByteBuffer
     protected byte clusteringKindEncoded;
     protected int clusteringColumnsBound;
 
+    // Memtable-source (write) path scratch: reused across rows/markers, grow-only.
+    private final List<AbstractType<?>> clusteringTypesList;
+    private final DataOutputBuffer clusteringWriteScratch = new DataOutputBuffer(64);
+
     public ClusteringDescriptor(AbstractType<?>[] clusteringTypes)
     {
         this.clusteringTypes = clusteringTypes;
+        this.clusteringTypesList = Arrays.asList(clusteringTypes);
     }
 
     protected void loadClustering(RandomAccessReader dataReader, byte clusteringKind, int clusteringColumnsBound) throws IOException
@@ -66,6 +73,31 @@ public class ClusteringDescriptor extends ResizableByteBuffer
             readUnfilteredClustering(dataReader, clusteringTypes, this.clusteringColumnsBound, this);
         else
             resetBuffer();
+    }
+
+    /**
+     * Inverse of {@link #loadClustering}: serializes a live {@link ClusteringPrefix} (from a
+     * memtable partition, not parsed from disk) into this descriptor's buffer, using the same
+     * {@link ClusteringPrefix.Serializer#serializeValuesWithoutSize} wire format
+     * {@link SSTableCursorReader#readUnfilteredClustering} parses — so a buffer built here reads
+     * back identically via {@link #toClusteringPrefix}.
+     */
+    protected void storeClustering(byte clusteringKind, int clusteringColumnsBound, ClusteringPrefix<?> prefix)
+    {
+        // Never called with STATIC_CLUSTERING_KIND: UnfilteredDescriptor#storeRowClustering
+        // always passes ROW_CLUSTERING_KIND, and #storeMarker's kind is always a bound/boundary
+        // ClusteringPrefix.Kind - a static row has no clustering to serialize in the first place.
+        set(clusteringKind, clusteringColumnsBound);
+        try
+        {
+            clusteringWriteScratch.clear();
+            ClusteringPrefix.serializer.serializeValuesWithoutSize(prefix, clusteringWriteScratch, 0, clusteringTypesList);
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException("Writing to an in-memory buffer shouldn't trigger an IOException", e);
+        }
+        overwrite(clusteringWriteScratch.getData(), clusteringWriteScratch.getLength());
     }
 
     public final ClusteringDescriptor resetMinEnd() {

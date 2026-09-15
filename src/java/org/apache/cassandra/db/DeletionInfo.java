@@ -60,6 +60,14 @@ public interface DeletionInfo extends IMeasurableMemory
 
     public boolean hasRanges();
 
+    /**
+     * The raw {@link RangeTombstoneList} backing this deletion info, or null if {@link #hasRanges()}
+     * is false. For allocation-free traversal (see {@link RangeTombstoneListCursor}) where the
+     * per-entry {@link RangeTombstone} wrapper {@link #rangeIterator} builds isn't affordable.
+     * Never mutate the returned list.
+     */
+    public RangeTombstoneList rangeTombstoneList();
+
     public int rangeCount();
 
     public long maxTimestamp();

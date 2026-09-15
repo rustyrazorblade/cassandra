@@ -129,8 +129,23 @@ public class ShardedMultiWriter implements SSTableMultiWriter
     @Override
     public void append(UnfilteredRowIterator partition)
     {
-        DecoratedKey key = partition.partitionKey();
+        maybeSwitchWriter(partition.partitionKey());
+        writers[currentWriter].append(partition);
+    }
 
+    /**
+     * Advances the shard tracker to {@code key} and, when that crosses a shard boundary after the
+     * current shard has already had something written to it, opens the next shard's writer and
+     * returns it; otherwise returns null, meaning the current writer still owns {@code key} and the
+     * caller keeps writing to {@link #currentWriter()}.
+     * <p/>
+     * Extracted from {@link #append} so the cursor flush path ({@code MemtableCursorFlusher}) can
+     * drive the very same shard rollover the iterator path gets here, writing into these same
+     * per-shard {@link #writers} - the ones this multi-writer later finishes, commits, and applies
+     * token-space coverage to - rather than a parallel set of its own.
+     */
+    public SSTableWriter maybeSwitchWriter(DecoratedKey key)
+    {
         // If we have written anything and cross a shard boundary, switch to a new writer.
         final long currentUncompressedSize = writers[currentWriter].getFilePointer();
         if (boundaries.advanceTo(key.getToken()) && currentUncompressedSize > 0)
@@ -141,9 +156,16 @@ public class ShardedMultiWriter implements SSTableMultiWriter
                          cfs.getKeyspaceName(), cfs.getTableName());
 
             writers[++currentWriter] = createWriter();
+            return writers[currentWriter];
         }
 
-        writers[currentWriter].append(partition);
+        return null;
+    }
+
+    /** The writer the next {@link #append} (or cursor-driven write) lands in, until a {@link #maybeSwitchWriter} rollover. */
+    public SSTableWriter currentWriter()
+    {
+        return writers[currentWriter];
     }
 
     @Override
