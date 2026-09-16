@@ -22,7 +22,7 @@ import java.util.Objects;
 
 import com.google.common.collect.ImmutableList;
 
-import org.antlr.runtime.RecognitionException;
+import org.antlr.v4.runtime.RecognitionException;
 
 import org.apache.cassandra.cql3.restrictions.CustomIndexExpression;
 
@@ -74,7 +74,7 @@ public final class WhereClause
 
     public static WhereClause parse(String cql) throws RecognitionException
     {
-        return CQLFragmentParser.parseAnyUnhandled(CqlParser::whereClause, cql).build();
+        return CQLFragmentParser.parseAnyUnhandled(p -> p.whereClause().clause, cql).build();
     }
 
     @Override

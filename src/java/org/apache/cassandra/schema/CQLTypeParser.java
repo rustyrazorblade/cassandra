@@ -59,6 +59,6 @@ public final class CQLTypeParser
 
     static CQL3Type.Raw parseRaw(String type)
     {
-        return CQLFragmentParser.parseAny(CqlParser::comparatorType, type, "CQL type");
+        return CQLFragmentParser.parseAny(p -> p.comparatorType().t, type, "CQL type");
     }
 }

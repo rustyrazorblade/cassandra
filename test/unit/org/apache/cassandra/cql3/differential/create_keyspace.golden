@@ -1,0 +1,1 @@
+Raw{attrs=KeyspaceAttributes{properties={"durable_writes"="true", "replication"={"class"="SimpleStrategy", "replication_factor"="3"}}}, bindVariables=VariableSpecifications{immutableSpecs=null, specs=[], targetColumns=[], targetOwners=null, variableNames=[]}, ifNotExists=false, keyspaceName="ks"}

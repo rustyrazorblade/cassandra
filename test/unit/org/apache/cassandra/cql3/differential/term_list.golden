@@ -1,0 +1,1 @@
+ArrayLiteral{elements=[Literal{preferedType=<type:Int32Type>, text="1", type=Type.INTEGER}, Literal{preferedType=<type:Int32Type>, text="2", type=Type.INTEGER}, Literal{preferedType=<type:Int32Type>, text="3", type=Type.INTEGER}]}

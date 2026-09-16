@@ -17,28 +17,49 @@
  */
 package org.apache.cassandra.cql3;
 
-import org.antlr.runtime.BaseRecognizer;
-import org.antlr.runtime.RecognitionException;
+import java.util.BitSet;
+
+import org.antlr.v4.runtime.ANTLRErrorListener;
+import org.antlr.v4.runtime.Parser;
+import org.antlr.v4.runtime.RecognitionException;
+import org.antlr.v4.runtime.Recognizer;
+import org.antlr.v4.runtime.atn.ATNConfigSet;
+import org.antlr.v4.runtime.dfa.DFA;
 
 /**
  * Listener used to collect the syntax errors emitted by the Lexer and Parser.
+ *
+ * <p>In ANTLR 4 both the lexer and the parser report every error, syntactic or
+ * grammar-level (via {@code notifyErrorListeners}), through the single
+ * {@link ANTLRErrorListener#syntaxError} method.  This interface narrows
+ * {@link ANTLRErrorListener} to that one method and gives the prediction
+ * callbacks no-op defaults, so a collector only needs to implement
+ * {@code syntaxError}.</p>
  */
-public interface ErrorListener
+public interface ErrorListener extends ANTLRErrorListener
 {
     /**
+     * {@inheritDoc}
+     *
      * Invoked when a syntax error occurs.
-     *
-     * @param recognizer the parser or lexer that emitted the error
-     * @param tokenNames the token names
-     * @param e the exception
      */
-    void syntaxError(BaseRecognizer recognizer, String[] tokenNames, RecognitionException e);
+    @Override
+    void syntaxError(Recognizer<?, ?> recognizer,
+                     Object offendingSymbol,
+                     int line,
+                     int charPositionInLine,
+                     String msg,
+                     RecognitionException e);
 
-    /**
-     * Invoked when a syntax error with a specified message occurs.
-     *
-     * @param recognizer the parser or lexer that emitted the error
-     * @param errorMsg the error message
-     */
-    void syntaxError(BaseRecognizer recognizer, String errorMsg);
+    @Override
+    default void reportAmbiguity(Parser recognizer, DFA dfa, int startIndex, int stopIndex,
+                                 boolean exact, BitSet ambigAlts, ATNConfigSet configs) {}
+
+    @Override
+    default void reportAttemptingFullContext(Parser recognizer, DFA dfa, int startIndex, int stopIndex,
+                                             BitSet conflictingAlts, ATNConfigSet configs) {}
+
+    @Override
+    default void reportContextSensitivity(Parser recognizer, DFA dfa, int startIndex, int stopIndex,
+                                          int prediction, ATNConfigSet configs) {}
 }

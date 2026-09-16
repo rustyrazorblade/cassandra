@@ -20,7 +20,7 @@ package org.apache.cassandra.cql3;
 
 import java.util.Objects;
 
-import org.antlr.runtime.Token;
+import org.antlr.v4.runtime.Token;
 
 import static java.lang.Math.max;
 import static java.lang.Math.min;

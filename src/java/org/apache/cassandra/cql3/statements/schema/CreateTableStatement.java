@@ -541,7 +541,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
 
     public static TableMetadata.Builder parse(String cql, String keyspace, String table, Types types, UserFunctions userFunctions)
     {
-        Raw createTable = CQLFragmentParser.parseAny(CqlParser::createTableStatement, cql, "CREATE TABLE")
+        Raw createTable = CQLFragmentParser.parseAny(p -> p.createTableStatement().stmt, cql, "CREATE TABLE")
                                            .keyspace(keyspace);
 
         if (table != null)

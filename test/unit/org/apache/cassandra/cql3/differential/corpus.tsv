@@ -1,0 +1,49 @@
+create_keyspace	query	CREATE KEYSPACE ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 3} AND durable_writes = true;
+create_table	query	CREATE TABLE ks.tbl (id int, ck text, s int STATIC, data map<text, int>, tags set<text>, PRIMARY KEY ((id), ck)) WITH CLUSTERING ORDER BY (ck ASC);
+select_where_in_order_limit	query	SELECT a, b, writetime(c) FROM ks.tbl WHERE id = 1 AND ck IN ('x', 'y') ORDER BY ck DESC LIMIT 10 ALLOW FILTERING;
+insert	query	INSERT INTO ks.tbl (id, ck, data) VALUES (1, 'a', {'k': 2}) USING TTL 60 AND TIMESTAMP 999;
+update	query	UPDATE ks.tbl USING TIMESTAMP 12345 SET data = data + {'k': 1}, s = 7 WHERE id = 1 AND ck = 'a' IF s = 6;
+delete	query	DELETE data['k'] FROM ks.tbl WHERE id = 1 AND ck = 'a' IF EXISTS;
+term_set	term	{1, 2, 3}
+term_map	term	{'k1': 10, 'k2': 20}
+term_tuple	term	(1, 'two', 3.0)
+comparator_nested	comparatorType	map<text, frozen<list<int>>>
+comparator_simple	comparatorType	int
+insert_bind_positional	query	INSERT INTO ks.tbl (id, v) VALUES (?, ?);
+insert_bind_named	query	INSERT INTO ks.tbl (id, v) VALUES (:id, :val);
+select_in_bind	query	SELECT * FROM ks.tbl WHERE ck IN ?;
+update_if_bind	query	UPDATE ks.tbl SET v = 1 WHERE id = 1 IF v = ?;
+select_group_by	query	SELECT id, count(*) FROM ks.tbl GROUP BY id;
+select_per_partition_limit	query	SELECT * FROM ks.tbl PER PARTITION LIMIT 2 LIMIT 10;
+select_distinct	query	SELECT DISTINCT id FROM ks.tbl;
+select_json	query	SELECT JSON id, v FROM ks.tbl;
+select_fn_selector	query	SELECT count(*), toUnixTimestamp(c) FROM ks.tbl;
+select_cast	query	SELECT CAST(v AS text) FROM ks.tbl;
+select_arithmetic	query	SELECT v + 1 FROM ks.tbl;
+select_slice_range	query	SELECT data[1..3] FROM ks.tbl;
+select_contains	query	SELECT * FROM ks.tbl WHERE tags CONTAINS 'x' ALLOW FILTERING;
+select_contains_key	query	SELECT * FROM ks.tbl WHERE data CONTAINS KEY 'k' ALLOW FILTERING;
+select_token	query	SELECT * FROM ks.tbl WHERE token(id) > token(1);
+select_tuple_in	query	SELECT * FROM ks.tbl WHERE (a, b) IN ((1, 2), (3, 4));
+batch_two_mods	query	BEGIN BATCH INSERT INTO ks.tbl (id, v) VALUES (1, 2); UPDATE ks.tbl SET v = 3 WHERE id = 4; APPLY BATCH;
+create_type	query	CREATE TYPE ks.udt (a int, b text);
+alter_table_add	query	ALTER TABLE ks.tbl ADD v2 int;
+alter_table_drop	query	ALTER TABLE ks.tbl DROP v2;
+create_index	query	CREATE INDEX myidx ON ks.tbl (v);
+grant	query	GRANT SELECT ON TABLE ks.tbl TO role1;
+insert_json	query	INSERT INTO ks.tbl JSON '{"id": 1, "v": 2}';
+if_not_exists	query	INSERT INTO ks.tbl (id, v) VALUES (1, 2) IF NOT EXISTS;
+quoted_name_doubled	query	SELECT "a""b" FROM ks.tbl;
+term_list	term	[1, 2, 3]
+term_udt	term	{a: 1, b: 'two'}
+term_function_call	term	now()
+term_typecast	term	(bigint)1
+term_unary_minus	term	-1
+term_arithmetic	term	1 + 2
+term_pg_string	term	$$it's$$
+term_doubled_quote	term	'it''s'
+comparator_tuple	comparatorType	tuple<int, text>
+comparator_frozen_set	comparatorType	frozen<set<int>>
+comparator_udt	comparatorType	myudt
+comparator_custom	comparatorType	'org.apache.cassandra.db.marshal.Int32Type'
+comparator_vector	comparatorType	vector<float, 3>

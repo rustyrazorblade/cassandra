@@ -18,7 +18,7 @@
 
 package org.apache.cassandra.cql3;
 
-import org.antlr.runtime.Token;
+import org.antlr.v4.runtime.Token;
 import org.junit.Test;
 import org.mockito.Mockito;
 

@@ -39,7 +39,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 import com.google.common.primitives.Ints;
 
-import org.antlr.runtime.RecognitionException;
+import org.antlr.v4.runtime.RecognitionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -987,11 +987,17 @@ public class QueryProcessor implements QueryHandler
     {
         try
         {
-            return CQLFragmentParser.parseAnyUnhandled(CqlParser::query, queryStr);
+            return CQLFragmentParser.parseAnyUnhandled(p -> p.query().stmnt, queryStr);
         }
         catch (CassandraException ce)
         {
             throw ce;
+        }
+        // In ANTLR 4 RecognitionException is a RuntimeException, so it must be caught
+        // before the general RuntimeException clause; otherwise that clause hides it.
+        catch (RecognitionException e)
+        {
+            throw new SyntaxException("Invalid or malformed CQL query string: " + e.getMessage());
         }
         catch (RuntimeException re)
         {
@@ -1000,10 +1006,6 @@ public class QueryProcessor implements QueryHandler
                                                     queryStr,
                                                     re.getClass().getSimpleName(),
                                                     re.getMessage()));
-        }
-        catch (RecognitionException e)
-        {
-            throw new SyntaxException("Invalid or malformed CQL query string: " + e.getMessage());
         }
     }
 

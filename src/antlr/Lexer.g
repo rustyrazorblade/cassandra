@@ -19,42 +19,6 @@
 
 lexer grammar Lexer;
 
-@lexer::members {
-    List<Token> tokens = new ArrayList<Token>();
-
-    public void emit(Token token)
-    {
-        state.token = token;
-        tokens.add(token);
-    }
-
-    public Token nextToken()
-    {
-        super.nextToken();
-        if (tokens.size() == 0)
-            return new CommonToken(Token.EOF);
-        return tokens.remove(0);
-    }
-
-    private final List<ErrorListener> listeners = new ArrayList<ErrorListener>();
-
-    public void addErrorListener(ErrorListener listener)
-    {
-        this.listeners.add(listener);
-    }
-
-    public void removeErrorListener(ErrorListener listener)
-    {
-        this.listeners.remove(listener);
-    }
-
-    public void displayRecognitionError(String[] tokenNames, RecognitionException e)
-    {
-        for (int i = 0, m = listeners.size(); i < m; i++)
-            listeners.get(i).syntaxError(this, tokenNames, e);
-    }
-}
-
 // Case-insensitive keywords
 // When adding a new reserved keyword, add entry to o.a.c.cql3.ReservedKeywords and
 // pylib/cqlshlib/cqlhandling.py::cql_keywords_reserved.
@@ -275,36 +239,31 @@ fragment Y: ('y'|'Y');
 fragment Z: ('z'|'Z');
 
 STRING_LITERAL
-    @init{
-        StringBuilder txt = new StringBuilder(); // temporary to build pg-style-string
-    }
-    @after{ setText(txt.toString()); }
-    :
-      /* pg-style string literal */
-      (
-        '\$' '\$'
-        ( /* collect all input until '$$' is reached again */
-          {  (input.size() - input.index() > 1)
-               && !"$$".equals(input.substring(input.index(), input.index() + 1)) }?
-             => c=. { txt.appendCodePoint(c); }
-        )*
-        '\$' '\$'
+    : (
+        /* pg-style string literal */
+        ( '$$' .*? '$$' )
+        |
+        /* conventional quoted string literal */
+        ( '\'' ( ~'\'' | '\'' '\'' )* '\'' )
       )
-      |
-      /* conventional quoted string literal */
-      (
-        '\'' (c=~('\'') { txt.appendCodePoint(c);} | '\'' '\'' { txt.appendCodePoint('\''); })* '\''
-      )
+      {
+          String raw = getText();
+          if (!raw.isEmpty() && raw.charAt(0) == '$')
+              // pg-style: strip the leading and trailing '$$'
+              setText(raw.substring(2, raw.length() - 2));
+          else
+              // conventional: strip the surrounding quotes and unescape doubled quotes
+              setText(raw.substring(1, raw.length() - 1).replace("''", "'"));
+      }
     ;
 
 QUOTED_NAME
-    @init{ StringBuilder b = new StringBuilder(); }
-    @after{ setText(b.toString()); }
-    : '\"' (c=~('\"') { b.appendCodePoint(c); } | '\"' '\"' { b.appendCodePoint('\"'); })+ '\"'
+    : '"' ( ~'"' | '"' '"' )+ '"'
+      { setText(getText().substring(1, getText().length() - 1).replace("\"\"", "\"")); }
     ;
 
 EMPTY_QUOTED_NAME
-    : '\"' '\"'
+    : '"' '"'
     ;
 
 fragment DIGIT
@@ -366,13 +325,13 @@ RANGE
     ;
 
 /*
- * Normally a lexer only emits one token at a time, but ours is tricked out
- * to support multiple (see @lexer::members near the top of the grammar).
+ * FLOAT overlaps INTEGER and RANGE ('..').  ANTLR 4 resolves lexer ambiguity by
+ * longest match, then rule order.  INTEGER is declared before FLOAT, so a bare
+ * integer matches INTEGER.  The predicate stops FLOAT from eating the first dot
+ * of a RANGE token, so an input like "1..3" tokenizes as INTEGER RANGE INTEGER.
  */
 FLOAT
-    : (INTEGER '.' RANGE) => INTEGER '.'
-    | (INTEGER RANGE) => INTEGER {$type = INTEGER;}
-    | INTEGER ('.' DIGIT*)? EXPONENT?
+    : INTEGER ( { _input.LA(1) == '.' && _input.LA(2) != '.' }? '.' DIGIT* )? EXPONENT?
     ;
 
 /*
@@ -407,13 +366,13 @@ UUID
     ;
 
 WS
-    : (' ' | '\t' | '\n' | '\r')+ { $channel = HIDDEN; }
+    : (' ' | '\t' | '\n' | '\r')+ -> channel(HIDDEN)
     ;
 
 COMMENT
-    : ('--' | '//') .* ('\n'|'\r') { $channel = HIDDEN; }
+    : ('--' | '//') ~('\n'|'\r')* ('\n'|'\r')? -> channel(HIDDEN)
     ;
 
 MULTILINE_COMMENT
-    : '/*' .* '*/' { $channel = HIDDEN; }
+    : '/*' .*? '*/' -> channel(HIDDEN)
     ;

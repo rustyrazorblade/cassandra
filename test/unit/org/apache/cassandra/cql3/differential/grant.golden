@@ -1,0 +1,1 @@
+GrantPermissionsStatement{bindVariables=VariableSpecifications{immutableSpecs=null, specs=[], targetColumns=[], targetOwners=null, variableNames=[]}, grantee=RoleResource{hash=<hashCode>, level=Level.ROLE, name="role1"}, permissions=[Permission.SELECT], resource=DataResource{hash=<hashCode>, keyspace="ks", level=Level.TABLE, table="tbl"}}

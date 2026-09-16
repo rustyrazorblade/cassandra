@@ -30,6 +30,7 @@ import Parser,Lexer;
 
     import java.util.Collections;
     import java.util.EnumSet;
+    import java.util.HashMap;
     import java.util.HashSet;
     import java.util.LinkedHashMap;
     import java.util.List;
@@ -55,85 +56,6 @@ import Parser,Lexer;
     import org.apache.cassandra.utils.LocalizeString;
 }
 
-@members {
-    public void addErrorListener(ErrorListener listener)
-    {
-        gParser.addErrorListener(listener);
-    }
-
-    public void removeErrorListener(ErrorListener listener)
-    {
-        gParser.removeErrorListener(listener);
-    }
-
-    public void displayRecognitionError(String[] tokenNames, RecognitionException e)
-    {
-        gParser.displayRecognitionError(tokenNames, e);
-    }
-
-    protected void addRecognitionError(String msg)
-    {
-        gParser.addRecognitionError(msg);
-    }
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    // Recovery methods are overridden to avoid wasting work on recovering from errors when the result will be
-    // ignored anyway.
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-    @Override
-    protected Object recoverFromMismatchedToken(IntStream input, int ttype, BitSet follow) throws RecognitionException
-    {
-        throw new MismatchedTokenException(ttype, input);
-    }
-
-    @Override
-    public void recover(IntStream input, RecognitionException re)
-    {
-        // Do nothing.
-    }
-}
-
-@lexer::header {
-    package org.apache.cassandra.cql3;
-}
-
-@lexer::members {
-    List<Token> tokens = new ArrayList<Token>();
-
-    public void emit(Token token)
-    {
-        state.token = token;
-        tokens.add(token);
-    }
-
-    public Token nextToken()
-    {
-        super.nextToken();
-        if (tokens.size() == 0)
-            return new CommonToken(Token.EOF);
-        return tokens.remove(0);
-    }
-
-    private final List<ErrorListener> listeners = new ArrayList<ErrorListener>();
-
-    public void addErrorListener(ErrorListener listener)
-    {
-        this.listeners.add(listener);
-    }
-
-    public void removeErrorListener(ErrorListener listener)
-    {
-        this.listeners.remove(listener);
-    }
-
-    public void displayRecognitionError(String[] tokenNames, RecognitionException e)
-    {
-        for (int i = 0, m = listeners.size(); i < m; i++)
-            listeners.get(i).syntaxError(this, tokenNames, e);
-    }
-}
-
 query returns [CQLStatement.Raw stmnt]
-    : st=cqlStatement (';')* EOF { $stmnt = st; }
+    : st=cqlStatement (';')* EOF { $stmnt = $st.stmt; }
     ;

@@ -394,31 +394,14 @@
       </dependency>
       <dependency>
         <groupId>org.antlr</groupId>
-        <artifactId>antlr</artifactId>
-        <version>3.5.2</version>
+        <artifactId>antlr4</artifactId>
+        <version>4.13.2</version>
         <scope>provided</scope>
-        <exclusions>
-          <exclusion>
-            <artifactId>stringtemplate</artifactId>
-            <groupId>org.antlr</groupId>
-          </exclusion>
-        </exclusions>
       </dependency>
       <dependency>
         <groupId>org.antlr</groupId>
-        <artifactId>ST4</artifactId>
-        <version>4.0.8</version>
-      </dependency>
-      <dependency>
-        <groupId>org.antlr</groupId>
-        <artifactId>antlr-runtime</artifactId>
-        <version>3.5.2</version>
-        <exclusions>
-          <exclusion>
-            <artifactId>stringtemplate</artifactId>
-            <groupId>org.antlr</groupId>
-          </exclusion>
-        </exclusions>
+        <artifactId>antlr4-runtime</artifactId>
+        <version>4.13.2</version>
       </dependency>
       <dependency>
         <groupId>org.slf4j</groupId>

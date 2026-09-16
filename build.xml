@@ -662,19 +662,18 @@
     <target name="gen-cql3-grammar" depends="check-gen-cql3-grammar" unless="cql3current">
       <echo>Building Grammar ${build.src.antlr}/Cql.g  ...</echo>
       <!-- antlr will crash on the first run on JDK21 and subsequently succeed if we don't fork it and execute in a separate JVM... -->
-      <java classname="org.antlr.Tool"
+      <java classname="org.antlr.v4.Tool"
             classpathref="cql3-grammar.classpath"
             failonerror="true"
             fork="true"
             outputproperty="antlr.output"
             errorproperty="antlr.error">
-         <arg value="-Xconversiontimeout" />
-         <arg value="10000" />
-         <arg value="${build.src.antlr}/Cql.g" />
-         <arg value="-fo" />
+         <arg value="-o" />
          <arg value="${build.src.gen-java}/org/apache/cassandra/cql3/" />
-         <arg value="-Xmaxinlinedfastates"/>
-         <arg value="10"/> <!-- default is 60 -->
+         <arg value="-Xexact-output-dir" />
+         <arg value="-lib" />
+         <arg value="${build.src.antlr}" />
+         <arg value="${build.src.antlr}/Cql.g" />
       </java>
     </target>
 
