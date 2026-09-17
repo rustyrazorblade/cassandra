@@ -124,6 +124,31 @@ public abstract class ReadResponse
         return InMemoryDataResponse.build(data, command, rdi, inMemoryMaxRows, inMemoryMaxHeapSize);
     }
 
+    /**
+     * Wraps FULLY-BUILT wire bytes (the
+     * {@code UnfilteredPartitionIterators.Serializer} envelope around one partition's worth of
+     * transcode-produced bytes) directly, skipping {@code UnfilteredPartitionIterators.serializerForIntraNode()
+     * .serialize(...)} entirely: the transcode path never forms a
+     * {@code UnfilteredPartitionIterator} of materialized {@code Row}/{@code Cell} objects to
+     * serialize. Structurally this is {@link RemoteDataResponse}'s shape (pre-built bytes
+     * passed straight to the {@link DataResponse} super constructor, no {@code build(iter, ...)}
+     * call), but with {@link DeserializationHelper.Flag#LOCAL} semantics like {@link LocalDataResponse}
+     * -- not {@code FROM_REMOTE} -- since this response is built HERE, on the replica that owns the
+     * data, from local sstable/memtable legs, exactly like {@code LocalDataResponse} is.
+     */
+    static ReadResponse createTranscodedDataResponse(ByteBuffer data, RepairedDataInfo rdi)
+    {
+        return new TranscodedDataResponse(data, rdi.getDigest(), rdi.isConclusive());
+    }
+
+    private static class TranscodedDataResponse extends DataResponse
+    {
+        private TranscodedDataResponse(ByteBuffer data, ByteBuffer repairedDataDigest, boolean isRepairedDigestConclusive)
+        {
+            super(data, repairedDataDigest, isRepairedDigestConclusive, MessagingService.current_version, DeserializationHelper.Flag.LOCAL);
+        }
+    }
+
     @VisibleForTesting
     public static ReadResponse createRemoteDataResponse(UnfilteredPartitionIterator data,
                                                         ByteBuffer repairedDataDigest,
