@@ -96,6 +96,8 @@ K_END:         E N D;
 K_CASE:        C A S E;
 K_WHEN:        W H E N;
 K_ELSE:        E L S E;
+K_OVER:        O V E R;
+K_ROW_NUMBER:  R O W '_' N U M B E R;
 K_IS:          I S;
 K_CONTAINS:    C O N T A I N S;
 K_BETWEEN:     B E T W E E N;

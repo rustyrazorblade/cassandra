@@ -104,6 +104,7 @@ import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
@@ -205,6 +206,13 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
      */
     private final org.apache.cassandra.cql3.selection.arena.ArenaOrdering arenaOrdering;
 
+    /**
+     * The ROW_NUMBER window function this query carries, or null.  Set at prepare time and gated by
+     * the window function flag.  When present, the arena owns the query, sorts the single partition
+     * by the window ORDER BY, and appends the rank as a trailing bigint column.
+     */
+    private final WindowSpec windowSpec;
+
     public final StatementSource source;
 
     // Used by forSelection below
@@ -226,7 +234,8 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                            Term perPartitionLimit,
                            StatementSource source,
                            SelectOptions selectOptions,
-                           org.apache.cassandra.cql3.selection.arena.ArenaOrdering arenaOrdering)
+                           org.apache.cassandra.cql3.selection.arena.ArenaOrdering arenaOrdering,
+                           WindowSpec windowSpec)
     {
         this.table = table;
         this.bindVariables = bindVariables;
@@ -241,7 +250,61 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         this.source = source;
         this.selectOptions = selectOptions;
         this.arenaOrdering = arenaOrdering;
+        this.windowSpec = windowSpec;
         this.functions = findAllFunctions();
+    }
+
+    /**
+     * A resolved ROW_NUMBER window function.  It holds the column the rank is ordered by and the
+     * output name of the rank column.  The rank column is always the trailing column of the result.
+     */
+    public static final class WindowSpec
+    {
+        private final ColumnMetadata orderingColumn;
+        private final ColumnIdentifier rankColumnName;
+
+        WindowSpec(ColumnMetadata orderingColumn, ColumnIdentifier rankColumnName)
+        {
+            this.orderingColumn = orderingColumn;
+            this.rankColumnName = rankColumnName;
+        }
+
+        ColumnMetadata orderingColumn()
+        {
+            return orderingColumn;
+        }
+
+        ColumnIdentifier rankColumnName()
+        {
+            return rankColumnName;
+        }
+    }
+
+    /**
+     * @return {@code true} if this query carries a ROW_NUMBER window function.  When {@code false},
+     * the window code paths are never entered.  Research POC.
+     */
+    public boolean hasWindow()
+    {
+        return windowSpec != null;
+    }
+
+    /**
+     * Builds the result metadata for a window query: the columns the user requested, followed by a
+     * trailing {@code bigint} rank column.  This is distinct from the metadata the arena uses to
+     * buffer rows, which counts only the projected columns and no rank.  The columns added to the
+     * result set only to drive the sort (CASSANDRA-4911) are excluded here, so the client sees just
+     * the requested columns plus the rank.
+     */
+    private ResultSet.ResultMetadata getWindowResultMetadata()
+    {
+        ResultSet.ResultMetadata base = getResultMetadata();
+        List<ColumnSpecification> names = new ArrayList<>(base.requestNames());
+        names.add(new ColumnSpecification(table.keyspace,
+                                          table.name,
+                                          windowSpec.rankColumnName(),
+                                          LongType.instance));
+        return new ResultSet.ResultMetadata(names);
     }
 
     @Override
@@ -321,6 +384,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                    null,
                                    StatementSource.INTERNAL,
                                    SelectOptions.EMPTY,
+                                   null,
                                    null);
     }
 
@@ -452,7 +516,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         // the client page size, so the driver never round-trips for more pages (which would re-resolve
         // the inner).  An aggregate query already returns a single client result through the
         // aggregation pager in one execute() call, so it stays on the else branch.
-        if (aggregationSpec == null && (hasSubqueries() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
+        if (aggregationSpec == null && (hasSubqueries() || hasWindow() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
         {
             rows = execute(query, options, state.getClientState(), selectors, nowInSec, userLimit, null, requestTime, unmask);
         }
@@ -774,7 +838,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             // the client page size, so the driver never round-trips for more pages (which would re-resolve
             // the inner).  An aggregate query already returns a single client result through the
             // aggregation pager in one execute() call, so it stays on the else branch.
-            if (aggregationSpec == null && (hasSubqueries() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
+            if (aggregationSpec == null && (hasSubqueries() || hasWindow() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
             {
                 try (PartitionIterator data = query.executeInternal(executionController))
                 {
@@ -1193,20 +1257,30 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
         if (arenaPlan.isArenaOwned() && partitions.hasNext())
         {
-            // Arena owns this query - single partition, no processPartition call
+            // Arena owns this query - single partition, no processPartition call.  A window query
+            // ships the augmented metadata (the requested columns plus a trailing rank column) and
+            // asks the operator to append the rank; every other query ships its normal metadata.
             try (RowIterator partition = partitions.next())
             {
+                ResultSet.ResultMetadata arenaMetadata = hasWindow() ? getWindowResultMetadata()
+                                                                     : getResultMetadata();
                 return org.apache.cassandra.cql3.selection.arena.ArenaAggregationOperator.execute(
                     partition,
                     options,
                     selection,
                     arenaPlan,
                     userLimit,
-                    getResultMetadata(),
+                    arenaMetadata,
                     table,
-                    nowInSec);
+                    nowInSec,
+                    hasWindow());
             }
         }
+
+        // A window query whose single partition is absent has no rows to rank, but must still return
+        // the window result shape (the requested columns plus the trailing rank column).
+        if (hasWindow() && arenaPlan.isArenaOwned())
+            return new ResultSet(getWindowResultMetadata());
 
         // Existing path (unchanged)
         GroupMaker groupMaker = aggregationSpec == null ? null : aggregationSpec.newGroupMaker();
@@ -1472,20 +1546,71 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             // which are needed to determine what indexes to use for the query and to validate whether filtering is needed.
             IndexHints indexHints = options.parseIndexHints(table, IndexRegistry.obtain(table));
 
-            List<Selectable> selectables = RawSelector.toSelectables(selectClause, table);
+            List<Ordering> orderings = getOrderings(table);
+
+            // Detect a ROW_NUMBER window function in the SELECT clause.  It is not projected per row;
+            // the arena computes the rank after it sorts the single partition.  Strip it from the
+            // projection here and carry it as a WindowSpec.  Its flag is checked first, inside
+            // Selectable.WindowFunction.Raw.prepare.  The window ORDER BY becomes the arena sort key.
+            WindowSpec windowSpec = null;
+            List<RawSelector> projectionClause = selectClause;
+            int windowCount = 0;
+            int windowIndex = -1;
+            for (int i = 0; i < selectClause.size(); i++)
+            {
+                if (selectClause.get(i).selectable instanceof Selectable.WindowFunction.Raw)
+                {
+                    windowCount++;
+                    windowIndex = i;
+                }
+            }
+            if (windowCount > 0)
+            {
+                RawSelector windowRaw = selectClause.get(windowIndex);
+                // Prepare the window function first so the flag check runs (and rejects when off)
+                // before any other work.
+                Selectable.WindowFunction windowFn = (Selectable.WindowFunction) windowRaw.selectable.prepare(table);
+
+                checkTrue(windowCount == 1, "Only one window function is supported in the SELECT clause.");
+                // The rank is always the trailing result column, so require ROW_NUMBER to be last.
+                checkTrue(windowIndex == selectClause.size() - 1,
+                          "ROW_NUMBER() must be the last item in the SELECT clause.");
+
+                Ordering windowOrdering = windowFn.ordering().bind(table, variableSpecifications, table);
+                ColumnIdentifier rankName = windowRaw.alias != null
+                                            ? windowRaw.alias
+                                            : new ColumnIdentifier("row_number", true);
+                windowSpec = new WindowSpec(windowOrdering.expression.getColumn(), rankName);
+
+                // Remove the window function from the projection; the arena appends the rank.
+                projectionClause = new ArrayList<>(selectClause);
+                projectionClause.remove(windowIndex);
+
+                // The window ORDER BY is the single arena sort key.  A top-level ORDER BY, if present,
+                // must match it exactly.
+                orderings = mergeWindowOrdering(orderings, windowOrdering);
+            }
+
+            List<Selectable> selectables = RawSelector.toSelectables(projectionClause, table);
             boolean containsOnlyStaticColumns = selectOnlyStaticColumns(table, selectables);
 
-            List<Ordering> orderings = getOrderings(table);
             StatementRestrictions restrictions = prepareRestrictions(state, table, variableSpecifications, orderings, indexHints, containsOnlyStaticColumns, forView);
 
             // If we order post-query, the sorted column needs to be in the ResultSet for sorting,
             // even if we don't ultimately ship them to the client (CASSANDRA-4911).
             Map<ColumnMetadata, Ordering> orderingColumns = getOrderingColumns(orderings);
 
+            // Reject every window shape the arena cannot rank before it engages, so an unsupported
+            // window query fails loudly at prepare instead of mis-ranking at execution.  The aggregate
+            // check waits until the aggregation spec is known, below.
+            if (windowSpec != null)
+                validateWindow(restrictions, orderingColumns, windowSpec);
+
             // Arena-owned ORDER BY on a non-clustering column: gated by the flag and single-partition
             // only.  When eligible, the ordering columns must be in the result set so the arena can
-            // sort by them, and the standard clustering-only ordering validation is bypassed.
-            boolean arenaOrderBy = isArenaNonClusteringOrderBy(restrictions, orderingColumns);
+            // sort by them, and the standard clustering-only ordering validation is bypassed.  A window
+            // query always routes to the arena, regardless of the arena aggregation flag.
+            boolean arenaOrderBy = windowSpec != null || isArenaNonClusteringOrderBy(restrictions, orderingColumns);
 
             Set<ColumnMetadata> resultSetOrderingColumns = arenaOrderBy ? orderingColumns.keySet()
                                                                         : getResultSetOrdering(restrictions, orderingColumns);
@@ -1511,6 +1636,11 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             checkFalse(aggregationSpecFactory == AggregationSpecification.AGGREGATE_EVERYTHING_FACTORY
                        && perPartitionLimit != null,
                        "PER PARTITION LIMIT is not allowed with aggregate queries.");
+
+            // The arena computes ROW_NUMBER on its non-aggregate branch, so an aggregate alongside the
+            // window would never run.  Reject it loudly here rather than let it fall through.
+            if (windowSpec != null)
+                checkTrue(aggregationSpecFactory == null, "ROW_NUMBER does not support aggregate functions.");
 
             ColumnComparator<List<byte[]>> orderingComparator = null;
             boolean isReversed = false;
@@ -1550,7 +1680,71 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                        prepareLimit(variableSpecifications, perPartitionLimit, keyspace(), perPartitionLimitReceiver()),
                                        source,
                                        options,
-                                       arenaOrdering);
+                                       arenaOrdering,
+                                       windowSpec);
+        }
+
+        /**
+         * Merges the window ORDER BY into the query's ORDER BY key so the arena has exactly one sort
+         * key.  When the query has no top-level ORDER BY, the window ORDER BY becomes the only key.
+         * When it has one, that ORDER BY must match the window ORDER BY exactly: the same single
+         * column and the same direction.  Any mismatch is rejected.
+         */
+        private List<Ordering> mergeWindowOrdering(List<Ordering> topLevel, Ordering windowOrdering)
+        {
+            if (topLevel.isEmpty())
+                return Collections.singletonList(windowOrdering);
+
+            // An ANN/topK top-level ORDER BY can never be the arena's single sort key.  Reject it
+            // with the ANN-specific message here, before the generic exact-match check, so the user
+            // sees why rather than a "does not match" message.
+            for (Ordering o : topLevel)
+                checkFalse(o.expression instanceof Ordering.Ann, "ROW_NUMBER does not support ANN/topK ordering.");
+
+            checkTrue(topLevel.size() == 1
+                      && topLevel.get(0).expression.getColumn().equals(windowOrdering.expression.getColumn())
+                      && topLevel.get(0).direction == windowOrdering.direction,
+                      "A top-level ORDER BY with ROW_NUMBER must match the window ORDER BY exactly " +
+                      "(the same single column and direction).");
+            return topLevel;
+        }
+
+        /**
+         * Rejects every window shape the arena cannot rank.  ROW_NUMBER needs a single buffered
+         * partition ordered by a non-clustering, arena-encodable column, with no feature that changes
+         * the row set or the buffered shape.  Each rejection throws with its own message.  The
+         * aggregate rejection lives at the call site, where the aggregation spec is known.
+         */
+        private void validateWindow(StatementRestrictions restrictions,
+                                    Map<ColumnMetadata, Ordering> orderingColumns,
+                                    WindowSpec windowSpec)
+        {
+            // Single-partition equality only.  A key range (including no WHERE), an IN on the
+            // partition key, a secondary-index scan, or an ANN/topK query cannot define one buffered
+            // partition to rank over.
+            checkFalse(restrictions.isKeyRange(),
+                       "ROW_NUMBER requires a single partition restricted by an equality on the full partition key.");
+            checkFalse(restrictions.keyIsInRelation(),
+                       "ROW_NUMBER does not support IN on the partition key; restrict a single partition with equality.");
+            checkFalse(restrictions.usesSecondaryIndexing(),
+                       "ROW_NUMBER does not support secondary index queries; restrict a single partition with equality.");
+            checkFalse(restrictions.isTopK(),
+                       "ROW_NUMBER does not support ANN/topK ordering.");
+
+            // DISTINCT, GROUP BY, PER PARTITION LIMIT, and JSON each change the row set or the shape
+            // the arena buffers, so the rank would be computed over the wrong rows.
+            checkFalse(parameters.isDistinct, "ROW_NUMBER does not support DISTINCT.");
+            checkTrue(parameters.groups.isEmpty(), "ROW_NUMBER does not support GROUP BY.");
+            checkNull(perPartitionLimit, "ROW_NUMBER does not support PER PARTITION LIMIT.");
+            checkFalse(parameters.isJson, "ROW_NUMBER does not support SELECT JSON.");
+
+            // The window ORDER BY must be a non-clustering, non-key, arena-encodable column, matching
+            // the phase-5 arena's non-clustering ORDER BY constraint.
+            ColumnMetadata col = windowSpec.orderingColumn();
+            checkFalse(col.isClusteringColumn() || col.isPartitionKey(),
+                       "ROW_NUMBER OVER (ORDER BY ...) must order by a non-clustering, non-key column.");
+            checkTrue(org.apache.cassandra.cql3.selection.arena.ArenaOrdering.canEncode(orderingColumns),
+                      "ROW_NUMBER OVER (ORDER BY ...) must order by a column the arena can sort.");
         }
 
         /**

@@ -223,6 +223,8 @@ public enum CassandraRelevantProperties
     CQL_CASE_EXPRESSION_ENABLED("cassandra.cql.case_expression.enabled", "false"),
     /** Feature flag for uncorrelated IN-subqueries on the partition key. OFF by default. Research POC. */
     CQL_SUBQUERY_ENABLED("cassandra.cql.subquery.enabled", "false"),
+    /** Feature flag for the ROW_NUMBER window function in the SELECT projection list. OFF by default. Research POC. */
+    CQL_WINDOW_FUNCTION_ENABLED("cassandra.cql.window_function.enabled", "false"),
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
     /** Experimental. */
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),

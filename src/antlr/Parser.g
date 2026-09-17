@@ -463,10 +463,30 @@ selectionTupleOrNestedSelector returns [Selectable.Raw s]
  * sub-element selection for UDT.
  */
 simpleUnaliasedSelector returns [Selectable.Raw s]
-    : e=caseExpression                           { $s = $e.s; }
+    : w=windowFunction                           { $s = $w.s; }
+    | e=caseExpression                           { $s = $e.s; }
     | c=sident                                   { $s = $c.id; }
     | l=selectionLiteral                         { $s = new Selectable.WithTerm.Raw($l.raw); }
     | f=selectionFunction                        { $s = $f.s; }
+    ;
+
+/*
+ * A window function.  Only ROW_NUMBER() with a single ORDER BY column is supported:
+ *   ROW_NUMBER() OVER (ORDER BY col [ASC|DESC])
+ * The ORDER BY column reuses the same single-column ordering the top-level ORDER BY uses.
+ * The grammar is unconditional; the feature flag is enforced at prepare time.  ANTLR 4
+ * adaptive prediction keeps this distinct from a generic function call named row_number,
+ * which the two productions share up to the OVER keyword.
+ */
+windowFunction returns [Selectable.Raw s]
+    @init {
+        Ordering.Direction direction = Ordering.Direction.ASC;
+    }
+    : K_ROW_NUMBER '(' ')' K_OVER '(' K_ORDER K_BY c=cident (K_ASC | K_DESC { direction = Ordering.Direction.DESC; })? ')'
+    {
+        Ordering.Raw ordering = new Ordering.Raw(new Ordering.Raw.SingleColumn($c.id), direction);
+        $s = new Selectable.WindowFunction.Raw(ordering);
+    }
     ;
 
 /*
@@ -2507,6 +2527,8 @@ basic_unreserved_keyword returns [String str]
         | K_CASE
         | K_WHEN
         | K_ELSE
+        | K_OVER
+        | K_ROW_NUMBER
         | K_TRANSACTION
         | K_COMMENT
         | K_COMMENTS

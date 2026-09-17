@@ -34,6 +34,7 @@ import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.FieldIdentifier;
 import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.cql3.Ordering;
 import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.cql3.functions.AggregateFcts;
 import org.apache.cassandra.cql3.functions.CastFcts;
@@ -816,6 +817,89 @@ public interface Selectable extends AssignmentTestable
                 {
                     return new Raw(operand, whens, elseResult);
                 }
+            }
+        }
+    }
+
+    /**
+     * The ROW_NUMBER window function in the selection clause.
+     * <p>Only the shape {@code ROW_NUMBER() OVER (ORDER BY col [ASC|DESC])} is supported.  The
+     * rank is not a per-row value; it is the post-sort position of the row within the single,
+     * fully buffered partition.  The arena operator computes it after it sorts the partition, so
+     * this selectable never projects a value of its own.  SelectStatement.RawStatement.prepare
+     * detects it at prepare time, lifts its ORDER BY into the arena sort key, and appends the rank
+     * as a trailing {@code bigint} column.  Every cross-cutting rejection (single-partition,
+     * DISTINCT, aggregate, and so on) also lives in RawStatement.prepare, which can see the
+     * restrictions and limits this selectable cannot.</p>
+     */
+    public static class WindowFunction implements Selectable
+    {
+        // The window's ORDER BY, still raw.  RawStatement binds it against the table so it can
+        // reuse the same single-column ordering the top-level ORDER BY uses.
+        private final Ordering.Raw ordering;
+
+        public WindowFunction(Ordering.Raw ordering)
+        {
+            this.ordering = ordering;
+        }
+
+        public Ordering.Raw ordering()
+        {
+            return ordering;
+        }
+
+        @Override
+        public Selector.Factory newSelectorFactory(TableMetadata table, AbstractType<?> expectedType, List<ColumnMetadata> defs, VariableSpecifications boundNames)
+        {
+            // A top-level ROW_NUMBER is stripped from the projection by RawStatement.prepare and the
+            // arena appends the rank, so its factory is never built.  Reaching here means the window
+            // function is nested inside another expression (arithmetic, a cast, a field access, a
+            // function argument, and so on).  The selection is built during prepare, so this recurses
+            // the whole prepared selectable tree; a window at any depth below the top level lands
+            // here.  Reject it at prepare with a clear message rather than let the client see an
+            // internal server error.
+            throw invalidRequest("ROW_NUMBER() cannot be used inside another expression; it must be a top-level SELECT item.");
+        }
+
+        @Override
+        public AbstractType<?> getExactTypeIfKnown(String keyspace)
+        {
+            return LongType.instance;
+        }
+
+        @Override
+        public boolean selectColumns(Predicate<ColumnMetadata> predicate)
+        {
+            // The ordering column is added to the result set separately (like a post-query ORDER BY
+            // column), so the window function itself selects no column here.
+            return false;
+        }
+
+        @Override
+        public String toString()
+        {
+            return "row_number() OVER (ORDER BY ...)";
+        }
+
+        public static class Raw implements Selectable.Raw
+        {
+            private final Ordering.Raw ordering;
+
+            public Raw(Ordering.Raw ordering)
+            {
+                this.ordering = ordering;
+            }
+
+            @Override
+            public Selectable prepare(TableMetadata table)
+            {
+                // Only the flag check lives here.  This selectable cannot see the restrictions,
+                // DISTINCT, GROUP BY, HAVING, ORDER BY, or LIMIT, so every other rejection is done in
+                // SelectStatement.RawStatement.prepare where those are visible.
+                if (!CassandraRelevantProperties.CQL_WINDOW_FUNCTION_ENABLED.getBoolean())
+                    throw invalidRequest("Window functions are not enabled. Set -Dcassandra.cql.window_function.enabled=true to use them.");
+
+                return new WindowFunction(ordering);
             }
         }
     }

@@ -66,8 +66,10 @@ public final class ArenaOperatorPlan
                                          TableMetadata table,
                                          ArenaOrdering arenaOrdering)
     {
-        // Check feature flag
-        if (!CassandraRelevantProperties.CASSANDRA_CQL_ARENA_AGGREGATION_ENABLED.getBoolean())
+        // Check feature flag.  A window query (ROW_NUMBER) always routes to the arena, because the
+        // arena is the only path that computes the rank; it engages regardless of the arena
+        // aggregation flag.  Prepare has already rejected every window shape the arena cannot own.
+        if (!CassandraRelevantProperties.CASSANDRA_CQL_ARENA_AGGREGATION_ENABLED.getBoolean() && !stmt.hasWindow())
         {
             return fallback();
         }

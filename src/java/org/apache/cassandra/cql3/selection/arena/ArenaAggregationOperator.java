@@ -85,7 +85,8 @@ public final class ArenaAggregationOperator implements AutoCloseable
                                     int userLimit,
                                     ResultSet.ResultMetadata resultMetadata,
                                     TableMetadata table,
-                                    long nowInSec) throws InvalidRequestException
+                                    long nowInSec,
+                                    boolean appendWindowRank) throws InvalidRequestException
     {
         int columnCount = selection.getResultMetadata().names.size();
 
@@ -93,7 +94,7 @@ public final class ArenaAggregationOperator implements AutoCloseable
         {
             operator.bufferPartition(partition, selection, options, table, nowInSec);
             operator.sortRows();
-            ResultSet result = operator.materialize(resultMetadata, userLimit);
+            ResultSet result = operator.materialize(resultMetadata, userLimit, appendWindowRank);
             if (logger.isDebugEnabled())
                 logger.debug("Arena aggregation path taken: {} rows buffered, {} bytes leased, key columns {}",
                              operator.buffer.getRowCount(), operator.lease.capacity(), plan.getKeyColumnIndices());
@@ -209,6 +210,10 @@ public final class ArenaAggregationOperator implements AutoCloseable
      */
     private void sortRows()
     {
+        // Introsort is not stable, so rows that compare equal on the sort key keep an arena-defined
+        // order.  ROW_NUMBER therefore assigns distinct, contiguous ranks over a tie group, but the
+        // order within the group is not specified.  This matches SQL ROW_NUMBER, whose result is
+        // documented as nondeterministic when the ORDER BY is not unique.
         if (!plan.needsSort())
             return;
 
@@ -333,15 +338,38 @@ public final class ArenaAggregationOperator implements AutoCloseable
         }
     }
 
-    private ResultSet materialize(ResultSet.ResultMetadata resultMetadata, int userLimit)
+    private ResultSet materialize(ResultSet.ResultMetadata resultMetadata, int userLimit, boolean appendWindowRank)
     {
         int count = buffer.getRowCount();
         int limit = (userLimit > 0 && userLimit < count) ? userLimit : count;
 
         List<List<byte[]>> rows = new ArrayList<>(limit);
-        for (int i = 0; i < limit; i++)
+
+        if (appendWindowRank)
         {
-            rows.add(buffer.extractRow(i));
+            // A ROW_NUMBER query.  The rank is the post-sort position of the row within the full
+            // sorted buffer, computed before the LIMIT trims the result.  The output row is the
+            // requested columns followed by the rank.  "requested" is the augmented metadata's
+            // column count minus the trailing rank column.  The buffer may hold more values than
+            // that (columns added only to drive the sort, CASSANDRA-4911), so copy just the first
+            // "requested" values, then append the rank as a bigint.
+            int requested = resultMetadata.getColumnCount() - 1;
+            for (int i = 0; i < limit; i++)
+            {
+                List<byte[]> full = buffer.extractRow(i);
+                List<byte[]> out = new ArrayList<>(requested + 1);
+                for (int j = 0; j < requested; j++)
+                    out.add(full.get(j));
+                out.add(ByteBufferUtil.getArrayUnsafeNullable(ByteBufferUtil.bytes((long) (i + 1))));
+                rows.add(out);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < limit; i++)
+            {
+                rows.add(buffer.extractRow(i));
+            }
         }
 
         return new ResultSet(resultMetadata, rows);
