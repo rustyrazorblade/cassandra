@@ -513,7 +513,7 @@ public interface ClusteringPrefix<V> extends IMeasurableMemory, Clusterable<V>
                 return ClusteringBoundOrBoundary.serializer.serializedSize((ClusteringBoundOrBoundary<?>)clustering, version, types);
         }
 
-        <V> void serializeValuesWithoutSize(ClusteringPrefix<V> clustering, DataOutputPlus out, int version, List<AbstractType<?>> types) throws IOException
+        public <V> void serializeValuesWithoutSize(ClusteringPrefix<V> clustering, DataOutputPlus out, int version, List<AbstractType<?>> types) throws IOException
         {
             int offset = 0;
             int clusteringSize = clustering.size();

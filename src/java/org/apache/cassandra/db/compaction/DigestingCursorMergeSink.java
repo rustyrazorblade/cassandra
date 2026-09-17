@@ -371,22 +371,7 @@ public class DigestingCursorMergeSink implements CursorMergeSink
     {
         cellValueScratch.clear();
         int written = cursor.copyCellValue(cellValueScratch, copyColumnValueBuffer);
-        byte[] data = cellValueScratch.getData();
-        int length = cellValueScratch.getLength();
-        if (pendingCellColumn.type.valueLengthIfFixed() >= 0)
-        {
-            pendingCellValue = ByteBuffer.wrap(Arrays.copyOf(data, length));
-        }
-        else
-        {
-            // Variable-length type: copyCellContents wrote [unsigned-vint length][value bytes] -
-            // strip the vint prefix, same as MaterializingCursorMergeSink. The length==0 guard
-            // mirrors the DataOutputBuffer overload below (this path is only reached when the cell
-            // flags claim a value, so the vint prefix is always present, but keep the two overloads
-            // symmetric to avoid a future copy-paste regression).
-            int prefixLength = length == 0 ? 0 : VIntCoding.computeUnsignedVIntSize(ByteBuffer.wrap(data, 0, length), 0);
-            pendingCellValue = ByteBuffer.wrap(Arrays.copyOfRange(data, prefixLength, length));
-        }
+        setPendingCellValueFromBytes(cellValueScratch.getData(), cellValueScratch.getLength());
         return written;
     }
 
@@ -395,8 +380,16 @@ public class DigestingCursorMergeSink implements CursorMergeSink
     {
         // rawValueLength feeds the writer's collection-size guardrail only; a digest strips the
         // leading vint itself and measures nothing.
-        byte[] data = tempCellBuffer.getData();
-        int length = tempCellBuffer.getLength();
+        setPendingCellValueFromBytes(tempCellBuffer.getData(), tempCellBuffer.getLength());
+    }
+
+    /**
+     * Sets the pending cell value from the raw bytes a caller wrote it into.  For a
+     * variable-length type it strips the {@code [unsigned-vint length][value bytes]} framing.  The
+     * {@code length == 0} guard is defensive; callers only reach here when a value is present.
+     */
+    private void setPendingCellValueFromBytes(byte[] data, int length)
+    {
         if (pendingCellColumn.type.valueLengthIfFixed() >= 0)
         {
             pendingCellValue = ByteBuffer.wrap(Arrays.copyOf(data, length));
