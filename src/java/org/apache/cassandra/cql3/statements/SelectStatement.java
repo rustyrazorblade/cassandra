@@ -65,6 +65,7 @@ import org.apache.cassandra.cql3.WhereClause;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.restrictions.SingleRestriction;
 import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
+import org.apache.cassandra.cql3.restrictions.SubqueryTerms;
 import org.apache.cassandra.cql3.selection.RawSelector;
 import org.apache.cassandra.cql3.selection.ResultSetBuilder;
 import org.apache.cassandra.cql3.selection.Selectable;
@@ -331,6 +332,11 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
     public void authorize(ClientState state) throws InvalidRequestException, UnauthorizedException
     {
+        // AUTH: authorize every inner subquery statement too.  execute() does not call authorize(), so
+        // without this the inner table's SELECT permission would be bypassed (privilege escalation).
+        for (SelectStatement inner : getSubquerySelectStatements())
+            inner.authorize(state);
+
         if (table.isView())
         {
             TableMetadataRef baseTable = View.findBaseTable(keyspace(), table());
@@ -385,6 +391,13 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             Guardrails.readConsistencyLevels.guard(EnumSet.of(cl), state.getClientState());
 
         long nowInSec = options.getNowInSeconds(state);
+
+        // Resolve any uncorrelated IN-subqueries once, at the coordinator, before building the outer
+        // read.  The resolved partition-key value lists ride on the returned options.  No-op when the
+        // query uses no subquery.  Research POC (CQL_SUBQUERY_ENABLED).
+        if (hasSubqueries())
+            options = resolveSubqueries(options, state.getClientState(), nowInSec, requestTime, false);
+
         int userLimit = getLimit(options);
         int userPerPartitionLimit = getPerPartitionLimit(options);
         int pageSize = options.getPageSize();
@@ -434,7 +447,12 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             query.trackWarnings();
         ResultMessage.Rows rows;
 
-        if (aggregationSpec == null && (pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
+        // C1/C2: a query with subqueries must run in a single execute() call so the inner query
+        // resolves exactly once.  For a non-aggregate query, force the single-page branch regardless of
+        // the client page size, so the driver never round-trips for more pages (which would re-resolve
+        // the inner).  An aggregate query already returns a single client result through the
+        // aggregation pager in one execute() call, so it stays on the else branch.
+        if (aggregationSpec == null && (hasSubqueries() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
         {
             rows = execute(query, options, state.getClientState(), selectors, nowInSec, userLimit, null, requestTime, unmask);
         }
@@ -467,6 +485,44 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
     public boolean hasAggregation()
     {
         return aggregationSpecFactory != null;
+    }
+
+    /**
+     * @return {@code true} if this statement has one or more uncorrelated IN-subqueries in its WHERE
+     * clause.  When {@code false}, the subquery code paths are never entered.  Research POC.
+     */
+    public boolean hasSubqueries()
+    {
+        return !restrictions.getSubqueries().isEmpty();
+    }
+
+    /**
+     * Resolves every uncorrelated IN-subquery once, at the coordinator, and returns query options that
+     * carry the resolved partition-key value lists keyed by subquery slot id.  Each inner query inherits
+     * the outer consistency level and runs fully materialized and unpaged.  Call this before building the
+     * outer {@code ReadQuery}.  See {@link SubqueryTerms}.
+     */
+    private QueryOptions resolveSubqueries(QueryOptions options, ClientState state, long nowInSec, Dispatcher.RequestTime requestTime, boolean internal)
+    {
+        List<SubqueryTerms> subqueries = restrictions.getSubqueries();
+        Map<Long, List<ByteBuffer>> resolved = new LinkedHashMap<>(subqueries.size());
+        ConsistencyLevel cl = options.getConsistency();
+        for (SubqueryTerms subquery : subqueries)
+            resolved.put(subquery.slotId(), subquery.resolve(state, cl, nowInSec, requestTime, internal));
+        return QueryOptions.withSubqueryResults(options, resolved);
+    }
+
+    /**
+     * @return the prepared inner SELECT statements of this statement's IN-subqueries, in order.  Used
+     * for authorization and prepared-statement cache invalidation.  Empty when there is no subquery.
+     */
+    public List<SelectStatement> getSubquerySelectStatements()
+    {
+        List<SubqueryTerms> subqueries = restrictions.getSubqueries();
+        List<SelectStatement> statements = new ArrayList<>(subqueries.size());
+        for (SubqueryTerms subquery : subqueries)
+            statements.add(subquery.innerStatement());
+        return statements;
     }
 
     public ReadQuery getQuery(QueryOptions options, long nowInSec) throws RequestValidationException
@@ -689,6 +745,11 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                               long nowInSec,
                                               Dispatcher.RequestTime requestTime)
     {
+        // Resolve any uncorrelated IN-subqueries once before building the read.  No-op without a
+        // subquery.  Research POC (CQL_SUBQUERY_ENABLED).
+        if (hasSubqueries())
+            options = resolveSubqueries(options, state.getClientState(), nowInSec, requestTime, true);
+
         int userLimit = getLimit(options);
         int userPerPartitionLimit = getPerPartitionLimit(options);
         int pageSize = options.getPageSize();
@@ -708,7 +769,12 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
         try (ReadExecutionController executionController = query.executionController())
         {
-            if (aggregationSpec == null && (pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
+            // C1/C2: a query with subqueries must run in a single execute() call so the inner query
+            // resolves exactly once.  For a non-aggregate query, force the single-page branch regardless of
+            // the client page size, so the driver never round-trips for more pages (which would re-resolve
+            // the inner).  An aggregate query already returns a single client result through the
+            // aggregation pager in one execute() call, so it stays on the else branch.
+            if (aggregationSpec == null && (hasSubqueries() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
             {
                 try (PartitionIterator data = query.executeInternal(executionController))
                 {

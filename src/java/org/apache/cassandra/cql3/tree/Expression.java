@@ -526,19 +526,26 @@ public abstract class Expression implements AstNode
         }
     }
 
-    // Extension points for future phases
-    public static abstract class SubqueryExpr extends Expression
+    /**
+     * An uncorrelated subquery used as the value list of an IN predicate
+     * ({@code pk IN (SELECT one_col FROM t2 [WHERE ...])}).  Shadow AST node for the research POC;
+     * it is held as the single element of an {@link InExpr}'s value list.  The inner query is a full
+     * {@link SelectAst}.
+     */
+    public static final class SubqueryExpr extends Expression
     {
-        protected SubqueryExpr(SourceSpan span)
+        public final SelectAst inner;
+
+        public SubqueryExpr(SourceSpan span, SelectAst inner)
         {
             super(span);
-            throw new UnsupportedOperationException("Subqueries not yet implemented");
+            this.inner = inner;
         }
 
         @Override
         public <R> R accept(ExpressionVisitor<R> visitor)
         {
-            throw new UnsupportedOperationException("Subqueries not yet implemented");
+            return visitor.visitSubqueryExpr(this);
         }
     }
 

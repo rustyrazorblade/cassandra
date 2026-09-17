@@ -2235,6 +2235,14 @@ relation[WhereClause.Builder clauses]
            | K_BETWEEN betweenValues=singleColumnBetweenValues { $clauses.add(Relation.singleColumn($name.id, Operator.BETWEEN, $betweenValues.raws)); }
            | K_LIKE t=term { $clauses.add(Relation.singleColumn($name.id, Operator.LIKE, $t.raw)); }
            | K_IS K_NOT K_NULL { $clauses.add(Relation.singleColumn($name.id, Operator.IS_NOT, Constants.NULL_LITERAL)); }
+           | K_IN '(' { Token subqueryMarker = statementBeginMarker; } inSub=selectStatement ')'
+                 {
+                     // The nested selectStatement runs stmtBegins()/stmtSrc(), which clobber the shared
+                     // statementBeginMarker.  Restore the outer statement's marker so its source tracking
+                     // stays correct.  Research POC (uncorrelated IN-subquery on the partition key).
+                     statementBeginMarker = subqueryMarker;
+                     $clauses.add(Relation.singleColumnSubquery($name.id, $inSub.expr));
+                 }
            | rtInOperator=inOperator inValue=singleColumnInValues { $clauses.add(Relation.singleColumn($name.id, $rtInOperator.o, $inValue.raws)); }
            | rtContainsOperator=containsOperator t=term { $clauses.add(Relation.singleColumn($name.id, $rtContainsOperator.o, $t.raw)); }
            )

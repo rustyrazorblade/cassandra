@@ -45,6 +45,7 @@ import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.cql3.WhereClause;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.statements.StatementType;
+import org.apache.cassandra.cql3.terms.Terms;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.PartitionPosition;
@@ -130,6 +131,12 @@ public final class StatementRestrictions
     private final IndexRestrictions filterRestrictions = new IndexRestrictions();
 
     /**
+     * Uncorrelated IN-subqueries found in the WHERE clause.  Each is resolved once at the coordinator
+     * before the outer read runs.  Empty for every query that does not use a subquery.  Research POC.
+     */
+    private final List<SubqueryTerms> subqueries = new ArrayList<>();
+
+    /**
      * <code>true</code> if the secondary index need to be queried, <code>false</code> otherwise
      */
     private boolean usesSecondaryIndexing;
@@ -166,6 +173,29 @@ public final class StatementRestrictions
         this.clusteringColumnsRestrictions = new ClusteringColumnRestrictions(table, allowFilteringOfPrimaryKeys);
         this.nonPrimaryKeyRestrictions = RestrictionSet.empty();
         this.notNullColumns = new HashSet<>();
+    }
+
+    /**
+     * Records an IN-subquery's resolved-value carrier so the statement can resolve it before the read.
+     * A no-op for every relation that is not an IN-subquery.
+     */
+    private void recordIfSubquery(Relation relation, Restriction restriction)
+    {
+        if (relation.isSubquery() && restriction instanceof SimpleRestriction)
+        {
+            Terms terms = ((SimpleRestriction) restriction).terms();
+            if (terms instanceof SubqueryTerms)
+                subqueries.add((SubqueryTerms) terms);
+        }
+    }
+
+    /**
+     * @return the uncorrelated IN-subqueries in this statement's WHERE clause, in order.  Empty when
+     * the query uses no subquery.
+     */
+    public List<SubqueryTerms> getSubqueries()
+    {
+        return subqueries;
     }
 
     public StatementRestrictions(ClientState state,
@@ -229,11 +259,11 @@ public final class StatementRestrictions
                 if (!forView)
                     throw new InvalidRequestException("Unsupported restriction: " + relation);
 
-                this.notNullColumns.addAll(relation.toRestriction(table, boundNames, owner, allowFiltering).columns());
+                this.notNullColumns.addAll(relation.toRestriction(state, table, boundNames, owner, allowFiltering).columns());
             }
             else if (operator.requiresIndexing())
             {
-                Restriction restriction = relation.toRestriction(table, boundNames, owner, allowFiltering);
+                Restriction restriction = relation.toRestriction(state, table, boundNames, owner, allowFiltering);
 
                 if (!type.allowUseOfSecondaryIndices() || !restriction.hasSupportingIndex(indexRegistry, indexHints))
                     throw invalidRequest("%s restriction is only supported on properly " +
@@ -243,7 +273,9 @@ public final class StatementRestrictions
             }
             else
             {
-                addRestriction(relation.toRestriction(table, boundNames, owner, allowFiltering), indexRegistry, indexHints);
+                SingleRestriction restriction = relation.toRestriction(state, table, boundNames, owner, allowFiltering);
+                recordIfSubquery(relation, restriction);
+                addRestriction(restriction, indexRegistry, indexHints);
             }
         }
 

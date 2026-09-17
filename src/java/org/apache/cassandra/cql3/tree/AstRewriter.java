@@ -252,4 +252,13 @@ public abstract class AstRewriter implements ExpressionVisitor<Expression>
         Expression newElse = node.elseResult == null ? null : node.elseResult.accept(this);
         return new Expression.Case(node.getSourceSpan(), newOperand, newBranches, newElse);
     }
+
+    @Override
+    public Expression visitSubqueryExpr(Expression.SubqueryExpr node)
+    {
+        // The subquery's children form a full inner SelectAst, which an expression rewriter does not
+        // own.  Return the node unchanged so the inner statement is preserved intact.  Shadow AST node
+        // for the research POC.
+        return node;
+    }
 }

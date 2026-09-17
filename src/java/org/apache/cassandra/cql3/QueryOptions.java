@@ -136,6 +136,18 @@ public abstract class QueryOptions implements RealTimeFunctionContext
         return new OptionsWithPageSize(options, pageSize);
     }
 
+    /**
+     * Decorates the options with the resolved results of IN-subqueries for a single request.
+     *
+     * <p>The subquery results are keyed by a per-subquery slot id.  This state MUST ride on the
+     * per-request options, never on the cached prepared statement or restriction, because prepared
+     * statements are shared across threads.  Research POC (CQL_SUBQUERY_ENABLED).</p>
+     */
+    public static QueryOptions withSubqueryResults(QueryOptions options, Map<Long, List<ByteBuffer>> results)
+    {
+        return new OptionsWithSubqueryResults(options, results);
+    }
+
     public abstract ConsistencyLevel getConsistency();
     public abstract List<ByteBuffer> getValues();
 
@@ -385,6 +397,17 @@ public abstract class QueryOptions implements RealTimeFunctionContext
         return this;
     }
 
+    /**
+     * Returns the resolved value list of the IN-subquery bound to the given slot id.
+     *
+     * <p>Populated only when the request carries subqueries; see {@link #withSubqueryResults}.
+     * Research POC (CQL_SUBQUERY_ENABLED).</p>
+     */
+    public List<ByteBuffer> getSubqueryResult(long slotId)
+    {
+        throw new IllegalStateException("No subquery results are attached to these query options");
+    }
+
     static class DefaultQueryOptions extends QueryOptions
     {
         private final ConsistencyLevel consistency;
@@ -538,6 +561,12 @@ public abstract class QueryOptions implements RealTimeFunctionContext
             wrapped.prepare(specs);
             return this;
         }
+
+        @Override
+        public List<ByteBuffer> getSubqueryResult(long slotId)
+        {
+            return wrapped.getSubqueryResult(slotId);
+        }
     }
 
     static class OptionsWithConsistencyLevel extends QueryOptionsWrapper
@@ -571,6 +600,30 @@ public abstract class QueryOptions implements RealTimeFunctionContext
         public int getPageSize()
         {
             return pageSize;
+        }
+    }
+
+    /**
+     * <code>QueryOptions</code> decorator that carries the resolved results of IN-subqueries for a
+     * single request, keyed by slot id.  Research POC (CQL_SUBQUERY_ENABLED).
+     */
+    static class OptionsWithSubqueryResults extends QueryOptionsWrapper
+    {
+        private final Map<Long, List<ByteBuffer>> results;
+
+        OptionsWithSubqueryResults(QueryOptions wrapped, Map<Long, List<ByteBuffer>> results)
+        {
+            super(wrapped);
+            this.results = results;
+        }
+
+        @Override
+        public List<ByteBuffer> getSubqueryResult(long slotId)
+        {
+            List<ByteBuffer> resolved = results.get(slotId);
+            if (resolved == null)
+                throw new IllegalStateException("Subquery slot " + slotId + " was not resolved before execution");
+            return resolved;
         }
     }
 

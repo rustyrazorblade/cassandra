@@ -18,6 +18,7 @@
 package org.apache.cassandra.cql3.tree;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -452,6 +453,16 @@ public final class AstBuilder
             // The corpus tests use explicit term lists
 
             return new Expression.InExpr(span(ctx), left, values);
+        }
+
+        // IN-subquery: cident IN ( SELECT ... ).  Shadow AST node for the research POC; the inner
+        // query becomes a nested SelectAst held as the single value of the InExpr.
+        if (ctx.cident() != null && ctx.selectStatement() != null)
+        {
+            Expression left = new Expression.ColumnRef(span(ctx.cident()), extractQualifiedName(ctx.cident()));
+            SelectAst innerAst = buildSelectAst(ctx.selectStatement());
+            Expression subquery = new Expression.SubqueryExpr(span(ctx.selectStatement()), innerAst);
+            return new Expression.InExpr(span(ctx), left, Collections.singletonList(subquery));
         }
 
         throw new UnsupportedAstException("Unsupported relation: " + ctx.getText());

@@ -1110,6 +1110,15 @@ public class QueryProcessor implements QueryHandler
                 SelectStatement selectStatement = ((SelectStatement) statement);
                 statementKsName = selectStatement.keyspace();
                 statementCfName = selectStatement.table();
+
+                // H4: a SELECT with an IN-subquery also depends on the inner table.  Invalidate the
+                // cached outer statement when the inner table changes, so ALTER/DROP of the inner
+                // table is honored.  Research POC (CQL_SUBQUERY_ENABLED).
+                for (SelectStatement inner : selectStatement.getSubquerySelectStatements())
+                {
+                    if (shouldInvalidate(ksName, cfName, inner))
+                        return true;
+                }
             }
             else if (statement instanceof CQLStatement.CompositeCQLStatement)
             {

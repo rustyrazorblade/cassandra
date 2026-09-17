@@ -120,6 +120,15 @@ public final class SimpleRestriction implements SingleRestriction
         return operator;
     }
 
+    /**
+     * @return the value terms of this restriction.  Package-private, used only to discover an
+     * IN-subquery's {@link SubqueryTerms} so the statement can resolve it before execution.
+     */
+    Terms terms()
+    {
+        return values;
+    }
+
     @Override
     public boolean isANN()
     {

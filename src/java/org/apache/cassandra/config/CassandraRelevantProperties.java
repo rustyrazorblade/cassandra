@@ -221,6 +221,8 @@ public enum CassandraRelevantProperties
     CQL_AST_PARSER_ENABLED("cassandra.cql.ast_parser.enabled", "false"),
     /** Feature flag for CASE expressions in the SELECT projection list. OFF by default. Research POC. */
     CQL_CASE_EXPRESSION_ENABLED("cassandra.cql.case_expression.enabled", "false"),
+    /** Feature flag for uncorrelated IN-subqueries on the partition key. OFF by default. Research POC. */
+    CQL_SUBQUERY_ENABLED("cassandra.cql.subquery.enabled", "false"),
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
     /** Experimental. */
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),
