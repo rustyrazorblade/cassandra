@@ -313,6 +313,9 @@ public final class CreateTableStatement extends AlterSchemaStatement
             if (type.referencesDuration())
                 throw ire("duration type is not supported for PRIMARY KEY column '%s'", column);
 
+            if (type instanceof org.apache.cassandra.db.marshal.JsonbType)
+                throw ire("jsonb type is not supported for PRIMARY KEY column '%s'", column);
+
             if (staticColumns.contains(column))
                 throw ire("Static column '%s' cannot be part of the PRIMARY KEY", column);
         });

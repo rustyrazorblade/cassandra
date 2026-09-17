@@ -1,0 +1,13 @@
+[package]
+name = "cassandra_jsonb"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jsonb = "=0.4.1"
+
+[profile.release]
+panic = "unwind"

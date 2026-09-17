@@ -851,7 +851,32 @@
         </javac>
     </target>
 
-    <target depends="init,gen-cql3-grammar,generate-cql-html,generate-jflex-java,gen-java-copies"
+    <target name="build-jsonb-native" description="Build the native JSONB library">
+        <property name="cargo.bin" value="${user.home}/.cargo/bin/cargo"/>
+        <available file="${cargo.bin}" property="cargo.present"/>
+        <condition property="cargo.absent">
+            <not>
+                <isset property="cargo.present"/>
+            </not>
+        </condition>
+        <antcall target="-build-jsonb-native-if-present"/>
+        <antcall target="-warn-jsonb-native-skipped"/>
+    </target>
+
+    <target name="-build-jsonb-native-if-present" if="cargo.present">
+        <exec executable="${cargo.bin}" dir="${basedir}/native/jsonb" failonerror="true">
+            <arg value="build"/>
+            <arg value="--release"/>
+        </exec>
+        <echo message="JSONB native library built successfully"/>
+    </target>
+
+    <target name="-warn-jsonb-native-skipped" if="cargo.absent">
+        <echo message="WARNING: cargo not found at ${cargo.bin} - skipping JSONB native library build"/>
+        <echo message="JSONB operations will fail at runtime unless the library is built separately"/>
+    </target>
+
+    <target depends="init,gen-cql3-grammar,generate-cql-html,generate-jflex-java,gen-java-copies,build-jsonb-native"
             name="build-project">
         <echo message="${ant.project.name}: ${ant.file}"/>
         <!-- Order matters! -->

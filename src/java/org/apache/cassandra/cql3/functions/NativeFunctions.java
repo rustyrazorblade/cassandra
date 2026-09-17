@@ -50,6 +50,7 @@ public class NativeFunctions
             VectorFcts.addFunctionsTo(this);
             ClusterMetadataFcts.addFunctionsTo(this);
             FormatFcts.addFunctionsTo(this);
+            JsonbFcts.addFunctionsTo(this);
         }
     };
 

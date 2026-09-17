@@ -113,6 +113,14 @@ public enum CassandraRelevantProperties
     CASSANDRA_JMX_REMOTE_LOGIN_CONFIG("cassandra.jmx.remote.login.config"),
     /** Cassandra jmx remote and local port */
     CASSANDRA_JMX_REMOTE_PORT("cassandra.jmx.remote.port"),
+    /** Path to the native JSONB library */
+    CASSANDRA_JSONB_LIBRARY("cassandra.jsonb.library"),
+    /** Maximum input byte length for JSONB operations (default 10MB) */
+    CASSANDRA_JSONB_MAX_INPUT_BYTES("cassandra.jsonb.max_input_bytes", "10485760"),
+    /** Maximum key list length for jsonb_exists_any/all (default 1000) */
+    CASSANDRA_JSONB_MAX_KEY_LIST_LENGTH("cassandra.jsonb.max_key_list_length", "1000"),
+    /** Maximum nesting depth for JSONB documents (default 1000) */
+    CASSANDRA_JSONB_MAX_NESTING_DEPTH("cassandra.jsonb.max_nesting_depth", "1000"),
     CASSANDRA_MAX_HINT_TTL("cassandra.maxHintTTL", convertToString(Integer.MAX_VALUE)),
     CASSANDRA_MINIMUM_REPLICATION_FACTOR("cassandra.minimum_replication_factor"),
     CASSANDRA_NETTY_USE_HEAP_ALLOCATOR("cassandra.netty_use_heap_allocator"),

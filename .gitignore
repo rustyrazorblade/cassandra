@@ -98,3 +98,6 @@ cassandra-builds/
 cassandra-dtest/
 
 conf/triggers/trigger-example.jar
+
+# Rust cdylib build output for the JSONB native type (POC)
+native/jsonb/target/
