@@ -24,6 +24,7 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.cql3.restrictions.SimpleRestriction;
 import org.apache.cassandra.cql3.restrictions.SingleRestriction;
+import org.apache.cassandra.cql3.selection.Selectable;
 import org.apache.cassandra.cql3.terms.Term;
 import org.apache.cassandra.cql3.terms.Terms;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -61,11 +62,27 @@ public final class Relation
      */
     private final Terms.Raw rawTerms;
 
+    /**
+     * The raw selectable on the left-hand side of a HAVING predicate (e.g. {@code SUM(v)}), or {@code null}
+     * for a column-based relation.  HAVING predicates on aggregate functions are parsed and carried here,
+     * but they are gated at prepare time; {@link #toRestriction} does not support them yet.
+     */
+    private final Selectable.Raw rawSelectable;
+
     private Relation(ColumnsExpression.Raw rawExpressions, Operator operator, Terms.Raw rawTerms)
     {
         this.rawExpressions = rawExpressions;
         this.operator = operator;
         this.rawTerms = rawTerms;
+        this.rawSelectable = null;
+    }
+
+    private Relation(Selectable.Raw rawSelectable, Operator operator, Terms.Raw rawTerms)
+    {
+        this.rawExpressions = null;
+        this.operator = operator;
+        this.rawTerms = rawTerms;
+        this.rawSelectable = rawSelectable;
     }
 
     public Operator operator()
@@ -99,6 +116,23 @@ public final class Relation
     {
         assert operator.kind() != Operator.Kind.BINARY;
         return new Relation(ColumnsExpression.Raw.singleColumn(identifier), operator, rawTerms);
+    }
+
+    /**
+     * Creates a relation whose left-hand side is a function applied to columns (e.g. {@code SUM(v) > 10}).
+     *
+     * <p>This is used for HAVING predicates on aggregate functions.  The relation is carried through
+     * parsing, but it is not yet convertible to a restriction; HAVING is gated at prepare time.</p>
+     *
+     * @param rawSelectable the raw selectable (function) on the left-hand side
+     * @param operator the relation operator
+     * @param rawTerm the term to which the function result is compared
+     * @return a relation with a function on the left-hand side.
+     */
+    public static Relation function(Selectable.Raw rawSelectable, Operator operator, Term.Raw rawTerm)
+    {
+        assert operator.kind() == Operator.Kind.BINARY;
+        return new Relation(rawSelectable, operator, Terms.Raw.of(rawTerm));
     }
 
     /**
@@ -180,7 +214,7 @@ public final class Relation
      */
     public boolean onToken()
     {
-        return rawExpressions.kind() == ColumnsExpression.Kind.TOKEN;
+        return rawExpressions != null && rawExpressions.kind() == ColumnsExpression.Kind.TOKEN;
     }
 
     /**
@@ -193,6 +227,9 @@ public final class Relation
      */
     public SingleRestriction toRestriction(TableMetadata table, VariableSpecifications boundNames, Object owner, boolean allowFiltering)
     {
+        if (rawSelectable != null)
+            throw invalidRequest("Functions on the left-hand side of a predicate are not yet supported: %s", this);
+
         ColumnsExpression columnsExpression = rawExpressions.prepare(table);
 
         if (operator == Operator.NEQ && columnsExpression.kind() == ColumnsExpression.Kind.TOKEN)
@@ -231,6 +268,8 @@ public final class Relation
 
     public ColumnIdentifier column()
     {
+        if (rawExpressions == null)
+            throw invalidRequest("Relation %s does not apply to a single column", this);
         return rawExpressions.identifiers().get(0);
     }
 
@@ -243,6 +282,8 @@ public final class Relation
      */
     public Relation renameIdentifier(ColumnIdentifier from, ColumnIdentifier to)
     {
+        if (rawExpressions == null)
+            return this;
         return new Relation(rawExpressions.renameIdentifier(from, to), operator, rawTerms);
     }
 
@@ -257,6 +298,7 @@ public final class Relation
 
         Relation relation = (Relation) o;
         return Objects.equals(rawExpressions, relation.rawExpressions)
+            && Objects.equals(rawSelectable, relation.rawSelectable)
             && operator == relation.operator
             && Objects.equals(rawTerms, relation.rawTerms);
     }
@@ -264,7 +306,7 @@ public final class Relation
     @Override
     public int hashCode()
     {
-        return Objects.hash(rawExpressions, operator, rawTerms);
+        return Objects.hash(rawExpressions, rawSelectable, operator, rawTerms);
     }
 
     /**
@@ -274,6 +316,8 @@ public final class Relation
      */
     public String toCQLString()
     {
+        if (rawSelectable != null)
+            return rawSelectable + " " + operator + " " + rawTerms;
         return operator.buildCQLString(rawExpressions, rawTerms);
     }
 

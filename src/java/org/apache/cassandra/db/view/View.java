@@ -32,6 +32,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.cql3.QualifiedName;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.StatementSource;
+import org.apache.cassandra.cql3.WhereClause;
 import org.apache.cassandra.cql3.selection.RawSelector;
 import org.apache.cassandra.cql3.selection.Selectable;
 import org.apache.cassandra.cql3.statements.SelectOptions;
@@ -181,6 +182,7 @@ public class View
                                                  parameters,
                                                  selectClause(),
                                                  definition.whereClause,
+                                                 WhereClause.empty(),
                                                  null,
                                                  null,
                                                  StatementSource.INTERNAL,

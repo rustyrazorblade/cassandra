@@ -94,6 +94,27 @@ public class ReservedKeywordsTest
         asserts.assertAll();
     }
 
+    /**
+     * HAVING is unreserved. An existing schema may use {@code having} as an unquoted identifier,
+     * so it must still parse as a column name. GROUP BY ... HAVING must also still parse in its
+     * clause position.
+     */
+    @Test
+    public void testHavingIsUnreservedAndClauseParses()
+    {
+        // (a) "having" works as an unquoted column name.
+        Assert.assertTrue("having must parse as an unquoted column name",
+                          parses("CREATE TABLE ks.t (having int PRIMARY KEY)"));
+        Assert.assertTrue("having must parse as an unquoted column name in INSERT",
+                          parses("INSERT INTO ks.t (having) VALUES (1)"));
+        Assert.assertTrue("having must parse as an unquoted column name in SELECT",
+                          parses("SELECT having FROM ks.t"));
+
+        // (b) GROUP BY ... HAVING still parses in its clause position.
+        Assert.assertTrue("GROUP BY ... HAVING must still parse",
+                          parses("SELECT pk, count(*) FROM ks.t GROUP BY pk HAVING count(*) > 1"));
+    }
+
     private static boolean isAllowed(String keyword)
     {
         return parses(String.format("ALTER TABLE ks.t ADD %s TEXT", keyword));

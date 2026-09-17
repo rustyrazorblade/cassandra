@@ -198,6 +198,12 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
     private final List<Function> functions;
 
+    /**
+     * The resolved ORDER BY key when a single-partition, non-clustering-column sort is routed to
+     * the arena, or null.  Set at prepare time and gated by the arena aggregation flag.
+     */
+    private final org.apache.cassandra.cql3.selection.arena.ArenaOrdering arenaOrdering;
+
     public final StatementSource source;
 
     // Used by forSelection below
@@ -218,7 +224,8 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                            Term limit,
                            Term perPartitionLimit,
                            StatementSource source,
-                           SelectOptions selectOptions)
+                           SelectOptions selectOptions,
+                           org.apache.cassandra.cql3.selection.arena.ArenaOrdering arenaOrdering)
     {
         this.table = table;
         this.bindVariables = bindVariables;
@@ -232,6 +239,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         this.perPartitionLimit = perPartitionLimit;
         this.source = source;
         this.selectOptions = selectOptions;
+        this.arenaOrdering = arenaOrdering;
         this.functions = findAllFunctions();
     }
 
@@ -311,7 +319,8 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                    null,
                                    null,
                                    StatementSource.INTERNAL,
-                                   SelectOptions.EMPTY);
+                                   SelectOptions.EMPTY,
+                                   null);
     }
 
     @Override
@@ -974,10 +983,32 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         // If we do post ordering we need to get all the results sorted before we can trim them.
         if (aggregationSpec != AggregationSpecification.AGGREGATE_EVERYTHING)
         {
+            // If arena owns ordering/limiting on non-clustering key, read must see all rows before LIMIT
+            boolean arenaOwnsOrdering = false;
+            try
+            {
+                org.apache.cassandra.cql3.selection.arena.ArenaOperatorPlan plan =
+                    org.apache.cassandra.cql3.selection.arena.ArenaOperatorPlan.plan(this, selection, restrictions, table, arenaOrdering);
+                arenaOwnsOrdering = plan.isArenaOwned() && plan.needsSort();
+            }
+            catch (Exception e)
+            {
+                // Planning failed: fall back to the standard limit.  This branch decides whether the
+                // arena, not the read, applies the LIMIT, so log the reason rather than hiding it.
+                logger.warn("Arena ordering planning failed; using the standard row limit", e);
+                arenaOwnsOrdering = false;
+            }
+
+            if (arenaOwnsOrdering)
+            {
+                cqlRowLimit = DataLimits.NO_LIMIT;
+            }
             // If we aren't need post-query ordering but we are doing index ordering (currently ANN only) then
             // we do need to use the user limit.
-            if (!needsPostQueryOrdering() || needIndexOrdering())
+            else if (!needsPostQueryOrdering() || needIndexOrdering())
+            {
                 cqlRowLimit = userLimit;
+            }
             cqlPerPartitionLimit = perPartitionLimit;
         }
 
@@ -1090,6 +1121,28 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                               boolean unmask,
                               ClientState state) throws InvalidRequestException
     {
+        // Arena operator branch (D1)
+        org.apache.cassandra.cql3.selection.arena.ArenaOperatorPlan arenaPlan =
+            org.apache.cassandra.cql3.selection.arena.ArenaOperatorPlan.plan(this, selection, restrictions, table, arenaOrdering);
+
+        if (arenaPlan.isArenaOwned() && partitions.hasNext())
+        {
+            // Arena owns this query - single partition, no processPartition call
+            try (RowIterator partition = partitions.next())
+            {
+                return org.apache.cassandra.cql3.selection.arena.ArenaAggregationOperator.execute(
+                    partition,
+                    options,
+                    selection,
+                    arenaPlan,
+                    userLimit,
+                    getResultMetadata(),
+                    table,
+                    nowInSec);
+            }
+        }
+
+        // Existing path (unchanged)
         GroupMaker groupMaker = aggregationSpec == null ? null : aggregationSpec.newGroupMaker();
         ResultSetBuilder result = new ResultSetBuilder(getResultMetadata(), options, selectors, unmask, groupMaker);
 
@@ -1278,6 +1331,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         public final Parameters parameters;
         public final List<RawSelector> selectClause;
         public final WhereClause whereClause;
+        public final WhereClause havingClause;
         public final Term.Raw limit;
         public final Term.Raw perPartitionLimit;
         private ClientState state;
@@ -1288,6 +1342,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                             Parameters parameters,
                             List<RawSelector> selectClause,
                             WhereClause whereClause,
+                            WhereClause havingClause,
                             Term.Raw limit,
                             Term.Raw perPartitionLimit,
                             StatementSource source,
@@ -1297,6 +1352,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             this.parameters = parameters;
             this.selectClause = selectClause;
             this.whereClause = whereClause;
+            this.havingClause = havingClause;
             this.limit = limit;
             this.perPartitionLimit = perPartitionLimit;
             this.source = source;
@@ -1330,6 +1386,20 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
          */
         public SelectStatement prepare(ClientState state, boolean forView, VariableSpecifications variableSpecifications) throws InvalidRequestException
         {
+            // Gate HAVING at prepare time.  The grammar parses HAVING unconditionally, but no execution
+            // path implements it yet.  Reject it here so a HAVING query never runs unfiltered and
+            // silently returns wrong rows.  The message differs by flag so the disabled case points at
+            // the flag, while the enabled case is honest that the feature is unfinished.
+            if (havingClause != WhereClause.empty() && (!havingClause.relations.isEmpty() || !havingClause.expressions.isEmpty()))
+            {
+                if (!org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_CQL_ARENA_AGGREGATION_ENABLED.getBoolean())
+                {
+                    throw new InvalidRequestException("HAVING clause is not supported when arena aggregation is disabled. " +
+                                                      "Enable cassandra.cql.arena_aggregation.enabled to use HAVING.");
+                }
+                throw new InvalidRequestException("HAVING is not yet supported");
+            }
+
             TableMetadata table = Schema.instance.validateTable(keyspace(), name());
 
             // Besides actual restrictions (where clauses), prepareRestrictions will include the user-provided index hints,
@@ -1345,7 +1415,14 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             // If we order post-query, the sorted column needs to be in the ResultSet for sorting,
             // even if we don't ultimately ship them to the client (CASSANDRA-4911).
             Map<ColumnMetadata, Ordering> orderingColumns = getOrderingColumns(orderings);
-            Set<ColumnMetadata> resultSetOrderingColumns = getResultSetOrdering(restrictions, orderingColumns);
+
+            // Arena-owned ORDER BY on a non-clustering column: gated by the flag and single-partition
+            // only.  When eligible, the ordering columns must be in the result set so the arena can
+            // sort by them, and the standard clustering-only ordering validation is bypassed.
+            boolean arenaOrderBy = isArenaNonClusteringOrderBy(restrictions, orderingColumns);
+
+            Set<ColumnMetadata> resultSetOrderingColumns = arenaOrderBy ? orderingColumns.keySet()
+                                                                        : getResultSetOrdering(restrictions, orderingColumns);
 
             Selection selection = prepareSelection(table,
                                                    selectables,
@@ -1371,15 +1448,26 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
             ColumnComparator<List<byte[]>> orderingComparator = null;
             boolean isReversed = false;
+            org.apache.cassandra.cql3.selection.arena.ArenaOrdering arenaOrdering = null;
 
             if (!orderingColumns.isEmpty())
             {
                 assert !forView;
                 verifyOrderingIsAllowed(restrictions, orderingColumns);
-                orderingComparator = getOrderingComparator(selection, restrictions, orderingColumns);
-                isReversed = isReversed(table, orderingColumns, restrictions);
-                if (isReversed && orderingComparator != null)
-                    orderingComparator = orderingComparator.reverse();
+                if (arenaOrderBy)
+                {
+                    // The arena owns the sort.  It compares by type per column and applies the LIMIT
+                    // after the sort, so no on-heap comparator or reversed read is needed here.  The
+                    // clustering-only rejection in isReversed() is intentionally not reached.
+                    arenaOrdering = org.apache.cassandra.cql3.selection.arena.ArenaOrdering.build(selection, orderingColumns);
+                }
+                else
+                {
+                    orderingComparator = getOrderingComparator(selection, restrictions, orderingColumns);
+                    isReversed = isReversed(table, orderingColumns, restrictions);
+                    if (isReversed && orderingComparator != null)
+                        orderingComparator = orderingComparator.reverse();
+                }
            }
 
             checkNeedsFiltering(table, restrictions);
@@ -1395,7 +1483,41 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                        prepareLimit(variableSpecifications, limit, keyspace(), limitReceiver()),
                                        prepareLimit(variableSpecifications, perPartitionLimit, keyspace(), perPartitionLimitReceiver()),
                                        source,
-                                       options);
+                                       options,
+                                       arenaOrdering);
+        }
+
+        /**
+         * Determine whether an ORDER BY on a non-clustering column should route to the arena.
+         * True only when: the arena aggregation flag is on, the query is single-partition
+         * (partition key restricted by EQ so it is not a key range or IN), the ordering is not an
+         * index/ANN ordering, at least one ordering column is not a clustering column, and every
+         * ordering column is encodable.  When false, a non-clustering ORDER BY stays rejected by
+         * the existing clustering-only validation.
+         */
+        private static boolean isArenaNonClusteringOrderBy(StatementRestrictions restrictions,
+                                                           Map<ColumnMetadata, Ordering> orderingColumns)
+        {
+            if (orderingColumns.isEmpty())
+                return false;
+
+            if (!org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_CQL_ARENA_AGGREGATION_ENABLED.getBoolean())
+                return false;
+
+            // Single partition only: EQ on the full partition key, not a range, IN, or index scan.
+            if (restrictions.isKeyRange() || restrictions.keyIsInRelation()
+                || restrictions.usesSecondaryIndexing() || restrictions.isTopK())
+                return false;
+
+            // ANN / index ordering is served by the existing path.
+            if (orderingColumns.values().stream().anyMatch(o -> o.expression.hasNonClusteredOrdering()))
+                return false;
+
+            // Only route when a non-clustering column is ordered; pure clustering ORDER BY falls back.
+            if (orderingColumns.keySet().stream().allMatch(ColumnMetadata::isClusteringColumn))
+                return false;
+
+            return org.apache.cassandra.cql3.selection.arena.ArenaOrdering.canEncode(orderingColumns);
         }
 
         private Set<ColumnMetadata> getResultSetOrdering(StatementRestrictions restrictions, Map<ColumnMetadata, Ordering> orderingColumns)

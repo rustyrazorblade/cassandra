@@ -102,6 +102,14 @@ public enum CassandraRelevantProperties
     CASSANDRA_CLI_LAYOUT("cassandra.cli.layout", "airline"),
     /** The classpath storage configuration file. */
     CASSANDRA_CONFIG("cassandra.config", "cassandra.yaml"),
+    /** Enable arena-based aggregation for ORDER BY/DISTINCT on arbitrary columns (default false) */
+    CASSANDRA_CQL_ARENA_AGGREGATION_ENABLED("cassandra.cql.arena_aggregation.enabled", "false"),
+    /** Maximum bytes for arena aggregation pool - total global bound (default 256MB) */
+    CASSANDRA_CQL_ARENA_AGGREGATION_MAX_BYTES("cassandra.cql.arena_aggregation.max_bytes", "268435456"),
+    /** Maximum bytes per query for arena aggregation (default 64MB) */
+    CASSANDRA_CQL_ARENA_AGGREGATION_MAX_QUERY_BYTES("cassandra.cql.arena_aggregation.max_query_bytes", "67108864"),
+    /** Maximum rows for arena aggregation (default 1000000) */
+    CASSANDRA_CQL_ARENA_AGGREGATION_MAX_ROWS("cassandra.cql.arena_aggregation.max_rows", "1000000"),
     /**
      * The cassandra-foreground option will tell CassandraDaemon whether
      * to close stdout/stderr, but it's up to us not to background.

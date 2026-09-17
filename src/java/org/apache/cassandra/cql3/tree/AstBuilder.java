@@ -114,8 +114,8 @@ public final class AstBuilder
         FromRelation from = buildFrom(ctx.columnFamilyName());
 
         SelectAst.WhereAst where = null;
-        if (ctx.whereClause() != null)
-            where = buildWhere(ctx.whereClause());
+        if (ctx.wclause != null)
+            where = buildWhere(ctx.wclause);
 
         SelectAst.GroupByAst groupBy = null;
         SelectAst.OrderByAst orderBy = null;

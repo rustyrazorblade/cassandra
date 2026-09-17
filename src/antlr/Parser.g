@@ -300,6 +300,7 @@ selectStatement returns [SelectStatement.RawStatement expr]
       K_FROM cf=columnFamilyName
       ( K_WHERE wclause=whereClause )?
       ( K_GROUP K_BY groupByClause[groups] ( ',' groupByClause[groups] )* )?
+      ( K_HAVING hv=havingClause )?
       ( K_ORDER K_BY orderByClause[orderings] ( ',' orderByClause[orderings] )* )?
       ( K_PER K_PARTITION K_LIMIT rows=intValue { perPartitionLimit = $rows.raw; } )?
       ( K_LIMIT rows=intValue { limit = $rows.raw; } )?
@@ -313,7 +314,8 @@ selectStatement returns [SelectStatement.RawStatement expr]
                                                                              isJson,
                                                                              null);
           WhereClause where = $wclause.ctx == null ? WhereClause.empty() : $wclause.clause.build();
-          $expr = new SelectStatement.RawStatement($cf.name, params, $sclause.selectorsList, where, limit, perPartitionLimit, stmtSrc(), options);
+          WhereClause having = $hv.ctx == null ? WhereClause.empty() : $hv.clause.build();
+          $expr = new SelectStatement.RawStatement($cf.name, params, $sclause.selectorsList, where, having, limit, perPartitionLimit, stmtSrc(), options);
       }
     ;
     
@@ -331,7 +333,7 @@ letStatement returns [SelectStatement.RawStatement expr]
           SelectStatement.Parameters params = new SelectStatement.Parameters(Collections.emptyList(), Collections.emptyList(), false, false, false, $txnVar.text);
           WhereClause where = $wclause.ctx == null ? WhereClause.empty() : $wclause.clause.build();
 
-          $expr = new SelectStatement.RawStatement($cf.name, params, $assignments.expr, where, limit, null, stmtSrc(), SelectOptions.EMPTY);
+          $expr = new SelectStatement.RawStatement($cf.name, params, $assignments.expr, where, WhereClause.empty(), limit, null, stmtSrc(), SelectOptions.EMPTY);
       }
     ;
     
@@ -512,6 +514,24 @@ relationOrExpression [WhereClause.Builder clause]
 customIndexExpression [WhereClause.Builder clause]
     @init{QualifiedName name = new QualifiedName();}
     : 'expr(' idxName[name] ',' t=term ')' { clause.add(new CustomIndexExpression(name, $t.raw));}
+    ;
+
+/**
+ * HAVING predicates.  Unlike WHERE, the left-hand side may be an aggregate function call
+ * (e.g. HAVING SUM(v) > 10) as well as a plain column.  This reuses the existing
+ * selectionFunction, relationType and term productions the SELECT clause already uses;
+ * selectionFunction accepts a function applied to columns.  It does not introduce a new
+ * expression grammar.  The grammar is unconditional; the feature flag is enforced at prepare
+ * time in SelectStatement.
+ */
+havingClause returns [WhereClause.Builder clause]
+    @init{ $clause = new WhereClause.Builder(); }
+    : havingRelation[$clause] (K_AND havingRelation[$clause])*
+    ;
+
+havingRelation[WhereClause.Builder clause]
+    : s=selectionFunction type=relationType t=term { $clause.add(Relation.function($s.s, $type.op, $t.raw)); }
+    | name=cident type=relationType t=term { $clause.add(Relation.singleColumn($name.id, $type.op, $t.raw)); }
     ;
 
 orderByClause[List<Ordering.Raw> orderings]
@@ -2429,6 +2449,7 @@ basic_unreserved_keyword returns [String str]
         | K_PER
         | K_PARTITION
         | K_GROUP
+        | K_HAVING
         | K_DATACENTERS
         | K_CIDRS
         | K_ACCESS
