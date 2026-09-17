@@ -219,6 +219,8 @@ public enum CassandraRelevantProperties
     CONSISTENT_SIMULTANEOUS_MOVES_ALLOW("cassandra.consistent.simultaneousmoves.allow"),
     /** Feature flag for the AST parser path. OFF by default. This is a research POC. */
     CQL_AST_PARSER_ENABLED("cassandra.cql.ast_parser.enabled", "false"),
+    /** Feature flag for CASE expressions in the SELECT projection list. OFF by default. Research POC. */
+    CQL_CASE_EXPRESSION_ENABLED("cassandra.cql.case_expression.enabled", "false"),
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
     /** Experimental. */
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),

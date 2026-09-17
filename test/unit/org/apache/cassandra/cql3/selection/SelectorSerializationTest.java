@@ -28,6 +28,7 @@ import org.junit.Test;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.FieldIdentifier;
+import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.cql3.functions.AggregateFcts;
@@ -53,10 +54,43 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
 import static java.util.Arrays.asList;
+import static org.apache.cassandra.config.CassandraRelevantProperties.CQL_CASE_EXPRESSION_ENABLED;
 import static org.junit.Assert.assertEquals;
 
 public class SelectorSerializationTest extends CQLTester
 {
+    @Test
+    public void testCaseSelectorSerDes() throws IOException
+    {
+        createTable("CREATE TABLE %s (pk int, v int, PRIMARY KEY(pk))");
+
+        KeyspaceMetadata keyspace = Schema.instance.getKeyspaceMetadata(KEYSPACE);
+        TableMetadata table = keyspace.getTableOrViewNullable(currentTable());
+
+        CQL_CASE_EXPRESSION_ENABLED.setBoolean(true);
+        try
+        {
+            // Searched form with ELSE: CASE WHEN v > 5 THEN 'a' ELSE 'b' END
+            Selectable.CaseExpression.Raw.Builder searched = new Selectable.CaseExpression.Raw.Builder();
+            searched.addWhen(RawIdentifier.forUnquoted("v"), Operator.GT,
+                             new Selectable.WithTerm.Raw(Literal.integer("5")),
+                             new Selectable.WithTerm.Raw(Literal.string("a")));
+            searched.setElse(new Selectable.WithTerm.Raw(Literal.string("b")));
+            checkSerialization(searched.build().prepare(table), table);
+
+            // Simple form without ELSE: CASE v WHEN 5 THEN 'a' END
+            Selectable.CaseExpression.Raw.Builder simple = new Selectable.CaseExpression.Raw.Builder();
+            simple.setOperand(RawIdentifier.forUnquoted("v"));
+            simple.addWhen(new Selectable.WithTerm.Raw(Literal.integer("5")), null, null,
+                           new Selectable.WithTerm.Raw(Literal.string("a")));
+            checkSerialization(simple.build().prepare(table), table);
+        }
+        finally
+        {
+            CQL_CASE_EXPRESSION_ENABLED.reset();
+        }
+    }
+
     @Test
     public void testSerDes() throws IOException
     {

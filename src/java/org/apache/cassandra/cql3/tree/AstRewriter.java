@@ -241,4 +241,15 @@ public abstract class AstRewriter implements ExpressionVisitor<Expression>
         Expression newValue = node.value.accept(this);
         return new Expression.CustomIndexExpr(node.getSourceSpan(), node.indexName, newValue);
     }
+
+    @Override
+    public Expression visitCase(Expression.Case node)
+    {
+        Expression newOperand = node.operand == null ? null : node.operand.accept(this);
+        List<Expression.Case.WhenBranch> newBranches = node.branches.stream()
+            .map(b -> new Expression.Case.WhenBranch(b.condition.accept(this), b.result.accept(this)))
+            .collect(Collectors.toList());
+        Expression newElse = node.elseResult == null ? null : node.elseResult.accept(this);
+        return new Expression.Case(node.getSourceSpan(), newOperand, newBranches, newElse);
+    }
 }

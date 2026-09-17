@@ -55,3 +55,6 @@ select_mixed_bind	query	SELECT * FROM ks.tbl WHERE x = :named AND y = ? AND z = 
 select_deep_field_access	query	SELECT data.field1.field2.field3 FROM ks.tbl;
 select_nested_collections	query	SELECT [[1, 2], [3, 4]], {{'a': 1}, {'b': 2}} FROM ks.tbl;
 select_multi_predicate_where	query	SELECT * FROM ks.tbl WHERE a = 1 AND b CONTAINS 'x' AND c > 10 AND token(id) > token(5);
+select_case_simple	query	SELECT CASE k WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'many' END FROM ks.tbl;
+select_case_searched	query	SELECT CASE WHEN v > 10 THEN 'big' ELSE 'small' END FROM ks.tbl;
+select_case_no_else	query	SELECT CASE k WHEN 1 THEN 'one' END FROM ks.tbl;

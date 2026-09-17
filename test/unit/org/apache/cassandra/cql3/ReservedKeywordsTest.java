@@ -115,6 +115,30 @@ public class ReservedKeywordsTest
                           parses("SELECT pk, count(*) FROM ks.t GROUP BY pk HAVING count(*) > 1"));
     }
 
+    /**
+     * CASE, WHEN and ELSE are unreserved. They are grammar keywords for CASE expressions, but an
+     * existing schema may use them as unquoted identifiers, so they must still parse as column names
+     * and must not be reported as reserved.
+     */
+    @Test
+    public void testCaseKeywordsAreUnreserved()
+    {
+        SoftAssertions asserts = new SoftAssertions();
+        for (String keyword : new String[]{ "case", "when", "else" })
+        {
+            asserts.assertThat(ReservedKeywords.isReserved(keyword))
+                   .describedAs(keyword + " must not be reserved")
+                   .isFalse();
+            asserts.assertThat(parses(String.format("CREATE TABLE ks.t (%s int PRIMARY KEY)", keyword)))
+                   .describedAs(keyword + " must parse as an unquoted column name")
+                   .isTrue();
+            asserts.assertThat(parses(String.format("SELECT %s FROM ks.t", keyword)))
+                   .describedAs(keyword + " must parse as an unquoted column name in SELECT")
+                   .isTrue();
+        }
+        asserts.assertAll();
+    }
+
     private static boolean isAllowed(String keyword)
     {
         return parses(String.format("ALTER TABLE ks.t ADD %s TEXT", keyword));

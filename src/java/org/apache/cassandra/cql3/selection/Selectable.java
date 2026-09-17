@@ -27,11 +27,13 @@ import java.util.Map;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.FieldIdentifier;
+import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.VariableSpecifications;
 import org.apache.cassandra.cql3.functions.AggregateFcts;
 import org.apache.cassandra.cql3.functions.CastFcts;
@@ -525,6 +527,295 @@ public interface Selectable extends AssignmentTestable
             public WithCast prepare(TableMetadata table)
             {
                 return new WithCast(arg.prepare(table), type);
+            }
+        }
+    }
+
+    /**
+     * A CASE expression in the selection clause.
+     * <p>Both the simple form ({@code CASE operand WHEN v THEN r ... END}) and the searched form
+     * ({@code CASE WHEN lhs op rhs THEN r ... END}) are normalized at prepare time into a list of
+     * comparison branches.  Each branch is a comparison {@code left op right}; the simple form is
+     * rewritten to {@code operand = value}.  The first branch whose comparison is true produces the
+     * result; if none match the ELSE result is used, and if there is no ELSE the value is null.</p>
+     */
+    public static class CaseExpression implements Selectable
+    {
+        /**
+         * A single normalized branch: a comparison and the result to return when it is true.
+         */
+        public static class Branch
+        {
+            public final Selectable left;
+            public final Operator operator;
+            public final Selectable right;
+            // The type used to compare left and right.  Comparison uses compareForCQL on this type.
+            public final AbstractType<?> comparisonType;
+            public final Selectable result;
+
+            public Branch(Selectable left, Operator operator, Selectable right, AbstractType<?> comparisonType, Selectable result)
+            {
+                this.left = left;
+                this.operator = operator;
+                this.right = right;
+                this.comparisonType = comparisonType;
+                this.result = result;
+            }
+        }
+
+        private final List<Branch> branches;
+        private final Selectable elseResult; // may be null
+        private final AbstractType<?> resultType;
+
+        public CaseExpression(List<Branch> branches, Selectable elseResult, AbstractType<?> resultType)
+        {
+            this.branches = branches;
+            this.elseResult = elseResult;
+            this.resultType = resultType;
+        }
+
+        @Override
+        public Selector.Factory newSelectorFactory(TableMetadata table, AbstractType<?> expectedType, List<ColumnMetadata> defs, VariableSpecifications boundNames)
+        {
+            List<CaseSelector.BranchFactory> branchFactories = new ArrayList<>(branches.size());
+            for (Branch branch : branches)
+            {
+                Factory left = branch.left.newSelectorFactory(table, branch.comparisonType, defs, boundNames);
+                Factory right = branch.right.newSelectorFactory(table, branch.comparisonType, defs, boundNames);
+                Factory result = branch.result.newSelectorFactory(table, resultType, defs, boundNames);
+                branchFactories.add(new CaseSelector.BranchFactory(left, branch.operator, right, branch.comparisonType, result));
+            }
+
+            Factory elseFactory = elseResult == null ? null
+                                                     : elseResult.newSelectorFactory(table, resultType, defs, boundNames);
+
+            return CaseSelector.newFactory(resultType, branchFactories, elseFactory, toString());
+        }
+
+        @Override
+        public AbstractType<?> getExactTypeIfKnown(String keyspace)
+        {
+            return resultType;
+        }
+
+        @Override
+        public boolean selectColumns(Predicate<ColumnMetadata> predicate)
+        {
+            for (Branch branch : branches)
+            {
+                if (branch.left.selectColumns(predicate)
+                    || branch.right.selectColumns(predicate)
+                    || branch.result.selectColumns(predicate))
+                    return true;
+            }
+            return elseResult != null && elseResult.selectColumns(predicate);
+        }
+
+        @Override
+        public String toString()
+        {
+            StringBuilder sb = new StringBuilder("CASE");
+            for (Branch branch : branches)
+                sb.append(" WHEN ").append(branch.left).append(' ').append(branch.operator)
+                  .append(' ').append(branch.right).append(" THEN ").append(branch.result);
+            if (elseResult != null)
+                sb.append(" ELSE ").append(elseResult);
+            sb.append(" END");
+            return sb.toString();
+        }
+
+        public static class Raw implements Selectable.Raw
+        {
+            // A raw WHEN clause as parsed.  For the simple form only value and result are set
+            // (operator and right are null); for the searched form value/operator/right form a comparison.
+            private static class RawWhen
+            {
+                final Selectable.Raw value;    // left side of the comparison (or the compared value in the simple form)
+                final Operator operator;       // null in the simple form
+                final Selectable.Raw right;    // null in the simple form
+                final Selectable.Raw result;
+
+                RawWhen(Selectable.Raw value, Operator operator, Selectable.Raw right, Selectable.Raw result)
+                {
+                    this.value = value;
+                    this.operator = operator;
+                    this.right = right;
+                    this.result = result;
+                }
+            }
+
+            private final Selectable.Raw operand; // null in the searched form
+            private final List<RawWhen> whens;
+            private final Selectable.Raw elseResult; // may be null
+
+            private Raw(Selectable.Raw operand, List<RawWhen> whens, Selectable.Raw elseResult)
+            {
+                this.operand = operand;
+                this.whens = whens;
+                this.elseResult = elseResult;
+            }
+
+            @Override
+            public Selectable prepare(TableMetadata table)
+            {
+                // The feature flag is checked first so that the behaviour is identical to before when off.
+                if (!CassandraRelevantProperties.CQL_CASE_EXPRESSION_ENABLED.getBoolean())
+                    throw invalidRequest("CASE expressions are not enabled. Set -Dcassandra.cql.case_expression.enabled=true to use them.");
+
+                boolean simpleForm = operand != null;
+
+                // Disambiguate the over-permissive grammar.  A CASE with an operand must use bare values in
+                // its WHEN clauses; a searched CASE must use a comparison in every WHEN clause.
+                for (RawWhen when : whens)
+                {
+                    if (simpleForm && when.operator != null)
+                        throw invalidRequest("CASE with an operand cannot use a comparison in a WHEN clause. Use either \"CASE operand WHEN value ...\" or \"CASE WHEN lhs op rhs ...\".");
+                    if (!simpleForm && when.operator == null)
+                        throw invalidRequest("A searched CASE requires a comparison (for example \"WHEN a = b\") in every WHEN clause.");
+                }
+
+                String ks = table.keyspace;
+
+                Selectable preparedOperand = simpleForm ? operand.prepare(table) : null;
+
+                // Resolve the result type from the first THEN branch and require every other THEN and the
+                // ELSE to share that exact type.  No coercion or numeric widening is done.
+                List<Selectable> results = new ArrayList<>(whens.size());
+                for (RawWhen when : whens)
+                    results.add(when.result.prepare(table));
+                Selectable preparedElse = elseResult == null ? null : elseResult.prepare(table);
+
+                // Anchor the result type on the first branch (THEN or ELSE) that has a known type.
+                // Bind markers and NULL literals have no type of their own; they coerce to the anchor.
+                AbstractType<?> resultType = null;
+                for (Selectable result : results)
+                {
+                    resultType = typeOf(result, ks);
+                    if (resultType != null)
+                        break;
+                }
+                if (resultType == null && preparedElse != null)
+                    resultType = typeOf(preparedElse, ks);
+                if (resultType == null)
+                    throw invalidRequest("Cannot infer the result type of the CASE expression (try using a cast to force a type on a THEN or ELSE result).");
+
+                // Every branch that has a known type must match the anchor exactly; untyped branches coerce.
+                for (Selectable result : results)
+                    requireSameType(resultType, typeOf(result, ks), "THEN");
+                if (preparedElse != null)
+                    requireSameType(resultType, typeOf(preparedElse, ks), "ELSE");
+
+                // Build the normalized comparison branches.
+                List<Branch> branches = new ArrayList<>(whens.size());
+                for (int i = 0; i < whens.size(); i++)
+                {
+                    RawWhen when = whens.get(i);
+                    Selectable left;
+                    Operator op;
+                    Selectable right;
+
+                    if (simpleForm)
+                    {
+                        left = preparedOperand;
+                        op = Operator.EQ;
+                        right = when.value.prepare(table);
+                    }
+                    else
+                    {
+                        left = when.value.prepare(table);
+                        op = when.operator;
+                        right = when.right.prepare(table);
+                    }
+
+                    branches.add(new Branch(left, op, right, comparisonTypeOf(left, right, ks), results.get(i)));
+                }
+
+                return new CaseExpression(branches, preparedElse, resultType);
+            }
+
+            private static AbstractType<?> typeOf(Selectable selectable, String keyspace)
+            {
+                AbstractType<?> type = selectable.getExactTypeIfKnown(keyspace);
+                return type != null ? type : selectable.getCompatibleTypeIfKnown(keyspace);
+            }
+
+            /**
+             * Works out the type used to compare the two operands of a searched WHEN clause.
+             *
+             * An operand with an exact type (a column or a function) returns its own bytes and ignores
+             * the expected type; a literal or a bind marker coerces to the expected type instead.  When
+             * both operands have an exact type neither one coerces, so the two types must be value
+             * compatible or the comparison reads the wrong bytes.  We reject an incompatible pair with a
+             * clear message rather than silently misreading or widening.
+             */
+            private static AbstractType<?> comparisonTypeOf(Selectable left, Selectable right, String keyspace)
+            {
+                AbstractType<?> leftExact = left.getExactTypeIfKnown(keyspace);
+                AbstractType<?> rightExact = right.getExactTypeIfKnown(keyspace);
+
+                if (leftExact != null && rightExact != null)
+                {
+                    // Pick the type that can read the other operand's bytes; reject if neither can.
+                    if (leftExact.isValueCompatibleWith(rightExact))
+                        return leftExact;
+                    if (rightExact.isValueCompatibleWith(leftExact))
+                        return rightExact;
+                    throw invalidRequest("Cannot compare CASE WHEN operands of types %s and %s; use a cast to convert one of them.",
+                                         leftExact.asCQL3Type(), rightExact.asCQL3Type());
+                }
+
+                // At most one operand has a fixed type; the other coerces to it.
+                if (leftExact != null)
+                    return leftExact;
+                if (rightExact != null)
+                    return rightExact;
+
+                // Both operands are literals or bind markers; fall back to a compatible (prefered) type.
+                AbstractType<?> comparisonType = typeOf(left, keyspace);
+                if (comparisonType == null)
+                    comparisonType = typeOf(right, keyspace);
+                if (comparisonType == null)
+                    throw invalidRequest("Cannot infer the type of a CASE WHEN comparison (try using a cast on one of its operands).");
+                return comparisonType;
+            }
+
+            private static void requireSameType(AbstractType<?> expected, AbstractType<?> actual, String clause)
+            {
+                // A null actual type is an untyped branch (a bind marker or NULL literal); it coerces
+                // to the anchor type, so only a known and different type is a mismatch.
+                if (actual != null && !expected.equals(actual))
+                    throw invalidRequest("All CASE result branches must have the same type. The result type is %s but a %s branch is of type %s.",
+                                         expected.asCQL3Type(), clause, actual.asCQL3Type());
+            }
+
+            /**
+             * A builder used by the grammar to collect the parsed parts of a CASE expression.
+             */
+            public static class Builder
+            {
+                private Selectable.Raw operand;
+                private final List<RawWhen> whens = new ArrayList<>();
+                private Selectable.Raw elseResult;
+
+                public void setOperand(Selectable.Raw operand)
+                {
+                    this.operand = operand;
+                }
+
+                public void addWhen(Selectable.Raw value, Operator operator, Selectable.Raw right, Selectable.Raw result)
+                {
+                    whens.add(new RawWhen(value, operator, right, result));
+                }
+
+                public void setElse(Selectable.Raw elseResult)
+                {
+                    this.elseResult = elseResult;
+                }
+
+                public Raw build()
+                {
+                    return new Raw(operand, whens, elseResult);
+                }
             }
         }
     }

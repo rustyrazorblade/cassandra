@@ -171,6 +171,12 @@ public final class AstBuilder
 
     private Expression buildExprFromSelectable(CqlParser.SelectorContext sctx, Selectable.Raw raw)
     {
+        // A CASE expression builds a faithful Case node. It does not drive execution; lowering still
+        // returns the carried RawStatement.
+        CqlParser.CaseExpressionContext caseCtx = findCaseExpression(sctx);
+        if (caseCtx != null)
+            return buildCaseExpression(caseCtx);
+
         // Try to extract arithmetic from unaliasedSelector
         if (sctx.unaliasedSelector() != null && sctx.unaliasedSelector().selectionAddition() != null)
         {
@@ -193,6 +199,90 @@ public final class AstBuilder
         }
 
         return new Expression.ColumnRef(span(sctx), name, raw);
+    }
+
+    // Returns the first CASE expression found in a depth-first walk.  This shadow AST is used for
+    // fidelity checks only and does not drive execution, so returning the first nested CASE is fine;
+    // the real execution path is the Selectable/Selector tree built in Selectable.CaseExpression.
+    private CqlParser.CaseExpressionContext findCaseExpression(ParseTree tree)
+    {
+        if (tree instanceof CqlParser.CaseExpressionContext)
+            return (CqlParser.CaseExpressionContext) tree;
+
+        if (tree instanceof ParserRuleContext)
+        {
+            ParserRuleContext ctx = (ParserRuleContext) tree;
+            for (int i = 0; i < ctx.getChildCount(); i++)
+            {
+                CqlParser.CaseExpressionContext found = findCaseExpression(ctx.getChild(i));
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    private Expression buildCaseExpression(CqlParser.CaseExpressionContext ctx)
+    {
+        boolean hasElse = ctx.K_ELSE() != null;
+        int numBranches = ctx.whenCondition().size();
+        int total = ctx.unaliasedSelector().size();
+        // Direct unaliasedSelector children appear in source order: operand (if any), each result, then else.
+        boolean hasOperand = (total - numBranches - (hasElse ? 1 : 0)) == 1;
+
+        int idx = 0;
+        Expression operand = null;
+        if (hasOperand)
+            operand = bestExpr(ctx.unaliasedSelector(idx++));
+
+        List<Expression.Case.WhenBranch> branches = new ArrayList<>();
+        for (int w = 0; w < numBranches; w++)
+        {
+            Expression condition = buildWhenCondition(ctx.whenCondition(w), operand);
+            Expression result = bestExpr(ctx.unaliasedSelector(idx++));
+            branches.add(new Expression.Case.WhenBranch(condition, result));
+        }
+
+        Expression elseResult = hasElse ? bestExpr(ctx.unaliasedSelector(idx)) : null;
+
+        return new Expression.Case(span(ctx), operand, branches, elseResult);
+    }
+
+    private Expression buildWhenCondition(CqlParser.WhenConditionContext ctx, @Nullable Expression operand)
+    {
+        Expression left = bestExpr(ctx.unaliasedSelector(0));
+        if (ctx.relationType() != null && ctx.unaliasedSelector().size() == 2)
+        {
+            // Searched form: lhs op rhs.
+            Expression.Comparison.Operator op = mapRelationTypeToOperator(ctx.relationType());
+            Expression right = bestExpr(ctx.unaliasedSelector(1));
+            return new Expression.Comparison(span(ctx), left, op, right);
+        }
+
+        // Simple form: the value is compared against the operand for equality.
+        if (operand != null)
+            return new Expression.Comparison(span(ctx), operand, Expression.Comparison.Operator.EQ, left);
+        return left;
+    }
+
+    // A best-effort conversion of a selector into an Expression for AST fidelity. It never drives
+    // execution, so an unrecognized shape falls back to a text literal rather than throwing.
+    private Expression bestExpr(CqlParser.UnaliasedSelectorContext ctx)
+    {
+        if (ctx.selectionAddition() != null)
+        {
+            Expression arith = tryBuildArithmetic(ctx.selectionAddition());
+            if (arith != null)
+                return arith;
+
+            if (ctx.selectionAddition().selectionMultiplication().size() == 1)
+            {
+                Expression group = tryBuildMultiplication(ctx.selectionAddition().selectionMultiplication(0));
+                if (group != null)
+                    return group;
+            }
+        }
+        return new Expression.Literal(span(ctx), ctx.getText());
     }
 
     private Expression tryBuildArithmetic(CqlParser.SelectionAdditionContext ctx)

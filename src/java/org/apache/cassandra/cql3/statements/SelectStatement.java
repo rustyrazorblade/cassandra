@@ -1725,6 +1725,12 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                     checkTrue(def.isClusteringColumn(),
                               "Group by functions are only supported on clustering columns, got %s", def.name);
                 }
+                else if (selectable instanceof Selectable.CaseExpression)
+                {
+                    // A CASE expression is not a column, so reject it here with a clear message rather
+                    // than letting the column cast below fail.
+                    throw invalidRequest("CASE expressions are not supported in the GROUP BY clause.");
+                }
                 else
                 {
                     def = (ColumnMetadata) selectable;

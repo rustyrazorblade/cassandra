@@ -44,4 +44,5 @@ public interface ExpressionVisitor<R>
     R visitContainsExpr(Expression.ContainsExpr node);
     R visitTokenExpr(Expression.TokenExpr node);
     R visitCustomIndexExpr(Expression.CustomIndexExpr node);
+    R visitCase(Expression.Case node);
 }

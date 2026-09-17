@@ -463,9 +463,35 @@ selectionTupleOrNestedSelector returns [Selectable.Raw s]
  * sub-element selection for UDT.
  */
 simpleUnaliasedSelector returns [Selectable.Raw s]
-    : c=sident                                   { $s = $c.id; }
+    : e=caseExpression                           { $s = $e.s; }
+    | c=sident                                   { $s = $c.id; }
     | l=selectionLiteral                         { $s = new Selectable.WithTerm.Raw($l.raw); }
     | f=selectionFunction                        { $s = $f.s; }
+    ;
+
+/*
+ * A CASE expression.  Two forms exist:
+ *   simple:   CASE operand WHEN v1 THEN r1 [WHEN v2 THEN r2 ...] [ELSE d] END
+ *   searched: CASE WHEN cond1 THEN r1 [WHEN cond2 THEN r2 ...] [ELSE d] END
+ * A condition is a comparison "lhs op rhs" between two selectables.
+ * The grammar uses one unified when-condition: an unaliasedSelector with an optional
+ * comparison tail.  ANTLR cannot decide simple-vs-searched from the optional leading
+ * operand, so we parse permissively here and disambiguate at prepare time.
+ */
+caseExpression returns [Selectable.Raw s]
+    @init {
+        Selectable.CaseExpression.Raw.Builder builder = new Selectable.CaseExpression.Raw.Builder();
+    }
+    @after { $s = builder.build(); }
+    : K_CASE ( op=unaliasedSelector { builder.setOperand($op.s); } )?
+      ( K_WHEN w=whenCondition[builder] K_THEN r=unaliasedSelector { builder.addWhen($w.left, $w.op, $w.right, $r.s); } )+
+      ( K_ELSE e=unaliasedSelector { builder.setElse($e.s); } )?
+      K_END
+    ;
+
+whenCondition[Selectable.CaseExpression.Raw.Builder builder] returns [Selectable.Raw left, Operator op, Selectable.Raw right]
+    : l=unaliasedSelector { $left = $l.s; $op = null; $right = null; }
+      ( t=relationType rr=unaliasedSelector { $op = $t.op; $right = $rr.s; } )?
     ;
 
 selectionFunction returns [Selectable.Raw s]
@@ -2470,6 +2496,9 @@ basic_unreserved_keyword returns [String str]
         | K_END
         | K_LET
         | K_THEN
+        | K_CASE
+        | K_WHEN
+        | K_ELSE
         | K_TRANSACTION
         | K_COMMENT
         | K_COMMENTS

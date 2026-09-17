@@ -387,6 +387,45 @@ public abstract class Expression implements AstNode
         }
     }
 
+    public static final class Case extends Expression
+    {
+        /**
+         * A single WHEN branch. {@code condition} is the compared value in the simple form
+         * or a {@link Comparison} in the searched form.
+         */
+        public static final class WhenBranch
+        {
+            public final Expression condition;
+            public final Expression result;
+
+            public WhenBranch(Expression condition, Expression result)
+            {
+                this.condition = condition;
+                this.result = result;
+            }
+        }
+
+        @Nullable
+        public final Expression operand;
+        public final List<WhenBranch> branches;
+        @Nullable
+        public final Expression elseResult;
+
+        public Case(SourceSpan span, @Nullable Expression operand, List<WhenBranch> branches, @Nullable Expression elseResult)
+        {
+            super(span);
+            this.operand = operand;
+            this.branches = ImmutableList.copyOf(branches);
+            this.elseResult = elseResult;
+        }
+
+        @Override
+        public <R> R accept(ExpressionVisitor<R> visitor)
+        {
+            return visitor.visitCase(this);
+        }
+    }
+
     // Predicate nodes for WHERE clause
     public static final class Comparison extends Expression
     {

@@ -94,7 +94,8 @@ public abstract class Selector
         AGGREGATE_FUNCTION_SELECTOR(AggregateFunctionSelector.deserializer),
         ELEMENT_SELECTOR(ElementsSelector.ElementSelector.deserializer),
         SLICE_SELECTOR(ElementsSelector.SliceSelector.deserializer),
-        VECTOR_SELECTOR(VectorSelector.deserializer);
+        VECTOR_SELECTOR(VectorSelector.deserializer),
+        CASE_SELECTOR(CaseSelector.deserializer);
 
         private static final Kind[] VALUES = values();
 
