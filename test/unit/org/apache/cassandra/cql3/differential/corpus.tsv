@@ -47,3 +47,11 @@ comparator_frozen_set	comparatorType	frozen<set<int>>
 comparator_udt	comparatorType	myudt
 comparator_custom	comparatorType	'org.apache.cassandra.db.marshal.Int32Type'
 comparator_vector	comparatorType	vector<float, 3>
+select_multi_bind_where	query	SELECT a FROM ks.tbl WHERE x = ? AND y = ?;
+select_bind_limits	query	SELECT a FROM ks.tbl WHERE x = ? PER PARTITION LIMIT ? LIMIT ?;
+select_in_multi_bind	query	SELECT * FROM ks.tbl WHERE id IN (?, ?, ?);
+select_tuple_in_bind	query	SELECT * FROM ks.tbl WHERE (a, b) IN ((?, ?), (?, ?));
+select_mixed_bind	query	SELECT * FROM ks.tbl WHERE x = :named AND y = ? AND z = :other;
+select_deep_field_access	query	SELECT data.field1.field2.field3 FROM ks.tbl;
+select_nested_collections	query	SELECT [[1, 2], [3, 4]], {{'a': 1}, {'b': 2}} FROM ks.tbl;
+select_multi_predicate_where	query	SELECT * FROM ks.tbl WHERE a = 1 AND b CONTAINS 'x' AND c > 10 AND token(id) > token(5);

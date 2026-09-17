@@ -105,6 +105,7 @@ import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.concurrent.Future;
 import org.apache.cassandra.utils.concurrent.FutureCombiner;
 
+import static org.apache.cassandra.config.CassandraRelevantProperties.CQL_AST_PARSER_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.ENABLE_NODELOCAL_QUERIES;
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkTrue;
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
@@ -1200,5 +1201,82 @@ public class QueryProcessor implements QueryHandler
         {
             removeInvalidPreparedStatementsForFunction(aggregate.name().keyspace, aggregate.name().name);
         }
+    }
+
+    // ===== AST Parser POC (Phase 3) =====
+
+    /**
+     * Feature flag for the AST parser path. OFF by default. This is a research POC.
+     * When enabled, the seam routes SELECT through the AST builder. This is not yet wired
+     * into the live request path.
+     */
+    public static volatile boolean ENABLE_AST_PARSER = CQL_AST_PARSER_ENABLED.getBoolean();
+
+    /**
+     * Parse a query string and return the QueryContext. This seam surfaces the ANTLR4
+     * context tree so the AST path can walk it. The direct path discards the context.
+     */
+    private static CqlParser.QueryContext parseStatementWithContext(String queryStr) throws SyntaxException
+    {
+        try
+        {
+            return CQLFragmentParser.parseAnyUnhandled(p -> p.query(), queryStr);
+        }
+        catch (CassandraException ce)
+        {
+            throw ce;
+        }
+        catch (RecognitionException e)
+        {
+            throw new SyntaxException("Invalid or malformed CQL query string: " + e.getMessage());
+        }
+        catch (RuntimeException re)
+        {
+            logger.error(String.format("The statement: [%s] could not be parsed.", queryStr), re);
+            throw new SyntaxException(String.format("Failed parsing statement: [%s] reason: %s %s",
+                                                    queryStr,
+                                                    re.getClass().getSimpleName(),
+                                                    re.getMessage()));
+        }
+    }
+
+    /**
+     * Parse a statement via the AST path: build the AST from the context tree, then lower it to
+     * the domain objects. Only SELECT is supported in this POC.
+     */
+    private static CQLStatement.Raw parseStatementViaAst(String queryStr) throws SyntaxException
+    {
+        CqlParser.QueryContext ctx = parseStatementWithContext(queryStr);
+
+        if (ctx.cqlStatement() != null && ctx.cqlStatement().selectStatement() != null)
+        {
+            org.apache.cassandra.cql3.tree.Statement astStmt = org.apache.cassandra.cql3.tree.AstBuilder.build(ctx);
+            if (astStmt instanceof org.apache.cassandra.cql3.tree.SelectAst)
+                return org.apache.cassandra.cql3.tree.AstLowering.lowerSelectAst((org.apache.cassandra.cql3.tree.SelectAst) astStmt);
+        }
+
+        return ctx.stmnt;
+    }
+
+    /**
+     * Feature-flagged seam for the AST parser path. When the flag is off, this returns the direct
+     * parse verbatim. When on, SELECT statements route through AstBuilder + AstLowering; unsupported
+     * statements fall back to the direct path. This method has no live callers; equivalence is proven
+     * in AstEquivalenceDifferentialTest.
+     */
+    public static CQLStatement.Raw parseStatementMaybeAst(String queryStr) throws SyntaxException
+    {
+        if (ENABLE_AST_PARSER)
+        {
+            try
+            {
+                return parseStatementViaAst(queryStr);
+            }
+            catch (org.apache.cassandra.cql3.tree.UnsupportedAstException e)
+            {
+                return parseStatement(queryStr);
+            }
+        }
+        return parseStatement(queryStr);
     }
 }

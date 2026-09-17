@@ -54,7 +54,7 @@ public class ReservedKeywordsTest
         // on this change, if that vote passes then you can update "reserved_keywords.txt" (and pylib/cqlshlib/cqlhandling.py::cql_keywords_reserved).
         // Never update "reserved_keywords.txt" without a vote on the mailing list!
         SoftAssertions asserts = new SoftAssertions();
-        for (var f : Cql_Lexer.class.getDeclaredFields())
+        for (var f : CqlLexer.class.getDeclaredFields())
         {
             if (!Modifier.isStatic(f.getModifiers())) continue;
             if (!f.getName().startsWith("K_")) continue;
@@ -77,7 +77,7 @@ public class ReservedKeywordsTest
     public void testUnreservedKeywordsAsUserNameAndIdentity()
     {
         SoftAssertions asserts = new SoftAssertions();
-        for (var f : Cql_Lexer.class.getDeclaredFields())
+        for (var f : CqlLexer.class.getDeclaredFields())
         {
             if (!Modifier.isStatic(f.getModifiers())) continue;
             if (!f.getName().startsWith("K_")) continue;
