@@ -18,61 +18,71 @@
 
 package org.apache.cassandra.test.microbench;
 
-import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
-import com.sun.management.ThreadMXBean;
+import org.openjdk.jmh.annotations.Benchmark;
+import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.Fork;
+import org.openjdk.jmh.annotations.Level;
+import org.openjdk.jmh.annotations.Measurement;
+import org.openjdk.jmh.annotations.Mode;
+import org.openjdk.jmh.annotations.OutputTimeUnit;
+import org.openjdk.jmh.annotations.Param;
+import org.openjdk.jmh.annotations.Scope;
+import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.TearDown;
+import org.openjdk.jmh.annotations.Threads;
+import org.openjdk.jmh.annotations.Warmup;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.commitlog.CommitLogPosition;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.service.DiskErrorsHandlerService;
 
 /**
- * Drives {@link CommitLog#add} in a tight loop so a profiler can be attached to the write path on its own.
+ * Measures the throughput and per-op allocation of {@link CommitLog#add} on the write path.
  *
- * Prints READY once the warmup is done and DONE once the measured phase is over, so a harness can start and
- * stop the profiler around the measured phase only. Reports the heap bytes the benchmark thread allocated and
- * the throughput it reached.
- *
- * Usage: CommitLogAddBench &lt;payload bytes&gt; &lt;warmup iterations&gt; &lt;measured iterations&gt; [pool size]
+ * Run with the JMH gc profiler ({@code -prof gc}) to read the heap bytes allocated per op from
+ * {@code gc.alloc.rate.norm}.
  */
+@BenchmarkMode(Mode.Throughput)
+@OutputTimeUnit(TimeUnit.SECONDS)
+@Warmup(iterations = 5, time = 1, timeUnit = TimeUnit.SECONDS)
+@Measurement(iterations = 10, time = 1, timeUnit = TimeUnit.SECONDS)
+@Fork(value = 1)
+@Threads(1)
+@State(Scope.Benchmark)
 public class CommitLogAddBench
 {
     private static final String KEYSPACE = "commitlog_add_bench";
     private static final String TABLE = "standard1";
 
-    public static void main(String[] args) throws Exception
-    {
-        try
-        {
-            run(args);
-        }
-        catch (Throwable t)
-        {
-            t.printStackTrace(System.out);
-            System.out.flush();
-            Runtime.getRuntime().halt(1);
-        }
-    }
+    @Param("100")
+    public int payloadSize = 100;
 
-    private static void run(String[] args) throws Exception
-    {
-        int payloadSize = Integer.parseInt(args[0]);
-        int warmupIterations = Integer.parseInt(args[1]);
-        int measuredIterations = Integer.parseInt(args[2]);
-        int poolSize = args.length > 3 ? Integer.parseInt(args[3]) : 50_000;
+    @Param("50000")
+    public int poolSize = 50000;
 
+    private Mutation[] pool;
+    private int index;
+
+    @Setup(Level.Trial)
+    public void setup() throws Exception
+    {
         KeyspaceParams.DEFAULT_LOCAL_DURABLE_WRITES = false;
-        org.apache.cassandra.ServerTestUtils.daemonInitialization();
+        ServerTestUtils.daemonInitialization();
         DiskErrorsHandlerService.configure();
         SchemaLoader.prepareServer();
         SchemaLoader.createKeyspace(KEYSPACE,
@@ -83,51 +93,26 @@ public class CommitLogAddBench
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(TABLE);
         ByteBuffer payload = randomPayload(payloadSize);
 
-        // A fresh mutation per iteration, as on the write path. Reusing one would cache its serialization after
-        // the first call and measure something no production write does.
-        for (int i = 0; i < warmupIterations; i++)
-            CommitLog.instance.add(mutation(cfs, payload, i));
-
-        // Built up front so the measured phase holds nothing but CommitLog.add. Building them inside the loop
-        // would bury the write path under RowUpdateBuilder's own allocation. The measured loop cycles through
-        // the pool, which keeps the run long enough to profile without holding every mutation in memory. Each
-        // one carries its cached serialization by then, as a mutation does by the time it reaches the commit
-        // log on the real write path.
-        Mutation[] pool = new Mutation[Math.min(measuredIterations, poolSize)];
+        // Build the mutations up front so the measured op holds nothing but CommitLog.add. Each one carries its
+        // cached serialization by the time it reaches the commit log, as a mutation does on the real write path.
+        // The benchmark cycles through the pool.
+        pool = new Mutation[poolSize];
         for (int i = 0; i < pool.length; i++)
-            pool[i] = mutation(cfs, payload, warmupIterations + i);
+            pool[i] = mutation(cfs, payload, i);
+    }
 
-        System.out.println("READY");
-        System.out.flush();
+    @TearDown(Level.Trial)
+    public void teardown() throws InterruptedException, ExecutionException
+    {
+        CommitLog.instance.shutdownBlocking();
+    }
 
-        ThreadMXBean threads = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        long threadId = Thread.currentThread().getId();
-        long bytesBefore = threads.getThreadAllocatedBytes(threadId);
-        long startNanos = System.nanoTime();
-
-        for (int i = 0; i < measuredIterations; i++)
-            CommitLog.instance.add(pool[i % pool.length]);
-
-        long elapsedNanos = System.nanoTime() - startNanos;
-        long allocated = threads.getThreadAllocatedBytes(threadId) - bytesBefore;
-
-        // Hold the process open so the harness can dump and stop the profiler before the JVM exits. Sleeping
-        // allocates nothing, so the tail of the profile stays empty.
-        System.out.println("DONE");
-        System.out.flush();
-        if (CassandraRelevantProperties.TEST_COMMITLOG_BENCH_HOLD.getBoolean())
-            Thread.sleep(10_000);
-
-        System.out.printf("payload_bytes=%d%n", payloadSize);
-        System.out.printf("iterations=%d%n", measuredIterations);
-        System.out.printf("pool_size=%d%n", pool.length);
-        System.out.printf("elapsed_ms=%d%n", elapsedNanos / 1_000_000);
-        System.out.printf("ops_per_sec=%.1f%n", measuredIterations / (elapsedNanos / 1e9));
-        System.out.printf("heap_bytes_allocated=%d%n", allocated);
-        System.out.printf("heap_bytes_per_op=%.1f%n", (double) allocated / measuredIterations);
-        System.out.flush();
-
-        System.exit(0);
+    @Benchmark
+    public CommitLogPosition add() throws Exception
+    {
+        Mutation mutation = pool[index];
+        index = index + 1 == pool.length ? 0 : index + 1;
+        return CommitLog.instance.add(mutation);
     }
 
     private static Mutation mutation(ColumnFamilyStore cfs, ByteBuffer payload, int i)

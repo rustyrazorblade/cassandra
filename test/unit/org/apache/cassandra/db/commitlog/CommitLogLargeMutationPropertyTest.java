@@ -27,8 +27,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
-import javax.crypto.Cipher;
-
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -40,18 +38,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.ParameterizedClass;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
-import org.apache.cassandra.io.compress.DeflateCompressor;
-import org.apache.cassandra.io.compress.LZ4Compressor;
-import org.apache.cassandra.io.compress.ZstdCompressor;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.security.CipherFactory;
 import org.apache.cassandra.security.EncryptionContext;
-import org.apache.cassandra.security.EncryptionContextGenerator;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.COMMITLOG_IGNORE_REPLAY_ERRORS;
 import static org.apache.cassandra.db.commitlog.CommitLogSegment.ENTRY_OVERHEAD_SIZE;
@@ -92,37 +86,20 @@ public class CommitLogLargeMutationPropertyTest
 
     public CommitLogLargeMutationPropertyTest(ParameterizedClass commitLogCompression,
                                               EncryptionContext encryptionContext,
+                                              Config.DiskAccessMode diskAccessMode,
                                               Class<? extends CommitLogSegment> expectedSegmentType)
     {
         this.expectedSegmentType = expectedSegmentType;
-        DatabaseDescriptor.setCommitLogCompression(commitLogCompression);
-        DatabaseDescriptor.setEncryptionContext(encryptionContext);
-        DatabaseDescriptor.initializeCommitLogDiskAccessMode();
+        // Pin the disk access mode per parameterization. If the mode came from the ambient yaml instead,
+        // a config that sets commitlog_disk_access_mode: auto (cassandra_latest.yaml) would resolve to
+        // direct IO and the memory-mapped parameterization would run the wrong segment type.
+        CommitLogPropertyFixture.applySegmentConfiguration(commitLogCompression, encryptionContext, diskAccessMode);
     }
 
-    @Parameters(name = "{2}")
+    @Parameters(name = "{3}")
     public static Collection<Object[]> generateData() throws Exception
     {
-        return Arrays.asList(new Object[][]
-                             {
-                             { null, EncryptionContextGenerator.createDisabledContext(), MemoryMappedSegment.class },
-                             { null, newEncryptionContext(), EncryptedSegment.class },
-                             { new ParameterizedClass(LZ4Compressor.class.getName(), Collections.emptyMap()),
-                               EncryptionContextGenerator.createDisabledContext(), CompressedSegment.class },
-                             { new ParameterizedClass(DeflateCompressor.class.getName(), Collections.emptyMap()),
-                               EncryptionContextGenerator.createDisabledContext(), CompressedSegment.class },
-                             { new ParameterizedClass(ZstdCompressor.class.getName(), Collections.emptyMap()),
-                               EncryptionContextGenerator.createDisabledContext(), CompressedSegment.class }
-                             });
-    }
-
-    private static EncryptionContext newEncryptionContext() throws Exception
-    {
-        EncryptionContext context = EncryptionContextGenerator.createContext(true);
-        CipherFactory cipherFactory = new CipherFactory(context.getTransparentDataEncryptionOptions());
-        Cipher cipher = cipherFactory.getEncryptor(context.getTransparentDataEncryptionOptions().cipher,
-                                                   context.getTransparentDataEncryptionOptions().key_alias);
-        return EncryptionContextGenerator.createContext(cipher.getIV(), true);
+        return CommitLogPropertyFixture.segmentParameterizations();
     }
 
     @BeforeClass
