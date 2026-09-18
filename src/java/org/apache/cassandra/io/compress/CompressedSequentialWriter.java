@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.OpenOption;
 import java.util.Optional;
+import java.util.function.LongConsumer;
 import java.util.zip.CRC32;
 
 import javax.annotation.Nullable;
@@ -282,7 +283,7 @@ public class CompressedSequentialWriter extends SequentialWriter
     }
 
     @Override
-    public void setPostFlushListener(java.util.function.LongConsumer runPostFlush)
+    public void setPostFlushListener(LongConsumer runPostFlush)
     {
         // The superclass fires this from whichever thread flushed. That would be the pipeline's
         // thread, and the BIG-path consumer, IndexSummaryBuilder.markDataSynced, walks maps the

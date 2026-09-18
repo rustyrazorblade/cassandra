@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.collect.ImmutableMap;
@@ -40,6 +41,13 @@ public class FaultyCompressor implements ICompressor
     private static final AtomicLong compressCalls = new AtomicLong();
     private static volatile long failAtCall = Long.MAX_VALUE;
 
+    // Blocks the compress call at this index (counting from 1) until releaseLatch fires, so a test can
+    // hold the writer thread deterministically mid-compress. arrivedLatch signals that the thread has
+    // reached the block.
+    private static volatile long blockAtCall = Long.MAX_VALUE;
+    private static volatile CountDownLatch releaseLatch;
+    private static volatile CountDownLatch arrivedLatch;
+
     private final ICompressor delegate = LZ4Compressor.create(ImmutableMap.of());
 
     /** Throw on the nth compress call, counting from 1. */
@@ -49,10 +57,25 @@ public class FaultyCompressor implements ICompressor
         failAtCall = n;
     }
 
+    /**
+     * Block the nth compress call (counting from 1) until {@code release} fires; {@code arrived}
+     * counts down when the writer thread reaches the block.
+     */
+    public static void blockAt(long n, CountDownLatch release, CountDownLatch arrived)
+    {
+        compressCalls.set(0);
+        blockAtCall = n;
+        releaseLatch = release;
+        arrivedLatch = arrived;
+    }
+
     public static void reset()
     {
         compressCalls.set(0);
         failAtCall = Long.MAX_VALUE;
+        blockAtCall = Long.MAX_VALUE;
+        releaseLatch = null;
+        arrivedLatch = null;
     }
 
     @SuppressWarnings("unused")   // found by reflection from CompressionParams
@@ -64,8 +87,23 @@ public class FaultyCompressor implements ICompressor
     @Override
     public void compress(ByteBuffer input, ByteBuffer output) throws IOException
     {
-        if (compressCalls.incrementAndGet() == failAtCall)
+        long call = compressCalls.incrementAndGet();
+        if (call == failAtCall)
             throw new IOException("injected compression failure at chunk " + failAtCall);
+
+        if (call == blockAtCall)
+        {
+            if (arrivedLatch != null)
+                arrivedLatch.countDown();
+            try
+            {
+                releaseLatch.await();
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+            }
+        }
 
         delegate.compress(input, output);
     }

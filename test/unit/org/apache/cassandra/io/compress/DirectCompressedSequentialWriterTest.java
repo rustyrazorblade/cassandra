@@ -34,10 +34,14 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import com.google.common.collect.ImmutableMap;
 
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -49,6 +53,7 @@ import accord.utils.Gen;
 import accord.utils.Gens;
 import accord.utils.RandomSource;
 
+import org.apache.cassandra.Util;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DataStorageSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -431,6 +436,80 @@ public class DirectCompressedSequentialWriterTest
             // doPreCleanup frees and nulls writeBuffer even on the abort path.
             assertNull("writeBuffer must be released by doPreCleanup on abort", writerRef.writeBuffer());
         }));
+    }
+
+    /**
+     * On abort while the writer thread is stuck mid-compress, doPreCleanup must NOT free writeBuffer.
+     * The thread can still be inside writeToAlignedBuffer (a put into writeBuffer) or a channel write
+     * on it, and freeing the native buffer there faults the JVM. The parent already guards its own
+     * buffers this way: it quiesces first and, when the thread will not stop, frees nothing and only
+     * closes the channel. This test holds the writer inside the first compress, aborts, and asserts
+     * the abort does not fault, the pipeline is still running, the channel is closed, and writeBuffer
+     * was left alone. It then releases the writer and lets it settle. Against the pre-fix code, which
+     * freed writeBuffer before quiescing, the post-abort writeBuffer would be null (and the writer,
+     * once released, would touch freed memory).
+     */
+    @Test
+    public void abortWithStuckWriterFreesNoBuffersAndClosesChannel() throws Exception
+    {
+        CompressionParams params = faultyParams();
+        int chunk = params.chunkLength();
+        int asyncBytes = 4 * chunk;   // asyncBytes > 0 gives the writer a pipeline with a small pool
+
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch arrived = new CountDownLatch(1);
+        FaultyCompressor.blockAt(1, release, arrived);   // hold the writer inside the first compress
+
+        // Shorten the quiesce timeout so the abort exercises the join-timeout path in milliseconds
+        // rather than the 30s production default.
+        long savedQuiesce = AsyncChunkPipeline.quiesceMillis;
+        AsyncChunkPipeline.quiesceMillis = 200;
+
+        File data = FileUtils.createTempFile("stuckWriter", ".db");
+        File meta = new File(data.absolutePath() + ".metadata");
+
+        DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
+        data, meta, null, SequentialWriterOption.DEFAULT, params, newCollector(), null, asyncBytes);
+        try
+        {
+            // Two full chunks: the first is flushed to the pipeline and picked up by the writer, which
+            // then blocks in compress; the second stays buffered. Random bytes keep each chunk full.
+            byte[] payload = new byte[chunk * 2];
+            new Random(7).nextBytes(payload);
+            writer.write(payload);
+
+            assertTrue("writer thread never reached the blocking compress",
+                       arrived.await(10, TimeUnit.SECONDS));
+
+            assertTrue("writer thread should be running while stuck", writer.pipeline.stillRunning());
+            assertNotNull("writeBuffer must exist before abort", writer.writeBuffer());
+            assertTrue("channel should be open before abort", writer.isOpen());
+
+            Throwable result = writer.abort(null);
+
+            assertNull("abort with a stuck writer must not fault: " + result, result);
+            assertTrue("the stuck writer must still be running after a timed-out quiesce",
+                       writer.pipeline.stillRunning());
+            assertNotNull("writeBuffer must NOT be freed while the writer thread may still touch it",
+                          writer.writeBuffer());
+            assertFalse("abort must close the channel to unblock a stuck write", writer.isOpen());
+        }
+        finally
+        {
+            release.countDown();
+            Util.spinUntilTrue(() -> !writer.pipeline.stillRunning(), 30, TimeUnit.SECONDS);
+            AsyncChunkPipeline.quiesceMillis = savedQuiesce;
+            FaultyCompressor.reset();
+            data.tryDelete();
+            meta.tryDelete();
+        }
+    }
+
+    /** Builds params by class name so CompressionParams instantiates FaultyCompressor as production would. */
+    private static CompressionParams faultyParams()
+    {
+        return new CompressionParams(FaultyCompressor.class.getName(), ImmutableMap.of(),
+                                     DEFAULT_CHUNK_LENGTH, CompressionParams.DEFAULT_MIN_COMPRESS_RATIO);
     }
 
     @Test
