@@ -18,13 +18,17 @@
 
 package org.apache.cassandra.db.compaction;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.service.ActiveRepairService;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 
 /**
  * {@link CompactionStrategyManager#getEstimatedRemainingTasks()} is read by every metrics scrape, so it walks
@@ -33,19 +37,19 @@ import static org.junit.Assert.assertTrue;
  */
 public class CompactionStrategyManagerEstimatedTasksTest extends CQLTester
 {
-    // Sum over all four holders (repaired, unrepaired, pending and transient repairs). getStrategies()
-    // omits the transient-repair holder, so it cannot catch a dropped or double-counted holder.
-    private static int sumOverStrategies(CompactionStrategyManager csm)
+    // Fill an empty column family store with eight L0 sstables, 50 rows each.
+    private void writeEightL0SStables(int keyBase)
     {
-        int tasks = 0;
-        for (AbstractStrategyHolder holder : csm.getHolders())
-            for (AbstractCompactionStrategy strategy : holder.allStrategies())
-                tasks += strategy.getEstimatedRemainingTasks();
-        return tasks;
+        for (int sstable = 0; sstable < 8; sstable++)
+        {
+            for (int i = 0; i < 50; i++)
+                execute("INSERT INTO %s (k, v) VALUES (?, ?)", keyBase + sstable * 50 + i, i);
+            flush();
+        }
     }
 
     @Test
-    public void matchesSumOverStrategies()
+    public void matchesConcreteEstimate()
     {
         // LeveledCompactionStrategy computes its estimate on demand from the manifest. SizeTiered caches it
         // as a side effect of the background compaction loop, which is disabled here, so it would report 0.
@@ -57,21 +61,36 @@ public class CompactionStrategyManagerEstimatedTasksTest extends CQLTester
 
         CompactionStrategyManager csm = cfs.getCompactionStrategyManager();
         assertEquals(0, csm.getEstimatedRemainingTasks());
-        assertEquals(sumOverStrategies(csm), csm.getEstimatedRemainingTasks());
 
-        // Eight sstables in L0 against a max_threshold of 4 gives a deterministic estimate of two tasks.
-        for (int sstable = 0; sstable < 8; sstable++)
-        {
-            for (int i = 0; i < 50; i++)
-                execute("INSERT INTO %s (k, v) VALUES (?, ?)", sstable * 50 + i, i);
-            flush();
-        }
-
-        int expected = sumOverStrategies(csm);
-        assertTrue("expected pending compactions across 8 L0 sstables, got " + expected, expected > 0);
-        assertEquals(expected, csm.getEstimatedRemainingTasks());
+        // Eight L0 sstables against a max_threshold of 4 give a deterministic estimate of two tasks.
+        writeEightL0SStables(0);
+        assertEquals(2, csm.getEstimatedRemainingTasks());
 
         // Repeated reads are stable; nothing about the traversal mutates strategy state.
-        assertEquals(expected, csm.getEstimatedRemainingTasks());
+        assertEquals(2, csm.getEstimatedRemainingTasks());
+    }
+
+    @Test
+    public void sumsAcrossHolders() throws Exception
+    {
+        // The manager owns four holders (repaired, unrepaired, pending and transient repairs). The metric
+        // must sum over every holder, not just the unrepaired one. This exercises two non-empty holders so
+        // a bug that dropped the repaired holder from the sum would fail here.
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, v int) WITH compaction = " +
+                    "{'class':'LeveledCompactionStrategy', 'max_threshold':'4'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        CompactionStrategyManager csm = cfs.getCompactionStrategyManager();
+
+        // Eight L0 sstables, then mark them repaired so they move to the repaired holder: two tasks there.
+        writeEightL0SStables(0);
+        List<SSTableReader> repaired = new ArrayList<>(cfs.getLiveSSTables());
+        csm.mutateRepaired(repaired, System.currentTimeMillis(), ActiveRepairService.NO_PENDING_REPAIR, false);
+        assertEquals(2, csm.getEstimatedRemainingTasks());
+
+        // Eight more L0 sstables stay unrepaired: two tasks in the unrepaired holder. The total is the sum.
+        writeEightL0SStables(1000);
+        assertEquals(4, csm.getEstimatedRemainingTasks());
     }
 }
