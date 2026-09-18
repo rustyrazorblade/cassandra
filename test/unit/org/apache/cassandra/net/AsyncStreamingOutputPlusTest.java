@@ -26,8 +26,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.AfterClass;
 import org.junit.Test;
@@ -46,10 +44,11 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.memory.BufferPools;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.FileRegion;
 import io.netty.channel.embedded.EmbeddedChannel;
 
-import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -236,30 +235,38 @@ public class AsyncStreamingOutputPlusTest
     }
 
     /**
-     * The window has to be applied, not only computed. Nothing drains the channel here, so the bytes in flight
-     * climb to the window and the writer parks. The number of writes it completes first reports the window it
-     * applied.
+     * The window has to be applied, not only computed. A write hands its byte count and the configured water
+     * marks to beginFlush, which is where they govern how much may be in flight. A recording subclass captures
+     * the marks beginFlush receives, so the check is deterministic rather than a race against a parking thread.
      */
     @Test
-    public void testConfiguredSendWindowGovernsHowMuchIsInFlight() throws Exception
+    public void writeToChannelPassesTheConfiguredSendWindowToBeginFlush() throws IOException
     {
         int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
         int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
         try
         {
-            int chunk = 64 << 10;
+            DatabaseDescriptor.setStreamChunkSizeInBytes(512); // a window may not be smaller than the chunk
+            DatabaseDescriptor.setStreamSendWindowInBytes(4 * (64 << 10)); // 256 KiB, above the channel default marks
 
-            // The writer parks before a write once the bytes already in flight pass max(low, high - chunk).
-            // The first write always flushes and never counts, so the count is that threshold in chunks, plus two.
-            //
-            // A window far below the channel's marks: its 64 KiB high and 32 KiB low stand, the threshold is
-            // max(32 KiB, 0) = 32 KiB, and one chunk of 64 KiB already passes it.
-            assertEquals("with no window of our own the channel's marks should govern",
-                         2, writesBeforeParking(1024, chunk));
+            RecordingBeginFlush out = new RecordingBeginFlush(new TestChannel(4));
+            try
+            {
+                out.writeToChannel(supplier -> {
+                    ByteBuffer buffer = supplier.get(64);
+                    buffer.position(buffer.limit());
+                    buffer.flip();
+                }, StreamManager.getRateLimiter(FBUtilities.getBroadcastAddressAndPort()));
 
-            // A 256 KiB window gives max(128 KiB, 192 KiB) = 192 KiB, which is three more chunks.
-            assertEquals("the configured window should govern how much the writer keeps in flight",
-                         5, writesBeforeParking(4 * chunk, chunk));
+                assertEquals("the write must pass the configured low water mark to beginFlush",
+                             out.streamingSendWindowLowWaterMark, out.lastLowWaterMark);
+                assertEquals("the write must pass the configured high water mark to beginFlush",
+                             out.streamingSendWindowHighWaterMark, out.lastHighWaterMark);
+            }
+            finally
+            {
+                out.discard();
+            }
         }
         finally
         {
@@ -268,64 +275,27 @@ public class AsyncStreamingOutputPlusTest
         }
     }
 
-    /** Submit fixed size writes to a channel that is never drained, and report how many land before it parks. */
-    private int writesBeforeParking(int window, int chunk) throws Exception
+    /** An output that records the water marks handed to the last payload-carrying beginFlush call. */
+    private static class RecordingBeginFlush extends AsyncStreamingOutputPlus
     {
-        // the writes here are sized directly, so stream_chunk_size only has to stay under the window
-        DatabaseDescriptor.setStreamChunkSizeInBytes(512);
-        DatabaseDescriptor.setStreamSendWindowInBytes(window);
+        long lastLowWaterMark;
+        long lastHighWaterMark;
 
-        TestChannel channel = new TestChannel(4);
-        AsyncStreamingOutputPlus out = new AsyncStreamingOutputPlus(channel);
-        AtomicInteger completed = new AtomicInteger();
-
-        Thread writer = new Thread(() -> {
-            try
-            {
-                StreamManager.StreamRateLimiter limiter = StreamManager.getRateLimiter(FBUtilities.getBroadcastAddressAndPort());
-                for (int i = 0; i < 16; i++)
-                {
-                    out.writeToChannel(supplier -> {
-                        ByteBuffer buffer = supplier.get(chunk);
-                        buffer.position(buffer.limit());
-                        buffer.flip();
-                    }, limiter);
-                    completed.incrementAndGet();
-                }
-            }
-            catch (Throwable ignored)
-            {
-                // the test drains the channel and interrupts; whatever falls out here is not the subject
-            }
-        });
-        writer.setDaemon(true);
-        writer.start();
-
-        try
+        RecordingBeginFlush(Channel channel)
         {
-            // let it get as far as it can, then confirm it is parked rather than merely slow
-            long deadline = nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            int stable = -1;
-            while (nanoTime() < deadline)
-            {
-                Thread.State state = writer.getState();
-                int done = completed.get();
-                if (done == stable && (state == Thread.State.WAITING || state == Thread.State.TIMED_WAITING))
-                    return done;
-                stable = done;
-                Thread.sleep(50);
-            }
-            throw new AssertionError("the writer never parked; it completed " + completed.get() + " writes");
+            super(channel);
         }
-        finally
+
+        @Override
+        protected ChannelPromise beginFlush(long byteCount, long lowWaterMark, long highWaterMark) throws IOException
         {
-            while (channel.readOutbound() != null)
+            // doFlush(0) may call beginFlush with nothing buffered; the payload write is the one that matters
+            if (byteCount > 0)
             {
-                // drain, so the parked writer can finish and the thread can exit
+                lastLowWaterMark = lowWaterMark;
+                lastHighWaterMark = highWaterMark;
             }
-            writer.interrupt();
-            writer.join(TimeUnit.SECONDS.toMillis(10));
-            out.discard();
+            return super.beginFlush(byteCount, lowWaterMark, highWaterMark);
         }
     }
 

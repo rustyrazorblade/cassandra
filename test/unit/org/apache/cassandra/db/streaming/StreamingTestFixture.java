@@ -28,6 +28,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
@@ -54,10 +56,12 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.streaming.SessionInfo;
 import org.apache.cassandra.streaming.StreamCoordinator;
+import org.apache.cassandra.streaming.StreamEvent;
 import org.apache.cassandra.streaming.StreamEventHandler;
 import org.apache.cassandra.streaming.StreamOperation;
 import org.apache.cassandra.streaming.StreamResultFuture;
 import org.apache.cassandra.streaming.StreamSession;
+import org.apache.cassandra.streaming.StreamState;
 import org.apache.cassandra.streaming.StreamSummary;
 import org.apache.cassandra.streaming.async.NettyStreamingConnectionFactory;
 import org.apache.cassandra.streaming.messages.StreamMessageHeader;
@@ -397,10 +401,22 @@ public final class StreamingTestFixture
 
     public static StreamSession session()
     {
+        return session(null);
+    }
+
+    /**
+     * A session whose progress and other stream events reach {@code onEvent}. Pass null to ignore events.
+     */
+    public static StreamSession session(Consumer<StreamEvent> onEvent)
+    {
+        List<StreamEventHandler> handlers = onEvent == null
+                                            ? Collections.emptyList()
+                                            : Collections.singletonList(recordingHandler(onEvent));
+
         StreamCoordinator coordinator = new StreamCoordinator(StreamOperation.BOOTSTRAP, 1, new NettyStreamingConnectionFactory(),
                                                               false, false, null, PreviewKind.NONE);
         StreamResultFuture future = StreamResultFuture.createInitiator(nextTimeUUID(), StreamOperation.BOOTSTRAP,
-                                                                       Collections.<StreamEventHandler>emptyList(), coordinator);
+                                                                       handlers, coordinator);
 
         InetAddressAndPort peer = FBUtilities.getBroadcastAddressAndPort();
         coordinator.addSessionInfo(new SessionInfo(peer, 0, peer, Collections.emptyList(), Collections.emptyList(),
@@ -409,6 +425,42 @@ public final class StreamingTestFixture
         StreamSession session = coordinator.getOrCreateOutboundSession(peer);
         session.init(future);
         return session;
+    }
+
+    /** Wrap a per-event callback as a full {@link StreamEventHandler}; the completion callbacks do nothing. */
+    private static StreamEventHandler recordingHandler(Consumer<StreamEvent> onEvent)
+    {
+        return new StreamEventHandler()
+        {
+            public void handleStreamEvent(StreamEvent event)
+            {
+                onEvent.accept(event);
+            }
+
+            public void onSuccess(StreamState state)
+            {
+            }
+
+            public void onFailure(Throwable throwable)
+            {
+            }
+        };
+    }
+
+    /**
+     * Run the writer for these sections and sum the per-chunk progress deltas it reports. A sub-range that
+     * begins part way into a chunk sends fewer bytes than it reads, so the deltas, not the bytes read, are
+     * what must add up to the section size.
+     */
+    public static long progressDeltas(SSTableReader sstable, List<PartitionPositionBounds> sections) throws IOException
+    {
+        AtomicLong summed = new AtomicLong();
+        StreamSession session = session(event -> {
+            if (event instanceof StreamEvent.ProgressEvent)
+                summed.addAndGet(((StreamEvent.ProgressEvent) event).progress.deltaBytes);
+        });
+        capture(writer(sstable, sections, session));
+        return summed.get();
     }
 
     /**
