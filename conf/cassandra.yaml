@@ -692,13 +692,13 @@ commitlog_disk_access_mode: legacy
 cursor_compaction_enabled: true
 
 # Experimental.  New garbage free memtable flush path, the flush counterpart of cursor_compaction_enabled.
-cursor_flush_enabled: false
+cursor_flush_enabled: true
 
 # Experimental.  New garbage free single-partition read path, gated by CursorReads.isReadSupported.
-cursor_reads_enabled: false
+cursor_reads_enabled: true
 
 # Experimental.  Move compression and the SSTable write off the compaction thread.
-async_compaction_writer_enabled: false
+async_compaction_writer_enabled: true
 
 # In-flight memory per open compressed writer.  Off heap with direct buffers.
 # async_compaction_writer_buffer: 4MiB
@@ -717,7 +717,7 @@ compaction_read_disk_access_mode: direct
 # data typically benefits from page cache for subsequent reads (workloads that
 # rarely read recently-flushed data, e.g. write-heavy time series, may see less
 # benefit from caching flush output).
-# background_write_disk_access_mode: standard
+background_write_disk_access_mode: direct
 
 # Size of the in-memory staging buffer for Direct IO background writes. Trades off syscall
 # frequency against per-flush blocking latency on the compaction thread.
