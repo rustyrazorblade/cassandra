@@ -81,6 +81,11 @@ public class SequentialWriterOption
         return trickleFsync;
     }
 
+    /**
+     * On the synchronous path this is the interval between fdatasync calls. The async compressed
+     * writer reuses it as the stride between kernel writeback hints instead; see
+     * {@link org.apache.cassandra.io.compress.CompressedSequentialWriter#hintWriteback}.
+     */
     public long trickleFsyncByteInterval()
     {
         return trickleFsyncByteInterval;
