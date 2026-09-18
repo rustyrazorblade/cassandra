@@ -18,6 +18,7 @@
 package org.apache.cassandra.io.compress;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -207,6 +208,94 @@ public class AsyncChunkPipelineTest
                      DirectCompressedSequentialWriter.class
                          .getDeclaredMethod("hintWriteback", long.class, long.class)
                          .getDeclaringClass());
+    }
+
+    /**
+     * The post-flush listener drives early open: a reader binds to whatever offset it reports. So the
+     * reported offset must never run ahead of the bytes actually on disk, or the reader short-reads
+     * live compaction output. This writes many chunks through the async writer with a small pool and,
+     * at every callback, checks the reported offset is monotonic and never exceeds the current on-disk
+     * data-file length. The payload is incompressible so the compressed file never falls below the
+     * uncompressed offset the listener reports, which keeps the length comparison meaningful.
+     */
+    @Test
+    public void postFlushOffsetNeverExceedsDurableBytes() throws IOException
+    {
+        CompressionParams params = CompressionParams.lz4();
+        byte[] payload = payload(params.chunkLength() * (SLOTS * 5) + 123, true);
+
+        File data = FileUtils.createTempFile("durableInvariant", ".db");
+        File meta = new File(data.absolutePath() + ".metadata");
+
+        CompressedSequentialWriter writer = newWriter(params, data, meta, asyncBytes(params));
+
+        long[] lastReported = { -1L };
+        List<String> violations = new ArrayList<>();
+        writer.setPostFlushListener(offset -> {
+            if (offset < lastReported[0])
+                violations.add("offset went backwards: " + offset + " < " + lastReported[0]);
+            lastReported[0] = offset;
+
+            long onDisk = data.length();
+            if (offset > onDisk)
+                violations.add("reported offset " + offset + " exceeds on-disk bytes " + onDisk);
+        });
+
+        // write() finishes and closes the writer, so the pipeline is fully drained on return.
+        write(writer, payload);
+
+        assertTrue("post-flush durable-offset invariant violated: " + violations, violations.isEmpty());
+        assertEquals("final durable offset must equal the uncompressed size after finish",
+                     payload.length, writer.getLastFlushOffset());
+    }
+
+    /**
+     * The writer thread is started on the first flush, so there is a window where the pipeline is
+     * marked started but the thread handle is not assigned yet. The Accord simulator drove an abort
+     * through that window: doPreCleanup ran quiesce() then stillRunning() on the half-started
+     * pipeline. Before the fix stillRunning did started && writer.isAlive() and threw a
+     * NullPointerException on the null handle, which broke every memtable flush that aborted. Both
+     * calls must treat a null handle as "no thread is running".
+     *
+     * The window is a scheduling accident that a byte-identical test never reaches, so pin the exact
+     * state directly: mark the pipeline started with no thread, then run the two cleanup calls.
+     */
+    @Test
+    public void cleanupToleratesStartedWithoutWriterThread() throws Exception
+    {
+        CompressionParams params = CompressionParams.lz4();
+        File data = FileUtils.createTempFile("halfStarted", ".db");
+        File meta = new File(data.absolutePath() + ".metadata");
+
+        CompressedSequentialWriter writer = newWriter(params, data, meta, asyncBytes(params));
+        try
+        {
+            AsyncChunkPipeline pipeline = pipelineOf(writer);
+            setStarted(pipeline, true);
+
+            // The abort path calls both of these; neither may dereference the null handle.
+            pipeline.quiesce();
+            assertFalse("a pipeline with no writer thread must not report itself running",
+                        pipeline.stillRunning());
+        }
+        finally
+        {
+            writer.abort(null);
+        }
+    }
+
+    private static AsyncChunkPipeline pipelineOf(CompressedSequentialWriter writer) throws Exception
+    {
+        Field f = CompressedSequentialWriter.class.getDeclaredField("pipeline");
+        f.setAccessible(true);
+        return (AsyncChunkPipeline) f.get(writer);
+    }
+
+    private static void setStarted(AsyncChunkPipeline pipeline, boolean value) throws Exception
+    {
+        Field f = AsyncChunkPipeline.class.getDeclaredField("started");
+        f.setAccessible(true);
+        f.setBoolean(pipeline, value);
     }
 
     private void compareAcrossSizes(CompressionParams params, String name) throws IOException

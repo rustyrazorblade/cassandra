@@ -27,6 +27,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongConsumer;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Throwables;
 
 import org.jctools.queues.SpscArrayQueue;
 import org.slf4j.Logger;
@@ -42,11 +43,10 @@ import static org.apache.cassandra.utils.Throwables.merge;
 /**
  * Runs compression, checksumming and the channel write away from the thread producing the data.
  *
- * In tests with fast disks the write side is 30-40% of a compaction thread's CPU, about 75% of it
- * compression and CRC. That cost is the same whether the bytes reach the disk through the page cache
- * or through O_DIRECT, so this lives beside {@link CompressedSequentialWriter} rather than inside a
- * subclass of it: both that class and {@link DirectCompressedSequentialWriter} own one, and neither
- * repeats any of it.
+ * Compression and CRC are a large part of a compaction thread's work, and that cost is the same
+ * whether the bytes reach the disk through the page cache or through O_DIRECT. So this lives beside
+ * {@link CompressedSequentialWriter} rather than inside a subclass of it: both that class and
+ * {@link DirectCompressedSequentialWriter} own one, and neither repeats any of it.
  *
  * The producer fills a chunk-sized slot, hands it on and takes a fresh one; slots rotate between
  * two single-producer, single-consumer queues, so the pool is the back-pressure. One thread per
@@ -62,8 +62,13 @@ class AsyncChunkPipeline
 {
     private static final Logger logger = LoggerFactory.getLogger(AsyncChunkPipeline.class);
 
-    /** How long shutdown waits for the writer thread before giving up and logging. */
-    private static final long QUIESCE_MILLIS = 30_000L;
+    /**
+     * How long shutdown waits for the writer thread before giving up and logging. Not final only so a
+     * test can shorten it to exercise the join-timeout path without a long wait; production never
+     * changes it.
+     */
+    @VisibleForTesting
+    static volatile long quiesceMillis = 30_000L;
 
     /** How long the writer parks before it looks for more work. */
     private static final long WRITER_PARK_NANOS = TimeUnit.MILLISECONDS.toNanos(200);
@@ -82,8 +87,13 @@ class AsyncChunkPipeline
     /** Filled chunks, in order. Offered by the producer, polled by the writer thread. */
     private final SpscArrayQueue<ByteBuffer> filled;
 
-    /** Producer-only until the thread starts; null until then. */
-    private Thread writer;
+    /**
+     * The writer thread, or null until it is started. It is the authoritative "a thread exists"
+     * signal for the cleanup path, which runs on a different thread than the producer, so it is
+     * volatile: a reader that sees a non-null handle sees a fully-started thread, and a reader that
+     * sees null knows there is no thread to wait for or free buffers underneath.
+     */
+    private volatile Thread writer;
 
     private final BufferType bufferType;
     private final int chunkLength;
@@ -107,6 +117,13 @@ class AsyncChunkPipeline
 
     /** Producer-only: the writer thread is started on the first flush, not during construction. */
     private boolean started = false;
+
+    /**
+     * Producer-only: set when the execution environment cannot start a background thread, so the
+     * writer's work runs inline on the producer thread instead. The deterministic simulator forbids
+     * threads; there the pipeline still produces identical output, only synchronously.
+     */
+    private boolean inline = false;
 
     /** Bytes between writeback hints; 0 turns hinting off. See the constructor for the rationale. */
     private final long writebackInterval;
@@ -172,8 +189,21 @@ class AsyncChunkPipeline
     {
         if (!started)
         {
+            try
+            {
+                // Publish the thread handle before marking started. The cleanup path keys off writer,
+                // so the handle must be set first: assigning it before started closes the window where
+                // a reader saw started true with writer still null.
+                writer = executorFactory().startThread(threadName, this::writerLoop);
+            }
+            catch (UnsupportedOperationException e)
+            {
+                // The environment forbids background threads (the deterministic simulator). Do the
+                // writer's work inline on the producer thread instead. writer stays null, so the
+                // cleanup path sees no thread to join or free buffers underneath.
+                inline = true;
+            }
             started = true;
-            writer = executorFactory().startThread(threadName, this::writerLoop);
         }
     }
 
@@ -220,10 +250,19 @@ class AsyncChunkPipeline
         }
     }
 
-    /** Hands a filled chunk to the writer thread. */
+    /** Hands a filled chunk to the writer thread, or writes it inline when there is no thread. */
     void submit(ByteBuffer outgoing)
     {
         submitted++;
+
+        if (inline)
+        {
+            // No writer thread: do its work here on the producer thread. drain() then completes at
+            // once because completed catches up to submitted before submit returns.
+            processChunk(outgoing);
+            return;
+        }
+
         if (!filled.offer(outgoing))
             throw new IllegalStateException("async writer queue full; slot accounting is wrong");
         if (writerParked)
@@ -278,7 +317,8 @@ class AsyncChunkPipeline
      */
     private void awaitProgress()
     {
-        if (started && !writer.isAlive() && failure.get() == null)
+        Thread w = writer;
+        if (w != null && !w.isAlive() && failure.get() == null)
             failure.compareAndSet(null, new IOException("Async writer thread for " + owner.getPath() + " exited unexpectedly"));
 
         LockSupport.parkNanos(PRODUCER_PARK_NANOS);
@@ -306,7 +346,7 @@ class AsyncChunkPipeline
         if (t == null)
             return;
 
-        com.google.common.base.Throwables.throwIfUnchecked(t);
+        Throwables.throwIfUnchecked(t);
         throw new FSWriteError(t instanceof IOException ? (IOException) t : new IOException(t), owner.getPath());
     }
 
@@ -327,29 +367,7 @@ class AsyncChunkPipeline
             if (slot != null)
             {
                 idle = 0;
-                try
-                {
-                    // Once a failure is recorded, the file is being aborted. Stop writing, but keep
-                    // recycling slots and counting them so drain() still completes rather than hangs.
-                    if (failure.get() == null)
-                    {
-                        owner.flushData(slot);
-                        durableOffset = owner.getLastFlushOffset();
-                        long onDisk = owner.chunkOffsetSnapshot();
-                        estimatedOnDisk = onDisk;
-                        maybeHintWriteback(onDisk);
-                    }
-                }
-                catch (Throwable t)
-                {
-                    failure.compareAndSet(null, t);
-                }
-                finally
-                {
-                    slot.clear();
-                    free.offer(slot);
-                    completed++;
-                }
+                processChunk(slot);
             }
             else if (shutdown)
             {
@@ -360,6 +378,38 @@ class AsyncChunkPipeline
 
             if (slot == null)
                 awaitWork(idle++);
+        }
+    }
+
+    /**
+     * Compresses, checksums and writes one chunk, then recycles its slot. The writer thread runs this
+     * for every filled slot; the inline fallback runs it on the producer thread. Either way the slot
+     * goes back on the free queue and completed advances, so drain() always makes progress.
+     */
+    private void processChunk(ByteBuffer slot)
+    {
+        try
+        {
+            // Once a failure is recorded, the file is being aborted. Stop writing, but keep recycling
+            // slots and counting them so drain() still completes rather than hangs.
+            if (failure.get() == null)
+            {
+                owner.flushData(slot);
+                durableOffset = owner.getLastFlushOffset();
+                long onDisk = owner.chunkOffsetSnapshot();
+                estimatedOnDisk = onDisk;
+                maybeHintWriteback(onDisk);
+            }
+        }
+        catch (Throwable t)
+        {
+            failure.compareAndSet(null, t);
+        }
+        finally
+        {
+            slot.clear();
+            free.offer(slot);
+            completed++;
         }
     }
 
@@ -410,7 +460,10 @@ class AsyncChunkPipeline
     /** True while a writer thread may still touch a buffer, so nothing may be freed. */
     boolean stillRunning()
     {
-        return started && writer.isAlive();
+        // Key off the thread handle, not started: writer is non-null only once the thread exists, and
+        // a null handle means no thread can touch a buffer, so nothing may still be running.
+        Thread w = writer;
+        return w != null && w.isAlive();
     }
 
     void quiesce()
@@ -420,25 +473,26 @@ class AsyncChunkPipeline
         // in doPreCleanup needs to be safe.
         shutdown = true;
 
-        if (!started)
-            return;   // nothing was ever flushed; there is no thread to wait for
+        Thread w = writer;
+        if (w == null)
+            return;   // nothing was ever flushed, or the thread never started; there is nothing to wait for
 
         // The writer exits once it finds the queue empty, so nothing already dispatched is dropped.
-        LockSupport.unpark(writer);
+        LockSupport.unpark(w);
         try
         {
-            writer.join(QUIESCE_MILLIS);
+            w.join(quiesceMillis);
         }
         catch (InterruptedException e)
         {
             Thread.currentThread().interrupt();
         }
 
-        if (writer.isAlive())
+        if (w.isAlive())
             logger.error("Async compaction writer thread for {} did not stop within {}ms " +
                          "({} of {} chunks written, recorded failure: {}); its buffers are left to the " +
                          "garbage collector rather than freed underneath it",
-                         owner.getPath(), QUIESCE_MILLIS, completed, submitted, failure.get());
+                         owner.getPath(), quiesceMillis, completed, submitted, failure.get());
     }
 
     /** Frees every buffer the pipeline owns. Only safe once {@link #stillRunning} is false. */

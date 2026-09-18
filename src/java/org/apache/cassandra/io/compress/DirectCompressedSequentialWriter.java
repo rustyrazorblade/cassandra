@@ -75,7 +75,9 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     // capacity >= maxChunkWrite + CRC_LENGTH + blockSize: a chunk is staged in a single put, so it must fit
     // contiguously even after a flush carries over up to blockSize - 1 unaligned bytes.
     private ByteBuffer writeBuffer;
-    private long actualDataSize = 0;
+    // Written by the writer thread in writeChunk, read by the producer through getOnDiskFilePointer;
+    // volatile so the producer sees the latest size, matching the other cross-thread fields here.
+    private volatile long actualDataSize = 0;
 
     private boolean dataFinalized = false;
 
@@ -414,6 +416,18 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         @Override
         protected Throwable doPreCleanup(Throwable accumulate)
         {
+            // Let the parent run first. It quiesces the pipeline, then frees nothing if the writer
+            // thread is still alive: a stuck writer may still be inside writeToAlignedBuffer or a
+            // channel write on writeBuffer, and freeing it there faults the JVM. writeBuffer follows
+            // the same rule, so it must be freed after the quiesce, not before it.
+            accumulate = super.doPreCleanup(accumulate);
+
+            // The writer thread did not stop, so the parent left its buffers to the garbage collector
+            // rather than free them underneath the thread. writeBuffer is one of those buffers: leave
+            // it for the collector too instead of freeing memory the writer may still touch.
+            if (pipeline != null && pipeline.stillRunning())
+                return accumulate;
+
             if (writeBuffer != null)
             {
                 try
@@ -429,7 +443,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
                 writeBuffer = null;
             }
 
-            return super.doPreCleanup(accumulate);
+            return accumulate;
         }
     }
 
