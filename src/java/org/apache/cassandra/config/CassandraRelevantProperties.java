@@ -645,6 +645,22 @@ public enum CassandraRelevantProperties
     TEST_CASSANDRA_SKIP_SYNC("cassandra.skip_sync"),
     TEST_CASSANDRA_SUITENAME("suitename", "suitename_IS_UNDEFINED"),
     TEST_CASSANDRA_TESTTAG("cassandra.testtag", "cassandra.testtag_IS_UNDEFINED"),
+    /**
+     * Scale knobs for the commit log property tests and the stateful model test.
+     * <ul>
+     * <li>examples: the baseline case count, which the costlier classes scale down;</li>
+     * <li>mutations_per_example: how many mutations one case writes;</li>
+     * <li>seed: pins a run so a failure reproduces;</li>
+     * <li>stateful.steps: the length of the command sequence the stateful model test runs.</li>
+     * </ul>
+     * Override down for a quick local check.
+     */
+    TEST_COMMITLOG_BENCH_HOLD("bench.hold"),
+    TEST_COMMITLOG_EXAMPLES("cassandra.test.commitlog.examples", "200"),
+    TEST_COMMITLOG_MUTATIONS_PER_EXAMPLE("cassandra.test.commitlog.mutations_per_example", "40"),
+    TEST_COMMITLOG_SEED("cassandra.test.commitlog.seed"),
+    TEST_COMMITLOG_STATEFUL_STEPS("cassandra.test.commitlog.stateful.steps", "150"),
+
     TEST_COMPRESSION("cassandra.test.compression"),
     TEST_COMPRESSION_ALGO("cassandra.test.compression.algo", "lz4"),
     TEST_DEBUG_REF_COUNT("cassandra.debugrefcount"),
