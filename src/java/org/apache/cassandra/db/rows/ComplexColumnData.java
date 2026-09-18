@@ -169,8 +169,7 @@ public class ComplexColumnData extends ColumnData implements Iterable<Cell<?>>
         if (!complexDeletion.isLive())
             complexDeletion.digest(digest);
 
-        for (Cell<?> cell : this)
-            cell.digest(digest);
+        BTree.<ColumnData, Digest>apply(cells, ColumnData::digest, digest);
     }
 
     public boolean hasInvalidDeletions()
