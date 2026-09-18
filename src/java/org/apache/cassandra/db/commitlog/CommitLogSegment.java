@@ -215,7 +215,7 @@ public abstract class CommitLogSegment
             for (PartitionUpdate update : mutation.getPartitionUpdates())
                 coverInMap(tableDirty, update.metadata().id, position);
 
-            return new Allocation(this, opGroup, position, (ByteBuffer) buffer.duplicate().position(position).limit(position + size));
+            return new Allocation(this, opGroup, position, size);
         }
         catch (Throwable t)
         {
@@ -710,14 +710,14 @@ public abstract class CommitLogSegment
         private final CommitLogSegment segment;
         private final OpOrder.Group appendOp;
         private final int position;
-        private final ByteBuffer buffer;
+        private final int size;
 
-        Allocation(CommitLogSegment segment, OpOrder.Group appendOp, int position, ByteBuffer buffer)
+        Allocation(CommitLogSegment segment, OpOrder.Group appendOp, int position, int size)
         {
             this.segment = segment;
             this.appendOp = appendOp;
             this.position = position;
-            this.buffer = buffer;
+            this.size = size;
         }
 
         CommitLogSegment getSegment()
@@ -725,9 +725,14 @@ public abstract class CommitLogSegment
             return segment;
         }
 
-        ByteBuffer getBuffer()
+        int getPosition()
         {
-            return buffer;
+            return position;
+        }
+
+        int getSize()
+        {
+            return size;
         }
 
         // markWritten() MUST be called once we are done with the segment or the CL will never flush
@@ -750,7 +755,7 @@ public abstract class CommitLogSegment
          */
         public CommitLogPosition getCommitLogPosition()
         {
-            return new CommitLogPosition(segment.id, buffer.limit());
+            return new CommitLogPosition(segment.id, position + size);
         }
     }
 
