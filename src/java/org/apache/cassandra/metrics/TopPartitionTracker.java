@@ -153,6 +153,14 @@ public class TopPartitionTracker implements Closeable
         return topSizes.get().toMap(metadata);
     }
 
+    /**
+     * @return the recorded size in bytes of {@code key} if it is one of the tracked top partitions, otherwise 0
+     */
+    public long getSizeEstimate(DecoratedKey key)
+    {
+        return topSizes.get().getEstimate(key);
+    }
+
     @VisibleForTesting
     public TopHolder topSizes()
     {
