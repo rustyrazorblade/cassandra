@@ -719,6 +719,8 @@ public enum CassandraRelevantProperties
      * This is a dev/CI only property. Do not use otherwise.
      */
     TEST_STORAGE_COMPATIBILITY_MODE("cassandra.test.storage_compatibility_mode", StorageCompatibilityMode.NONE.toString()),
+    TEST_STREAMING_BURN_ITERATIONS("cassandra.test.streaming_burn_iterations", "5"),
+    TEST_STREAMING_BURN_MIB("cassandra.test.streaming_burn_mib", "256"),
     TEST_STRICT_LCS_CHECKS("cassandra.test.strict_lcs_checks"),
     /** Turns some warnings into exceptions for testing. */
     TEST_STRICT_RUNTIME_CHECKS("cassandra.strict.runtime.checks"),
