@@ -39,7 +39,7 @@ cluster_name: 'Test Cluster'
 # See https://cassandra.apache.org/doc/latest/getting-started/production.html#tokens for
 # best practice information about num_tokens.
 #
-num_tokens: 16
+num_tokens: 4
 
 # Triggers automatic allocation of num_tokens tokens for this node. The allocation
 # algorithm attempts to choose tokens in a way that optimizes replicated load over
@@ -689,7 +689,7 @@ commitlog_segment_size: 32MiB
 commitlog_disk_access_mode: legacy
 
 # Experimental.  New garbage free compaction path.  Does not yet support collections, counters, BTI.
-cursor_compaction_enabled: false
+cursor_compaction_enabled: true
 
 # Experimental.  New garbage free memtable flush path, the flush counterpart of cursor_compaction_enabled.
 cursor_flush_enabled: false
@@ -706,7 +706,7 @@ async_compaction_writer_enabled: false
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
-# compaction_read_disk_access_mode: auto
+compaction_read_disk_access_mode: direct
 
 # Set the disk access mode for writing compressed SSTables during background operations
 # (compaction, streaming, cleanup, repair, etc.). The allowed values are:
@@ -725,7 +725,7 @@ async_compaction_writer_enabled: false
 # + one block when chunk_length exceeds this value.
 # Allocated per concurrent background writer (e.g. one per active compaction thread,
 # streaming session, etc.), so total off-heap usage scales with concurrency.
-# direct_write_buffer_size: 1MiB
+direct_write_buffer_size: 16MiB
 
 # Compression to apply to SSTables as they flush for compressed tables.
 # Note that tables without compression enabled do not respect this flag.
@@ -769,8 +769,8 @@ seed_provider:
 # On the other hand, since writes are almost never IO bound, the ideal
 # number of "concurrent_writes" is dependent on the number of cores in
 # your system; (8 * number_of_cores) is a good rule of thumb.
-concurrent_reads: 32
-concurrent_writes: 32
+concurrent_reads: 64
+concurrent_writes: 128
 concurrent_counter_writes: 32
 
 # For materialized view writes, as there is a read involved, so this should
@@ -837,7 +837,7 @@ memtable:
     trie:
       class_name: TrieMemtable
     default:
-      inherits: skiplist
+      inherits: trie
 
 # Total permitted memory to use for memtables. Cassandra will stop
 # accepting writes when the limit is exceeded until a flush completes,
@@ -875,7 +875,7 @@ memtable:
 #
 # offheap_objects
 #    off heap objects
-memtable_allocation_type: heap_buffers
+memtable_allocation_type: offheap_objects
 
 # Limit memory usage for Merkle tree calculations during repairs of a certain
 # table and common token range. Repair commands targeting multiple tables or
@@ -962,7 +962,7 @@ memtable_allocation_type: heap_buffers
 # and flush size and frequency. More is not better you just need enough flush writers
 # to never stall waiting for flushing to free memory.
 #
-# memtable_flush_writers: 2
+memtable_flush_writers: 16
 
 # Total space to use for change-data-capture logs on disk.
 #
@@ -1004,7 +1004,7 @@ index_summary_resize_interval: 60m
 # buffers. Enable this to avoid sudden dirty buffer flushing from
 # impacting read latencies. Almost always a good idea on SSDs; not
 # necessarily on platters.
-trickle_fsync: true
+trickle_fsync: false
 # The interval bounds how much dirty data one fsync forces out, so it bounds the
 # size of a single writeback burst. Raising it trades read tail latency for write
 # throughput; raise it far enough and the kernel's own dirty page thresholds
@@ -1218,8 +1218,8 @@ snapshot_links_per_second: 0
 # The default format is "big", the legacy SSTable format in use since Cassandra 3.0.
 # Cassandra versions 5.0 and later also support the trie-indexed "bti" format,
 # which offers better performance.
-#sstable:
-#  selected_format: big
+sstable:
+  selected_format: bti
 
 # Granularity of the collation index of rows within a partition.
 # Applies to both BIG and BTI SSTable formats. In both formats,
@@ -1256,11 +1256,14 @@ column_index_cache_size: 2KiB
 # If no value is specified, the default is to use SizeTieredCompactionStrategy,
 # with its default compaction parameters.
 #
-# default_compaction:
-#   class_name: SizeTieredCompactionStrategy
-#   parameters:
-#     min_threshold: 4
-#     max_threshold: 32
+default_compaction:
+    class_name: UnifiedCompactionStrategy
+    parameters:
+      scaling_parameters: L10
+      max_sstables_to_compact: 64
+      target_sstable_size: 1GiB
+      sstable_growth: 0.3333333333333333
+      min_sstable_size: 100MiB
 
 
 # Number of simultaneous compactions to allow, NOT including
@@ -1298,7 +1301,7 @@ concurrent_materialized_view_builders: 1
 # Setting this to 0 disables throttling. Note that this accounts for all types
 # of compaction, including validation compaction (building Merkle trees
 # for repairs).
-compaction_throughput: 64MiB/s
+compaction_throughput: 256MiB/s
 
 # When compacting, the replacement sstable(s) can be opened before they
 # are completely written, and used in place of the prior sstables for
@@ -1786,7 +1789,7 @@ dynamic_snitch_badness_threshold: 1.0
 #
 # With any v2 variant and `paxos_state_purging: repaired` it is safe to use ANY Commit consistency.
 #
-#paxos_variant: v1
+paxos_variant: v2
 
 # Configures Java crypto provider. By default, it will use DefaultCryptoProvider
 # which will install Amazon Correto Crypto Provider.
