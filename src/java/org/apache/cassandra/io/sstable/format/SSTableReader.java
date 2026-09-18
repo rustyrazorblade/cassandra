@@ -41,7 +41,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import javax.annotation.Nullable;
 
 import com.clearspring.analytics.stream.cardinality.CardinalityMergeException;
-import com.clearspring.analytics.stream.cardinality.ICardinality;
+import com.clearspring.analytics.stream.cardinality.HyperLogLogPlus;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
@@ -87,6 +87,7 @@ import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.metadata.CompactionMetadata;
+import org.apache.cassandra.io.sstable.metadata.MetadataType;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.ChannelProxy;
 import org.apache.cassandra.io.util.CheckedFunction;
@@ -313,7 +314,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
             return count;
 
         boolean failed = false;
-        ICardinality cardinality = null;
+        HyperLogLogPlus cardinality = null;
         for (SSTableReader sstable : sstables)
         {
             if (sstable.openReason == OpenReason.EARLY)
@@ -321,20 +322,21 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
             try
             {
-                CompactionMetadata metadata = StatsComponent.load(sstable.descriptor).compactionMetadata();
-                // If we can't load the CompactionMetadata, we are forced to estimate the keys using the index
-                // summary. (CASSANDRA-10676)
-                if (metadata == null)
+                HyperLogLogPlus estimator = sstable.cardinalityEstimator();
+                // Statistics.db carries no cardinality estimator, so fall back to per-sstable key estimates.
+                // (CASSANDRA-10676)
+                if (estimator == null)
                 {
-                    logger.warn("Reading cardinality from Statistics.db failed for {}", sstable.getFilename());
+                    logger.warn("No cardinality estimator in Statistics.db for {}", sstable.getFilename());
                     failed = true;
                     break;
                 }
 
+                // Accumulate in place; merge() allocates a whole estimator per sstable and copies this one into it.
                 if (cardinality == null)
-                    cardinality = metadata.cardinalityEstimator;
+                    cardinality = estimator;
                 else
-                    cardinality = cardinality.merge(metadata.cardinalityEstimator);
+                    cardinality.addAll(estimator);
             }
             catch (IOException e)
             {
@@ -360,6 +362,15 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
                 count += sstable.estimatedKeys();
         }
         return count;
+    }
+
+    /**
+     * A cardinality estimator for this sstable, or null if its Statistics.db carries none. Each call returns a
+     * fresh estimator: a merge mutates the estimator it is given.
+     */
+    public HyperLogLogPlus cardinalityEstimator() throws IOException
+    {
+        return tidy.global.cardinalityEstimator();
     }
 
     public static SSTableReader open(SSTable.Owner owner, Descriptor descriptor)
@@ -1698,7 +1709,11 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         // keyed by descriptor, mapping to the shared GlobalTidy for that descriptor
         static final ConcurrentMap<Descriptor, Ref<GlobalTidy>> lookup = new ConcurrentHashMap<>();
 
+        // caches the absence, so Statistics.db is not read again
+        private static final byte[] NO_ESTIMATOR = new byte[0];
+
         private final Descriptor desc;
+        private volatile byte[] cardinalityEstimator;
         // the readMeter that is shared between all instances of the sstable, and can be overridden in all of them
         // at once also, for testing purposes
         private RestorableMeter readMeter;
@@ -1711,6 +1726,24 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         GlobalTidy(final SSTableReader reader)
         {
             this.desc = reader.descriptor;
+        }
+
+        /**
+         * A cardinality estimator built from this sstable's Statistics.db, or null if the file carries none. Each
+         * call builds a fresh one: a merge mutates the estimator it is given. A read failure is not cached.
+         */
+        HyperLogLogPlus cardinalityEstimator() throws IOException
+        {
+            byte[] serialized = cardinalityEstimator;
+            if (serialized == null)
+            {
+                CompactionMetadata metadata = StatsComponent.load(desc, MetadataType.COMPACTION).compactionMetadata();
+                serialized = metadata == null ? NO_ESTIMATOR : metadata.cardinalityEstimator.getBytes();
+                // a Statistics.db rewrite carries the compaction metadata through unchanged, so a racing second
+                // read caches the same estimator
+                cardinalityEstimator = serialized;
+            }
+            return serialized == NO_ESTIMATOR ? null : HyperLogLogPlus.Builder.build(serialized);
         }
 
         void ensureReadMeter()

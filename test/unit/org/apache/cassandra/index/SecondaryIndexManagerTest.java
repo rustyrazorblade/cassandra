@@ -51,6 +51,7 @@ import org.apache.cassandra.utils.concurrent.Refs;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -60,6 +61,34 @@ public class SecondaryIndexManagerTest extends CQLTester
     public void after()
     {
         TestingIndex.clear();
+    }
+
+    @Test
+    public void indexColumnFamilyStoresAreCachedAndInvalidated() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk int PRIMARY KEY, a int, b int)");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        SecondaryIndexManager indexManager = cfs.indexManager;
+
+        assertTrue(indexManager.getAllIndexColumnFamilyStores().isEmpty());
+
+        String first = createIndex("CREATE INDEX ON %s (a) USING 'legacy_local_table'");
+        Set<ColumnFamilyStore> afterFirst = indexManager.getAllIndexColumnFamilyStores();
+        assertEquals(1, afterFirst.size());
+
+        // With no index registered or removed in between, the memoised set is handed back as-is rather
+        // than rebuilt. This is what keeps the metrics, flush and compaction paths from allocating.
+        assertSame(afterFirst, indexManager.getAllIndexColumnFamilyStores());
+
+        createIndex("CREATE INDEX ON %s (b) USING 'legacy_local_table'");
+        Set<ColumnFamilyStore> afterSecond = indexManager.getAllIndexColumnFamilyStores();
+        assertEquals(2, afterSecond.size());
+        assertTrue(afterSecond.containsAll(afterFirst));
+
+        dropIndex("DROP INDEX %s." + first);
+        Set<ColumnFamilyStore> afterDrop = indexManager.getAllIndexColumnFamilyStores();
+        assertEquals(1, afterDrop.size());
+        assertFalse(afterDrop.containsAll(afterSecond));
     }
 
     @Test
