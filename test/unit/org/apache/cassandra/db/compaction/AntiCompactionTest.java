@@ -66,6 +66,7 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.SSTableTxnWriter;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigTableReader;
@@ -465,6 +466,11 @@ public class AntiCompactionTest
 
         int savedIndexSizeInKiB = DatabaseDescriptor.getColumnIndexSizeInKiB();
         DatabaseDescriptor.setColumnIndexSizeInKiB(1);
+        // This test reads back the per-partition index blocks through BigTableReader, so it must run on the
+        // BIG format regardless of the ambient config. cassandra_latest.yaml selects BTI, whose reader is a
+        // different type; pin BIG here and restore the previous format in the finally block.
+        SSTableFormat<?, ?> savedFormat = DatabaseDescriptor.getSelectedSSTableFormat();
+        DatabaseDescriptor.setSelectedSSTableFormat("big");
         try
         {
             // "2" falls inside range(0, 4] (anticompacted into the pending-repair sstable), "5" falls outside it.
@@ -552,6 +558,7 @@ public class AntiCompactionTest
         finally
         {
             DatabaseDescriptor.setColumnIndexSizeInKiB(savedIndexSizeInKiB);
+            DatabaseDescriptor.setSelectedSSTableFormat(savedFormat);
         }
     }
 
