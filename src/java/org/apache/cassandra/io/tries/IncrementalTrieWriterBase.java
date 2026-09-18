@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
@@ -38,6 +39,12 @@ implements IncrementalTrieWriter<VALUE>
     protected final TrieSerializer<VALUE, ? super DEST> serializer;
     protected final DEST dest;
     protected ByteComparable prev = null;
+    // Reused buffers holding the byte-comparable form of the previous and next keys.  add() materializes each key once
+    // into curBytes instead of decoding both prev and next on every call.
+    private static final int INITIAL_KEY_BUFFER_SIZE = 32;
+    private byte[] prevBytes = new byte[INITIAL_KEY_BUFFER_SIZE];
+    private int prevLen = 0;
+    private byte[] curBytes = new byte[INITIAL_KEY_BUFFER_SIZE];
     long count = 0;
 
     protected IncrementalTrieWriterBase(TrieSerializer<VALUE, ? super DEST> serializer, DEST dest, NODE root)
@@ -50,6 +57,7 @@ implements IncrementalTrieWriter<VALUE>
     protected void reset(NODE root)
     {
         this.prev = null;
+        this.prevLen = 0;
         this.count = 0;
         this.stack.clear();
         this.stack.addLast(root);
@@ -60,6 +68,7 @@ implements IncrementalTrieWriter<VALUE>
     public void close()
     {
         this.prev = null;
+        this.prevLen = 0;
         this.count = 0;
         this.stack.clear();
     }
@@ -68,48 +77,67 @@ implements IncrementalTrieWriter<VALUE>
     public void add(ByteComparable next, VALUE value) throws IOException
     {
         ++count;
-        int stackpos = 0;
-        ByteSource sn = next.asComparableBytes(Walker.BYTE_COMPARABLE_VERSION);
-        int n = sn.next();
 
+        // Materialize the byte-comparable form of the key once into a reused buffer.  The old code decoded both the
+        // previous and the next key on every call and walked them in lockstep; here we keep the previous key's bytes
+        // around and only decode the next key.
+        ByteSource sn = next.asComparableBytes(Walker.BYTE_COMPARABLE_VERSION);
+        int curLen = 0;
+        for (int b = sn.next(); b != ByteSource.END_OF_STREAM; b = sn.next())
+        {
+            if (curLen == curBytes.length)
+                curBytes = Arrays.copyOf(curBytes, curLen * 2);
+            curBytes[curLen++] = (byte) b;
+        }
+
+        int stackpos = 0;
         if (prev != null)
         {
-            ByteSource sp = prev.asComparableBytes(Walker.BYTE_COMPARABLE_VERSION);
-            int p = sp.next();
-            while ( n == p )
-            {
-                assert n != ByteSource.END_OF_STREAM : String.format("Incremental trie requires unique sorted keys, got equal %s(%s) after %s(%s).",
-                                                                     next,
-                                                                     next.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION),
-                                                                     prev,
-                                                                     prev.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION));
+            // The shared prefix length is the first index where the two keys differ.  Arrays.mismatch returns -1 only
+            // when the two ranges are identical, which means duplicate keys.
+            int mismatch = Arrays.mismatch(prevBytes, 0, prevLen, curBytes, 0, curLen);
+            assert mismatch != -1 : String.format("Incremental trie requires unique sorted keys, got equal %s(%s) after %s(%s).",
+                                                  next,
+                                                  next.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION),
+                                                  prev,
+                                                  prev.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION));
 
-                ++stackpos;
-                n = sn.next();
-                p = sp.next();
-            }
-            assert p < n : String.format("Incremental trie requires sorted keys, got %s(%s) after %s(%s).",
-                                         next,
-                                         next.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION),
-                                         prev,
-                                         prev.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION));
+            // The next key must sort after the previous key.  If the mismatch is at the end of one key, the shorter key
+            // is a prefix of the other; otherwise compare the first differing byte as unsigned.
+            boolean sorted;
+            if (mismatch == prevLen)          // previous key is a strict prefix of the next key
+                sorted = true;
+            else if (mismatch == curLen)      // next key is a strict prefix of the previous key
+                sorted = false;
+            else
+                sorted = (curBytes[mismatch] & 0xFF) > (prevBytes[mismatch] & 0xFF);
+            assert sorted : String.format("Incremental trie requires sorted keys, got %s(%s) after %s(%s).",
+                                          next,
+                                          next.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION),
+                                          prev,
+                                          prev.byteComparableAsString(Walker.BYTE_COMPARABLE_VERSION));
+            stackpos = mismatch;
         }
-        prev = next;
 
         while (stack.size() > stackpos + 1)
             completeLast();
 
         NODE node = stack.getLast();
-        while (n != ByteSource.END_OF_STREAM)
+        for (int i = stackpos; i < curLen; ++i)
         {
-            node = node.addChild((byte) n);
+            node = node.addChild(curBytes[i]);
             stack.addLast(node);
-            ++stackpos;
-            n = sn.next();
         }
 
         VALUE existingPayload = node.setPayload(value);
         assert existingPayload == null;
+
+        // The next key becomes the previous key.  Swap buffers so the old previous buffer is reused as scratch.
+        byte[] tmp = prevBytes;
+        prevBytes = curBytes;
+        curBytes = tmp;
+        prevLen = curLen;
+        prev = next;
     }
 
     public long complete() throws IOException
