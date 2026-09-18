@@ -63,7 +63,7 @@ public abstract class OfflineToolUtils
         "ScheduledFastTasks:[1-9]",
         "OptionalTasks:[1-9]",
         "Reference-Reaper",
-        "LocalPool-Cleaner(-networking|-chunk-cache)",
+        "LocalPool-Cleaner(-networking|-chunk-cache|-partition-writers)",
         "CacheCleanupExecutor:[1-9]",
         "CompactionExecutor:[1-9]",
         "ValidationExecutor:[1-9]",
