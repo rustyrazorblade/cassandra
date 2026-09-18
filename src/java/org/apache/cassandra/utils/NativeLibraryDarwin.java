@@ -110,6 +110,12 @@ public class NativeLibraryDarwin implements NativeLibraryWrapper
         return fsync(fd);
     }
 
+    public int callSyncFileRange(int fd, long offset, long nbytes, int flags) throws UnsatisfiedLinkError, RuntimeException
+    {
+        // sync_file_range is a Linux-only syscall
+        throw new UnsatisfiedLinkError();
+    }
+
     public int callClose(int fd) throws UnsatisfiedLinkError, RuntimeException
     {
         return close(fd);

@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.channels.FileChannel;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.sun.jna.LastErrorException;
 
@@ -73,8 +74,13 @@ public final class NativeLibrary
     private static final int POSIX_FADV_DONTNEED   = 4; /* fadvise.h */
     private static final int POSIX_FADV_NOREUSE    = 5; /* fadvise.h */
 
+    private static final int SYNC_FILE_RANGE_WRITE = 2; /* fs.h */
+
     private static final NativeLibraryWrapper wrappedLibrary;
     private static boolean jnaLockable = false;
+
+    // Logs once if the sync_file_range writeback hint is unavailable, so the feature going silently off is visible.
+    private static final AtomicBoolean syncFileRangeUnavailableLogged = new AtomicBoolean(false);
 
     private static final Field FILE_DESCRIPTOR_FD_FIELD;
     private static final Field FILE_CHANNEL_FD_FIELD;
@@ -270,6 +276,47 @@ public final class NativeLibrary
                 throw e;
 
             logger.warn("posix_fadvise({}, {}) failed, errno ({}).", fd, offset, errno(e));
+        }
+    }
+
+    /**
+     * Starts kernel writeback of a byte range without the durability or metadata cost of fsync.
+     *
+     * Uses {@code SYNC_FILE_RANGE_WRITE} alone: it queues the range's dirty pages for writeout and
+     * returns. It does not wait for that writeout, and it makes no durability guarantee; a later fsync
+     * still owns durability. Its purpose is to keep the dirty-page backlog bounded so that final fsync
+     * is cheap. Callers pass strictly increasing, non-overlapping ranges, so the wait-before flag would
+     * have nothing in flight to wait on and is left off.
+     *
+     * Linux only. On any other OS the call is a no-op, because the syscall does not exist there.
+     */
+    public static void trySyncFileRange(int fd, long offset, long nbytes)
+    {
+        if (fd < 0 || osType != LINUX)
+            return;
+
+        try
+        {
+            wrappedLibrary.callSyncFileRange(fd, offset, nbytes, SYNC_FILE_RANGE_WRITE);
+        }
+        catch (UnsatisfiedLinkError e)
+        {
+            // JNA unavailable, or an OS without the syscall: the write path still works without the hint.
+            // Log once so the feature going silently off is visible without spamming the hot path.
+            if (syncFileRangeUnavailableLogged.compareAndSet(false, true))
+                logger.info("sync_file_range is unavailable ({}); writeback hints are off and the commit fsync owns durability",
+                            e.getMessage());
+        }
+        catch (RuntimeException e)
+        {
+            if (!(e instanceof LastErrorException))
+                throw e;
+            // A failed hint is not a durability fault; the final fsync still runs. But a hint that fails
+            // every interval (a kernel or filesystem without sync_file_range, or a disk writeback error)
+            // makes this feature silently a no-op, so warn -- rate-limited, since this is a hot path.
+            NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, 10, TimeUnit.MINUTES,
+                             "sync_file_range writeback hint failed (fd={}, errno={}); the commit fsync still owns durability",
+                             fd, errno(e));
         }
     }
 

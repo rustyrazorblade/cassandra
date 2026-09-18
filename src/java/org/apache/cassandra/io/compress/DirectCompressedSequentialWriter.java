@@ -20,7 +20,6 @@ package org.apache.cassandra.io.compress;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
 
 import javax.annotation.Nullable;
@@ -41,6 +40,7 @@ import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.ChecksumWriter;
+import org.apache.cassandra.io.util.ChecksumWriter.SinkChecksumWriter;
 import org.apache.cassandra.io.util.DataPosition;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
@@ -80,11 +80,15 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     private boolean dataFinalized = false;
 
     // Chunks staged in writeBuffer but not yet on disk, as flat {compressedEnd, uncompressedEnd} pairs in
-    // write order: offer 2 in writeChunk, poll 2 in durableUncompressedOffset, nothing else, or pairing
-    // breaks. Lets the post-flush listener report a durable offset. Offsets are never negative, so -1 is
-    // a safe empty sentinel.
+    // write order: offer 2 when a chunk is staged, poll 2 when it becomes durable, nothing else, or pairing
+    // breaks. Only the writer thread touches this queue. Offsets are never negative, so -1 is a safe empty
+    // sentinel.
     private final LongArrayQueue stagedChunkBoundaries = new LongArrayQueue(-1L);
-    private long durableUncompressedOffset = 0;
+
+    // Uncompressed offset of the last chunk whose compressed bytes are fully on disk. The writer thread
+    // updates it after each channel write; the post-flush listener on the producer thread only reads it.
+    // A stale read is safe: the value is never above the true durable offset, so a reader never short-reads.
+    private volatile long durableUncompressedOffset = 0;
 
     private final int blockSize;
 
@@ -100,7 +104,25 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
                                             MetadataCollector sstableMetadataCollector,
                                             @Nullable CompressionDictionaryManager compressionDictionaryManager)
     {
-        super(file, offsetsFile, digestFile, option, parameters, sstableMetadataCollector, compressionDictionaryManager, ExtendedOpenOption.DIRECT);
+        this(file, offsetsFile, digestFile, option, parameters, sstableMetadataCollector, compressionDictionaryManager, 0);
+    }
+
+    /**
+     * @param asyncBufferBytes bytes the write path may keep in flight off the calling thread, or 0
+     *                         to compress and write inline. Compression and CRC are the same CPU cost
+     *                         under O_DIRECT as anywhere else, so this path wants it just as much.
+     */
+    public DirectCompressedSequentialWriter(File file,
+                                            File offsetsFile,
+                                            @Nullable File digestFile,
+                                            SequentialWriterOption option,
+                                            CompressionParams parameters,
+                                            MetadataCollector sstableMetadataCollector,
+                                            @Nullable CompressionDictionaryManager compressionDictionaryManager,
+                                            int asyncBufferBytes)
+    {
+        super(file, offsetsFile, digestFile, option, parameters, sstableMetadataCollector,
+              compressionDictionaryManager, asyncBufferBytes, ExtendedOpenOption.DIRECT);
 
         // super() opened the O_DIRECT FileChannel and allocated parent buffers; if anything below throws
         // the caller never gets a reference to clean them up, so abort the txn proxy ourselves.
@@ -146,7 +168,8 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     @Override
     protected ChecksumWriter createChecksumWriter()
     {
-        return new DirectChecksumWriter(this::writeCrcToAlignedBuffer);
+        // Routes the per-chunk CRC into the block-aligned writeBuffer instead of the channel.
+        return new SinkChecksumWriter(this::writeCrcToAlignedBuffer);
     }
 
     // Parent reads fchannel.position(), which lags by the bytes staged in writeBuffer.
@@ -175,6 +198,13 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         syncDataOnlyInternal();
     }
 
+    // O_DIRECT bypasses the page cache, so there are no dirty pages for a writeback hint to start.
+    // Skip the syscall the parent would otherwise make once per interval.
+    @Override
+    void hintWriteback(long offset, long nbytes)
+    {
+    }
+
     // Brings the file to its final on-disk form exactly once. openFinalEarly's sync and commit's doPrepare
     // both land here; whichever runs first does the work, the other is a no-op. Safe because the writer is
     // switched out right after openFinalEarly, so nothing writes once the file is final.
@@ -184,6 +214,10 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
             return;
 
         doFlush(0);
+        // With a pipeline that flush only submits. The padding and truncate below size the file, so
+        // every chunk has to be staged in the aligned buffer before they run.
+        if (pipeline != null)
+            pipeline.drain();
         flushFinalWithPadding();
         dataFinalized = true;
     }
@@ -191,15 +225,17 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     // The parent feeds the post-flush listener getLastFlushOffset() (== uncompressedSize), which counts bytes
     // staged in writeBuffer that O_DIRECT has not yet written. Report instead the uncompressed offset of the
     // last chunk whose compressed bytes are fully on disk, so a preemptive reader never short-reads past EOF.
+    // The writer thread keeps durableUncompressedOffset current; the listener only reads that volatile.
     @Override
     public void setPostFlushListener(LongConsumer postFlush)
     {
-        super.setPostFlushListener(stagedOffset -> postFlush.accept(durableUncompressedOffset()));
+        super.setPostFlushListener(stagedOffset -> postFlush.accept(durableUncompressedOffset));
     }
 
-    // fchannel.position() counts only whole blocks written, so chunks ending at or below it are durable.
-    // Chunks flush in order, so draining from the head suffices and the offset is monotonic.
-    private long durableUncompressedOffset()
+    // Runs on the writer thread after a channel write. fchannel.position() counts only whole blocks written,
+    // so chunks ending at or below it are durable. Chunks flush in order, so draining from the head suffices
+    // and the published offset is monotonic.
+    private void advanceDurableOffset()
     {
         long onDisk;
         try
@@ -211,14 +247,15 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
             throw new FSReadError(e, getPath());
         }
 
+        long offset = durableUncompressedOffset;
         long compressedEnd;
         while ((compressedEnd = stagedChunkBoundaries.peekLong()) != stagedChunkBoundaries.nullValue()
                && compressedEnd <= onDisk)
         {
             stagedChunkBoundaries.pollLong();
-            durableUncompressedOffset = stagedChunkBoundaries.pollLong();
+            offset = stagedChunkBoundaries.pollLong();
         }
-        return durableUncompressedOffset;
+        durableUncompressedOffset = offset;
     }
 
     @Override
@@ -302,6 +339,8 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
             {
                 writeBuffer.clear();
             }
+
+            advanceDurableOffset();
         }
         catch (IOException e)
         {
@@ -326,6 +365,8 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
 
             // O_DIRECT required padding; truncate back to actual data size.
             fchannel.truncate(actualDataSize);
+
+            advanceDurableOffset();
         }
         catch (IOException e)
         {
@@ -398,30 +439,4 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         return new DirectTransactionalProxy();
     }
 
-    /**
-     * Routes the per-chunk CRC into the block-aligned writeBuffer instead of the channel, reusing
-     * ChecksumWriter's bookkeeping rather than duplicating it. Only the CRC trailer flows through here;
-     * {@link #writeChunk} stages the chunk data.
-     */
-    private static final class DirectChecksumWriter extends ChecksumWriter
-    {
-        private final IntConsumer alignedSink;
-
-        DirectChecksumWriter(IntConsumer alignedSink)
-        {
-            this.alignedSink = alignedSink;
-        }
-
-        @Override
-        protected void writeIncrementalInt(int value)
-        {
-            alignedSink.accept(value);
-        }
-
-        @Override
-        public void writeChunkSize(int length)
-        {
-            throw new UnsupportedOperationException("writeChunkSize is unused on the compressed O_DIRECT path");
-        }
-    }
 }
