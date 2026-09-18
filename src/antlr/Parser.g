@@ -292,12 +292,16 @@ selectStatement returns [SelectStatement.RawStatement expr]
         boolean allowFiltering = false;
         boolean isJson = false;
         SelectOptions options = new SelectOptions();
+        SelectStatement.RawJoin joinRaw = null;
         stmtBegins();
     }
     : K_SELECT
         // json is a valid column name. By consequence, we need to resolve the ambiguity for "json - json"
       ( K_JSON { isJson = true; } )? sclause=selectClause
       K_FROM cf=columnFamilyName
+        // Research POC (CQL_JOIN_ENABLED): a single INNER JOIN of two tables on one equi-predicate.
+      ( K_JOIN jt=columnFamilyName K_ON l1=cident '.' l2=cident '=' r1=cident '.' r2=cident
+        { joinRaw = new SelectStatement.RawJoin($jt.name, $l1.id, $l2.id, $r1.id, $r2.id); } )?
       ( K_WHERE wclause=whereClause )?
       ( K_GROUP K_BY groupByClause[groups] ( ',' groupByClause[groups] )* )?
       ( K_HAVING hv=havingClause )?
@@ -315,7 +319,7 @@ selectStatement returns [SelectStatement.RawStatement expr]
                                                                              null);
           WhereClause where = $wclause.ctx == null ? WhereClause.empty() : $wclause.clause.build();
           WhereClause having = $hv.ctx == null ? WhereClause.empty() : $hv.clause.build();
-          $expr = new SelectStatement.RawStatement($cf.name, params, $sclause.selectorsList, where, having, limit, perPartitionLimit, stmtSrc(), options);
+          $expr = new SelectStatement.RawStatement($cf.name, params, $sclause.selectorsList, where, having, limit, perPartitionLimit, stmtSrc(), options, joinRaw);
       }
     ;
     
@@ -333,7 +337,7 @@ letStatement returns [SelectStatement.RawStatement expr]
           SelectStatement.Parameters params = new SelectStatement.Parameters(Collections.emptyList(), Collections.emptyList(), false, false, false, $txnVar.text);
           WhereClause where = $wclause.ctx == null ? WhereClause.empty() : $wclause.clause.build();
 
-          $expr = new SelectStatement.RawStatement($cf.name, params, $assignments.expr, where, WhereClause.empty(), limit, null, stmtSrc(), SelectOptions.EMPTY);
+          $expr = new SelectStatement.RawStatement($cf.name, params, $assignments.expr, where, WhereClause.empty(), limit, null, stmtSrc(), SelectOptions.EMPTY, null);
       }
     ;
     
@@ -2537,5 +2541,6 @@ basic_unreserved_keyword returns [String str]
         | K_LABELS
         | K_FIELD
         | K_COLUMN
+        | K_JOIN
         ) { $str = $k.text; }
     ;

@@ -186,7 +186,8 @@ public class View
                                                  null,
                                                  null,
                                                  StatementSource.INTERNAL,
-						                         SelectOptions.EMPTY);
+						                         SelectOptions.EMPTY,
+						                         null);
 
             rawSelect.setBindVariables(Collections.emptyList());
 

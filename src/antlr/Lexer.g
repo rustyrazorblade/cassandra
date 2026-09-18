@@ -69,6 +69,7 @@ K_INDEX:       I N D E X;
 K_INDEXES:     I N D E X E S;
 K_CUSTOM:      C U S T O M;
 K_ON:          O N;
+K_JOIN:        J O I N;
 K_TO:          T O;
 K_DROP:        D R O P;
 K_PRIMARY:     P R I M A R Y;

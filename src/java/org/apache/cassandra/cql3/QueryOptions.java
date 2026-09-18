@@ -148,6 +148,39 @@ public abstract class QueryOptions implements RealTimeFunctionContext
         return new OptionsWithSubqueryResults(options, results);
     }
 
+    /**
+     * Decorates the options with the resolved build side of a broadcast hash JOIN for a single
+     * request.  The build side is fully materialized and hashed at the coordinator before the probe
+     * read runs; see {@code SelectStatement.resolveJoin}.  This state MUST ride on the per-request
+     * options, never on the cached prepared statement, because prepared statements are shared across
+     * threads.  Research POC (CQL_JOIN_ENABLED).
+     */
+    public static QueryOptions withJoinResult(QueryOptions options, JoinHash joinHash)
+    {
+        return new OptionsWithJoinResult(options, joinHash);
+    }
+
+    /**
+     * The materialized, hashed build side of a broadcast hash JOIN.  Maps the serialized build-key
+     * value to every build row that carries it.  A null build key is never a map entry.  Research POC
+     * (CQL_JOIN_ENABLED).
+     */
+    public static final class JoinHash
+    {
+        private final Map<ByteBuffer, List<List<byte[]>>> rowsByKey;
+
+        public JoinHash(Map<ByteBuffer, List<List<byte[]>>> rowsByKey)
+        {
+            this.rowsByKey = rowsByKey;
+        }
+
+        /** @return the build rows that carry {@code key}, or null when the build side has none. */
+        public List<List<byte[]>> get(ByteBuffer key)
+        {
+            return rowsByKey.get(key);
+        }
+    }
+
     public abstract ConsistencyLevel getConsistency();
     public abstract List<ByteBuffer> getValues();
 
@@ -408,6 +441,17 @@ public abstract class QueryOptions implements RealTimeFunctionContext
         throw new IllegalStateException("No subquery results are attached to these query options");
     }
 
+    /**
+     * Returns the resolved build side of a broadcast hash JOIN.
+     *
+     * <p>Populated only when the request carries a JOIN; see {@link #withJoinResult}.  Research POC
+     * (CQL_JOIN_ENABLED).</p>
+     */
+    public JoinHash getJoinResult()
+    {
+        throw new IllegalStateException("No join result is attached to these query options");
+    }
+
     static class DefaultQueryOptions extends QueryOptions
     {
         private final ConsistencyLevel consistency;
@@ -567,6 +611,12 @@ public abstract class QueryOptions implements RealTimeFunctionContext
         {
             return wrapped.getSubqueryResult(slotId);
         }
+
+        @Override
+        public JoinHash getJoinResult()
+        {
+            return wrapped.getJoinResult();
+        }
     }
 
     static class OptionsWithConsistencyLevel extends QueryOptionsWrapper
@@ -624,6 +674,27 @@ public abstract class QueryOptions implements RealTimeFunctionContext
             if (resolved == null)
                 throw new IllegalStateException("Subquery slot " + slotId + " was not resolved before execution");
             return resolved;
+        }
+    }
+
+    /**
+     * <code>QueryOptions</code> decorator that carries the resolved build side of a broadcast hash
+     * JOIN for a single request.  Research POC (CQL_JOIN_ENABLED).
+     */
+    static class OptionsWithJoinResult extends QueryOptionsWrapper
+    {
+        private final JoinHash joinHash;
+
+        OptionsWithJoinResult(QueryOptions wrapped, JoinHash joinHash)
+        {
+            super(wrapped);
+            this.joinHash = joinHash;
+        }
+
+        @Override
+        public JoinHash getJoinResult()
+        {
+            return joinHash;
         }
     }
 

@@ -57,6 +57,9 @@ public abstract class FromRelation implements AstNode
         protected JoinRel(SourceSpan span)
         {
             super(span);
+            // The phase-9 broadcast hash join is NOT driven from this AST tree.  It is driven from
+            // SelectStatement.JoinSpec, resolved in SelectStatement.RawStatement.prepare and executed
+            // at the coordinator.  This stub stays unimplemented on purpose.
             throw new UnsupportedOperationException("Joins not yet implemented");
         }
     }

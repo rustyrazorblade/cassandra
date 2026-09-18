@@ -23,6 +23,8 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -103,6 +105,9 @@ import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.db.marshal.CompositeType;
+import org.apache.cassandra.db.marshal.DecimalType;
+import org.apache.cassandra.db.marshal.DoubleType;
+import org.apache.cassandra.db.marshal.FloatType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.partitions.PartitionIterator;
@@ -213,6 +218,13 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
      */
     private final WindowSpec windowSpec;
 
+    /**
+     * The broadcast hash JOIN this query carries, or null.  Set at prepare time and gated by the join
+     * flag.  When present, this statement's table is the probe (streamed) side and {@code joinSpec}
+     * holds the prepared build side plus the resolved equi-join columns.  Research POC.
+     */
+    private final JoinSpec joinSpec;
+
     public final StatementSource source;
 
     // Used by forSelection below
@@ -235,7 +247,8 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                            StatementSource source,
                            SelectOptions selectOptions,
                            org.apache.cassandra.cql3.selection.arena.ArenaOrdering arenaOrdering,
-                           WindowSpec windowSpec)
+                           WindowSpec windowSpec,
+                           JoinSpec joinSpec)
     {
         this.table = table;
         this.bindVariables = bindVariables;
@@ -251,6 +264,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         this.selectOptions = selectOptions;
         this.arenaOrdering = arenaOrdering;
         this.windowSpec = windowSpec;
+        this.joinSpec = joinSpec;
         this.functions = findAllFunctions();
     }
 
@@ -287,6 +301,83 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
     public boolean hasWindow()
     {
         return windowSpec != null;
+    }
+
+    /**
+     * @return {@code true} if this query carries a broadcast hash JOIN.  When {@code false}, the join
+     * code paths are never entered.  Research POC.
+     */
+    public boolean hasJoin()
+    {
+        return joinSpec != null;
+    }
+
+    /**
+     * A resolved broadcast hash JOIN.  This statement's own table is the probe (streamed) side; the
+     * build side is prepared here as a standalone {@code SELECT * FROM t2} and fully materialized at
+     * the coordinator before the probe read runs.
+     *
+     * <p>The build side is hashed on the serialized value of {@code buildKey} (at {@code buildKeyIndex}
+     * in the build result row).  Each probe row is matched on the serialized value of {@code probeKey}
+     * (at {@code probeKeyIndex} in the probe result row).  When the user did not select the probe key,
+     * it is added to the probe result set only to drive the match (the CASSANDRA-4911 trick) and is
+     * sliced off before the rows are concatenated; {@code probeKeySynthetic} records that.</p>
+     *
+     * <p>{@code combinedMetadata} is the shipped probe columns followed by the shipped build columns.</p>
+     */
+    public static final class JoinSpec
+    {
+        private final SelectStatement buildSide;
+        private final ColumnMetadata probeKey;
+        private final ColumnMetadata buildKey;
+        private final ResultSet.ResultMetadata combinedMetadata;
+        private final int buildKeyIndex;
+        private final int probeKeyIndex;
+        private final boolean probeKeySynthetic;
+
+        JoinSpec(SelectStatement buildSide,
+                 ColumnMetadata probeKey,
+                 ColumnMetadata buildKey,
+                 ResultSet.ResultMetadata combinedMetadata,
+                 int buildKeyIndex,
+                 int probeKeyIndex,
+                 boolean probeKeySynthetic)
+        {
+            this.buildSide = buildSide;
+            this.probeKey = probeKey;
+            this.buildKey = buildKey;
+            this.combinedMetadata = combinedMetadata;
+            this.buildKeyIndex = buildKeyIndex;
+            this.probeKeyIndex = probeKeyIndex;
+            this.probeKeySynthetic = probeKeySynthetic;
+        }
+    }
+
+    /**
+     * The unresolved JOIN clause captured by the grammar: {@code JOIN t2 ON t1.a = t2.b}.  It holds only
+     * names; {@link RawStatement#prepare} resolves them against the two tables and builds the
+     * {@link JoinSpec}.  Research POC (CQL_JOIN_ENABLED).
+     */
+    public static final class RawJoin
+    {
+        public final QualifiedName joinTable;
+        public final ColumnIdentifier leftTable;
+        public final ColumnIdentifier leftColumn;
+        public final ColumnIdentifier rightTable;
+        public final ColumnIdentifier rightColumn;
+
+        public RawJoin(QualifiedName joinTable,
+                       ColumnIdentifier leftTable,
+                       ColumnIdentifier leftColumn,
+                       ColumnIdentifier rightTable,
+                       ColumnIdentifier rightColumn)
+        {
+            this.joinTable = joinTable;
+            this.leftTable = leftTable;
+            this.leftColumn = leftColumn;
+            this.rightTable = rightTable;
+            this.rightColumn = rightColumn;
+        }
     }
 
     /**
@@ -385,12 +476,18 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                    StatementSource.INTERNAL,
                                    SelectOptions.EMPTY,
                                    null,
+                                   null,
                                    null);
     }
 
     @Override
     public ResultSet.ResultMetadata getResultMetadata()
     {
+        // A JOIN ships the combined shape (probe columns then build columns), which the driver sees on
+        // PREPARE and in the result.  The probe read itself uses selection.getResultMetadata() directly.
+        // Research POC (CQL_JOIN_ENABLED).
+        if (hasJoin())
+            return joinSpec.combinedMetadata;
         return selection.getResultMetadata();
     }
 
@@ -400,6 +497,11 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         // without this the inner table's SELECT permission would be bypassed (privilege escalation).
         for (SelectStatement inner : getSubquerySelectStatements())
             inner.authorize(state);
+
+        // AUTH: authorize the JOIN build side too.  execute() reads it directly, so its SELECT
+        // permission must be checked here or it would be bypassed.
+        if (hasJoin())
+            joinSpec.buildSide.authorize(state);
 
         if (table.isView())
         {
@@ -462,6 +564,12 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         if (hasSubqueries())
             options = resolveSubqueries(options, state.getClientState(), nowInSec, requestTime, false);
 
+        // Resolve the JOIN build side once, at the coordinator, before building the probe read.  The
+        // materialized, hashed build side rides on the returned options.  No-op without a JOIN.
+        // Research POC (CQL_JOIN_ENABLED).
+        if (hasJoin())
+            options = resolveJoin(options, state.getClientState(), nowInSec, requestTime, false);
+
         int userLimit = getLimit(options);
         int userPerPartitionLimit = getPerPartitionLimit(options);
         int pageSize = options.getPageSize();
@@ -516,7 +624,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         // the client page size, so the driver never round-trips for more pages (which would re-resolve
         // the inner).  An aggregate query already returns a single client result through the
         // aggregation pager in one execute() call, so it stays on the else branch.
-        if (aggregationSpec == null && (hasSubqueries() || hasWindow() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
+        if (aggregationSpec == null && (hasSubqueries() || hasWindow() || hasJoin() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
         {
             rows = execute(query, options, state.getClientState(), selectors, nowInSec, userLimit, null, requestTime, unmask);
         }
@@ -574,6 +682,97 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         for (SubqueryTerms subquery : subqueries)
             resolved.put(subquery.slotId(), subquery.resolve(state, cl, nowInSec, requestTime, internal));
         return QueryOptions.withSubqueryResults(options, resolved);
+    }
+
+    /**
+     * Materializes the JOIN build side once, at the coordinator, and hashes it on the build-key value.
+     * The build side is a standalone {@code SELECT * FROM t2}; it is read fully and unpaged at the outer
+     * consistency level.  The read is capped at {@code partitionKeysInSelectFailThreshold + 1} rows and
+     * then checked against the guardrail, so an oversized build side fails loudly.  A null build key is
+     * skipped (INNER JOIN never matches it).  The resulting hash rides on the returned options.
+     *
+     * @return the options with the build hash attached (see {@link QueryOptions#withJoinResult}).
+     */
+    private QueryOptions resolveJoin(QueryOptions options, ClientState state, long nowInSec, Dispatcher.RequestTime requestTime, boolean internal)
+    {
+        SelectStatement build = joinSpec.buildSide;
+        ConsistencyLevel consistency = options.getConsistency();
+
+        // The join materializes both sides at the coordinator, so cap the build side at a configurable
+        // row limit.  A cap of 0 or less disables the check.  Read one extra row so an oversized build
+        // side is caught after materialization.
+        int maxRows = org.apache.cassandra.config.CassandraRelevantProperties.CQL_JOIN_MAX_ROWS.getInt();
+        int cap = maxRows > 0 ? maxRows + 1 : DataLimits.NO_LIMIT;
+
+        // The build side reads its own table, so derive its unmask from the caller's UNMASK permission on
+        // the BUILD table, exactly as the probe does for its own table (execute() and executeInternal()).
+        // The distributed path skips the permission check when the build table has no masked column.
+        boolean buildUnmask = internal
+                              ? state.hasTablePermission(build.table, Permission.UNMASK)
+                              : !build.table.hasMaskedColumns() || state.hasTablePermission(build.table, Permission.UNMASK);
+
+        QueryOptions buildOptions = QueryOptions.forInternalCalls(consistency, Collections.emptyList());
+        Selectors buildSelectors = build.selection.newSelectors(buildOptions);
+        ColumnFilter columnFilter = buildSelectors.getColumnFilter();
+
+        ReadQuery query = build.getQuery(buildOptions,
+                                         state,
+                                         columnFilter,
+                                         nowInSec,
+                                         cap,
+                                         DataLimits.NO_LIMIT,
+                                         cap,
+                                         null,
+                                         PotentialTxnConflicts.DISALLOW);
+
+        Map<ByteBuffer, List<List<byte[]>>> rowsByKey = new HashMap<>();
+        int rowCount;
+
+        // Isolate the build read's client warnings from the outer client, then restore the outer state.
+        // This only bypasses the CQL client-request warnings; the lower-level coordinator and table read
+        // metrics still count the inner read (see SubqueryTerms.resolve).
+        ClientWarn.State savedWarnState = ClientWarn.instance.get();
+        ClientWarn.instance.captureWarnings();
+        try
+        {
+            ResultSet buildRows;
+            if (internal)
+            {
+                try (ReadExecutionController controller = query.executionController();
+                     PartitionIterator data = query.executeInternal(controller))
+                {
+                    buildRows = build.process(data, nowInSec, buildUnmask, state);
+                }
+            }
+            else
+            {
+                try (PartitionIterator data = query.execute(consistency, state, requestTime))
+                {
+                    buildRows = build.process(data, nowInSec, buildUnmask, state);
+                }
+            }
+
+            rowCount = buildRows.rows.size();
+            for (List<byte[]> buildRow : buildRows.rows)
+            {
+                byte[] keyBytes = buildRow.get(joinSpec.buildKeyIndex);
+                // INNER JOIN: a null build key can never match a probe key, so drop it from the hash.
+                if (keyBytes == null)
+                    continue;
+                rowsByKey.computeIfAbsent(ByteBuffer.wrap(keyBytes), k -> new ArrayList<>()).add(buildRow);
+            }
+        }
+        finally
+        {
+            ClientWarn.instance.set(savedWarnState);
+        }
+
+        // Fail loudly when the build side exceeds the cap, naming the table and the threshold.
+        if (maxRows > 0 && rowCount > maxRows)
+            throw invalidRequest("JOIN build side %s has more than %d rows (cassandra.cql.join.max_rows); " +
+                                 "refine the query or raise the limit.", build.table(), maxRows);
+
+        return QueryOptions.withJoinResult(options, new QueryOptions.JoinHash(rowsByKey));
     }
 
     /**
@@ -814,6 +1013,11 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         if (hasSubqueries())
             options = resolveSubqueries(options, state.getClientState(), nowInSec, requestTime, true);
 
+        // Resolve the JOIN build side once, at the coordinator, before building the probe read.  No-op
+        // without a JOIN.  Research POC (CQL_JOIN_ENABLED).
+        if (hasJoin())
+            options = resolveJoin(options, state.getClientState(), nowInSec, requestTime, true);
+
         int userLimit = getLimit(options);
         int userPerPartitionLimit = getPerPartitionLimit(options);
         int pageSize = options.getPageSize();
@@ -838,7 +1042,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             // the client page size, so the driver never round-trips for more pages (which would re-resolve
             // the inner).  An aggregate query already returns a single client result through the
             // aggregation pager in one execute() call, so it stays on the else branch.
-            if (aggregationSpec == null && (hasSubqueries() || hasWindow() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
+            if (aggregationSpec == null && (hasSubqueries() || hasWindow() || hasJoin() || pageSize <= 0 || (query.limits().count() <= pageSize) || query.isTopK()))
             {
                 try (PartitionIterator data = query.executeInternal(executionController))
                 {
@@ -1129,8 +1333,11 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                 arenaOwnsOrdering = false;
             }
 
-            if (arenaOwnsOrdering)
+            if (arenaOwnsOrdering || hasJoin())
             {
+                // A JOIN applies the user LIMIT to the concatenated result, not to the probe read.
+                // The probe side must stream every row so no match is lost.  process() trims after the
+                // join.  Research POC (CQL_JOIN_ENABLED).
                 cqlRowLimit = DataLimits.NO_LIMIT;
             }
             // If we aren't need post-query ordering but we are doing index ordering (currently ANN only) then
@@ -1284,7 +1491,9 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
         // Existing path (unchanged)
         GroupMaker groupMaker = aggregationSpec == null ? null : aggregationSpec.newGroupMaker();
-        ResultSetBuilder result = new ResultSetBuilder(getResultMetadata(), options, selectors, unmask, groupMaker);
+        // Use the probe selection's own metadata for the builder.  For a JOIN, getResultMetadata()
+        // returns the combined probe+build shape, which is not the shape of the probe rows built here.
+        ResultSetBuilder result = new ResultSetBuilder(selection.getResultMetadata(), options, selectors, unmask, groupMaker);
 
         while (partitions.hasNext())
         {
@@ -1299,9 +1508,70 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
         orderResults(cqlRows, options, state);
 
+        // Broadcast hash JOIN: match each probe row against the materialized build side and emit the
+        // concatenated rows.  Runs after the probe rows are built and before the user LIMIT is applied,
+        // so LIMIT bounds the joined output.  No-op without a JOIN.  Research POC (CQL_JOIN_ENABLED).
+        if (hasJoin())
+            cqlRows = joinResults(cqlRows, options);
+
         cqlRows.trim(userLimit);
 
         return cqlRows;
+    }
+
+    /**
+     * Performs the broadcast hash JOIN probe.  {@code probeRows} is the fully materialized probe result;
+     * its rows carry the shipped probe columns and, at {@code joinSpec.probeKeyIndex}, the probe key (the
+     * key is one of the shipped columns when the user selected it, otherwise a trailing non-serialized
+     * column added only to drive the match).  The build side is read back from the per-request options.
+     *
+     * <p>For each probe row, the probe-key value is looked up in the build hash.  Every matching build
+     * row produces one output row: the shipped probe columns followed by the shipped build columns.  A
+     * null probe key never matches (INNER JOIN).  The result carries {@code joinSpec.combinedMetadata}.</p>
+     */
+    private ResultSet joinResults(ResultSet probeRows, QueryOptions options)
+    {
+        QueryOptions.JoinHash buildHash = options.getJoinResult();
+        int probeShipped = selection.getResultMetadata().requestNames().size();
+
+        // Both the probe result and the joined output live in coordinator memory, so cap each at the same
+        // configurable row limit as the build side.  A cap of 0 or less disables the check.
+        int maxRows = org.apache.cassandra.config.CassandraRelevantProperties.CQL_JOIN_MAX_ROWS.getInt();
+        if (maxRows > 0 && probeRows.rows.size() > maxRows)
+            throw invalidRequest("JOIN probe side %s has more than %d rows (cassandra.cql.join.max_rows); " +
+                                 "refine the query or raise the limit.", table, maxRows);
+
+        long outputCount = 0;
+        ResultSet joined = new ResultSet(joinSpec.combinedMetadata);
+        for (List<byte[]> probeRow : probeRows.rows)
+        {
+            byte[] probeKeyBytes = probeRow.get(joinSpec.probeKeyIndex);
+            // INNER JOIN: a null equi-join key matches nothing.
+            if (probeKeyBytes == null)
+                continue;
+
+            List<List<byte[]>> matches = buildHash.get(ByteBuffer.wrap(probeKeyBytes));
+            if (matches == null)
+                continue;
+
+            // The shipped probe columns are the leading columns of the probe row; a synthetic probe key
+            // sits past them and is dropped here.
+            List<byte[]> probeShippedValues = probeRow.subList(0, probeShipped);
+            for (List<byte[]> buildRow : matches)
+            {
+                // Fail loudly before the cross-product output grows past the cap, naming the threshold.
+                if (maxRows > 0 && ++outputCount > maxRows)
+                    throw invalidRequest("JOIN of %s and %s produces more than %d output rows " +
+                                         "(cassandra.cql.join.max_rows); refine the query or raise the limit.",
+                                         table, joinSpec.buildSide.table(), maxRows);
+
+                List<byte[]> out = new ArrayList<>(probeShipped + buildRow.size());
+                out.addAll(probeShippedValues);
+                out.addAll(buildRow);
+                joined.addRow(out);
+            }
+        }
+        return joined;
     }
 
     private static byte[][] getPartitionKeyComponentsAsBytes(TableMetadata metadata, DecoratedKey dk)
@@ -1477,6 +1747,8 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
         private ClientState state;
         public final StatementSource source;
         public final SelectOptions options;
+        /** The raw JOIN clause, or null when the query has none.  Gated by CQL_JOIN_ENABLED.  Research POC. */
+        public final RawJoin joinRaw;
 
         public RawStatement(QualifiedName cfName,
                             Parameters parameters,
@@ -1486,7 +1758,8 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                             Term.Raw limit,
                             Term.Raw perPartitionLimit,
                             StatementSource source,
-                            SelectOptions options)
+                            SelectOptions options,
+                            RawJoin joinRaw)
         {
             super(cfName);
             this.parameters = parameters;
@@ -1497,6 +1770,7 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
             this.perPartitionLimit = perPartitionLimit;
             this.source = source;
             this.options = options;
+            this.joinRaw = joinRaw;
         }
 
         public SelectStatement prepare(ClientState state)
@@ -1668,6 +1942,134 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
 
             checkNeedsFiltering(table, restrictions);
 
+            // Broadcast hash JOIN.  Resolve the build side and the equi-join columns here, at prepare
+            // time, and reject every shape outside the single supported form.  When the probe key is not
+            // in the SELECT list, the selection is rebuilt so the key rides the probe row (CASSANDRA-4911)
+            // without being shipped.  No-op without a JOIN.  Research POC (CQL_JOIN_ENABLED).
+            JoinSpec joinSpec = null;
+            if (joinRaw != null)
+            {
+                if (!org.apache.cassandra.config.CassandraRelevantProperties.CQL_JOIN_ENABLED.getBoolean())
+                    throw invalidRequest("JOIN is not supported. Enable cassandra.cql.join.enabled to use it.");
+
+                // Only the single supported shape runs.  Reject every feature the join path does not
+                // implement, so an unsupported query fails loudly at prepare instead of returning wrong rows.
+                checkTrue(windowSpec == null, "JOIN does not support window functions.");
+                // GROUP BY sets an aggregation spec too, so reject it before the aggregate guard to give
+                // the accurate message.
+                checkTrue(parameters.groups.isEmpty(), "JOIN does not support GROUP BY.");
+                checkTrue(aggregationSpecFactory == null, "JOIN does not support aggregate functions.");
+                checkFalse(parameters.isDistinct, "JOIN does not support SELECT DISTINCT.");
+                checkFalse(parameters.isJson, "JOIN does not support SELECT JSON.");
+                checkTrue(orderings.isEmpty(), "JOIN does not support ORDER BY.");
+                checkNull(perPartitionLimit, "JOIN does not support PER PARTITION LIMIT.");
+                checkFalse(!restrictions.getSubqueries().isEmpty(), "JOIN does not support a subquery in the same statement.");
+
+                // The synthetic-key slice assumes the shipped probe columns are the leading columns of the
+                // probe row.  A function in the SELECT clause builds a SelectionWithProcessing whose row
+                // layout differs, so reject it rather than risk a wrong slice.
+                for (Selectable raw : selectables)
+                    checkFalse(raw.processesSelection(), "JOIN does not support a function in the SELECT clause.");
+
+                // Resolve the build table (t2).  It must exist and differ from the probe table (t1).
+                String buildKs = joinRaw.joinTable.hasKeyspace() ? joinRaw.joinTable.getKeyspace() : keyspace();
+                TableMetadata buildTable = Schema.instance.validateTable(buildKs, joinRaw.joinTable.getName());
+                checkFalse(buildTable.id.equals(table.id), "JOIN requires two different tables.");
+
+                // The ON clause references a table by its bare name, with no keyspace.  Two tables with the
+                // same name (in different keyspaces) cannot be told apart, so reject the query.
+                checkFalse(buildTable.name.equals(table.name),
+                           "JOIN does not support two tables with the same name; the ON clause cannot tell the sides apart.");
+
+                // Match the two ON-clause table references to the probe and build tables in either order.
+                ColumnIdentifier probeCol;
+                ColumnIdentifier buildCol;
+                if (joinReferences(joinRaw.leftTable, table) && joinReferences(joinRaw.rightTable, buildTable))
+                {
+                    probeCol = joinRaw.leftColumn;
+                    buildCol = joinRaw.rightColumn;
+                }
+                else if (joinReferences(joinRaw.leftTable, buildTable) && joinReferences(joinRaw.rightTable, table))
+                {
+                    probeCol = joinRaw.rightColumn;
+                    buildCol = joinRaw.leftColumn;
+                }
+                else
+                {
+                    throw invalidRequest("The JOIN ON clause must reference the two joined tables, one on each side.");
+                }
+
+                ColumnMetadata probeKey = table.getColumn(probeCol);
+                checkNotNull(probeKey, "Undefined column %s referenced in JOIN ON clause", probeCol);
+                ColumnMetadata buildKey = buildTable.getColumn(buildCol);
+                checkNotNull(buildKey, "Undefined column %s referenced in JOIN ON clause", buildCol);
+
+                // The two ON columns must be the same CQL type, and that type must compare equal by bytes
+                // (byte equality == value equality).  Otherwise the hash match would be wrong.
+                checkTrue(probeKey.type.equals(buildKey.type),
+                          "JOIN ON columns must have the same type; got %s and %s.",
+                          probeKey.type.asCQL3Type(), buildKey.type.asCQL3Type());
+                checkFalse(isNonByteCanonicalJoinType(probeKey.type),
+                           "JOIN ON column type %s is not supported because equal values can have different byte encodings.",
+                           probeKey.type.asCQL3Type());
+
+                // A masked join key would hash the raw value on one side and the masked value on the other,
+                // silently dropping every match.  Reject it rather than return a wrong answer.
+                checkFalse(probeKey.isMasked() || buildKey.isMasked(), "JOIN does not support a masked join column.");
+
+                // Build side: a standalone "SELECT * FROM t2", prepared, authorized, and materialized at
+                // execution.  It ships every t2 column, so the build key is always present.
+                Parameters buildParams = new Parameters(Collections.emptyList(),
+                                                        Collections.emptyList(),
+                                                        false,
+                                                        true,
+                                                        false);
+                RawStatement buildRaw = new RawStatement(new QualifiedName(buildTable.keyspace, buildTable.name),
+                                                         buildParams,
+                                                         Collections.emptyList(),
+                                                         WhereClause.empty(),
+                                                         WhereClause.empty(),
+                                                         null,
+                                                         null,
+                                                         StatementSource.INTERNAL,
+                                                         SelectOptions.EMPTY,
+                                                         null);
+                buildRaw.setBindVariables(Collections.emptyList());
+                SelectStatement buildSide = buildRaw.prepare(state, false);
+
+                int buildKeyIndex = buildSide.getSelection().getResultSetIndex(buildKey);
+
+                // The probe key must be in the probe row to drive the match.  If the user selected it, use
+                // that index.  Otherwise rebuild the selection with the key as a non-serialized ordering
+                // column (CASSANDRA-4911): it rides the row past the shipped columns and is not sent.
+                int probeKeyIndex = selection.getResultSetIndex(probeKey);
+                boolean probeKeySynthetic = false;
+                if (probeKeyIndex < 0)
+                {
+                    selection = prepareSelection(table,
+                                                 selectables,
+                                                 variableSpecifications,
+                                                 Collections.singleton(probeKey),
+                                                 restrictions);
+                    probeKeyIndex = selection.getResultSetIndex(probeKey);
+                    probeKeySynthetic = true;
+                }
+
+                // Combined shape: the shipped probe columns then the shipped build columns.  Reject a
+                // duplicate output name; the driver keys a row by column name and would collide.
+                List<ColumnSpecification> combined = new ArrayList<>();
+                combined.addAll(selection.getResultMetadata().requestNames());
+                combined.addAll(buildSide.getResultMetadata().requestNames());
+                Set<String> seenNames = new HashSet<>();
+                for (ColumnSpecification cs : combined)
+                    checkTrue(seenNames.add(cs.name.toString()),
+                              "JOIN produces a duplicate column name '%s'; alias one side to disambiguate.",
+                              cs.name);
+                ResultSet.ResultMetadata combinedMetadata = new ResultSet.ResultMetadata(combined);
+
+                joinSpec = new JoinSpec(buildSide, probeKey, buildKey, combinedMetadata, buildKeyIndex, probeKeyIndex, probeKeySynthetic);
+            }
+
             return new SelectStatement(table,
                                        variableSpecifications,
                                        parameters,
@@ -1681,7 +2083,37 @@ public class SelectStatement implements CQLStatement.SingleKeyspaceCqlStatement,
                                        source,
                                        options,
                                        arenaOrdering,
-                                       windowSpec);
+                                       windowSpec,
+                                       joinSpec);
+        }
+
+        /**
+         * @return {@code true} if the ON-clause table reference {@code ref} names {@code table}.  The
+         * reference is a bare identifier, so it is matched against the table name only.
+         */
+        private static boolean joinReferences(ColumnIdentifier ref, TableMetadata table)
+        {
+            return ref.toString().equals(table.name);
+        }
+
+        /**
+         * @return {@code true} if two equal values of {@code type} can have different byte encodings.  A
+         * broadcast hash JOIN matches on the serialized bytes, so such a type is rejected.  DECIMAL,
+         * FLOAT, and DOUBLE all have this property (for example -0.0 and 0.0, or unnormalized decimals).
+         *
+         * <p>The check unwraps a reversed type (a DESC clustering column) and recurses into the subtypes
+         * of a collection, tuple, or UDT.  This way a nested float, double, or decimal is rejected too,
+         * for example {@code frozen<list<double>>} or a DESC double clustering key.</p>
+         */
+        private static boolean isNonByteCanonicalJoinType(AbstractType<?> type)
+        {
+            AbstractType<?> unwrapped = type.unwrap();
+            if (unwrapped instanceof DecimalType || unwrapped instanceof FloatType || unwrapped instanceof DoubleType)
+                return true;
+            for (AbstractType<?> sub : unwrapped.subTypes())
+                if (isNonByteCanonicalJoinType(sub))
+                    return true;
+            return false;
         }
 
         /**

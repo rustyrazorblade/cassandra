@@ -221,6 +221,10 @@ public enum CassandraRelevantProperties
     CQL_AST_PARSER_ENABLED("cassandra.cql.ast_parser.enabled", "false"),
     /** Feature flag for CASE expressions in the SELECT projection list. OFF by default. Research POC. */
     CQL_CASE_EXPRESSION_ENABLED("cassandra.cql.case_expression.enabled", "false"),
+    /** Feature flag for the broadcast hash JOIN of two tables on a single equi-predicate. OFF by default. Research POC. */
+    CQL_JOIN_ENABLED("cassandra.cql.join.enabled", "false"),
+    /** Row cap for a broadcast hash JOIN, enforced on the build side, the probe side, and the joined output. Default ON. Research POC. */
+    CQL_JOIN_MAX_ROWS("cassandra.cql.join.max_rows", "1000000"),
     /** Feature flag for uncorrelated IN-subqueries on the partition key. OFF by default. Research POC. */
     CQL_SUBQUERY_ENABLED("cassandra.cql.subquery.enabled", "false"),
     /** Feature flag for the ROW_NUMBER window function in the SELECT projection list. OFF by default. Research POC. */
