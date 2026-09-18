@@ -655,7 +655,6 @@ public enum CassandraRelevantProperties
      * </ul>
      * Override down for a quick local check.
      */
-    TEST_COMMITLOG_BENCH_HOLD("bench.hold"),
     TEST_COMMITLOG_EXAMPLES("cassandra.test.commitlog.examples", "200"),
     TEST_COMMITLOG_MUTATIONS_PER_EXAMPLE("cassandra.test.commitlog.mutations_per_example", "40"),
     TEST_COMMITLOG_SEED("cassandra.test.commitlog.seed"),

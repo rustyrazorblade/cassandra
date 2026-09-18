@@ -834,12 +834,25 @@ public abstract class CommitLogTest
     @Test
     public void replayEntryWithPaddedTail() throws IOException
     {
+        // Over-state by 8 bytes. The zero-fill loop fills the tail in one chunk.
+        assertPaddedTailReplays(8);
+    }
+
+    @Test
+    public void replayEntryWithMultiChunkPaddedTail() throws IOException
+    {
+        // Over-state by more than ZEROS.length (1024) bytes, so the zero-fill loop iterates more than once.
+        assertPaddedTailReplays(3000);
+    }
+
+    private void assertPaddedTailReplays(int overstatement) throws IOException
+    {
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
         CommitLog.instance.add(new OverstatedSizeMutation(Iterables.getOnlyElement(
             new RowUpdateBuilder(cfs.metadata(), 0, "k1").clustering("bytes")
                                                          .add("val", bytes("this is a string"))
                                                          .build()
-                                                         .getPartitionUpdates())));
+                                                         .getPartitionUpdates()), overstatement));
 
         CommitLog.instance.add(new RowUpdateBuilder(cfs.metadata(), 0, "k2").clustering("bytes")
                                                                            .add("val", bytes("this is a string"))
@@ -856,19 +869,22 @@ public abstract class CommitLogTest
     }
 
     /**
-     * Claims eight bytes more than it serializes, so the commit log allocates a slot the mutation cannot fill.
+     * Claims more bytes than it serializes, so the commit log allocates a slot the mutation cannot fill.
      */
     private static class OverstatedSizeMutation extends Mutation
     {
-        OverstatedSizeMutation(PartitionUpdate update)
+        private final int overstatement;
+
+        OverstatedSizeMutation(PartitionUpdate update, int overstatement)
         {
             super(update);
+            this.overstatement = overstatement;
         }
 
         @Override
         public int serializedSize(int version)
         {
-            return super.serializedSize(version) + 8;
+            return super.serializedSize(version) + overstatement;
         }
     }
 
