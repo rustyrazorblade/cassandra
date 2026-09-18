@@ -36,6 +36,7 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.utils.memory.BufferPools;
 
 import static org.apache.cassandra.db.streaming.StreamingTestFixture.capture;
 import static org.apache.cassandra.db.streaming.StreamingTestFixture.dataFileCount;
@@ -112,6 +113,30 @@ public class StreamFailureTest
     public void uncompressedWriterReportsAFailedWrite()
     {
         assertReportsFailedWrite(uncompressed);
+    }
+
+    /**
+     * The whole point of this path is that the read-ahead thread hands its buffers to the sender. When a write
+     * fails the sender must still return every buffer to the networking pool. A leak here is the regression.
+     */
+    @Test
+    public void failedWriteReturnsEveryBufferToThePool()
+    {
+        long used = BufferPools.forNetworking().usedSizeInBytes();
+
+        try
+        {
+            writeToFailingChannel(writer(uncompressed, wholeFile(uncompressed), session()),
+                                  new IOException("the network gave out"));
+            fail("a writer whose channel fails every write must not return normally");
+        }
+        catch (Throwable expected)
+        {
+            // the write must fail; the pool accounting is the subject here
+        }
+
+        assertEquals("a failed write must return every buffer to the networking pool",
+                     used, BufferPools.forNetworking().usedSizeInBytes());
     }
 
     @Test

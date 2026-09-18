@@ -48,6 +48,8 @@ import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 
 import static org.apache.cassandra.db.streaming.StreamingTestFixture.digests;
+import static org.apache.cassandra.db.streaming.StreamingTestFixture.header;
+import static org.apache.cassandra.db.streaming.StreamingTestFixture.progressDeltas;
 import static org.apache.cassandra.db.streaming.StreamingTestFixture.roundTrip;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -170,6 +172,20 @@ public class CassandraStreamRoundTripTest
                         0, sections.get(0).lowerPosition % (64 << 10));
 
         assertRoundTrips(simple, ranges);
+    }
+
+    @Test
+    public void progressDeltasSumToTheSectionSize() throws Throwable
+    {
+        List<Range<Token>> ranges = Collections.singletonList(new Range<>(tokenAtIndex(simple, 500),
+                                                                          tokenAtIndex(simple, 1500)));
+        List<PartitionPositionBounds> sections = simple.getPositionsForRanges(ranges);
+
+        assertNotEquals("the section must start part way into a chunk, or the offset is not exercised",
+                        0, sections.get(0).lowerPosition % (64 << 10));
+
+        assertEquals("the reported progress deltas must sum to the streamed section size",
+                     header(simple, sections).size(), progressDeltas(simple, sections));
     }
 
     @Test
