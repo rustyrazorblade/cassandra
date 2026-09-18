@@ -1301,8 +1301,11 @@ public class CompactionStrategyManager implements INotificationConsumer
         readLock.lock();
         try
         {
-            for (AbstractCompactionStrategy strategy : getAllStrategies())
-                tasks += strategy.getEstimatedRemainingTasks();
+            // Walk the holders rather than getAllStrategies(), which wraps them in a concat and a transform.
+            // The pending repair holders build a chain of their own regardless.
+            for (AbstractStrategyHolder holder : holders)
+                for (AbstractCompactionStrategy strategy : holder.allStrategies())
+                    tasks += strategy.getEstimatedRemainingTasks();
         }
         finally
         {
