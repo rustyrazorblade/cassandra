@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 
 import org.slf4j.Logger;
@@ -124,7 +125,8 @@ public class BigTableWriter extends SortedTableWriter<BigFormatPartitionWriter, 
      * stale and far larger than the slice these input sstables hold. Where both are available the smaller wins: an
      * undershoot costs a doubling, an overshoot costs memory for every partition the writer touches.
      */
-    private long estimatedPartitionSize(DecoratedKey key)
+    @VisibleForTesting
+    long estimatedPartitionSize(DecoratedKey key)
     {
         SSTable.Owner owner = owner().orElse(null);
         long known = owner != null ? owner.getKnownPartitionSize(key) : -1;

@@ -182,9 +182,9 @@ public class CompactionColumnIndexSizeTest extends CQLTester
         int bigRows = 300;
         long approxBigPartitionBytes = (long) bigRows * BIG_ROW_VALUE_BYTES;
 
-        // exact, lying-small, and lying-huge hints must all be harmless: at this commit nothing consumes the
-        // TopPartitionTracker size estimate for presizing, so the compacted output must read back identically
-        // regardless of what the hint claims.
+        // exact, lying-small, and lying-huge hints must all be harmless: the ColumnFamilyStore owner does feed
+        // this estimate into presizing during compaction, but presizing only sets the initial buffer size, never
+        // the bytes written, so the compacted output must read back identically regardless of what the hint claims.
         for (long hint : new long[]{ approxBigPartitionBytes, 16L, 1L << 40 })
         {
             writeCompactAndVerify(1, 0, false, bigRows, false, cfs -> {
