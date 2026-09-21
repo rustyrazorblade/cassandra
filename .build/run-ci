@@ -76,12 +76,11 @@ def base_job_name(args) -> str:
     ref: .jenkins/k8s/jenkins-deployment.yaml JCasC.configScripts.test-job
     """
     if not hasattr(base_job_name, "_cached_result"):
-        raw_url = args.repository.replace("https://github.com/", "https://raw.githubusercontent.com/").removesuffix(".git") + f"/{args.branch}/build.xml"
-        if 200 != requests.head(raw_url, timeout=30).status_code:
-            raise ValueError(f"GitHub unavailable, or this branch has not been pushed yet: {args.repository} @ {args.branch} (or remote tracking not setup up: `git config --get branch.{args.branch}.remote` and `git config --get branch.{args.branch}.merge`)")
-        response = requests.get(raw_url, timeout=30)
-        response.raise_for_status()
-        for line in response.text.splitlines():
+        # Read base.version from the local build.xml.  run-ci runs from inside
+        # the checkout, so the version is on disk and needs no remote fetch.
+        # This works for any repository host.
+        build_xml = CASSANDRA_DIR / "build.xml"
+        for line in build_xml.read_text().splitlines():
             if 'property' in line and 'name="base.version"' in line:
                 version = line.split('value="')[1].split('"')[0]
                 # TODO: add new version each release branching
@@ -232,9 +231,6 @@ def parse_arguments() -> argparse.Namespace:
     if not args.repository and not (args.only_setup or args.only_tear_down or args.only_node_cleaner):
         require_tracking_remote(args.branch)
 
-    assert not args.repository or (args.repository.startswith("https://github.com/")
-                                   and args.repository.removesuffix(".git").endswith("cassandra")),\
-        f"Only github apache/cassandra (forked) repository supported, got: {args.repository}"
     assert args.dtest_repository.startswith("https://github.com/") and args.dtest_repository.removesuffix(".git").endswith("cassandra-dtest"),\
         f"Only github apache/cassandra-dtest (forked) repository supported, got: {args.dtest_repository}"
     assert not (args.setup and args.only_setup), "Both --setup or --only-setup cannot be specified."
