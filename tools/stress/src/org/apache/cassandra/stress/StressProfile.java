@@ -48,7 +48,7 @@ import com.datastax.driver.core.exceptions.AlreadyExistsException;
 import com.google.common.base.Function;
 import com.google.common.util.concurrent.Uninterruptibles;
 
-import org.antlr.runtime.RecognitionException;
+import org.antlr.v4.runtime.RecognitionException;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 import org.yaml.snakeyaml.error.YAMLException;
@@ -209,7 +209,7 @@ public class StressProfile implements Serializable
         {
             try
             {
-                String name = CQLFragmentParser.parseAnyUnhandled(CqlParser::createKeyspaceStatement, keyspaceCql).keyspaceName;
+                String name = CQLFragmentParser.parseAnyUnhandled(p -> p.createKeyspaceStatement().stmt, keyspaceCql).keyspaceName;
                 assert name.equalsIgnoreCase(keyspaceName) : "Name in keyspace_definition doesn't match keyspace property: '" + name + "' != '" + keyspaceName + "'";
             }
             catch (RecognitionException | SyntaxException e)
@@ -226,10 +226,10 @@ public class StressProfile implements Serializable
         {
             try
             {
-                String name = CQLFragmentParser.parseAnyUnhandled(CqlParser::createTableStatement, tableCql).table();
+                String name = CQLFragmentParser.parseAnyUnhandled(p -> p.createTableStatement().stmt, tableCql).table();
                 assert name.equalsIgnoreCase(tableName) : "Name in table_definition doesn't match table property: '" + name + "' != '" + tableName + "'";
             }
-            catch (RecognitionException | RuntimeException e)
+            catch (RuntimeException e)
             {
                 throw new IllegalArgumentException("There was a problem parsing the table cql: " + e.getMessage());
             }
@@ -445,7 +445,7 @@ public class StressProfile implements Serializable
         ModificationStatement.Parsed modificationStatement;
         try
         {
-            modificationStatement = CQLFragmentParser.parseAnyUnhandled(CqlParser::updateStatement,
+            modificationStatement = CQLFragmentParser.parseAnyUnhandled(p -> p.updateStatement().expr,
                                                                         statement.getQueryString());
         }
         catch (RecognitionException e)
@@ -507,7 +507,7 @@ public class StressProfile implements Serializable
 
     public CreateTableStatement.Raw getCreateStatement()
     {
-        CreateTableStatement.Raw createStatement = CQLFragmentParser.parseAny(CqlParser::createTableStatement, tableCql, "CREATE TABLE");
+        CreateTableStatement.Raw createStatement = CQLFragmentParser.parseAny(p -> p.createTableStatement().stmt, tableCql, "CREATE TABLE");
         createStatement.keyspace(keyspaceName);
         return createStatement;
     }

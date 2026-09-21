@@ -17,12 +17,12 @@
  */
 package org.apache.cassandra.cql3;
 
-import org.antlr.runtime.ANTLRStringStream;
-import org.antlr.runtime.BaseRecognizer;
-import org.antlr.runtime.CharStream;
-import org.antlr.runtime.CommonTokenStream;
-import org.antlr.runtime.RecognitionException;
-import org.antlr.runtime.TokenStream;
+import org.antlr.v4.runtime.CharStream;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
+import org.antlr.v4.runtime.RecognitionException;
+import org.antlr.v4.runtime.Recognizer;
+import org.antlr.v4.runtime.TokenStream;
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.statements.PropertyDefinitions;
@@ -38,7 +38,7 @@ public class CqlParserTest
         SyntaxErrorCounter firstCounter = new SyntaxErrorCounter();
         SyntaxErrorCounter secondCounter = new SyntaxErrorCounter();
 
-        CharStream stream = new ANTLRStringStream("SELECT * FORM FROM test");
+        CharStream stream = CharStreams.fromString("SELECT * FORM FROM test");
         CqlLexer lexer = new CqlLexer(stream);
 
         TokenStream tokenStream = new CommonTokenStream(lexer);
@@ -46,10 +46,9 @@ public class CqlParserTest
         parser.addErrorListener(firstCounter);
         parser.addErrorListener(secondCounter);
 
-        // By default CqlParser should recover from the syntax error by removing FORM
-        // but as recoverFromMismatchedToken and recover have been overloaded, it will not
-        // and the returned ParsedStatement will be null.
-        assertNull(parser.query());
+        // The parser reports the syntax error (unexpected FORM) to every registered
+        // listener and leaves the statement unset.
+        assertNull(parser.query().stmnt);
 
         // Only one error must be reported (mismatched: FORM).
         assertEquals(1, firstCounter.count);
@@ -62,7 +61,7 @@ public class CqlParserTest
         SyntaxErrorCounter firstCounter = new SyntaxErrorCounter();
         SyntaxErrorCounter secondCounter = new SyntaxErrorCounter();
 
-        CharStream stream = new ANTLRStringStream("SELECT * FORM test;");
+        CharStream stream = CharStreams.fromString("SELECT * FORM test;");
         CqlLexer lexer = new CqlLexer(stream);
 
         TokenStream tokenStream = new CommonTokenStream(lexer);
@@ -89,7 +88,7 @@ public class CqlParserTest
     private void parseAndCountErrors(String cql, int expectedErrors, ParserOperation operation) throws RecognitionException
     {
         SyntaxErrorCounter counter = new SyntaxErrorCounter();
-        CharStream stream = new ANTLRStringStream(cql);
+        CharStream stream = CharStreams.fromString(cql);
         CqlLexer lexer = new CqlLexer(stream);
         TokenStream tokenStream = new CommonTokenStream(lexer);
         CqlParser parser = new CqlParser(tokenStream);
@@ -111,13 +110,12 @@ public class CqlParserTest
         private int count;
 
         @Override
-        public void syntaxError(BaseRecognizer recognizer, String[] tokenNames, RecognitionException e)
-        {
-            count++;
-        }
-
-        @Override
-        public void syntaxError(BaseRecognizer recognizer, String errorMsg)
+        public void syntaxError(Recognizer<?, ?> recognizer,
+                                Object offendingSymbol,
+                                int line,
+                                int charPositionInLine,
+                                String msg,
+                                RecognitionException e)
         {
             count++;
         }

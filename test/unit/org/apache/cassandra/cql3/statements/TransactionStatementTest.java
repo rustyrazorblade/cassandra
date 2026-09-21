@@ -113,9 +113,14 @@ public class TransactionStatementTest
     public void shouldRejectReferenceUpdateOutsideTxn()
     {
         String query = "UPDATE ks.tbl1 SET v = row2.v WHERE k=1 AND c=2;";
+        // A row reference is only legal inside a transaction, gated by the
+        // {isParsingTxn}? predicate.  ANTLR 4 hoists that predicate into
+        // prediction, so outside a transaction the alternative is pruned and the
+        // parser rejects the reference with "no viable alternative".  ANTLR 3
+        // reported "failed predicate" here; the rejection is the same.
         Assertions.assertThatThrownBy(() -> prepare(query))
                   .isInstanceOf(SyntaxException.class)
-                  .hasMessageContaining("failed predicate");
+                  .hasMessageContaining("no viable alternative");
     }
 
     @Test
@@ -126,9 +131,14 @@ public class TransactionStatementTest
                        "    UPDATE ks.tbl1 SET v=1 WHERE k=1 AND c=2;\n" +
                        "COMMIT TRANSACTION";
 
+        // A conditional transaction must terminate with END IF, gated by the
+        // {isTxnConditional}? predicate on the terminator alternatives.  ANTLR 4
+        // hoists those predicates into prediction, so a bare COMMIT after an IF
+        // leaves no viable alternative.  ANTLR 3 reported "failed predicate"; the
+        // rejection is the same.
         Assertions.assertThatThrownBy(() -> prepare(query))
                   .isInstanceOf(SyntaxException.class)
-                  .hasMessageContaining("failed predicate");
+                  .hasMessageContaining("no viable alternative");
     }
 
     @Test
@@ -139,9 +149,14 @@ public class TransactionStatementTest
                        "  END IF\n" +
                        "COMMIT TRANSACTION";
 
+        // END IF is only legal when a conditional IF was parsed, gated by the
+        // {isTxnConditional}? predicate.  ANTLR 4 hoists that predicate into
+        // prediction, so an END IF without a preceding IF leaves no viable
+        // alternative.  ANTLR 3 reported "failed predicate"; the rejection is the
+        // same.
         Assertions.assertThatThrownBy(() -> prepare(query))
                   .isInstanceOf(SyntaxException.class)
-                  .hasMessageContaining("failed predicate");
+                  .hasMessageContaining("no viable alternative");
     }
 
     @Test

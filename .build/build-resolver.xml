@@ -127,9 +127,7 @@
         </resolve>
         <resolve>
             <dependencies>
-                <dependency groupId="org.antlr" artifactId="antlr" version="3.5.2"/>
-                <dependency groupId="org.antlr" artifactId="antlr-runtime" version="3.5.2"/>
-                <dependency groupId="org.antlr" artifactId="ST4" version="4.0.8"/>
+                <dependency groupId="org.antlr" artifactId="antlr4" version="4.13.2"/>
             </dependencies>
             <path refid="cql3-grammar.classpath" classpath="runtime"/>
         </resolve>

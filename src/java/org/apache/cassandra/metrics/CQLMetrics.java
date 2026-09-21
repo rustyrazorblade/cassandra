@@ -36,6 +36,9 @@ public class CQLMetrics
 
     public final Counter useStatementsExecuted;
 
+    /** Incremented when a parse is aborted for exceeding the configured CQL parse-time budget. */
+    public final Counter parseTimeBudgetExceeded;
+
     public final Gauge<Integer> preparedStatementsCount;
     public final Gauge<Double> preparedStatementsRatio;
     public final Gauge<Long> preparedStatementsCacheSize;
@@ -47,6 +50,8 @@ public class CQLMetrics
         preparedStatementsEvicted = Metrics.counter(factory.createMetricName("PreparedStatementsEvicted"));
 
         useStatementsExecuted = Metrics.counter(factory.createMetricName("UseStatementsExecuted"));
+
+        parseTimeBudgetExceeded = Metrics.counter(factory.createMetricName("ParseTimeBudgetExceeded"));
 
         preparedStatementsCount = Metrics.register(factory.createMetricName("PreparedStatementsCount"), QueryProcessor::preparedStatementsCount);
         preparedStatementsRatio = Metrics.register(factory.createMetricName("PreparedStatementsRatio"), new RatioGauge()

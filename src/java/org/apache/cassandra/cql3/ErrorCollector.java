@@ -19,11 +19,11 @@ package org.apache.cassandra.cql3;
 
 import java.util.LinkedList;
 
-import org.antlr.runtime.BaseRecognizer;
-import org.antlr.runtime.Parser;
-import org.antlr.runtime.RecognitionException;
-import org.antlr.runtime.Token;
-import org.antlr.runtime.TokenStream;
+import org.antlr.v4.runtime.Parser;
+import org.antlr.v4.runtime.RecognitionException;
+import org.antlr.v4.runtime.Recognizer;
+import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.TokenStream;
 
 import org.apache.cassandra.exceptions.SyntaxException;
 
@@ -67,12 +67,30 @@ public final class ErrorCollector implements ErrorListener
      * {@inheritDoc}
      */
     @Override
-    public void syntaxError(BaseRecognizer recognizer, String[] tokenNames, RecognitionException e)
+    public void syntaxError(Recognizer<?, ?> recognizer,
+                            Object offendingSymbol,
+                            int line,
+                            int charPositionInLine,
+                            String msg,
+                            RecognitionException e)
     {
-        String hdr = recognizer.getErrorHeader(e);
-        String msg = recognizer.getErrorMessage(e, tokenNames);
+        // Grammar-level semantic errors are routed through notifyErrorListeners(String)
+        // by the grammar's addRecognitionError and arrive with a null RecognitionException.
+        // ANTLR 3 recorded these raw, with neither the "line L:C" header nor a query
+        // snippet, so the user-facing message is exactly the text the grammar supplied
+        // (e.g. "Bind variables cannot be used for index names").  Preserve that.
+        if (e == null)
+        {
+            errorMsgs.add(msg);
+            return;
+        }
 
-        StringBuilder builder = new StringBuilder().append(hdr)
+        // ANTLR 4 hands us the pre-formatted message plus the position; rebuild the
+        // "line L:C <msg>" header the ANTLR 3 BaseRecognizer.getErrorHeader produced.
+        StringBuilder builder = new StringBuilder().append("line ")
+                .append(line)
+                .append(':')
+                .append(charPositionInLine)
                 .append(' ')
                 .append(msg);
 
@@ -80,15 +98,6 @@ public final class ErrorCollector implements ErrorListener
             appendQuerySnippet((Parser) recognizer, builder);
 
         errorMsgs.add(builder.toString());
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public void syntaxError(BaseRecognizer recognizer, String errorMsg)
-    {
-        errorMsgs.add(errorMsg);
     }
 
     /**
@@ -187,7 +196,14 @@ public final class ErrorCollector implements ErrorListener
      */
     private static boolean isTokenValid(Token token)
     {
-        return token.getLine() > 0 && token.getCharPositionInLine() >= 0;
+        // The ANTLR 3 EOF token carried line 0 / charPositionInLine -1, so an error at end of input
+        // failed this check and no snippet was rendered.  The ANTLR 4 EOF token instead reports a
+        // real end-of-line position and the literal text "<EOF>", so rendering it into the snippet
+        // reads characters past the end of the query line (a StringIndexOutOfBoundsException).  Treat
+        // EOF as invalid to preserve the ANTLR 3 behavior: no snippet for an end-of-input error.
+        return token.getType() != Token.EOF
+               && token.getLine() > 0
+               && token.getCharPositionInLine() >= 0;
     }
 
     /**

@@ -1,0 +1,1 @@
+Literal{elements=[Literal{preferedType=<type:Int32Type>, text="1", type=Type.INTEGER}, Literal{preferedType=<type:AsciiType>, text="two", type=Type.STRING}, Literal{preferedType=<type:DoubleType>, text="3.0", type=Type.FLOAT}]}

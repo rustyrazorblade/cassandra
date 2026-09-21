@@ -37,7 +37,7 @@ import com.datastax.driver.core.ResultSet;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 
-import org.antlr.runtime.RecognitionException;
+import org.antlr.v4.runtime.RecognitionException;
 
 import org.apache.cassandra.cql3.CQLFragmentParser;
 import org.apache.cassandra.cql3.ColumnIdentifier;
@@ -73,7 +73,7 @@ public class CASQuery extends SchemaStatement
         ModificationStatement.Parsed modificationStatement;
         try
         {
-            modificationStatement = CQLFragmentParser.parseAnyUnhandled(CqlParser::updateStatement,
+            modificationStatement = CQLFragmentParser.parseAnyUnhandled(p -> p.updateStatement().expr,
                     statement.getQueryString());
         }
         catch (RecognitionException e)

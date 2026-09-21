@@ -1,0 +1,1 @@
+Raw{name=FunctionName{keyspace="system", name="_add"}, terms=[Literal{preferedType=<type:Int32Type>, text="1", type=Type.INTEGER}, Literal{preferedType=<type:Int32Type>, text="2", type=Type.INTEGER}]}

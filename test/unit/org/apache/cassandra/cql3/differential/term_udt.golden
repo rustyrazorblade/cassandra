@@ -1,0 +1,1 @@
+Literal{entries={FieldIdentifier{bytes=0x61}=Literal{preferedType=<type:Int32Type>, text="1", type=Type.INTEGER}, FieldIdentifier{bytes=0x62}=Literal{preferedType=<type:AsciiType>, text="two", type=Type.STRING}}}

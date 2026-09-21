@@ -31,7 +31,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-import org.antlr.runtime.RecognitionException;
+import org.antlr.v4.runtime.RecognitionException;
 import org.apache.commons.lang3.ArrayUtils;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -711,7 +711,7 @@ public class StressCQLSSTableWriter implements Closeable
     {
         try
         {
-            CQLStatement.Raw stmt = CQLFragmentParser.parseAnyUnhandled(CqlParser::query, query);
+            CQLStatement.Raw stmt = CQLFragmentParser.parseAnyUnhandled(p -> p.query().stmnt, query);
 
             if (!stmt.getClass().equals(klass))
                 throw new IllegalArgumentException("Invalid query, must be a " + type + " statement but was: " + stmt.getClass());

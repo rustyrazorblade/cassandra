@@ -1,0 +1,1 @@
+TypeCast{term=Literal{preferedType=<type:Int32Type>, text="1", type=Type.INTEGER}, type=RawType{frozen=false, type=Native.BIGINT}}

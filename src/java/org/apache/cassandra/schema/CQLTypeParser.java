@@ -21,7 +21,6 @@ import com.google.common.collect.ImmutableSet;
 
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.CQLFragmentParser;
-import org.apache.cassandra.cql3.CqlParser;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UserType;
 
@@ -59,6 +58,8 @@ public final class CQLTypeParser
 
     static CQL3Type.Raw parseRaw(String type)
     {
-        return CQLFragmentParser.parseAny(CqlParser::comparatorType, type, "CQL type");
+        // A CQL type string is a closed fragment.  A malformed type has no useful multi-error
+        // recovery, so fail fast on the first error instead of recovering and reporting.
+        return CQLFragmentParser.parseAnyFailFast(p -> p.comparatorType().t, type, "CQL type");
     }
 }

@@ -1,0 +1,1 @@
+RawCollection{frozen=false, keys=RawType{frozen=false, type=Native.TEXT}, kind=Kind.MAP, values=RawCollection{frozen=true, keys=null, kind=Kind.LIST, values=RawType{frozen=false, type=Native.INT}}}

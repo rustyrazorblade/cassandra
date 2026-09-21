@@ -26,7 +26,6 @@ import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.CQLFragmentParser;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.cql3.CqlParser;
 import org.apache.cassandra.cql3.FunctionContext;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.VariableSpecifications;
@@ -150,7 +149,7 @@ public interface Term
     static ByteBuffer asBytes(String keyspace, String term, AbstractType<?> type)
     {
         ColumnSpecification receiver = new ColumnSpecification(keyspace, SchemaConstants.DUMMY_KEYSPACE_OR_TABLE_NAME, new ColumnIdentifier("(dummy)", true), type);
-        Term.Raw rawTerm = CQLFragmentParser.parseAny(CqlParser::term, term, "CQL term");
+        Term.Raw rawTerm = CQLFragmentParser.parseAny(p -> p.term().raw, term, "CQL term");
         return rawTerm.prepare(keyspace, receiver).bindAndGet(QueryOptions.DEFAULT);
     }
 

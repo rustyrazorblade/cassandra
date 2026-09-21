@@ -1,0 +1,662 @@
+# CQL: SELECT id, name FROM ks.users WHERE id = 123
+K_SELECT	SELECT
+WS	 
+IDENT	id
+','	,
+WS	 
+IDENT	name
+WS	 
+K_FROM	FROM
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	id
+WS	 
+'='	=
+WS	 
+INTEGER	123
+
+# CQL: SELECT id, name FROM ks.users WHERE id IN (1, 2, 3, 4, 5) ORDER BY name ASC LIMIT 100
+K_SELECT	SELECT
+WS	 
+IDENT	id
+','	,
+WS	 
+IDENT	name
+WS	 
+K_FROM	FROM
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	id
+WS	 
+K_IN	IN
+WS	 
+'('	(
+INTEGER	1
+','	,
+WS	 
+INTEGER	2
+','	,
+WS	 
+INTEGER	3
+','	,
+WS	 
+INTEGER	4
+','	,
+WS	 
+INTEGER	5
+')'	)
+WS	 
+K_ORDER	ORDER
+WS	 
+K_BY	BY
+WS	 
+IDENT	name
+WS	 
+K_ASC	ASC
+WS	 
+K_LIMIT	LIMIT
+WS	 
+INTEGER	100
+
+# CQL: INSERT INTO ks.users (id, name, email) VALUES (?, ?, ?)
+K_INSERT	INSERT
+WS	 
+K_INTO	INTO
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+'('	(
+IDENT	id
+','	,
+WS	 
+IDENT	name
+','	,
+WS	 
+IDENT	email
+')'	)
+WS	 
+K_VALUES	VALUES
+WS	 
+'('	(
+QMARK	?
+','	,
+WS	 
+QMARK	?
+','	,
+WS	 
+QMARK	?
+')'	)
+
+# CQL: INSERT INTO ks.t (a, b, c, d) VALUES (1, 'x', true, 1.5)
+K_INSERT	INSERT
+WS	 
+K_INTO	INTO
+WS	 
+IDENT	ks
+'.'	.
+IDENT	t
+WS	 
+'('	(
+IDENT	a
+','	,
+WS	 
+IDENT	b
+','	,
+WS	 
+IDENT	c
+','	,
+WS	 
+IDENT	d
+')'	)
+WS	 
+K_VALUES	VALUES
+WS	 
+'('	(
+INTEGER	1
+','	,
+WS	 
+STRING_LITERAL	x
+','	,
+WS	 
+BOOLEAN	true
+','	,
+WS	 
+FLOAT	1.5
+')'	)
+
+# CQL: UPDATE ks.users SET name = 'alice', email = 'a@example.com' WHERE id = 42
+K_UPDATE	UPDATE
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+K_SET	SET
+WS	 
+IDENT	name
+WS	 
+'='	=
+WS	 
+STRING_LITERAL	alice
+','	,
+WS	 
+IDENT	email
+WS	 
+'='	=
+WS	 
+STRING_LITERAL	a@example.com
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	id
+WS	 
+'='	=
+WS	 
+INTEGER	42
+
+# CQL: UPDATE ks.t SET v = 1.5e-2 WHERE k = 0xDEADBEEF
+K_UPDATE	UPDATE
+WS	 
+IDENT	ks
+'.'	.
+IDENT	t
+WS	 
+K_SET	SET
+WS	 
+IDENT	v
+WS	 
+'='	=
+WS	 
+FLOAT	1.5e-2
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	k
+WS	 
+'='	=
+WS	 
+HEXNUMBER	0xDEADBEEF
+
+# CQL: DELETE FROM ks.users WHERE id = 42
+K_DELETE	DELETE
+WS	 
+K_FROM	FROM
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	id
+WS	 
+'='	=
+WS	 
+INTEGER	42
+
+# CQL: CREATE TABLE ks.users (id int PRIMARY KEY, name text, email text, created timestamp)
+K_CREATE	CREATE
+WS	 
+K_COLUMNFAMILY	TABLE
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+'('	(
+IDENT	id
+WS	 
+K_INT	int
+WS	 
+K_PRIMARY	PRIMARY
+WS	 
+K_KEY	KEY
+','	,
+WS	 
+IDENT	name
+WS	 
+K_TEXT	text
+','	,
+WS	 
+IDENT	email
+WS	 
+K_TEXT	text
+','	,
+WS	 
+IDENT	created
+WS	 
+K_TIMESTAMP	timestamp
+')'	)
+
+# CQL: CREATE TABLE ks.t (id uuid PRIMARY KEY, d duration, f float, m map<text, int>, l list<int>)
+K_CREATE	CREATE
+WS	 
+K_COLUMNFAMILY	TABLE
+WS	 
+IDENT	ks
+'.'	.
+IDENT	t
+WS	 
+'('	(
+IDENT	id
+WS	 
+K_UUID	uuid
+WS	 
+K_PRIMARY	PRIMARY
+WS	 
+K_KEY	KEY
+','	,
+WS	 
+IDENT	d
+WS	 
+K_DURATION	duration
+','	,
+WS	 
+IDENT	f
+WS	 
+K_FLOAT	float
+','	,
+WS	 
+IDENT	m
+WS	 
+K_MAP	map
+'<'	<
+K_TEXT	text
+','	,
+WS	 
+K_INT	int
+'>'	>
+','	,
+WS	 
+IDENT	l
+WS	 
+K_LIST	list
+'<'	<
+K_INT	int
+'>'	>
+')'	)
+
+# CQL: BEGIN BATCH INSERT INTO ks.users (id, name) VALUES (1, 'a'); UPDATE ks.users SET name = 'b' WHERE id = 2; APPLY BATCH
+K_BEGIN	BEGIN
+WS	 
+K_BATCH	BATCH
+WS	 
+K_INSERT	INSERT
+WS	 
+K_INTO	INTO
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+'('	(
+IDENT	id
+','	,
+WS	 
+IDENT	name
+')'	)
+WS	 
+K_VALUES	VALUES
+WS	 
+'('	(
+INTEGER	1
+','	,
+WS	 
+STRING_LITERAL	a
+')'	)
+';'	;
+WS	 
+K_UPDATE	UPDATE
+WS	 
+IDENT	ks
+'.'	.
+K_USERS	users
+WS	 
+K_SET	SET
+WS	 
+IDENT	name
+WS	 
+'='	=
+WS	 
+STRING_LITERAL	b
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	id
+WS	 
+'='	=
+WS	 
+INTEGER	2
+';'	;
+WS	 
+K_APPLY	APPLY
+WS	 
+K_BATCH	BATCH
+
+# CQL: SELECT * FROM t WHERE d = 1y2mo3d AND ts = 123e4567-e89b-12d3-a456-426614174000
+K_SELECT	SELECT
+WS	 
+'*'	*
+WS	 
+K_FROM	FROM
+WS	 
+IDENT	t
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	d
+WS	 
+'='	=
+WS	 
+DURATION	1y2mo3d
+WS	 
+K_AND	AND
+WS	 
+IDENT	ts
+WS	 
+'='	=
+WS	 
+UUID	123e4567-e89b-12d3-a456-426614174000
+
+# CQL: SELECT "quoted col", "a""b" FROM t WHERE flag = false
+K_SELECT	SELECT
+WS	 
+QUOTED_NAME	quoted col
+','	,
+WS	 
+QUOTED_NAME	a"b
+WS	 
+K_FROM	FROM
+WS	 
+IDENT	t
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	flag
+WS	 
+'='	=
+WS	 
+BOOLEAN	false
+
+# CQL: INSERT INTO t (k, v) VALUES (1, $$raw '' text$$)
+K_INSERT	INSERT
+WS	 
+K_INTO	INTO
+WS	 
+IDENT	t
+WS	 
+'('	(
+IDENT	k
+','	,
+WS	 
+IDENT	v
+')'	)
+WS	 
+K_VALUES	VALUES
+WS	 
+'('	(
+INTEGER	1
+','	,
+WS	 
+STRING_LITERAL	raw '' text
+')'	)
+
+# CQL: SELECT CAST(v AS int) FROM t WHERE k = -1 AND j = -1.5
+K_SELECT	SELECT
+WS	 
+K_CAST	CAST
+'('	(
+IDENT	v
+WS	 
+K_AS	AS
+WS	 
+K_INT	int
+')'	)
+WS	 
+K_FROM	FROM
+WS	 
+IDENT	t
+WS	 
+K_WHERE	WHERE
+WS	 
+IDENT	k
+WS	 
+'='	=
+WS	 
+INTEGER	-1
+WS	 
+K_AND	AND
+WS	 
+IDENT	j
+WS	 
+'='	=
+WS	 
+FLOAT	-1.5
+
+# CQL: SELECT id FROM t WHERE token(k) > -nan AND m = infinity
+K_SELECT	SELECT
+WS	 
+IDENT	id
+WS	 
+K_FROM	FROM
+WS	 
+IDENT	t
+WS	 
+K_WHERE	WHERE
+WS	 
+K_TOKEN	token
+'('	(
+IDENT	k
+')'	)
+WS	 
+'>'	>
+WS	 
+K_NEGATIVE_NAN	-nan
+WS	 
+K_AND	AND
+WS	 
+IDENT	m
+WS	 
+'='	=
+WS	 
+K_POSITIVE_INFINITY	infinity
+
+# CQL: 1..2
+INTEGER	1
+RANGE	..
+INTEGER	2
+
+# CQL: 1.2
+FLOAT	1.2
+
+# CQL: 1.
+FLOAT	1.
+
+# CQL: .5
+'.'	.
+INTEGER	5
+
+# CQL: 0...3.
+FLOAT	0.
+RANGE	..
+FLOAT	3.
+
+# CQL: 1e3
+FLOAT	1e3
+
+# CQL: 1E+3
+FLOAT	1E+3
+
+# CQL: 1.5e-2
+FLOAT	1.5e-2
+
+# CQL: 1.e3
+FLOAT	1.e3
+
+# CQL: 1.5.5
+FLOAT	1.5
+'.'	.
+INTEGER	5
+
+# CQL: 1y2mo3d
+DURATION	1y2mo3d
+
+# CQL: 1y
+DURATION	1y
+
+# CQL: 2mo
+DURATION	2mo
+
+# CQL: 500ms
+DURATION	500ms
+
+# CQL: 10us
+DURATION	10us
+
+# CQL: 1ns
+DURATION	1ns
+
+# CQL: -1y
+DURATION	-1y
+
+# CQL: 1µs
+DURATION	1µs
+
+# CQL: P1Y
+DURATION	P1Y
+
+# CQL: P1Y2M3D
+DURATION	P1Y2M3D
+
+# CQL: P1W
+DURATION	P1W
+
+# CQL: PT1H
+DURATION	PT1H
+
+# CQL: PT1H30M
+DURATION	PT1H30M
+
+# CQL: P1YT1H
+DURATION	P1YT1H
+
+# CQL: -P1Y
+DURATION	-P1Y
+
+# CQL: P2023-01-02T03:04:05
+DURATION	P2023-01-02T03:04:05
+
+# CQL: -nan
+K_NEGATIVE_NAN	-nan
+
+# CQL: -NaN
+K_NEGATIVE_NAN	-NaN
+
+# CQL: -infinity
+K_NEGATIVE_INFINITY	-infinity
+
+# CQL: -INFINITY
+K_NEGATIVE_INFINITY	-INFINITY
+
+# CQL: nan
+K_POSITIVE_NAN	nan
+
+# CQL: infinity
+K_POSITIVE_INFINITY	infinity
+
+# CQL: 123e4567-e89b-12d3-a456-426614174000
+UUID	123e4567-e89b-12d3-a456-426614174000
+
+# CQL: deadbeef-dead-beef-dead-beefdeadbeef
+UUID	deadbeef-dead-beef-dead-beefdeadbeef
+
+# CQL: 123e4567-e89b-12d3-a456-42661417400
+FLOAT	123e4567
+'-'	-
+IDENT	e89b
+DURATION	-12d
+INTEGER	3
+'-'	-
+IDENT	a456
+INTEGER	-42661417400
+
+# CQL: 0x
+HEXNUMBER	0x
+
+# CQL: 0xDEADBEEF
+HEXNUMBER	0xDEADBEEF
+
+# CQL: 0Xabc
+HEXNUMBER	0Xabc
+
+# CQL: 0xZZ
+HEXNUMBER	0x
+IDENT	ZZ
+
+# CQL: true
+BOOLEAN	true
+
+# CQL: TRUE
+BOOLEAN	TRUE
+
+# CQL: False
+BOOLEAN	False
+
+# CQL: "true"
+QUOTED_NAME	true
+
+# CQL: ""
+EMPTY_QUOTED_NAME	""
+
+# CQL: "a"
+QUOTED_NAME	a
+
+# CQL: "a""b"
+QUOTED_NAME	a"b
+
+# CQL: """"
+QUOTED_NAME	"
+
+# CQL: "abc
+
+# CQL: """
+EMPTY_QUOTED_NAME	""
+
+# CQL: "
+
+# CQL: ''
+STRING_LITERAL	
+
+# CQL: 'a''b'
+STRING_LITERAL	a'b
+
+# CQL: $$x$$
+STRING_LITERAL	x
+
+# CQL: $$ '' $$
+STRING_LITERAL	 '' 
+
+# CQL: abc
+IDENT	abc
+
+# CQL: a1
+IDENT	a1
+
+# CQL: f00d
+IDENT	f00d
+
+# CQL: e10
+IDENT	e10
+

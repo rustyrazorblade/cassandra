@@ -17,8 +17,9 @@
  */
 package org.apache.cassandra.cql3;
 
-import org.antlr.runtime.CharStream;
-import org.antlr.runtime.Token;
+import org.antlr.v4.runtime.CharStream;
+import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.TokenSource;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
@@ -211,47 +212,25 @@ public class ErrorCollectorTest
         @Override
         public int getType()
         {
-            throw new UnsupportedOperationException();
+            // These mocks stand in for real query tokens (never the EOF token), so report a
+            // non-EOF type.  ErrorCollector treats the EOF token as invalid for snippet purposes.
+            return Token.MIN_USER_TOKEN_TYPE;
         }
 
         @Override
-        public void setChannel(int channel)
+        public int getStartIndex()
         {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public void setCharPositionInLine(int charPositionInLine)
-        {
-            this.charPositionInLine = charPositionInLine;
-        }
-
-        @Override
-        public void setInputStream(CharStream inputStream)
+        public int getStopIndex()
         {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public void setLine(int line)
-        {
-            this.line = line;
-        }
-
-        @Override
-        public void setText(String text)
-        {
-            this.text = text;
-        }
-
-        @Override
-        public void setTokenIndex(int tokenIndex)
-        {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public void setType(int type)
+        public TokenSource getTokenSource()
         {
             throw new UnsupportedOperationException();
         }

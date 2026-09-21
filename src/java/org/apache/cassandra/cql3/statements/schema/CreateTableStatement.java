@@ -45,7 +45,6 @@ import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.CQLFragmentParser;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.cql3.CqlParser;
 import org.apache.cassandra.cql3.QualifiedName;
 import org.apache.cassandra.cql3.constraints.ColumnConstraint;
 import org.apache.cassandra.cql3.constraints.ColumnConstraints;
@@ -542,7 +541,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
 
     public static TableMetadata.Builder parse(String cql, String keyspace, String table, Types types, UserFunctions userFunctions)
     {
-        Raw createTable = CQLFragmentParser.parseAny(CqlParser::createTableStatement, cql, "CREATE TABLE")
+        Raw createTable = CQLFragmentParser.parseAny(p -> p.createTableStatement().stmt, cql, "CREATE TABLE")
                                            .keyspace(keyspace);
 
         if (table != null)

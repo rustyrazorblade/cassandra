@@ -28,7 +28,6 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.CQLFragmentParser;
-import org.apache.cassandra.cql3.CqlParser;
 import org.apache.cassandra.cql3.FieldIdentifier;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.TypeParser;
@@ -109,11 +108,11 @@ public class TupleTypesRepresentationTest
             this.multiCell = multiCell;
             this.cqlValue = cqlValue;
 
-            cqlType = CQLFragmentParser.parseAny(CqlParser::comparatorType, cqlTypeString, "non-dropped type")
+            cqlType = CQLFragmentParser.parseAny(p -> p.comparatorType().t, cqlTypeString, "non-dropped type")
                                        .prepare(keyspace, types);
             type = cqlType.getType();
 
-            droppedCqlType = CQLFragmentParser.parseAny(CqlParser::comparatorType, droppedCqlTypeString, "dropped type")
+            droppedCqlType = CQLFragmentParser.parseAny(p -> p.comparatorType().t, droppedCqlTypeString, "dropped type")
                                               .prepare(keyspace, types);
             // NOTE: TupleType is *always* parsed as frozen, but never toString()'d with the surrounding FrozenType
             droppedType = droppedCqlType.getType();

@@ -204,6 +204,14 @@ public enum CassandraRelevantProperties
     CONSISTENT_DIRECTORY_LISTINGS("cassandra.consistent_directory_listings"),
     CONSISTENT_RANGE_MOVEMENT("cassandra.consistent.rangemovement", "true"),
     CONSISTENT_SIMULTANEOUS_MOVES_ALLOW("cassandra.consistent.simultaneousmoves.allow"),
+    /** Feature flag for the AST parser path. OFF by default. This is a research POC. */
+    CQL_AST_PARSER_ENABLED("cassandra.cql.ast_parser.enabled", "false"),
+    /**
+     * Wall-clock budget, in milliseconds, for a single CQL parse. It caps the cost of adversarial
+     * ANTLR 4 ALL(*) prediction so a pathological input fails fast. The default is generous; a
+     * legitimate query never trips it. A value of 0 or less disables the cap.
+     */
+    CQL_PARSE_TIME_BUDGET_MS("cassandra.cql.parse_time_budget_ms", "5000"),
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
     /** Experimental. */
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),

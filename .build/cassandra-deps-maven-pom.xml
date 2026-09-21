@@ -66,15 +66,7 @@
     </dependency>
     <dependency>
       <groupId>org.antlr</groupId>
-      <artifactId>antlr</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.antlr</groupId>
-      <artifactId>ST4</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.antlr</groupId>
-      <artifactId>antlr-runtime</artifactId>
+      <artifactId>antlr4-runtime</artifactId>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>

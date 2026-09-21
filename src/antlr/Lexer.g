@@ -19,232 +19,18 @@
 
 lexer grammar Lexer;
 
-@lexer::members {
-    List<Token> tokens = new ArrayList<Token>();
+// Keywords are not lexed as individual rules.  The lexer matches an IDENT and the
+// nextToken() override in Cql.g reclassifies it to the matching K_* token type using an
+// allocation-free keyword table.  This keeps ~170 keyword rules out of the lexer ATN, so
+// identifier lexing does not weigh every keyword at each character.
+// When adding a new reserved keyword, add an entry to o.a.c.cql3.ReservedKeywords, to
+// pylib/cqlshlib/cqlhandling.py::cql_keywords_reserved, and to the tokens{} block in Cql.g.
+// When adding a new unreserved keyword, add an entry to unreserved keywords in Parser.g.
 
-    public void emit(Token token)
-    {
-        state.token = token;
-        tokens.add(token);
-    }
-
-    public Token nextToken()
-    {
-        super.nextToken();
-        if (tokens.size() == 0)
-            return new CommonToken(Token.EOF);
-        return tokens.remove(0);
-    }
-
-    private final List<ErrorListener> listeners = new ArrayList<ErrorListener>();
-
-    public void addErrorListener(ErrorListener listener)
-    {
-        this.listeners.add(listener);
-    }
-
-    public void removeErrorListener(ErrorListener listener)
-    {
-        this.listeners.remove(listener);
-    }
-
-    public void displayRecognitionError(String[] tokenNames, RecognitionException e)
-    {
-        for (int i = 0, m = listeners.size(); i < m; i++)
-            listeners.get(i).syntaxError(this, tokenNames, e);
-    }
-}
-
-// Case-insensitive keywords
-// When adding a new reserved keyword, add entry to o.a.c.cql3.ReservedKeywords and
-// pylib/cqlshlib/cqlhandling.py::cql_keywords_reserved.
-// When adding a new unreserved keyword, add entry to unreserved keywords in Parser.g.
-K_SELECT:      S E L E C T;
-K_LET:         L E T;
-K_FROM:        F R O M;
-K_AS:          A S;
-K_WHERE:       W H E R E;
-K_AND:         A N D;
-K_KEY:         K E Y;
-K_KEYS:        K E Y S;
-K_ENTRIES:     E N T R I E S;
-K_FULL:        F U L L;
-K_INSERT:      I N S E R T;
-K_UPDATE:      U P D A T E;
-K_WITH:        W I T H;
-K_LIMIT:       L I M I T;
-K_PER:         P E R;
-K_PARTITION:   P A R T I T I O N;
-K_USING:       U S I N G;
-K_USE:         U S E;
-K_DISTINCT:    D I S T I N C T;
-K_COUNT:       C O U N T;
-K_SET:         S E T;
-K_BEGIN:       B E G I N;
-K_UNLOGGED:    U N L O G G E D;
-K_BATCH:       B A T C H;
-K_APPLY:       A P P L Y;
-K_COMMIT:      C O M M I T;
-K_TRUNCATE:    T R U N C A T E;
-K_DELETE:      D E L E T E;
-K_TRANSACTION: T R A N S A C T I O N;
-K_IN:          I N;
-K_CREATE:      C R E A T E;
-K_SCHEMA:      S C H E M A;
-K_KEYSPACE:    ( K E Y S P A C E
-                 | K_SCHEMA );
-K_KEYSPACES:   K E Y S P A C E S;
-K_COLUMNFAMILY:( C O L U M N F A M I L Y
-                 | T A B L E );
-K_COLUMN:      C O L U M N;
-K_TABLES:      ( C O L U M N F A M I L I E S
-                 | T A B L E S );
-K_MATERIALIZED:M A T E R I A L I Z E D;
-K_VIEW:        V I E W;
-K_INDEX:       I N D E X;
-K_INDEXES:     I N D E X E S;
-K_CUSTOM:      C U S T O M;
-K_ON:          O N;
-K_TO:          T O;
-K_DROP:        D R O P;
-K_PRIMARY:     P R I M A R Y;
-K_INTO:        I N T O;
-K_VALUES:      V A L U E S;
-K_TIMESTAMP:   T I M E S T A M P;
-K_TTL:         T T L;
-K_CAST:        C A S T;
-K_ALTER:       A L T E R;
-K_RENAME:      R E N A M E;
-K_ADD:         A D D;
-K_TYPE:        T Y P E;
-K_TYPES:       T Y P E S;
-K_COMPACT:     C O M P A C T;
-K_STORAGE:     S T O R A G E;
-K_ORDER:       O R D E R;
-K_BY:          B Y;
-K_ASC:         A S C;
-K_DESC:        D E S C;
-K_ALLOW:       A L L O W;
-K_FILTERING:   F I L T E R I N G;
-K_IF:          I F;
-K_THEN:        T H E N;
-K_END:         E N D;
-K_IS:          I S;
-K_CONTAINS:    C O N T A I N S;
-K_BETWEEN:     B E T W E E N;
-K_GROUP:       G R O U P;
-K_CLUSTER:     C L U S T E R;
-K_INTERNALS:   I N T E R N A L S;
-K_ONLY:        O N L Y;
-K_CHECK:       C H E C K;
-
-K_GRANT:       G R A N T;
-K_ALL:         A L L;
-K_PERMISSION:  P E R M I S S I O N;
-K_PERMISSIONS: P E R M I S S I O N S;
-K_OF:          O F;
-K_REVOKE:      R E V O K E;
-K_MODIFY:      M O D I F Y;
-K_AUTHORIZE:   A U T H O R I Z E;
-K_DESCRIBE:    D E S C R I B E;
-K_EXECUTE:     E X E C U T E;
-K_NORECURSIVE: N O R E C U R S I V E;
-K_MBEAN:       M B E A N;
-K_MBEANS:      M B E A N S;
-
-K_USER:        U S E R;
-K_USERS:       U S E R S;
-K_ROLE:        R O L E;
-K_ROLES:       R O L E S;
-K_SUPERUSERS:  S U P E R U S E R S;
-K_SUPERUSER:   S U P E R U S E R;
-K_NOSUPERUSER: N O S U P E R U S E R;
-K_GENERATED:   G E N E R A T E D;
-K_PASSWORD:    P A S S W O R D;
-K_HASHED:      H A S H E D;
-K_LOGIN:       L O G I N;
-K_NOLOGIN:     N O L O G I N;
-K_OPTIONS:     O P T I O N S;
-K_ACCESS:      A C C E S S;
-K_DATACENTERS: D A T A C E N T E R S;
-K_CIDRS:       C I D R S;
-K_IDENTITY:    I D E N T I T Y;
-
-K_CLUSTERING:  C L U S T E R I N G;
-K_ASCII:       A S C I I;
-K_BIGINT:      B I G I N T;
-K_BLOB:        B L O B;
-K_BOOLEAN:     B O O L E A N;
-K_COUNTER:     C O U N T E R;
-K_DECIMAL:     D E C I M A L;
-K_DOUBLE:      D O U B L E;
-K_DURATION:    D U R A T I O N;
-K_FLOAT:       F L O A T;
-K_INET:        I N E T;
-K_INT:         I N T;
-K_SMALLINT:    S M A L L I N T;
-K_TINYINT:     T I N Y I N T;
-K_TEXT:        T E X T;
-K_UUID:        U U I D;
-K_VARCHAR:     V A R C H A R;
-K_VARINT:      V A R I N T;
-K_TIMEUUID:    T I M E U U I D;
-K_TOKEN:       T O K E N;
-K_WRITETIME:   W R I T E T I M E;
-K_MAXWRITETIME:M A X W R I T E T I M E;
-K_DATE:        D A T E;
-K_TIME:        T I M E;
-
-K_NULL:        N U L L;
-K_NOT:         N O T;
-K_EXISTS:      E X I S T S;
-
-K_MAP:         M A P;
-K_LIST:        L I S T;
-K_POSITIVE_NAN: N A N;
+// The '-' prefixed NaN/Infinity keywords keep dedicated rules: they start with '-', not a
+// letter, so they are never lexed as IDENT and cannot be reclassified.
 K_NEGATIVE_NAN: '-' N A N;
-K_POSITIVE_INFINITY:    I N F I N I T Y;
 K_NEGATIVE_INFINITY: '-' I N F I N I T Y;
-K_TUPLE:       T U P L E;
-
-K_TRIGGER:     T R I G G E R;
-K_STATIC:      S T A T I C;
-K_FROZEN:      F R O Z E N;
-K_FOR:         F O R;
-K_FIELD:       F I E L D;
-
-K_FUNCTION:    F U N C T I O N;
-K_FUNCTIONS:   F U N C T I O N S;
-K_AGGREGATE:   A G G R E G A T E;
-K_AGGREGATES:  A G G R E G A T E S;
-K_SFUNC:       S F U N C;
-K_STYPE:       S T Y P E;
-K_FINALFUNC:   F I N A L F U N C;
-K_INITCOND:    I N I T C O N D;
-K_RETURNS:     R E T U R N S;
-K_CALLED:      C A L L E D;
-K_INPUT:       I N P U T;
-K_LANGUAGE:    L A N G U A G E;
-K_OR:          O R;
-K_REPLACE:     R E P L A C E;
-
-K_JSON:        J S O N;
-K_DEFAULT:     D E F A U L T;
-K_UNSET:       U N S E T;
-K_LIKE:        L I K E;
-
-K_MASKED:      M A S K E D;
-K_UNMASK:      U N M A S K;
-K_SELECT_MASKED: S E L E C T '_' M A S K E D;
-
-K_VECTOR:      V E C T O R;
-K_ANN:         A N N;
-
-K_COMMENT:     C O M M E N T;
-K_COMMENTS:    C O M M E N T S;
-K_SECURITY:    S E C U R I T Y;
-K_LABEL:       L A B E L;
-K_LABELS:      L A B E L S;
 
 // Case-insensitive alpha characters
 fragment A: ('a'|'A');
@@ -275,36 +61,33 @@ fragment Y: ('y'|'Y');
 fragment Z: ('z'|'Z');
 
 STRING_LITERAL
-    @init{
-        StringBuilder txt = new StringBuilder(); // temporary to build pg-style-string
-    }
-    @after{ setText(txt.toString()); }
-    :
-      /* pg-style string literal */
-      (
-        '\$' '\$'
-        ( /* collect all input until '$$' is reached again */
-          {  (input.size() - input.index() > 1)
-               && !"$$".equals(input.substring(input.index(), input.index() + 1)) }?
-             => c=. { txt.appendCodePoint(c); }
-        )*
-        '\$' '\$'
+    : (
+        /* pg-style string literal */
+        ( '$$' .*? '$$' )
+        |
+        /* conventional quoted string literal */
+        ( '\'' ( ~'\'' | '\'' '\'' )* '\'' )
       )
-      |
-      /* conventional quoted string literal */
-      (
-        '\'' (c=~('\'') { txt.appendCodePoint(c);} | '\'' '\'' { txt.appendCodePoint('\''); })* '\''
-      )
+      {
+          String raw = getText();
+          if (!raw.isEmpty() && raw.charAt(0) == '$')
+              // pg-style: strip the leading and trailing '$$'
+              setText(raw.substring(2, raw.length() - 2));
+          else
+              // conventional: strip the surrounding quotes and unescape doubled quotes
+              setText(raw.substring(1, raw.length() - 1).replace("''", "'"));
+      }
     ;
 
-QUOTED_NAME
-    @init{ StringBuilder b = new StringBuilder(); }
-    @after{ setText(b.toString()); }
-    : '\"' (c=~('\"') { b.appendCodePoint(c); } | '\"' '\"' { b.appendCodePoint('\"'); })+ '\"'
-    ;
-
-EMPTY_QUOTED_NAME
-    : '\"' '\"'
+/*
+ * One rule for both quoted names.  It replaces QUOTED_NAME (one-or-more inner) and
+ * EMPTY_QUOTED_NAME ("").  nextToken() in Cql.g looks at the raw length: a two-character "" is
+ * EMPTY_QUOTED_NAME, anything longer is QUOTED_NAME.  The action unescapes only the longer case,
+ * leaving the empty name as the literal "" the old EMPTY_QUOTED_NAME rule produced.
+ */
+QUOTED
+    : '"' ( ~'"' | '"' '"' )* '"'
+      { if (getText().length() > 2) setText(getText().substring(1, getText().length() - 1).replace("\"\"", "\"")); }
     ;
 
 fragment DIGIT
@@ -353,10 +136,6 @@ fragment DURATION_UNIT
     | N S
     ;
 
-INTEGER
-    : '-'? DIGIT+
-    ;
-
 QMARK
     : '?'
     ;
@@ -366,25 +145,35 @@ RANGE
     ;
 
 /*
- * Normally a lexer only emits one token at a time, but ours is tricked out
- * to support multiple (see @lexer::members near the top of the grammar).
+ * NUMBER is one rule covering integers, floats and digit-leading durations.  It used to be three
+ * rules (INTEGER, FLOAT, and the digit-leading DURATION alternative); merging them keeps a single
+ * '-'? DIGIT+ prefix in the lexer ATN instead of three overlapping ones, which cuts the config-set
+ * churn while the lexer weighs a number.  nextToken() in Cql.g reclassifies each NUMBER back to
+ * INTEGER, FLOAT or DURATION so the parser sees the same token types as before.
+ *
+ * The optional tail decides the kind:
+ *   - the dot branch (a float) uses the same predicate the old FLOAT rule used.  It overlaps
+ *     RANGE ('..'): the dot is taken only when the next character is not a dot, or when a third
+ *     dot follows.  So "3." is a float, "1..3" is INTEGER RANGE INTEGER, and "0...3." is
+ *     FLOAT '0.' RANGE '..' FLOAT '3.'.
+ *   - the EXPONENT branch (a float) covers "1e3" with no dot.
+ *   - the DURATION_UNIT branch covers "1y2mo3d".
  */
-FLOAT
-    : (INTEGER '.' RANGE) => INTEGER '.'
-    | (INTEGER RANGE) => INTEGER {$type = INTEGER;}
-    | INTEGER ('.' DIGIT*)? EXPONENT?
+NUMBER
+    : '-'? DIGIT+
+      ( { _input.LA(1) == '.' && (_input.LA(2) != '.' || _input.LA(3) == '.') }? '.' DIGIT* EXPONENT?
+      | EXPONENT
+      | DURATION_UNIT (DIGIT+ DURATION_UNIT)*
+      )?
     ;
 
 /*
- * This has to be before IDENT so it takes precendence over it.
+ * ISO 8601 'P'-leading durations.  Split off from the old DURATION rule and left-factored on the
+ * shared '-'? 'P' prefix.  nextToken() reclassifies DURATION_P to DURATION.  The accepted strings
+ * and their spans are unchanged.
  */
-BOOLEAN
-    : T R U E | F A L S E
-    ;
-
-DURATION
-    : '-'? DIGIT+ DURATION_UNIT (DIGIT+ DURATION_UNIT)*
-    | '-'? 'P' DIGIT DIGIT DIGIT DIGIT '-' DIGIT DIGIT '-' DIGIT DIGIT 'T' DIGIT DIGIT ':' DIGIT DIGIT ':' DIGIT DIGIT // ISO 8601 "alternative format"
+DURATION_P
+    : '-'? 'P' DIGIT DIGIT DIGIT DIGIT '-' DIGIT DIGIT '-' DIGIT DIGIT 'T' DIGIT DIGIT ':' DIGIT DIGIT ':' DIGIT DIGIT // ISO 8601 "alternative format"
     | '-'? 'P' DURATION_ISO_8601_TIME_DESIGNATORS
     | DURATION_ISO_8601_WEEK_PERIOD_DESIGNATOR
     | DURATION_ISO_8601_PERIOD_DESIGNATORS DURATION_ISO_8601_TIME_DESIGNATORS?
@@ -407,13 +196,13 @@ UUID
     ;
 
 WS
-    : (' ' | '\t' | '\n' | '\r')+ { $channel = HIDDEN; }
+    : (' ' | '\t' | '\n' | '\r')+ -> channel(HIDDEN)
     ;
 
 COMMENT
-    : ('--' | '//') .* ('\n'|'\r') { $channel = HIDDEN; }
+    : ('--' | '//') ~('\n'|'\r')* ('\n'|'\r')? -> channel(HIDDEN)
     ;
 
 MULTILINE_COMMENT
-    : '/*' .* '*/' { $channel = HIDDEN; }
+    : '/*' .*? '*/' -> channel(HIDDEN)
     ;

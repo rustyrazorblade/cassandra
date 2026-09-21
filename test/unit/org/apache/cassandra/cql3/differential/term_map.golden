@@ -1,0 +1,1 @@
+Literal{entries=[Pair{left=Literal{preferedType=<type:AsciiType>, text="k1", type=Type.STRING}, right=Literal{preferedType=<type:Int32Type>, text="10", type=Type.INTEGER}}, Pair{left=Literal{preferedType=<type:AsciiType>, text="k2", type=Type.STRING}, right=Literal{preferedType=<type:Int32Type>, text="20", type=Type.INTEGER}}]}
