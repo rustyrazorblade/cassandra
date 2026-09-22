@@ -697,6 +697,12 @@ cursor_flush_enabled: false
 # Experimental.  New garbage free single-partition read path, gated by CursorReads.isReadSupported.
 cursor_reads_enabled: false
 
+# Experimental.  Move compression and the SSTable write off the compaction thread.
+async_compaction_writer_enabled: false
+
+# In-flight memory per open compressed writer.  Off heap with direct buffers.
+# async_compaction_writer_buffer: 4MiB
+
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
