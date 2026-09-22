@@ -35,6 +35,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -160,6 +161,18 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
 
     @VisibleForTesting
     public final AtomicInteger currentlyBackgroundUpgrading = new AtomicInteger(0);
+
+    /**
+     * Counts cleanups that ran through {@link #cursorCleanupOne} rather than falling back to
+     * {@link #iteratorCleanupOne}.  Differential tests read it to confirm the run took the cursor
+     * path, not the legacy one.
+     * <p>
+     * Counts cleanups committed to the cursor path, not completed ones: it is incremented once the
+     * path is chosen, before the {@link CursorCompactor} is constructed.  A later failure leaves a
+     * counted run that produced no output, so this is not a success count.
+     */
+    @VisibleForTesting
+    public static final LongAdder cursorCleanupsRun = new LongAdder();
 
     public static final int NO_GC = Integer.MIN_VALUE;
 
@@ -832,10 +845,25 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             @Override
             public void execute(LifecycleTransaction txn) throws IOException
             {
-                CleanupStrategy cleanupStrategy = CleanupStrategy.get(cfStore, allRanges, transientRanges, txn.onlyOne().isRepaired(), FBUtilities.nowInSeconds());
-                doCleanupOne(cfStore, txn, cleanupStrategy, allRanges, hasIndexes);
+                performCleanupOne(cfStore, txn, allRanges, transientRanges, hasIndexes);
             }
         }, jobs, OperationType.CLEANUP);
+    }
+
+    /**
+     * Cleans one sstable (the transaction's only original) against the ranges this node still owns.
+     * Split out of {@link #performCleanup}'s per-sstable operation so tests can drive the real
+     * production path over an explicit range set, without going through cluster metadata.
+     */
+    @VisibleForTesting
+    public void performCleanupOne(ColumnFamilyStore cfs,
+                                  LifecycleTransaction txn,
+                                  Collection<Range<Token>> allRanges,
+                                  Collection<Range<Token>> transientRanges,
+                                  boolean hasIndexes) throws IOException
+    {
+        CleanupStrategy cleanupStrategy = CleanupStrategy.get(cfs, allRanges, transientRanges, txn.onlyOne().isRepaired(), FBUtilities.nowInSeconds());
+        doCleanupOne(cfs, txn, cleanupStrategy, allRanges, hasIndexes);
     }
 
     public AllSSTableOpStatus performGarbageCollection(final ColumnFamilyStore cfStore, TombstoneOption tombstoneOption, int jobs) throws InterruptedException, ExecutionException
@@ -1628,23 +1656,144 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
 
         long start = nanoTime();
 
-        long totalkeysWritten = 0;
-
         long expectedBloomFilterSize = Math.max(cfs.metadata().params.minIndexInterval,
                                                 SSTableReader.getApproximateKeyCount(txn.originals()));
 
         logger.trace("Expected bloom filter size : {}", expectedBloomFilterSize);
         logger.info("Cleaning up {}", sstable);
 
+        long nowInSec = FBUtilities.nowInSeconds();
+
+        // The cursor path handles only strategies whose filter is a set of token ranges to read
+        // (see cursorCleanupOne) and falls back to the iterator path for the rest.
+        Collection<Range<Token>> cursorRanges = DatabaseDescriptor.cursorCompactionEnabled()
+                                                ? cleanupStrategy.cursorScanRanges()
+                                                : null;
+        if (cursorRanges != null && cursorCleanupOne(cfs, txn, sstable, cursorRanges, expectedBloomFilterSize, nowInSec, start))
+            return;
+
+        iteratorCleanupOne(cfs, txn, sstable, cleanupStrategy, expectedBloomFilterSize, nowInSec, start);
+    }
+
+    /**
+     * Cursor-backed counterpart to {@link #iteratorCleanupOne}.  Cleanup drops data at partition
+     * granularity, and for every strategy the cursor path accepts the filter is just the set of
+     * token ranges to read ({@link CleanupStrategy#cursorScanRanges}), applied via
+     * {@link SSTableReader#getPositionsForRanges}.  So the merge loop needs no per-partition
+     * ownership predicate and no secondary-index notification; the one strategy that notifies
+     * {@code cfs.indexManager} ({@link CleanupStrategy.Full}) is the indexed-table case, which
+     * {@link CursorCompactor#isCleanupSupported} rejects.
+     *
+     * @return false if the cursor path does not apply here and nothing was done, so the caller
+     *         must run the legacy path; true if cleanup completed here
+     */
+    private boolean cursorCleanupOne(ColumnFamilyStore cfs,
+                                     LifecycleTransaction txn,
+                                     SSTableReader sstable,
+                                     Collection<Range<Token>> cursorRanges,
+                                     long expectedBloomFilterSize,
+                                     long nowInSec,
+                                     long start) throws IOException
+    {
+        long totalkeysWritten = 0;
+        List<SSTableReader> finished;
+
+        try (CompactionController controller = new CompactionController(cfs, txn.originals(), cfs.getDefaultGcBefore(nowInSec)))
+        {
+            if (!CursorCompactor.isCleanupSupported(txn.originals(), controller))
+                return false;
+
+            List<SSTableReader.PartitionPositionBounds> bounds = sstable.getPositionsForRanges(cursorRanges);
+            // An sstable can intersect the owned ranges yet hold no key inside them, so nothing
+            // survives cleanup. Leave that case to the legacy path, which drops the sstable via an
+            // empty SSTableRewriter output.
+            if (bounds.isEmpty())
+                return false;
+
+            RateLimiter limiter = getRateLimiter();
+            double compressionRatio = sstable.getCompressionRatio();
+            if (compressionRatio == MetadataCollector.NO_COMPRESSION_RATIO)
+                compressionRatio = 1.0;
+
+            cursorCleanupsRun.increment();
+            CursorCompactor compactor = new CursorCompactor(OperationType.CLEANUP,
+                                                            Collections.singletonMap(sstable, bounds),
+                                                            controller, nowInSec, nextTimeUUID(), active);
+            try (SSTableRewriter writer = SSTableRewriter.construct(cfs, txn, false, sstable.maxDataAge);
+                 Refs<SSTableReader> refs = Refs.ref(Collections.singleton(sstable)))
+            {
+                StatsMetadata metadata = sstable.getSSTableMetadata();
+                // Single output sstable, created lazily on first write and built like the legacy
+                // path's (same directory, key count, repair/transient state, level and header) so
+                // both paths produce identical output. It never rolls over: cleanup does not use
+                // CompactionAwareWriter's disk-boundary/size-based writer switching.
+                SSTableWriter[] output = new SSTableWriter[1];
+                CursorCompactor.OutputWriterProvider writerProvider = new CursorCompactor.OutputWriterProvider()
+                {
+                    @Override
+                    public SSTableWriter maybeSwitchWriter(DecoratedKey key)
+                    {
+                        if (output[0] != null)
+                            return null;
+                        output[0] = createWriter(cfs, sstable.descriptor.directory, expectedBloomFilterSize,
+                                                 metadata.repairedAt, metadata.pendingRepair, metadata.isTransient, sstable, txn);
+                        writer.switchWriter(output[0]);
+                        compactor.setTargetDirectory(output[0].getFilename());
+                        return output[0];
+                    }
+
+                    @Override
+                    public void maybeReopenEarly(DecoratedKey key)
+                    {
+                        // Legacy cleanup gets this from SSTableRewriter.append on every partition.
+                        writer.maybeReopenEarly(key);
+                    }
+                };
+
+                long lastBytesScanned = 0;
+                while (compactor.writeNextPartition(writerProvider))
+                {
+                    totalkeysWritten++;
+
+                    long bytesScanned = compactor.getTotalBytesScanned();
+
+                    compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+
+                    lastBytesScanned = bytesScanned;
+                }
+
+                // flush to ensure we don't lose the tombstones on a restart, since they are not commitlog'd
+                cfs.indexManager.flushAllIndexesBlocking();
+
+                finished = writer.finish();
+            }
+            finally
+            {
+                compactor.close();
+            }
+        }
+
+        logCleanupResult(sstable, finished, totalkeysWritten, start);
+        return true;
+    }
+
+    private void iteratorCleanupOne(ColumnFamilyStore cfs,
+                                    LifecycleTransaction txn,
+                                    SSTableReader sstable,
+                                    CleanupStrategy cleanupStrategy,
+                                    long expectedBloomFilterSize,
+                                    long nowInSec,
+                                    long start) throws IOException
+    {
         File compactionFileLocation = sstable.descriptor.directory;
         RateLimiter limiter = getRateLimiter();
         double compressionRatio = sstable.getCompressionRatio();
         if (compressionRatio == MetadataCollector.NO_COMPRESSION_RATIO)
             compressionRatio = 1.0;
 
+        long totalkeysWritten = 0;
         List<SSTableReader> finished;
 
-        long nowInSec = FBUtilities.nowInSeconds();
         try (SSTableRewriter writer = SSTableRewriter.construct(cfs, txn, false, sstable.maxDataAge);
              ISSTableScanner scanner = cleanupStrategy.getScanner(sstable);
              CompactionController controller = new CompactionController(cfs, txn.originals(), cfs.getDefaultGcBefore(nowInSec));
@@ -1681,19 +1830,23 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             finished = writer.finish();
         }
 
-        if (!finished.isEmpty())
-        {
-            String format = "Cleaned up to %s.  %s to %s (~%d%% of original) for %,d keys.  Time: %,dms.";
-            long dTime = TimeUnit.NANOSECONDS.toMillis(nanoTime() - start);
-            long startsize = sstable.onDiskLength();
-            long endsize = 0;
-            for (SSTableReader newSstable : finished)
-                endsize += newSstable.onDiskLength();
-            double ratio = (double) endsize / (double) startsize;
-            logger.info(String.format(format, finished.get(0).getFilename(), FBUtilities.prettyPrintMemory(startsize),
-                                      FBUtilities.prettyPrintMemory(endsize), (int) (ratio * 100), totalkeysWritten, dTime));
-        }
+        logCleanupResult(sstable, finished, totalkeysWritten, start);
+    }
 
+    private static void logCleanupResult(SSTableReader sstable, List<SSTableReader> finished, long totalkeysWritten, long start)
+    {
+        if (finished.isEmpty())
+            return;
+
+        String format = "Cleaned up to %s.  %s to %s (~%d%% of original) for %,d keys.  Time: %,dms.";
+        long dTime = TimeUnit.NANOSECONDS.toMillis(nanoTime() - start);
+        long startsize = sstable.onDiskLength();
+        long endsize = 0;
+        for (SSTableReader newSstable : finished)
+            endsize += newSstable.onDiskLength();
+        double ratio = (double) endsize / (double) startsize;
+        logger.info(String.format(format, finished.get(0).getFilename(), FBUtilities.prettyPrintMemory(startsize),
+                                  FBUtilities.prettyPrintMemory(endsize), (int) (ratio * 100), totalkeysWritten, dTime));
     }
 
     protected void compactionRateLimiterAcquire(RateLimiter limiter, long bytesScanned, long lastBytesScanned, double compressionRatio)
@@ -1739,6 +1892,13 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         public abstract ISSTableScanner getScanner(SSTableReader sstable);
         public abstract UnfilteredRowIterator cleanup(UnfilteredRowIterator partition);
 
+        /**
+         * The token ranges the cursor path must read to reproduce this strategy exactly, or null
+         * if the strategy cannot be expressed as a pure range restriction and so has no cursor
+         * equivalent (see {@link Full}, which reads everything and filters per partition).
+         */
+        public abstract Collection<Range<Token>> cursorScanRanges();
+
         private static final class Bounded extends CleanupStrategy
         {
             private final Collection<Range<Token>> transientRanges;
@@ -1762,6 +1922,12 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             @Override
             public ISSTableScanner getScanner(SSTableReader sstable)
             {
+                return sstable.getScanner(cursorScanRanges(), DatabaseDescriptor.getCompactionReadDiskAccessMode());
+            }
+
+            @Override
+            public Collection<Range<Token>> cursorScanRanges()
+            {
                 //If transient replication is enabled and there are transient ranges
                 //then cleanup should remove any partitions that are repaired and in the transient range
                 //as they should already be synchronized at other full replicas.
@@ -1771,7 +1937,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                 {
                     rangesToScan = Collections2.filter(ranges, range -> !transientRanges.contains(range));
                 }
-                return sstable.getScanner(rangesToScan, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+                return rangesToScan;
             }
 
             @Override
@@ -1795,6 +1961,14 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             public ISSTableScanner getScanner(SSTableReader sstable)
             {
                 return sstable.getScanner(DatabaseDescriptor.getCompactionReadDiskAccessMode());
+            }
+
+            @Override
+            public Collection<Range<Token>> cursorScanRanges()
+            {
+                // Reads every partition so it can notify cfs.indexManager of the ones it drops.
+                // That notification has no cursor-path equivalent, so there is no range to offer.
+                return null;
             }
 
             @Override
