@@ -18,7 +18,6 @@
 package org.apache.cassandra.io.compress;
 
 import java.io.IOException;
-import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.ImmutableMap;
@@ -288,6 +287,6 @@ public class AsyncChunkPipelineFaultTest
 
     private static MetadataCollector collector()
     {
-        return new MetadataCollector(new ClusteringComparator(Collections.singletonList(BytesType.instance)));
+        return new MetadataCollector(new ClusteringComparator(BytesType.instance));
     }
 }

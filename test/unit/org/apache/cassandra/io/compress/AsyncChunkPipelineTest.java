@@ -21,7 +21,6 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
@@ -425,7 +424,7 @@ public class AsyncChunkPipelineTest
 
     private static MetadataCollector collector()
     {
-        return new MetadataCollector(new ClusteringComparator(Collections.singletonList(BytesType.instance)));
+        return new MetadataCollector(new ClusteringComparator(BytesType.instance));
     }
 
     /**
