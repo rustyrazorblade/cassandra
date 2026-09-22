@@ -46,7 +46,6 @@ import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTree;
-import org.apache.cassandra.utils.MerkleTree.RowHash;
 import org.apache.cassandra.utils.MerkleTrees;
 
 import static org.apache.cassandra.net.Verb.VALIDATION_RSP;
@@ -214,12 +213,12 @@ public class Validator implements Runnable
         assert range.contains(lastKey.getToken()) : "Token not in MerkleTree: " + lastKey.getToken();
         // case 3 must be true: mix in the hashed row
         // only add a hash for the merkle tree in case the digest was actually updated - see CASSANDRA-8979
+        // use the byte[] overload so no per-partition RowHash object is allocated (CASSANDRA-21568)
         if (inputBytes > 0)
         {
-            RowHash rowHash = new MerkleTree.RowHash(key.getToken(), digestBytes, inputBytes);
             if (topPartitionCollector != null)
-                topPartitionCollector.trackPartitionSize(key, rowHash.size);
-            range.addHash(rowHash);
+                topPartitionCollector.trackPartitionSize(key, inputBytes);
+            range.addHash(digestBytes, inputBytes);
         }
     }
 
