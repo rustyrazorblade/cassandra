@@ -103,6 +103,28 @@ public class RangeTombstoneList implements Iterable<RangeTombstone>, IMeasurable
         return comparator;
     }
 
+    /**
+     * Direct, allocation-free access to entry {@code i}'s bounds and deletion, for a marker walk
+     * (see {@link RangeTombstoneListCursor}) that avoids the per-entry {@link RangeTombstone}
+     * wrapper {@link #iterator()} builds.  {@code startAt} and {@code endAt} return this list's
+     * own live {@link ClusteringBound} objects; {@code deletionAt} builds one small
+     * {@link DeletionTime} per call, once per range tombstone, not per row or cell.
+     */
+    public ClusteringBound<?> startAt(int i)
+    {
+        return starts[i];
+    }
+
+    public ClusteringBound<?> endAt(int i)
+    {
+        return ends[i];
+    }
+
+    public DeletionTime deletionAt(int i)
+    {
+        return DeletionTime.buildUnsafeWithUnsignedInteger(markedAts[i], delTimesUnsignedIntegers[i]);
+    }
+
     public RangeTombstoneList copy()
     {
         return new RangeTombstoneList(comparator,
