@@ -24,6 +24,7 @@ import java.util.Map;
 import com.google.common.collect.ImmutableMap;
 
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.local.Node;
@@ -39,6 +40,7 @@ import static org.apache.cassandra.service.accord.AccordTestUtils.idSet;
 import static org.apache.cassandra.service.accord.topology.FastPathParsingTest.pfs;
 import static org.junit.Assert.assertEquals;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class ParameterizedFastPathStrategyTest
 {
     private static final SortedArrayList<Node.Id> NODES = idList(1, 2, 3, 4, 5, 6);

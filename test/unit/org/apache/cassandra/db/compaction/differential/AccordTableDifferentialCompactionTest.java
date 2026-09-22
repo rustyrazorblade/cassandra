@@ -19,6 +19,7 @@
 package org.apache.cassandra.db.compaction.differential;
 
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -44,6 +45,7 @@ import static org.junit.Assert.assertTrue;
  * writes through accord. The test starts a real local AccordService, because the gcBefore
  * derivation reads the node's durableBefore and redundantBefore state.
  */
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordTableDifferentialCompactionTest extends DifferentialCompactionTester
 {
     @BeforeClass

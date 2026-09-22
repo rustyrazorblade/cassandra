@@ -62,6 +62,7 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.ROW_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.SEEK;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.STATIC_ROW_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.TOMBSTONE_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
@@ -91,6 +92,8 @@ public class SSTableCursorReader implements AutoCloseable
         int PARTITION_END = 1 << 8;
         /** no segment left to read; EOF for a whole-file cursor */
         int DONE = 1 << 9;
+        /** {@link #seekUnfiltered} has positioned the reader but not yet resolved the flags */
+        int SEEK = 1 << 10;
 
         static boolean isState(int state, int mask) {
             return (state & mask) != 0;
@@ -170,6 +173,19 @@ public class SSTableCursorReader implements AutoCloseable
         // The type that compares the path bytes of the current cell: see
         // ColumnMetadata.pathNameComparator. It is null for a simple column.
         public AbstractType<?> cellPathType;
+
+        // Accessors over the cell state above. The merge loop reads the cell through these rather
+        // than through the fields, so the same walk can later run over a source that is not this
+        // class. Names match CursorReads.MergeLeg where it has a counterpart.
+        public ColumnMetadata cellColumn() { return cellColumn; }
+        public ReusableCellLivenessInfo cellLiveness() { return cellLiveness; }
+        public boolean cellProduced() { return producedCell; }
+        public int cellFlags() { return cellFlags; }
+        public AbstractType<?> cellType() { return cellType; }
+        public AbstractType<?> cellPathType() { return cellPathType; }
+        public byte[] cellPathBuffer() { return cellPathBuffer; }
+        public int cellPathLength() { return cellPathLength; }
+
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
         // One entry per column of columnsArray: the path comparator type of a complex column, or
@@ -724,6 +740,49 @@ public class SSTableCursorReader implements AutoCloseable
         if (marker != UnfilteredSerializer.END_OF_PARTITION)
             throw new IOException("Seeking to a partition at: " + position + " did not land after an end-of-partition marker; found 0x"
                                   + Integer.toHexString(marker));
+    }
+
+    /**
+     * Positions the cursor at an unfiltered's flags byte mid-partition (e.g. a BTI row-index
+     * block start) and consumes those flags, leaving the cursor ready for {@link #readRowHeader}
+     * / {@link #readTombstoneMarker} exactly as if it had walked there row by row. No
+     * partition-scoped stream state needs reconstructing: clustering values, liveness and
+     * deletion times are all encoded relative to the serialization HEADER (never running-delta
+     * against preceding unfiltereds), and cell-cursor state is re-initialized per row. The one
+     * piece of logical state a mid-partition position carries — the currently-OPEN range
+     * tombstone — is not recoverable from the data stream at the seek point and must be tracked
+     * by the caller (for BTI, the row index stores it per block:
+     * {@code RowIndexReader.IndexInfo.openDeletion}).
+     */
+    public int seekUnfiltered(long position)
+    {
+        state = SEEK;
+        // partition elements (Unfiltered) have flags
+        dataReader.seek(position);
+        try
+        {
+            long preFlagsPosition = dataReader.getPosition();
+            basicUnfilteredFlags = dataReader.readUnsignedByte();
+            // A seek target can land on the end-of-partition marker. A BTI row-index block boundary
+            // can coincide with the partition end: the reverse block walk seeks the last block's
+            // start, which can be the end marker itself. Report PARTITION_END so the caller treats
+            // the block as empty, exactly as the reference reverse reader does when
+            // deserializer.hasNext() is false. Do NOT advance to the next segment; a random seek
+            // must never cross into another partition.
+            if (UnfilteredSerializer.isEndOfPartition(basicUnfilteredFlags))
+                return state = PARTITION_END;
+            // resolve the flags straight to ROW_START/TOMBSTONE_START; there is no preceding
+            // unfiltered to close after a seek, and a mid-partition position is never a static row
+            readRowExtendedFlags(basicUnfilteredFlags, false, preFlagsPosition);
+            state = nextStateMidPartition(basicUnfilteredFlags);
+        }
+        catch (IOException e)
+        {
+            return corruptSSTable(e);
+        }
+        if (!isState(state, ROW_START | TOMBSTONE_START))
+            throw new IllegalStateException("Seeking to an unfiltered at: " + position + " did not result in a valid state: " + state);
+        return state;
     }
 
     // struct partition {

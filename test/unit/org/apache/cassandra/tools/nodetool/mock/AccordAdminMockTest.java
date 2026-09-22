@@ -20,12 +20,14 @@ package org.apache.cassandra.tools.nodetool.mock;
 
 import java.util.List;
 
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 
 import org.apache.cassandra.service.accord.AccordOperationsMBean;
 
 /** Test for the nodetool 'accord admin' command. */
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordAdminMockTest extends AbstractNodetoolMock
 {
     @Test

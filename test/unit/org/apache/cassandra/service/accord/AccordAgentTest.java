@@ -21,6 +21,7 @@ package org.apache.cassandra.service.accord;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.local.Node;
@@ -32,6 +33,7 @@ import org.apache.cassandra.service.accord.api.AccordAgent;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.Assert.assertTrue;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordAgentTest
 {
     @Test

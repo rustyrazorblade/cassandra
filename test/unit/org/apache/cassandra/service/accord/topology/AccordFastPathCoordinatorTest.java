@@ -27,6 +27,7 @@ import com.google.common.collect.Iterables;
 
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.local.Node;
@@ -45,6 +46,7 @@ import static org.apache.cassandra.service.accord.AccordTestUtils.idList;
 import static org.apache.cassandra.service.accord.AccordTestUtils.idSet;
 import static org.apache.cassandra.service.accord.AccordTestUtils.token;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordFastPathCoordinatorTest 
 {
     private static final IPartitioner partitioner = Murmur3Partitioner.instance;

@@ -19,6 +19,7 @@
 package org.apache.cassandra.audit;
 
 import java.net.InetSocketAddress;
+import java.util.regex.Pattern;
 
 import com.google.common.collect.ImmutableMap;
 
@@ -30,6 +31,7 @@ import org.apache.cassandra.auth.AuthenticatedUser;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
+import org.apache.cassandra.utils.FBUtilities;
 
 import static org.apache.cassandra.auth.MutualTlsAuthenticator.METADATA_IDENTITY_KEY;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -76,7 +78,10 @@ public class AuditLogEntryTest
     @Test
     public void testDefaultGetLogString()
     {
-        assertThat(entry.getLogString()).matches("user:cassandra_user\\|host:/127.0.0.1:7012\\|" +
+        // The host field is the node's broadcast endpoint; its port is the
+        // configured storage port, which the test harness may override.
+        String host = Pattern.quote(FBUtilities.getBroadcastAddressAndPort().toString());
+        assertThat(entry.getLogString()).matches("user:cassandra_user\\|host:" + host + "\\|" +
                                                  "source:/127.0.0.1\\|port:9999\\|timestamp:\\d+\\|" +
                                                  "type:LOGIN_SUCCESS\\|category:AUTH\\|" +
                                                  "operation:LOGIN SUCCESSFUL\\|identity:cassandra_user_identity");
@@ -85,7 +90,10 @@ public class AuditLogEntryTest
     @Test
     public void testGetLogStringWithCustomSeparators()
     {
-        assertThat(entry.getLogString("=", " ")).matches("user=cassandra_user host=/127.0.0.1:7012 " +
+        // The host field is the node's broadcast endpoint; its port is the
+        // configured storage port, which the test harness may override.
+        String host = Pattern.quote(FBUtilities.getBroadcastAddressAndPort().toString());
+        assertThat(entry.getLogString("=", " ")).matches("user=cassandra_user host=" + host + " " +
                                                          "source=/127.0.0.1 port=9999 timestamp=\\d+ " +
                                                          "type=LOGIN_SUCCESS category=AUTH " +
                                                          "operation=LOGIN SUCCESSFUL identity=cassandra_user_identity");
