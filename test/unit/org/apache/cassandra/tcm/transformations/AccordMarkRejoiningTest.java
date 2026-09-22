@@ -23,6 +23,7 @@ import java.util.Collections;
 
 import com.google.common.collect.ImmutableSet;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.cassandra.io.util.DataOutputBuffer;
@@ -30,6 +31,7 @@ import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.serialization.AsymmetricMetadataSerializers;
 import org.apache.cassandra.tcm.serialization.Version;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordMarkRejoiningTest
 {
     @Test

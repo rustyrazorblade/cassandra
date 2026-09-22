@@ -19,8 +19,6 @@ package org.apache.cassandra.db.compaction;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -62,6 +60,7 @@ import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.io.sstable.ClusteringDescriptor;
 import org.apache.cassandra.io.sstable.CursorMergeSink;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.io.sstable.OpenRangeDeletions;
 import org.apache.cassandra.io.sstable.PartitionDescriptor;
 import org.apache.cassandra.io.sstable.SSTableCursorReader;
 import org.apache.cassandra.io.sstable.SSTableCursorWriter;
@@ -430,7 +429,9 @@ public class CursorCompactor extends CompactionInfo.Holder
      *
      * See CASSANDRA-21463.
      */
-    private static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader)
+    // public so the experimental cursor read path (org.apache.cassandra.db.CursorReads) can share
+    // the exact same dropped-complex/counter-header-column gate rather than re-deriving it
+    public static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader)
     {
         // RegularAndStaticColumns iterates statics then regulars, so this covers both
         for (ColumnMetadata column : reader.header.columns())
@@ -949,7 +950,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             else if (UnfilteredSerializer.isTombstoneMarker(flags))
             {
                 isFirstUnfiltered = writeMergedMarker(unfilteredMergeLimit, mergedDeletion, isFirstUnfiltered);
-                activeDeletion = activeOpenRangeDeletion == DeletionTime.LIVE ? mergedDeletion : activeOpenRangeDeletion;
+                activeDeletion = openRanges.active() == DeletionTime.LIVE ? mergedDeletion : openRanges.active();
             }
             else
             {
@@ -980,7 +981,7 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     /**
      * The tombstone processing maybe writes a marker, and maybe changes
-     * {@link #activeOpenRangeDeletion}.
+     * {@link #openRanges}.
      *
      * @return false once anything has been written to the partition
      */
@@ -1383,11 +1384,11 @@ public class CursorCompactor extends CompactionInfo.Holder
     private boolean probeGroupHasDeadCell(int rowMergeLimit, int cellMergeLimit, DeletionTime rowActiveDeletion)
     {
         SSTableCursorReader.CellCursor leadCellCursor = sstableCursors[0].cellCursor();
-        if (leadCellCursor.cellColumn.isComplex())
+        if (leadCellCursor.cellColumn().isComplex())
         {
-            if (!ColumnMetadata.sameName(probeComplexColumn, leadCellCursor.cellColumn))
+            if (!ColumnMetadata.sameName(probeComplexColumn, leadCellCursor.cellColumn()))
             {
-                probeComplexColumn = leadCellCursor.cellColumn;
+                probeComplexColumn = leadCellCursor.cellColumn();
                 foldAndClampComplexDeletion(rowMergeLimit, probeComplexColumn, rowActiveDeletion, probeComplexDeletion);
             }
             if (!probeComplexDeletion.isLive())
@@ -1396,14 +1397,14 @@ public class CursorCompactor extends CompactionInfo.Holder
         // The producedCell test guards the read below: a deletion-only position (see mergeCells) has
         // no valid cell fields, because cellLiveness still holds the values of an earlier cell. A
         // live complex deletion above zero cells has nothing left to decide.
-        if (!leadCellCursor.producedCell)
+        if (!leadCellCursor.cellProduced())
             return false;
 
         // The column is simple, or it is complex with a live deletion. Its cells alone decide it.
-        ReusableCellLivenessInfo winner = leadCellCursor.cellLiveness;
+        ReusableCellLivenessInfo winner = leadCellCursor.cellLiveness();
         for (int i = 1; i < cellMergeLimit; i++)
         {
-            ReusableCellLivenessInfo challenger = sstableCursors[i].cellCursor().cellLiveness;
+            ReusableCellLivenessInfo challenger = sstableCursors[i].cellCursor().cellLiveness();
             if (CellLivenessInfo.resolve(winner, challenger) == RIGHT)
                 winner = challenger;
         }
@@ -1476,7 +1477,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             StatefulCursor c = sstableCursors[i];
             if (isState(c.state(), CELL_VALUE_START | CELL_END)
-                && ColumnMetadata.sameName(c.cellCursor().cellColumn, column))
+                && ColumnMetadata.sameName(c.cellCursor().cellColumn(), column))
             {
                 DeletionTime d = c.cellCursor().complexDeletion;
                 if (d.supersedes(scratch))
@@ -1554,14 +1555,14 @@ public class CursorCompactor extends CompactionInfo.Holder
         // -> the latest data.
         StatefulCursor firstSource = sstableCursors[0];
         SSTableCursorReader.CellCursor firstCursor = firstSource.cellCursor();
-        cellWinner.set(firstSource, firstCursor, firstCursor.cellLiveness);
+        cellWinner.set(firstSource, firstCursor, firstCursor.cellLiveness());
 
-        if (firstCursor.cellColumn.isCounterColumn())
+        if (firstCursor.cellColumn().isCounterColumn())
             return mergeCounterCells(cellMergeLimit, activeDeletion, rowLiveness, isRowDropped, isStatic);
 
         // All cells in this group have the same column, because the group is the merge minimum.
         // The winner changes below, but the column does not.
-        final boolean isComplexColumn = firstCursor.cellColumn.isComplex();
+        final boolean isComplexColumn = firstCursor.cellColumn().isComplex();
 
         DeletionTime effectiveDeletion = activeDeletion;
         if (isComplexColumn)
@@ -1570,13 +1571,13 @@ public class CursorCompactor extends CompactionInfo.Holder
             // The streams are in column order, this column is the merge minimum, and a
             // deletion-only position sorts before the cells. The merged deletion is therefore
             // known before the first cell of the column is written.
-            if (!ColumnMetadata.sameName(currentComplexColumn, firstCursor.cellColumn))
-                isRowDropped = startNewComplexColumn(rowMergeLimit, firstCursor.cellColumn, activeDeletion, isRowDropped, isStatic);
+            if (!ColumnMetadata.sameName(currentComplexColumn, firstCursor.cellColumn()))
+                isRowDropped = startNewComplexColumn(rowMergeLimit, firstCursor.cellColumn(), activeDeletion, isRowDropped, isStatic);
             // The shadow deletion is non-live only if it superseded the active deletion at the fold.
             if (!shadowComplexDeletion.isLive())
                 effectiveDeletion = shadowComplexDeletion;
 
-            if (!firstCursor.producedCell)
+            if (!firstCursor.cellProduced())
             {
                 // A deletion-only group. The fold above already used its deletion.
                 return isRowDropped;
@@ -1597,7 +1598,7 @@ public class CursorCompactor extends CompactionInfo.Holder
             partitionTombstoneCount++;
 
         /** {@link Cell.Serializer#serialize} */
-        int cellFlags = applyExpiredTtl(cellWinner.cursor.cellFlags);
+        int cellFlags = applyExpiredTtl(cellWinner.cursor.cellFlags());
 
         if (effectiveDeletion.deletesCellAt(cellWinner.liveness.timestamp())
             || purger.shouldPurge(cellWinner.liveness, nowInSec))
@@ -1617,9 +1618,9 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         // The winner's own cursor supplies the column. The name test in writeCellHeader needs that
         // instance.
-        ssTableCursorWriter.writeCellHeader(cellFlags, cellWinner.liveness, cellWinner.cursor.cellColumn);
+        ssTableCursorWriter.writeCellHeader(cellFlags, cellWinner.liveness, cellWinner.cursor.cellColumn());
         if (isComplexColumn)
-            ssTableCursorWriter.writeCellPath(cellWinner.cursor.cellPathBuffer, cellWinner.cursor.cellPathLength);
+            ssTableCursorWriter.writeCellPath(cellWinner.cursor.cellPathBuffer(), cellWinner.cursor.cellPathLength());
         if (!Cell.Serializer.hasValue(cellFlags))
             return;
 
@@ -1678,7 +1679,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             StatefulCursor challenger = sstableCursors[i];
             SSTableCursorReader.CellCursor challengerCursor = challenger.cellCursor();
-            ReusableCellLivenessInfo challengerLiveness = challengerCursor.cellLiveness;
+            ReusableCellLivenessInfo challengerLiveness = challengerCursor.cellLiveness();
 
             Resolution resolution = CellLivenessInfo.resolve(cellWinner.liveness, challengerLiveness);
             if (resolution == LEFT)
@@ -1740,7 +1741,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         // vint, and the reference compares the raw value bytes. Skip the vint, or a lexicographic
         // compare orders by length first.
         int skip1 = 0, skip2 = 0;
-        if (cellWinner.cursor.cellType.valueLengthIfFixed() < 0)
+        if (cellWinner.cursor.cellType().valueLengthIfFixed() < 0)
         {
             skip1 = tempCellBuffer1.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer1.getData()[0]);
             skip2 = tempCellBuffer2.getLength() == 0 ? 0 : wireVintSize(tempCellBuffer2.getData()[0]);
@@ -1862,7 +1863,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     private boolean mergeCounterCells(int cellMergeLimit, DeletionTime activeDeletion, LivenessInfo rowLiveness,
                                       boolean isRowDropped, boolean isStatic) throws IOException
     {
-        ColumnMetadata column = sstableCursors[0].cellCursor().cellColumn;
+        ColumnMetadata column = sstableCursors[0].cellCursor().cellColumn();
         // tombstone fold: the surviving-tombstone winner's liveness/flags (references into
         // the owning cursor's reusables — stable until that cursor reads its next cell)
         ReusableCellLivenessInfo tombstoneLiveness = null;
@@ -1875,7 +1876,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             StatefulCursor source = sstableCursors[i];
             SSTableCursorReader.CellCursor cc = source.cellCursor();
-            ReusableCellLivenessInfo liveness = cc.cellLiveness;
+            ReusableCellLivenessInfo liveness = cc.cellLiveness();
 
             if (activeDeletion.deletesCellAt(liveness.timestamp()))
             {
@@ -1894,7 +1895,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                 if (resolution == RIGHT)
                 {
                     tombstoneLiveness = liveness;
-                    tombstoneFlags = cc.cellFlags;
+                    tombstoneFlags = cc.cellFlags();
                     // counter tombstones normally carry no value, but the serializers
                     // preserve one faithfully when present (hasValue is recomputed from the
                     // bytes, Cell.Serializer.serialize) — dropping it while the flags still
@@ -1935,7 +1936,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                         tempCellValueLength1 = tempCellValueLength2;
                         tempCellValueLength2 = swapLength;
                         tombstoneLiveness = liveness;
-                        tombstoneFlags = cc.cellFlags;
+                        tombstoneFlags = cc.cellFlags();
                     }
                 }
                 else if (source.state() == CELL_VALUE_START)
@@ -2049,9 +2050,8 @@ public class CursorCompactor extends CompactionInfo.Holder
                : 1 + org.apache.cassandra.utils.vint.VIntCoding.numberOfExtraBytesToRead(firstByte);
     }
 
-    DeletionTime activeOpenRangeDeletion = DeletionTime.LIVE;
-    final List<ReusableDeletionTime> openMarkers = new ArrayList<>();
-    final ArrayDeque<ReusableDeletionTime> reusableMarkersPool = new ArrayDeque<>();
+    // Range-tombstone open-marker set, shared with CursorReadMerger.
+    final OpenRangeDeletions openRanges = new OpenRangeDeletions();
 
     /**
      * We have a common clustering and need to merge tombstones. Alternatively, we have a series of range tombstones
@@ -2066,14 +2066,14 @@ public class CursorCompactor extends CompactionInfo.Holder
     {
         rangeTombstonesMergeCounters[rangeTombstoneMergeLimit - 1]++;
         DeletionTime previousDeletionTimeInMerged = DeletionTime.LIVE;
-        if (activeOpenRangeDeletion != DeletionTime.LIVE) {
-            previousDeletionTimeInMerged = getDeletionTimeReusableCopy(activeOpenRangeDeletion);
+        if (openRanges.active() != DeletionTime.LIVE) {
+            previousDeletionTimeInMerged = openRanges.copyOf(openRanges.active());
         }
         try
         {
             updateOpenMarkers(rangeTombstoneMergeLimit, partitionDeletion);
 
-            DeletionTime newDeletionTimeInMerged = activeOpenRangeDeletion;
+            DeletionTime newDeletionTimeInMerged = openRanges.active();
             if (previousDeletionTimeInMerged.equals(newDeletionTimeInMerged))
                 return false;
 
@@ -2105,7 +2105,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         {
             if (previousDeletionTimeInMerged != DeletionTime.LIVE)
             {
-                reusableMarkersPool.offer((ReusableDeletionTime) previousDeletionTimeInMerged);
+                openRanges.recycle((ReusableDeletionTime) previousDeletionTimeInMerged);
             }
         }
     }
@@ -2152,123 +2152,12 @@ public class CursorCompactor extends CompactionInfo.Holder
         return false;
     }
 
+    /** Feeds the group's merged markers to the shared open set. */
     private void updateOpenMarkers(int rangeTombstoneMergeLimit, DeletionTime partitionDeletion)
     {
-        /** Similar to {@link RangeTombstoneMarker.Merger#updateOpenMarkers()} but we validate a close exists for every open.*/
         for (int i = 0; i < rangeTombstoneMergeLimit; i++)
-        {
-            UnfilteredDescriptor rangeTombstone = sstableCursors[i].unfiltered();
-            if (rangeTombstone.isStartBound())
-            {
-                DeletionTime openRangeDeletion = rangeTombstone.deletionTime();
-                addOpenRangeDeletion(partitionDeletion, openRangeDeletion);
-            }
-            else if (rangeTombstone.isEndBound())
-            {
-                DeletionTime closeRangeDeletion = rangeTombstone.deletionTime();
-                removeOpenRangeDeletion(partitionDeletion, closeRangeDeletion, rangeTombstone);
-            }
-            else if (rangeTombstone.isBoundary())
-            {
-                DeletionTime closeRangeDeletion = rangeTombstone.deletionTime();
-                removeOpenRangeDeletion(partitionDeletion, closeRangeDeletion, rangeTombstone);
-                DeletionTime openRangeDeletion = rangeTombstone.deletionTime2();
-                addOpenRangeDeletion(partitionDeletion, openRangeDeletion);
-            }
-            else
-                throw new IllegalStateException("Unexpected bound type:" + rangeTombstone.clusteringKind());
-        }
-
-        if (activeOpenRangeDeletion == null)
-        {
-            recalculateActiveOpen();
-        }
-    }
-
-    private void recalculateActiveOpen()
-    {
-        // active open has been invalidated by a close bound matching it, need to scan the list for new max
-        int size = openMarkers.size();
-        if (size == 0)
-        {
-            activeOpenRangeDeletion = DeletionTime.LIVE;
-            return;
-        }
-        // find max open marker
-        DeletionTime maxOpenDeletion = openMarkers.get(0);
-        for (int i = 1; i < size; i++)
-        {
-            DeletionTime openDeletionTime = openMarkers.get(i);
-            if (openDeletionTime.supersedes(maxOpenDeletion))
-                maxOpenDeletion = openDeletionTime;
-        }
-        activeOpenRangeDeletion = maxOpenDeletion;
-    }
-
-    private void removeOpenRangeDeletion(DeletionTime partitionDeletion, DeletionTime closeRangeDeletion, UnfilteredDescriptor rangeTombstone)
-    {
-        // filter out markers that are deleted by the `partitionDelete`
-        if (partitionDeletion != DeletionTime.LIVE && !closeRangeDeletion.supersedes(partitionDeletion))
-        {
-            return;
-        }
-        // a close marker should have a matching open in the list
-        int j = 0;
-        int size = openMarkers.size();
-        ReusableDeletionTime reusableOpenMarker = null;
-        for (; j < size;j++) {
-            reusableOpenMarker = openMarkers.get(j);
-            if (reusableOpenMarker.equals(closeRangeDeletion))
-                break;
-        }
-        if (j == size)
-            throw new IllegalStateException("Expected an open marker for this closing marker:" + rangeTombstone);
-
-        reusableMarkersPool.offer(reusableOpenMarker);
-        if (activeOpenRangeDeletion == reusableOpenMarker) {
-            // trigger recalculation
-            activeOpenRangeDeletion = null;
-        }
-        if (size == 1) {
-            openMarkers.clear();
-        }
-        else {
-            // avoid expensive array copy, take the last element
-            ReusableDeletionTime deletionTime = openMarkers.remove(size - 1);
-            if (j != size - 1)
-            {
-                // overwrite the matched marker (if it was not the last one)
-                openMarkers.set(j, deletionTime);
-            }
-        }
-    }
-
-    private void addOpenRangeDeletion(DeletionTime partitionDeletion, DeletionTime openRangeDeletion)
-    {
-        // filter out markers that are deleted by the `partitionDelete`
-        if (partitionDeletion != DeletionTime.LIVE && !openRangeDeletion.supersedes(partitionDeletion))
-        {
-            return;
-        }
-
-        ReusableDeletionTime reusable = getDeletionTimeReusableCopy(openRangeDeletion);
-        openMarkers.add(reusable);
-        if (activeOpenRangeDeletion != null && // invalidated by remove, so full scan is required
-            (activeOpenRangeDeletion == DeletionTime.LIVE || reusable.supersedes(activeOpenRangeDeletion))) {
-            activeOpenRangeDeletion = reusable;
-        }
-    }
-
-    private ReusableDeletionTime getDeletionTimeReusableCopy(DeletionTime openRangeDeletion)
-    {
-        ReusableDeletionTime reusable = reusableMarkersPool.pollLast();
-        if (reusable == null) {
-            reusable = ReusableDeletionTime.copy(openRangeDeletion);
-        }
-        else {
-            reusable.reset(openRangeDeletion);
-        }
-        return reusable;
+            openRanges.apply(sstableCursors[i].unfiltered(), partitionDeletion);
+        openRanges.settle();
     }
 
     private boolean isPartitionStarted()
@@ -2663,16 +2552,16 @@ public class CursorCompactor extends CompactionInfo.Holder
 
         SSTableCursorReader.CellCursor cc1 = c1.cellCursor();
         SSTableCursorReader.CellCursor cc2 = c2.cellCursor();
-        int byColumn = cc1.cellColumn.compareTo(cc2.cellColumn);
-        if (byColumn != 0 || !cc1.cellColumn.isComplex())
+        int byColumn = cc1.cellColumn().compareTo(cc2.cellColumn());
+        if (byColumn != 0 || !cc1.cellColumn().isComplex())
             return byColumn;
         // The two cursors are at the same complex column. A deletion-only position has no cell,
         // and sorts before every cell, so the deletion sources of the column come first.
-        if (!cc1.producedCell || !cc2.producedCell)
-            return Boolean.compare(cc1.producedCell, cc2.producedCell);
+        if (!cc1.cellProduced() || !cc2.cellProduced())
+            return Boolean.compare(cc1.cellProduced(), cc2.cellProduced());
         // The cell cursor resolves cellPathType once per column. Pass it here, because this
         // comparator runs once per cell per source.
-        return comparePaths(cc1.cellColumn, cc1.cellPathType, cc1.cellPathWindow(), cc2.cellPathWindow());
+        return comparePaths(cc1.cellColumn(), cc1.cellPathType(), cc1.cellPathWindow(), cc2.cellPathWindow());
     }
 
     /**
@@ -2680,8 +2569,12 @@ public class CursorCompactor extends CompactionInfo.Holder
      * {@link ColumnMetadata#cellPathComparator()}, which sets both the cell order that flush
      * writes to disk and the merge grouping of the iterator.
      */
+    // public (was @VisibleForTesting package-private) so the experimental cursor read path
+    // (org.apache.cassandra.db.CursorReadMerger) can share the type-aware cell-path order —
+    // including the UDT-signed-short subtlety below — instead of copying it. Pure static
+    // function; visibility bump only, no behavior change to any existing caller.
     @VisibleForTesting
-    static int comparePaths(ColumnMetadata column, ByteBuffer p1, ByteBuffer p2)
+    public static int comparePaths(ColumnMetadata column, ByteBuffer p1, ByteBuffer p2)
     {
         return comparePaths(column, ColumnMetadata.pathNameComparator(column.type), p1, p2);
     }

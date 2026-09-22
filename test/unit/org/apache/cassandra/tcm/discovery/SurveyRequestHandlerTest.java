@@ -36,6 +36,7 @@ import org.apache.cassandra.net.RequestCallback;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.Future;
 
 import static org.junit.Assert.assertEquals;
@@ -61,7 +62,10 @@ public class SurveyRequestHandlerTest
         }
         catch (InvalidRequestException e)
         {
-            assertEquals("Mismatching metadata id in survey request from /127.0.0.1:7012 (0)",e.getMessage());
+            // The sender is this node's broadcast endpoint; its port is the
+            // configured storage port, which the test harness may override.
+            String from = FBUtilities.getBroadcastAddressAndPort().toString();
+            assertEquals("Mismatching metadata id in survey request from " + from + " (0)", e.getMessage());
         }
     }
 

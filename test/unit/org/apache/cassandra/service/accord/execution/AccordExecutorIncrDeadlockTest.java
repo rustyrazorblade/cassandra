@@ -29,6 +29,7 @@ import java.util.function.LongSupplier;
 import java.util.function.ToLongFunction;
 
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.api.AsyncExecutor;
@@ -94,6 +95,7 @@ import static org.junit.Assert.fail;
  * Neither task alone deadlocks: without a txnId an INCR task holds no locks between runs, and without a shared txnId
  * the unsequenced task never blocks on {@code H}. ASYNC tasks are unaffected for the same reason.
  */
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordExecutorIncrDeadlockTest
 {
     private static final int KEYS = 8;

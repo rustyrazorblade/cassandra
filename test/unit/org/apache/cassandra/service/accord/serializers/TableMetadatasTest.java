@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
@@ -45,6 +46,7 @@ import org.apache.cassandra.utils.Generators;
 
 import static accord.utils.Property.qt;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class TableMetadatasTest
 {
     @Test

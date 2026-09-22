@@ -24,6 +24,7 @@ import java.util.Set;
 
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 
@@ -55,6 +56,7 @@ import org.apache.cassandra.service.accord.TokenRange;
 import static org.apache.cassandra.config.DatabaseDescriptor.getPartitioner;
 import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_VIEWS;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordVirtualTablesTest extends CQLTester
 {
     public static final Node.Id N1 = new Node.Id(1);

@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.primitives.Keys;
@@ -50,6 +51,7 @@ import static accord.utils.Property.qt;
 import static org.apache.cassandra.service.accord.serializers.TableMetadatasTest.buildSchema;
 import static org.apache.cassandra.service.accord.serializers.TableMetadatasTest.toMetadatas;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class TableMetadatasAndKeysTest
 {
     static

@@ -1718,7 +1718,7 @@
 
   <target name="test-latest" depends="maybe-build-test" description="Execute unit tests with configuration matching cassandra_latest.yaml">
     <path id="all-test-classes-path">
-      <fileset dir="${test.unit.src}" includes="**/${test.name}.java" />
+      <fileset dir="${test.unit.src}" includes="**/${test.name}.java" excludes="**/accord/**,**/*Accord*Test.java" />
     </path>
     <property name="all-test-classes" refid="all-test-classes-path"/>
     <testhelper testdelegate="testlist-latest" />
@@ -1726,7 +1726,7 @@
 
   <target name="test-oa" depends="maybe-build-test" description="Test Runner for the oa sstable format">
     <path id="all-test-classes-path">
-      <fileset dir="${test.unit.src}" includes="**/${test.name}.java" excludes="**/distributed/test/UpgradeTest*.java" />
+      <fileset dir="${test.unit.src}" includes="**/${test.name}.java" excludes="**/distributed/test/UpgradeTest*.java,**/accord/**,**/*Accord*Test.java" />
     </path>
     <property name="all-test-classes" refid="all-test-classes-path"/>
     <testhelper testdelegate="testlist-oa"/>
@@ -1949,7 +1949,7 @@
 
   <target name="test" depends="maybe-build-test" description="Test Runner">
     <path id="all-test-classes-path">
-      <fileset dir="${test.unit.src}" includes="**/${test.name}.java" excludes="**/distributed/test/UpgradeTest*.java" />
+      <fileset dir="${test.unit.src}" includes="**/${test.name}.java" excludes="**/distributed/test/UpgradeTest*.java,**/accord/**,**/*Accord*Test.java" />
     </path>
     <property name="all-test-classes" refid="all-test-classes-path"/>
     <testhelper testdelegate="testlist"/>

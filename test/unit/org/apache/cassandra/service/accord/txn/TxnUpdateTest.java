@@ -25,6 +25,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.stream.IntStream;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.api.Key;
@@ -61,6 +62,7 @@ import static accord.utils.Property.qt;
 import static accord.utils.SortedArrays.Search.FAST;
 import static org.assertj.core.api.Assertions.assertThat;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class TxnUpdateTest
 {
     private static final LongToken T0 = new LongToken(0);

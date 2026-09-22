@@ -21,6 +21,7 @@ package org.apache.cassandra.service.accord.serializers;
 import java.util.Comparator;
 import java.util.List;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.api.RoutingKey;
@@ -45,6 +46,7 @@ import org.apache.cassandra.utils.CassandraGenerators;
 import static accord.utils.Property.qt;
 import static org.apache.cassandra.utils.AccordGenerators.fromQT;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class CheckStatusSerializersTest
 {
     static

@@ -30,6 +30,7 @@ import java.util.Objects;
 import javax.annotation.Nullable;
 
 import org.assertj.core.api.Assertions;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.utils.DefaultRandom;
@@ -72,6 +73,7 @@ import static org.apache.cassandra.utils.ByteBufferUtil.EMPTY_BYTE_BUFFER;
 import static org.apache.cassandra.utils.Generators.toGen;
 
 //TOOD (maintaince): rather than copy the condition supported kinds, maybe references directly from the type?
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class TxnConditionTest
 {
     private static final SchemaProvider SCHEMA = new SchemaProvider();

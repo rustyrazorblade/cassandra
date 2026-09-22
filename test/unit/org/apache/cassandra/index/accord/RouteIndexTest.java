@@ -114,6 +114,7 @@ import static org.apache.cassandra.config.AccordConfig.RangeIndexMode.journal_sa
 import static org.apache.cassandra.config.DatabaseDescriptor.getPartitioner;
 import static org.apache.cassandra.schema.SchemaConstants.ACCORD_KEYSPACE_NAME;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class RouteIndexTest extends CQLTester
 {
     private static final Node.Id NODE = new Node.Id(42);

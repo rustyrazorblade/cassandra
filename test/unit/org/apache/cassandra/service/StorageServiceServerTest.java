@@ -536,7 +536,9 @@ public class StorageServiceServerTest
     {
         NodeId node2 = ClusterMetadata.current().directory.peerId(id2);
         NodeAddresses oldAddresses = ClusterMetadata.current().directory.getNodeAddresses(node2);
-        assertEquals("127.0.0.2:7012", StorageService.instance.getNativeaddress(id2, true));
+        // id2 was registered with the default port, so the native address
+        // carries the configured storage port, which the harness may override.
+        assertEquals(id2.getHostAddressAndPort(), StorageService.instance.getNativeaddress(id2, true));
 
         String newNativeString = "127.1.1.2:19012";
         InetAddressAndPort newNativeAddress = InetAddressAndPort.getByName(newNativeString);
@@ -552,7 +554,9 @@ public class StorageServiceServerTest
         // See https://issues.apache.org/jira/browse/CASSANDRA-17945 for more context.
         NodeId node2 = ClusterMetadata.current().directory.peerId(id2);
         NodeAddresses oldAddresses = ClusterMetadata.current().directory.getNodeAddresses(node2);
-        assertEquals("127.0.0.2:7012", StorageService.instance.getNativeaddress(id2, true));
+        // id2 was registered with the default port, so the native address
+        // carries the configured storage port, which the harness may override.
+        assertEquals(id2.getHostAddressAndPort(), StorageService.instance.getNativeaddress(id2, true));
 
         String newNativeString = "[0:0:0:0:0:0:0:3]:666";
         InetAddressAndPort newNativeAddress = InetAddressAndPort.getByName(newNativeString);

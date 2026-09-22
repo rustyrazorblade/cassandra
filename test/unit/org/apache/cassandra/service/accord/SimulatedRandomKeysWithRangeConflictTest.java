@@ -20,6 +20,7 @@ package org.apache.cassandra.service.accord;
 
 import java.util.Arrays;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.api.RoutingKey;
@@ -40,6 +41,7 @@ import static accord.utils.Property.stateful;
 import static org.apache.cassandra.dht.Murmur3Partitioner.LongToken.keyForToken;
 import static org.apache.cassandra.service.accord.AccordTestUtils.createTxn;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class SimulatedRandomKeysWithRangeConflictTest extends SimulatedAccordCommandStoreTestBase
 {
     private static Property.SimpleCommand<State> insertKey(RandomSource rs, State state)

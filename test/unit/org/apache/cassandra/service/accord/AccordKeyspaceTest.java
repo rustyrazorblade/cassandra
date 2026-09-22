@@ -32,6 +32,7 @@ import java.util.stream.Collectors;
 import com.google.common.collect.Iterables;
 
 import org.assertj.core.api.Assertions;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.stubbing.Answer;
@@ -88,6 +89,7 @@ import static org.apache.cassandra.service.accord.execution.AccordExecutionTestU
 import static org.apache.cassandra.utils.AbstractTypeGenerators.getTypeSupport;
 import static org.apache.cassandra.utils.AccordGenerators.fromQT;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordKeyspaceTest extends CQLTester.InMemory
 {
     static

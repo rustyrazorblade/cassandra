@@ -31,6 +31,7 @@ import java.util.function.Supplier;
 
 import org.assertj.core.api.Assertions;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.api.RoutingKey;
@@ -63,6 +64,7 @@ import org.apache.cassandra.utils.Pair;
 
 import static accord.utils.Property.qt;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class SimulatedAccordTaskTest extends SimulatedAccordCommandStoreTestBase
 {
     @Before

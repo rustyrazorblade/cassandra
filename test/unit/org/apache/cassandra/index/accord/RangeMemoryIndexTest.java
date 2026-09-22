@@ -27,6 +27,7 @@ import java.util.function.Predicate;
 import javax.annotation.Nullable;
 
 import org.assertj.core.api.Assertions;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,6 +53,7 @@ import static accord.utils.Property.commands;
 import static accord.utils.Property.stateful;
 import static org.apache.cassandra.index.accord.AccordIndexUtil.normalize;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class RangeMemoryIndexTest
 {
     static

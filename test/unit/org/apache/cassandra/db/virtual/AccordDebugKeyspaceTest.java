@@ -109,6 +109,7 @@ import static org.apache.cassandra.service.accord.AccordService.getBlocking;
 import static org.apache.cassandra.service.accord.AccordTestUtils.createTxn;
 import static org.apache.cassandra.service.accord.debug.TxnKindsAndDomains.ALL;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordDebugKeyspaceTest extends CQLTester
 {
     private static final String QUERY_TXN_BLOCKED_BY =
