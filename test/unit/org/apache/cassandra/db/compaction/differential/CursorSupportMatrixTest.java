@@ -191,8 +191,7 @@ public class CursorSupportMatrixTest extends CQLTester
 
         SSTableFormat<?, ?> original = DatabaseDescriptor.getSelectedSSTableFormat();
         SSTableFormat<?, ?> noCursorSupport = Mockito.mock(SSTableFormat.class, Mockito.CALLS_REAL_METHODS);
-        assertFalse("the stand-in must report no cursor compaction support, or the gate below is " +
-                    "not the thing being observed",
+        assertFalse("the stand-in must report no cursor compaction support",
                     noCursorSupport.supportsCursorCompaction());
 
         DatabaseDescriptor.setSelectedSSTableFormat(noCursorSupport);
@@ -316,12 +315,10 @@ public class CursorSupportMatrixTest extends CQLTester
         if (observerFailure.get() != null)
             throw observerFailure.get();
 
-        // assert the force compaction really ran with the key set populated, so the test cannot pass quietly
-        assertNotNull("expected the force compaction to change the sstable list while the observer was " +
-                      "subscribed; with no compaction there is no window in which the gate is exercised",
+        // the force compaction must have run with the key set populated
+        assertNotNull("expected the force compaction to change the sstable list while the observer was subscribed",
                       ignoredGcGraceInside.get());
-        assertTrue("expected the ignore-gc-grace key set to be populated for the duration of the force " +
-                   "compaction; if it is not, the rejection below is not attributable to this gate",
+        assertTrue("expected the ignore-gc-grace key set to be populated during the force compaction",
                    ignoredGcGraceInside.get());
 
         assertNotNull("expected the observer to have evaluated the gate", supportedInside.get());
@@ -373,8 +370,7 @@ public class CursorSupportMatrixTest extends CQLTester
 
         execute("ALTER TABLE %s DROP m");
 
-        assertFalse("dropped collection should leave the metadata check satisfied, which is exactly " +
-                    "why the header check is needed",
+        assertFalse("a dropped collection leaves the metadata check satisfied, so the header check is needed",
                     CursorCompactor.unsupportedMetadata(cfs.metadata()));
 
         boolean anyHeaderStillHasIt = false;
@@ -389,9 +385,7 @@ public class CursorSupportMatrixTest extends CQLTester
                     isSupportedNow(cfs));
 
         // positive control on a separate table: an equivalent table that never had a collection is
-        // supported. The rejection above is therefore attributable to the dropped column alone. The
-        // table under test cannot serve as its own pre-drop control, because the schema check rejects
-        // it while the collection is still live
+        // supported, so the rejection above is attributable to the dropped column alone
         createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
         ColumnFamilyStore plain = getCurrentColumnFamilyStore();
         plain.disableAutoCompaction();
@@ -421,8 +415,7 @@ public class CursorSupportMatrixTest extends CQLTester
 
         execute("ALTER TABLE %s DROP c");
 
-        assertFalse("the dropped counter must leave the metadata check satisfied, which is exactly " +
-                    "why the header check is needed",
+        assertFalse("a dropped counter leaves the metadata check satisfied, so the header check is needed",
                     CursorCompactor.unsupportedMetadata(cfs.metadata()));
 
         boolean anyHeaderStillHasIt = false;
@@ -446,5 +439,25 @@ public class CursorSupportMatrixTest extends CQLTester
         {
             return CursorCompactor.isSupported(scanners, controller);
         }
+    }
+
+    /**
+     * Materialized views pass this metadata-level gate, so regular cursor compaction accepts them:
+     * modern view maintenance no longer produces a shadowable row deletion (since CASSANDRA-13409,
+     * {@code Row.Deletion.shadowable(...)} has no remaining caller).  Cursor validation is more
+     * conservative about the same risk; that check lives in
+     * {@link CursorCompactor#isValidationSupported}, not in this shared metadata-only method.
+     */
+    @Test
+    public void materializedViewSupported()
+    {
+        requireNetwork();
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, PRIMARY KEY (pk, ck))");
+        String view = createView("CREATE MATERIALIZED VIEW %s AS SELECT pk, ck, v1 FROM %s " +
+                                 "WHERE pk IS NOT NULL AND ck IS NOT NULL AND v1 IS NOT NULL " +
+                                 "PRIMARY KEY (v1, pk, ck)");
+        TableMetadata viewMetadata = getColumnFamilyStore(KEYSPACE, view).metadata();
+        assertFalse("expected materialized view to be cursor-compaction-supported: " + viewMetadata,
+                    CursorCompactor.unsupportedMetadata(viewMetadata));
     }
 }
