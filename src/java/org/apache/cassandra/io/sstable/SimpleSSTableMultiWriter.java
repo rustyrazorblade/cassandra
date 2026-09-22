@@ -45,6 +45,16 @@ public class SimpleSSTableMultiWriter implements SSTableMultiWriter
         this.writer = writer;
     }
 
+    /**
+     * The single underlying writer this wraps, for callers that need to drive it more directly
+     * than {@link #append} allows; the memtable cursor flush path builds an
+     * {@code SSTableCursorWriter} around it.
+     */
+    public SSTableWriter writer()
+    {
+        return writer;
+    }
+
     public void append(UnfilteredRowIterator partition)
     {
         writer.append(partition);

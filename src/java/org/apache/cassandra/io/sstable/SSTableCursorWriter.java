@@ -36,15 +36,17 @@ import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.guardrails.Guardrails;
 import org.apache.cassandra.db.guardrails.Threshold;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.ValueAccessor;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellLivenessInfo;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.SerializationHelper;
 import org.apache.cassandra.db.rows.UnfilteredSerializer;
 import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.ReusableDecoratedKey;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SortedTableWriter;
-import org.apache.cassandra.io.sstable.format.big.BigTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
@@ -55,6 +57,8 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.Ref;
 
+import io.netty.util.concurrent.FastThreadLocal;
+
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_ALL_COLUMNS;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_DELETION;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_TIMESTAMP;
@@ -62,11 +66,14 @@ import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_TTL;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.IS_MARKER;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.isExtended;
 
-public class SSTableCursorWriter implements AutoCloseable
+public class SSTableCursorWriter implements AutoCloseable, CursorMergeSink
 {
     private static final UnfilteredSerializer SERIALIZER = UnfilteredSerializer.serializer;
     private static final ColumnMetadata[] EMPTY_COL_META = new ColumnMetadata[0];
     private final SortedTableWriter<?,?> ssTableWriter;
+    // True for a compaction writer, whose lifecycle close() drives end to end; false for a flush
+    // writer, whose finish and close the flush transaction drives.  See forCompaction/forFlush.
+    private final boolean ownsUnderlyingWriter;
     private final SequentialWriter dataWriter;
     private final DeletionTime.Serializer deletionTimeSerializer;
     private final MetadataCollector metadataCollector;
@@ -85,8 +92,21 @@ public class SSTableCursorWriter implements AutoCloseable
     // ROW contents, needed because of the order of writing and the var int fields
     private int rowFlags; // discovered as we go along
     private int rowExtendedFlags;
-    private final DataOutputBuffer rowHeaderBuffer = new DataOutputBuffer(); // holds the contents between FLAGS and SIZE
-    private final DataOutputBuffer rowBuffer = new DataOutputBuffer();
+    // A flush creates a new writer per flush, and per shard under UCS, so a per-instance row
+    // buffer would be reallocated every time.  Flush writers are strictly sequential on their
+    // flush thread, so the thread's pair of buffers is never shared between two live writers; the
+    // constructor clears them for each new writer.  Compaction keeps its own fresh buffers.
+    private static final FastThreadLocal<DataOutputBuffer[]> FLUSH_ROW_BUFFERS = new FastThreadLocal<DataOutputBuffer[]>()
+    {
+        @Override
+        protected DataOutputBuffer[] initialValue()
+        {
+            return new DataOutputBuffer[]{ new DataOutputBuffer(), new DataOutputBuffer() };
+        }
+    };
+
+    private final DataOutputBuffer rowHeaderBuffer; // holds the contents between FLAGS and SIZE
+    private final DataOutputBuffer rowBuffer;
     private final ReusableDeletionTime openMarker = ReusableDeletionTime.live();
 
     // How the writer holds the complex columns of the current row.
@@ -148,6 +168,10 @@ public class SSTableCursorWriter implements AutoCloseable
     // Format-specific index production. BIG writes promoted blocks, Index.db, a bloom filter and a
     // summary.
     private final CursorIndexWriter cursorIndexWriter;
+    // The last key written, copied in per partition. It is the underlying writer's last key, so an
+    // sstable opened early at a writer switch carries real bounds. Whatever keeps it past the next
+    // partition takes retainable(), which copies it.
+    private final ReusableDecoratedKey lastKey;
 
     private SSTableCursorWriter(
         Descriptor desc,
@@ -155,9 +179,11 @@ public class SSTableCursorWriter implements AutoCloseable
         SequentialWriter dataWriter,
         SortedTableWriter.AbstractIndexWriter indexWriter,
         MetadataCollector metadataCollector,
-        SerializationHeader serializationHeader)
+        SerializationHeader serializationHeader,
+        boolean ownsUnderlyingWriter)
     {
         this.ssTableWriter = ssTableWriter;
+        this.ownsUnderlyingWriter = ownsUnderlyingWriter;
         this.dataWriter = dataWriter;
         this.deletionTimeSerializer = DeletionTime.getSerializer(desc.version);
         this.metadataCollector = metadataCollector;
@@ -165,28 +191,71 @@ public class SSTableCursorWriter implements AutoCloseable
         hasStaticColumns = serializationHeader.hasStatic();
         staticColumns = hasStaticColumns ? serializationHeader.columns(true).toArray(EMPTY_COL_META) : EMPTY_COL_META;
         regularColumns = serializationHeader.columns(false).toArray(EMPTY_COL_META);
-        this.cursorIndexWriter = new BigCursorIndexWriter((BigTableWriter.IndexWriter) indexWriter,
-                                                           this.deletionTimeSerializer);
+        this.cursorIndexWriter = ssTableWriter.newCursorIndexWriter(serializationHeader);
+        this.lastKey = ssTableWriter.getPartitioner().createReusableKey(0);
         // Same two conditions SortedTableWriter settles once, in its own constructor and in
         // guardCollectionSize: both guardrails off, or a system keyspace.
         this.collectionGuardsDisabled =
             (!Guardrails.collectionSize.enabled() && !Guardrails.itemsPerCollection.enabled())
             || SchemaConstants.isSystemKeyspace(ssTableWriter.metadata().keyspace);
+        // Compaction gets a fresh pair; flush reuses the thread's pair, cleared for this writer.
+        if (ownsUnderlyingWriter)
+        {
+            this.rowHeaderBuffer = new DataOutputBuffer();
+            this.rowBuffer = new DataOutputBuffer();
+        }
+        else
+        {
+            DataOutputBuffer[] pair = FLUSH_ROW_BUFFERS.get();
+            this.rowHeaderBuffer = pair[0];
+            this.rowBuffer = pair[1];
+            this.rowHeaderBuffer.clear();
+            this.rowBuffer.clear();
+        }
     }
 
-    public SSTableCursorWriter(SortedTableWriter<?,?> ssTableWriter)
+    /**
+     * For compaction, which owns {@code ssTableWriter}'s full lifecycle: {@link #close} finishes
+     * and closes it too, in addition to releasing this cursor's own state.
+     */
+    public static SSTableCursorWriter forCompaction(SortedTableWriter<?,?> ssTableWriter)
+    {
+        return new SSTableCursorWriter(ssTableWriter, true);
+    }
+
+    /**
+     * For memtable flush, whose flush transaction finishes and closes {@code ssTableWriter}
+     * elsewhere: {@link #close} only releases this cursor's own index-builder state and leaves
+     * {@code ssTableWriter} untouched.
+     */
+    public static SSTableCursorWriter forFlush(SortedTableWriter<?,?> ssTableWriter)
+    {
+        return new SSTableCursorWriter(ssTableWriter, false);
+    }
+
+    private SSTableCursorWriter(SortedTableWriter<?,?> ssTableWriter, boolean ownsUnderlyingWriter)
     {
         this(ssTableWriter.descriptor,
              ssTableWriter,
              ssTableWriter.dataWriter,
              ssTableWriter.indexWriter,
              ssTableWriter.metadataCollector,
-             ssTableWriter.partitionWriter.getHeader());
+             ssTableWriter.partitionWriter.getHeader(),
+             ownsUnderlyingWriter);
     }
 
+    /**
+     * Always releases this cursor's own state; also finishes and closes {@link #ssTableWriter}
+     * when this instance {@link #ownsUnderlyingWriter}.  See {@link #forCompaction} and
+     * {@link #forFlush}.
+     */
     @Override
     public void close()
     {
+        cursorIndexWriter.close();
+        if (!ownsUnderlyingWriter)
+            return;
+
         SSTableReader finish = ssTableWriter.finish(false);
         if (finish != null) {
             Ref<SSTableReader> ref = finish.ref();
@@ -223,7 +292,8 @@ public class SSTableCursorWriter implements AutoCloseable
      * @param lastName the clustering of the last non-static unfiltered written to this partition, needed as
      *                 the last name of a trailing index block; null if the partition wrote none.
      */
-    public void writePartitionEnd(byte[] partitionKey, int partitionKeyLength, DeletionTime partitionDeletionTime,
+    public void writePartitionEnd(byte[] partitionKey,
+                                  int partitionKeyLength, DeletionTime partitionDeletionTime,
                                   int headerLength, ClusteringDescriptor lastName) throws IOException
     {
         SERIALIZER.writeEndOfPartition(dataWriter);
@@ -231,17 +301,24 @@ public class SSTableCursorWriter implements AutoCloseable
         long partitionSize = partitionEnd - partitionStart;
         addPartitionMetadata(partitionKey, partitionKeyLength, partitionSize, partitionDeletionTime);
 
+        // Populate the reusable last key for every path.  BTI builds its partition index and the
+        // sstable's first/last bounds from this DecoratedKey (endPartition below), so flush needs it
+        // too; an empty key here corrupts the BTI partition index.  The copy is into the reusable
+        // key, not a new one; readers of last take retainable() when they keep it.
+        lastKey.copyKey(partitionKey, partitionKeyLength);
+
+        // setLast is compaction only.  BigTableWriter.openInternal reads this field, so an sstable
+        // opened early at a writer switch would otherwise carry a stale last.  Flush never opens
+        // early; MemtableCursorFlusher sets last once at the end.
+        if (ownsUnderlyingWriter)
+            ssTableWriter.setLast(lastKey);
+
         /** {@link SortedTableWriter#endPartition(DecoratedKey, DeletionTime)}
          lastWrittenKey = key; // tracked for verification, see {@link SortedTableWriter#verifyPartition(DecoratedKey)}, checking the key size and sorting
-         // first/last are retained for metadata {@link org.apache.cassandra.io.sstable.format.SSTableWriter#finalizeMetadata()}. They are also exposed via
-         // getters from the writer, but usage is unclear.
-         last = lastWrittenKey;
-         if (first == null)
-         first = lastWrittenKey;
          // this is implemented differently for BIG/BTI
          createRowIndexEntry(key, partitionLevelDeletion, partitionEnd - 1);
          */
-        cursorIndexWriter.endPartition(partitionKey, partitionKeyLength, headerLength, partitionDeletionTime, partitionEnd, lastName);
+        cursorIndexWriter.endPartition(lastKey, partitionKey, partitionKeyLength, headerLength, partitionDeletionTime, partitionEnd, lastName);
     }
 
 
@@ -253,13 +330,16 @@ public class SSTableCursorWriter implements AutoCloseable
      */
     private void addPartitionMetadata(byte[] partitionKey, int partitionKeyLength, long partitionSize, DeletionTime partitionDeletionTime)
     {
+        // Before the guardrail check: SortedTableWriter counts the partition deletion in startPartition, so it
+        // is already in totalTombstones by the time the guardrail runs at partition end.
+        metadataCollector.updatePartitionDeletion(partitionDeletionTime);
+
         if (partitionSize > guardrailsPartitionSizeWarning)
             guardPartitionThreshold(Guardrails.partitionSize, partitionKey, partitionKeyLength, partitionSize);
 
         if (metadataCollector.totalTombstones > guardrailsPartitionTombstonesWarning)
             guardPartitionThreshold(Guardrails.partitionTombstones, partitionKey, partitionKeyLength, metadataCollector.totalTombstones);
 
-        metadataCollector.updatePartitionDeletion(partitionDeletionTime);
         metadataCollector.addPartitionSizeInBytes(partitionSize);
         metadataCollector.addKey(partitionKey, 0, partitionKeyLength);
         metadataCollector.addCellPerPartitionCount();
@@ -529,16 +609,33 @@ public class SSTableCursorWriter implements AutoCloseable
         nextCellIndex++;
     }
 
+    /**
+     * Adds a cell's raw bytes to the collection size the guardrail measures, when the current cell
+     * counts towards it.  Every overload that emits path or value bytes must call this.
+     */
+    private void countTowardsCollection(long rawBytes)
+    {
+        if (cellCountsTowardsCollection)
+            markerLiveDataSize[complexMarkerCount - 1] += rawBytes;
+    }
+
     /** Adds the cell path of the current complex cell to the cell stream, as a vint length and
      *  then the path bytes. */
     public void writeCellPath(byte[] pathBuffer, int pathLength) throws IOException
     {
         // CellPath.dataSize is the sum of the raw component bytes, which for one component is the
         // path length itself.
-        if (cellCountsTowardsCollection)
-            markerLiveDataSize[complexMarkerCount - 1] += pathLength;
+        countTowardsCollection(pathLength);
         rowBuffer.writeUnsignedVInt32(pathLength);
         rowBuffer.write(pathBuffer, 0, pathLength);
+    }
+
+    /** Appends the complex cell's path directly from its source buffer, with no intermediate
+     *  copy; the flush path's counterpart to the byte[]-scratch overload above. */
+    public void writeCellPath(ByteBuffer pathValue) throws IOException
+    {
+        countTowardsCollection(pathValue.remaining());
+        ByteBufferUtil.writeWithVIntLength(pathValue, rowBuffer);
     }
 
     public void writeCellHeader(int cellFlags, CellLivenessInfo cellLiveness, ColumnMetadata cellColumn) throws IOException
@@ -597,8 +694,7 @@ public class SSTableCursorWriter implements AutoCloseable
     public int writeCellValue(SSTableCursorReader cursor, byte[] copyColumnValueBuffer) throws IOException
     {
         int state = cursor.copyCellValue(rowBuffer, copyColumnValueBuffer);
-        if (cellCountsTowardsCollection)
-            markerLiveDataSize[complexMarkerCount - 1] += cursor.lastCellValueLength();
+        countTowardsCollection(cursor.lastCellValueLength());
         return state;
     }
 
@@ -608,9 +704,32 @@ public class SSTableCursorWriter implements AutoCloseable
      */
     public void writeCellValue(DataOutputBuffer tempCellBuffer, int rawValueLength) throws IOException
     {
-        if (cellCountsTowardsCollection)
-            markerLiveDataSize[complexMarkerCount - 1] += rawValueLength;
+        countTowardsCollection(rawValueLength);
         rowBuffer.write(tempCellBuffer.getData(), 0, tempCellBuffer.getLength());
+    }
+
+    /** Appends a variable-length cell value supplied as a raw window: vint length + bytes
+     *  (the wire form for variable-length types — counter contexts use this). */
+    public void writeCellValue(byte[] value, int offset, int length) throws IOException
+    {
+        rowBuffer.writeUnsignedVInt32(length);
+        rowBuffer.write(value, offset, length);
+    }
+
+    /** Appends a cell value directly from its source, with no intermediate copy; the flush path's
+     *  counterpart to the scratch-buffer overloads above. */
+    public <V> void writeCellValue(V value, ValueAccessor<V> accessor, AbstractType<?> type) throws IOException
+    {
+        // accessor.size is the raw value length; writeValue's own vint prefix does not count.
+        countTowardsCollection(accessor.size(value));
+        type.writeValue(value, accessor, rowBuffer);
+    }
+
+    /** {@link org.apache.cassandra.db.rows.Cells#collectStats} parity: called once per
+     *  live counter cell in the output row. */
+    public void updateCounterShardStats(boolean hasLegacyShards)
+    {
+        metadataCollector.updateHasLegacyCounterShards(hasLegacyShards);
     }
 
     public void writeRowEnd(UnfilteredDescriptor rHeader, boolean updateClusteringMetadata) throws IOException
@@ -917,8 +1036,7 @@ public class SSTableCursorWriter implements AutoCloseable
     public void setLast(ByteBuffer key)
     {
         IPartitioner partitioner = ssTableWriter.getPartitioner();
-        DecoratedKey last = partitioner.decorateKey(ByteBufferUtil.clone(key));
-        ssTableWriter.setLast(last);
+        ssTableWriter.setLast(partitioner.decorateKey(ByteBufferUtil.clone(key)));
     }
 
     public void setFirst(ByteBuffer key)

@@ -21,7 +21,11 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.util.Arrays;
 
+import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringBound;
+import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.Columns;
+import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
@@ -58,6 +62,21 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
     public UnfilteredDescriptor(AbstractType<?>[] clusteringTypes)
     {
         super(clusteringTypes);
+    }
+
+    /**
+     * Builds a comparison-only descriptor from a query-side clustering bound (never handed to a
+     * cursor, never row/marker fields).  The cursor read path uses this to give a not-yet-opened
+     * sstable leg a sortable lower bound in the merge, so the leg's partition header is opened
+     * only when the merge actually reaches its data.  The bound's values go through the same
+     * {@code serializeValuesWithoutSize} wire form {@link #loadClustering} parses, so the result
+     * compares byte-for-byte against a leg's own loaded descriptor.
+     */
+    public static UnfilteredDescriptor forBound(AbstractType<?>[] clusteringTypes, ClusteringBound<?> bound)
+    {
+        UnfilteredDescriptor descriptor = new UnfilteredDescriptor(clusteringTypes);
+        descriptor.storeClustering((byte) bound.kind().ordinal(), bound.size(), bound);
+        return descriptor;
     }
 
     void loadTombstone(RandomAccessReader dataReader,
@@ -229,6 +248,36 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
                 throw new IOException("Invalid large Columns subset: missing index " + idx + " of " + supersetCount);
             presentColumnsWords[idx >>> 6] &= ~(1L << (idx & 63));
         }
+    }
+
+    /**
+     * Write path: populates the clustering-key bytes for a regular row from a live
+     * {@link Clustering}.  {@link SSTableCursorWriter#writeRowEnd} reads only the clustering
+     * fields off this descriptor for a non-static row, so nothing else needs populating.
+     */
+    public void storeRowClustering(Clustering<?> clustering)
+    {
+        storeClustering(ROW_CLUSTERING_KIND, clusteringTypes.length, clustering);
+    }
+
+    /**
+     * Write path: populates a range-tombstone bound/boundary marker, the clustering bytes plus the
+     * deletion time(s) {@link SSTableCursorWriter#writeRangeTombstone} reads off this descriptor.
+     * {@code open} is only used for boundary kinds; pass {@link DeletionTime#LIVE} for plain bounds.
+     * <p>
+     * {@code kind} is taken separately from {@code valuesSource} so a boundary can reuse one
+     * side's live {@link org.apache.cassandra.db.ClusteringBound} as the values source under the
+     * merged boundary kind; {@link ClusteringPrefix.Serializer#serializeValuesWithoutSize} reads
+     * only its size and values, never its kind.
+     */
+    public void storeMarker(ClusteringPrefix.Kind kind, ClusteringPrefix<?> valuesSource, DeletionTime close, DeletionTime open)
+    {
+        storeClustering((byte) kind.ordinal(), valuesSource.size(), valuesSource);
+        deletionTime.reset(close);
+        if (kind.isBoundary())
+            deletionTime2.reset(open);
+        else
+            deletionTime2.resetLive();
     }
 
     public void resetUnfiltered()
