@@ -63,8 +63,8 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
     /** Allocation ceilings for each format. */
     private enum Ceilings
     {
-        BIG(512 * 1024, 1.0, 0.5, 0.5, 0.6),
-        BTI(768 * 1024, 1.3, 0.6, 0.32, 0.6);
+        BIG(512 * 1024, 1.0, 0.5, 0.5, 0.6, 1.7),
+        BTI(768 * 1024, 1.3, 0.6, 0.32, 0.6, 2.0);
 
         /** Growth ceiling, in bytes, for the row-count and sparse-row gates. */
         final long deltaBytes;
@@ -73,15 +73,17 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         final double complexPerInputByte;
         final double largeFilePerInputByte;
         final double wideSchemaPerInputByte;
+        final double counterPerInputByte;
 
         Ceilings(long deltaBytes, double rangeTombstonePerInputByte, double complexPerInputByte,
-                 double largeFilePerInputByte, double wideSchemaPerInputByte)
+                 double largeFilePerInputByte, double wideSchemaPerInputByte, double counterPerInputByte)
         {
             this.deltaBytes = deltaBytes;
             this.rangeTombstonePerInputByte = rangeTombstonePerInputByte;
             this.complexPerInputByte = complexPerInputByte;
             this.largeFilePerInputByte = largeFilePerInputByte;
             this.wideSchemaPerInputByte = wideSchemaPerInputByte;
+            this.counterPerInputByte = counterPerInputByte;
         }
     }
 
@@ -362,6 +364,62 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
     }
 
+    /**
+     * Counter compaction allocation must not scale with the number of counter cells.  Measured
+     * per input byte like the range-tombstone and complex gates; counter rows are small, so
+     * per-key and test-environment residual dominate.  The ceiling trips at roughly one extra
+     * small object per input cell.
+     */
+    @Test
+    public void allocationDoesNotScaleWithCounterCells() throws Exception
+    {
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
+
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
+            long smallAlloc = measureCounters(SMALL_PARTITIONS);
+            long smallBytes = lastInputBytes;
+            long bigAlloc = measureCounters(SMALL_PARTITIONS * SCALE);
+            long bigBytes = lastInputBytes;
+            long delta = bigAlloc - smallAlloc;
+            long extraBytes = bigBytes - smallBytes;
+            double perInputByte = (double) delta / extraBytes;
+            logger.info("counter cursor compaction allocation: small={}B big={}B delta={}B over {}B extra input = {} B/B (ceiling {})",
+                        smallAlloc, bigAlloc, delta, extraBytes,
+                        String.format("%.3f", perInputByte), ceilings.counterPerInputByte);
+            assertTrue(String.format("counter cursor allocation per input byte too high: " +
+                                     "%.3f B/B (delta %,dB over %,dB extra input, ceiling %.2f)",
+                                     perInputByte, delta, extraBytes, ceilings.counterPerInputByte),
+                       perInputByte <= ceilings.counterPerInputByte);
+        });
+    }
+
+
+    private long measureCounters(int partitions) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, PRIMARY KEY (pk, ck)) " +
+                    "WITH compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (int round = 0; round < 2; round++)
+        {
+            for (long pk = 0; pk < partitions; pk++)
+                for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                {
+                    execute("UPDATE %s SET c1 = c1 + ? WHERE pk = ? AND ck = ?", ck + round, pk, ck);
+                    if (ck % 3 == 0)
+                        execute("UPDATE %s SET c2 = c2 + ? WHERE pk = ? AND ck = ?", -ck, pk, ck);
+                }
+            flush();
+        }
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+        captureLastInputBytes(cfs);
+        return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
+    }
+
     /** Allocation must not scale with sparse rows in a >= 64-column superset, which uses the
      *  large-subset wire format. */
     @Test
@@ -620,6 +678,40 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
             assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
 
             dumpAllocationProfile("recordRangeTombstoneAllocationProfile", 30, cfs, gcBefore);
+        });
+    }
+
+    /** Diagnostic, not a gate: records a JFR allocation profile of the big counter table under
+     *  build/test/jfr. Skipped unless the profile property is set. */
+    @Test
+    public void recordCounterAllocationProfile() throws Exception
+    {
+        assumeProfilingEnabled();
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
+
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
+            createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, PRIMARY KEY (pk, ck)) " +
+                        "WITH compression = {'enabled': 'false'}");
+            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            cfs.disableAutoCompaction();
+            int partitions = SMALL_PARTITIONS * SCALE;
+            for (int round = 0; round < 2; round++)
+            {
+                for (long pk = 0; pk < partitions; pk++)
+                    for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                    {
+                        execute("UPDATE %s SET c1 = c1 + ? WHERE pk = ? AND ck = ?", ck + round, pk, ck);
+                        if (ck % 3 == 0)
+                            execute("UPDATE %s SET c2 = c2 + ? WHERE pk = ? AND ck = ?", -ck, pk, ck);
+                    }
+                flush();
+            }
+            long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+            assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+
+            dumpAllocationProfile("recordCounterAllocationProfile", 30, cfs, gcBefore);
         });
     }
 
