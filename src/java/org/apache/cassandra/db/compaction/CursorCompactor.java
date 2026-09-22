@@ -46,7 +46,6 @@ import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.SystemKeyspace;
-import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.Cell;
@@ -270,6 +269,66 @@ public class CursorCompactor extends CompactionInfo.Holder
         }
 
         LOGGER.debug("Cursor validation compaction is supported for {}.{}", metadata.keyspace, metadata.name);
+        return true;
+    }
+
+    /**
+     * Support gate for cursor-backed cleanup.  Like {@link #isSupported} but without the
+     * full-range-scanner requirement, since cleanup reads only the ranges this node still owns.
+     * It keeps the output-format and {@code tombstoneOption} gates and adds one cleanup-specific
+     * rejection: a table with live secondary indexes selects {@code CleanupStrategy.Full}, which
+     * notifies {@code cfs.indexManager} of every dropped partition.  The cursor merge loop has no
+     * such notification, so an indexed table stays on the legacy path.  The {@code indexManager}
+     * check below is the same condition {@code CleanupStrategy.get} branches on.
+     * <p>
+     * Materialized views are admitted here, like {@link #isSupported} and unlike
+     * {@link #isValidationSupported}.  All three face the same risk (a legacy view sstable with
+     * shadowable row deletions), but a mid-merge failure in cleanup only costs one sstable's
+     * rewrite, which the operator can rerun.  See {@code CursorCleanupSupportPostureTest}.
+     */
+    public static boolean isCleanupSupported(Collection<SSTableReader> sstables, AbstractCompactionController controller)
+    {
+        TableMetadata metadata = controller.cfs.metadata();
+        if (unsupportedMetadata(metadata)) return false;
+
+        if (controller.cfs.indexManager.hasIndexes())
+        {
+            LOGGER.debug("Cursor cleanup is not supported for {}.{}: it cannot notify secondary indexes of removed partitions",
+                         metadata.keyspace, metadata.name);
+            return false;
+        }
+
+        for (SSTableReader reader : sstables)
+        {
+            Version version = reader.descriptor.version;
+            if (!version.isLatestVersion())
+            {
+                LOGGER.debug("Cursor cleanup is not supported for {}.{}: sstable version {} is not the latest",
+                             metadata.keyspace, metadata.name, version);
+                return false;
+            }
+            // Cleanup writes through the same merge path as compaction, so it needs the same
+            // header gate; see isSupported and isValidationSupported.
+            if (unsupportedHeaderColumns(metadata, reader))
+                return false;
+        }
+
+        if (!DatabaseDescriptor.getSelectedSSTableFormat().supportsCursorCompaction())
+        {
+            LOGGER.debug("Cursor cleanup is not supported for {}.{}: the selected sstable output format {} does not support it",
+                         metadata.keyspace, metadata.name, DatabaseDescriptor.getSelectedSSTableFormat());
+            return false;
+        }
+
+        // TODO: Implement CompactionIterator.GarbageSkipper like functionality
+        if (controller.tombstoneOption != CompactionParams.TombstoneOption.NONE)
+        {
+            LOGGER.debug("Cursor cleanup is not supported for {}.{}: garbage skipping is not implemented, controller.tombstoneOption={}",
+                         metadata.keyspace, metadata.name, controller.tombstoneOption);
+            return false;
+        }
+
+        LOGGER.debug("Cursor cleanup compaction is supported for {}.{}", metadata.keyspace, metadata.name);
         return true;
     }
 
@@ -507,7 +566,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     // separately from partitionHeaderLength (a writer-only byte count) so isPartitionStarted() does
     // not force a non-writing CursorMergeSink to fabricate byte positions.
     private boolean partitionStarted = false;
-    private CompactionAwareWriter compactionAwareWriter;
+    private OutputWriterProvider writerProvider;
 
     public CursorCompactor(OperationType type, List<ISSTableScanner> scanners, AbstractCompactionController controller, long nowInSec, TimeUUID compactionId)
     {
@@ -637,12 +696,12 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /**
-     * Builds cursors directly from {@code boundsBySSTable}'s sstables, each restricted to its
-     * given partial byte ranges (via {@link StatefulCursor#positionAt}) instead of full-range
-     * scanners - e.g. repair validation, which only ever reads its assigned repair ranges and
-     * never writes output. Pair with {@link #mergeNextPartition}, never {@link #writeNextPartition}.
-     * Callers must have already confirmed {@link #isValidationSupported} for this
-     * {@code sstables}/{@code controller} pair.
+     * Builds cursors from {@code boundsBySSTable}'s sstables, each restricted to its partial byte
+     * ranges (via {@link StatefulCursor#positionAt}) instead of full-range scanners.  Used by
+     * repair validation, which reads its assigned ranges and writes no output (pair with
+     * {@link #mergeNextPartition} after {@link #isValidationSupported}), and by cleanup, which
+     * reads the ranges this node still owns and rewrites them (pair with {@link #writeNextPartition}
+     * after {@link #isCleanupSupported}).
      */
     public CursorCompactor(OperationType type,
                           Map<SSTableReader, List<PartitionPositionBounds>> boundsBySSTable,
@@ -728,11 +787,31 @@ public class CursorCompactor extends CompactionInfo.Holder
     }
 
     /**
+     * Supplies the output sstable writer to the merge loop.  Called before the first unfiltered of
+     * an output partition is written; returns a non-null {@link SSTableWriter} only when output
+     * rolls over to a new sstable, so the merge loop closes out the previous one.  Null means keep
+     * writing to the current one.  {@link CompactionAwareWriter#maybeSwitchWriter} implements this
+     * contract; cleanup supplies its own single-output implementation over a bare
+     * {@link org.apache.cassandra.io.sstable.SSTableRewriter}.
+     */
+    public interface OutputWriterProvider
+    {
+        SSTableWriter maybeSwitchWriter(DecoratedKey key);
+
+        /**
+         * Called at every partition boundary that does not switch writers.  Publishes an
+         * early-opened partial of the current output once enough has been written.  The legacy path
+         * gets this from {@link org.apache.cassandra.io.sstable.SSTableRewriter#append} per partition.
+         */
+        void maybeReopenEarly(DecoratedKey key);
+    }
+
+    /**
      * @return false if finished, true if partition is written (which might require multiple partition reads)
      */
-    public boolean writeNextPartition(CompactionAwareWriter compactionAwareWriter) throws IOException {
+    public boolean writeNextPartition(OutputWriterProvider writerProvider) throws IOException {
         while (!finished) {
-            if (tryWriteNextPartition(compactionAwareWriter)) {
+            if (tryWriteNextPartition(writerProvider)) {
                 return true;
             }
         }
@@ -759,7 +838,7 @@ public class CursorCompactor extends CompactionInfo.Holder
     /**
      * @return true if a partition was written
      */
-    private boolean tryWriteNextPartition(CompactionAwareWriter compactionAwareWriter) throws IOException
+    private boolean tryWriteNextPartition(OutputWriterProvider writerProvider) throws IOException
     {
         if (isStopRequested())
             throw new CompactionInterruptedException(getCompactionInfo());
@@ -789,7 +868,7 @@ public class CursorCompactor extends CompactionInfo.Holder
                 throw new IllegalStateException(String.format("Last written key %s >= current key %s", lastWrittenKey(), key));
 
             // needed if we actually write a partition, not used otherwise
-            this.compactionAwareWriter = compactionAwareWriter;
+            this.writerProvider = writerProvider;
 
             purger.resetOnNewPartition(key);
             boolean written = mergePartitions(partitionMergeLimit);
@@ -962,10 +1041,10 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     private void startPartition(DeletionTime toWritePartitionDeletion) throws IOException
     {
-        // compactionAwareWriter is null for mergeNextPartition()'s read-only path: ssTableCursorWriter
-        // was already fixed to the sink for this compactor's whole lifetime, no rollover applies.
-        if (compactionAwareWriter != null)
-            maybeSwitchWriter(compactionAwareWriter);
+        // writerProvider is null on mergeNextPartition()'s read-only path, where ssTableCursorWriter
+        // is fixed to the sink for the compactor's lifetime and no rollover applies.
+        if (writerProvider != null)
+            maybeSwitchWriter(writerProvider);
         partitionHeaderLength = ssTableCursorWriter.writePartitionStart(
                                     partitionDescriptor.keyBytes(),
                                     partitionDescriptor.keyLength(),
@@ -2238,7 +2317,7 @@ public class CursorCompactor extends CompactionInfo.Holder
         }
     }
 
-    private void maybeSwitchWriter(CompactionAwareWriter writerProvider)
+    private void maybeSwitchWriter(OutputWriterProvider writerProvider)
     {
         assert !finished;
         // Set last key, so this is ready to be closed.
