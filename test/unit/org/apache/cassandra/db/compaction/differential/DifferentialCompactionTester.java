@@ -792,7 +792,7 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
                    lengthBoundHolds);
     }
 
-    private CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
+    protected CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
     {
         // 1. copy components first: verification or the dump can fail and roll back the
         // transaction, deleting the live files; the copies are the only evidence left for
