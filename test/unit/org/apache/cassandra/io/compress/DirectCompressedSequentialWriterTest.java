@@ -61,6 +61,7 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ReadPattern;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.metrics.StorageMetrics;
@@ -435,7 +436,7 @@ public class DirectCompressedSequentialWriterTest
     @Test
     public void testDirectMemoryIsCleanedOnClose() throws Exception
     {
-        // Sized to dominate baseline allocator noise; matches DirectThreadLocalReadAheadBufferTest.
+        // Sized to dominate baseline allocator noise; matches DirectReadAheadBufferTest.
         int bufferSize = 64 * 1024 * 1024;
         withDirectWriteBufferSize(bufferSize / 1024, () ->
         withTempDataFile("direct_mem_clean", (dataFile, metadataFile) ->
@@ -945,7 +946,7 @@ public class DirectCompressedSequentialWriterTest
                         writer.finish();
                         try (CompressionMetadata md = CompressionMetadata.open(metadataFile, dataFile.length(), true);
                              FileHandle fh = new FileHandle.Builder(dataFile).withCompressionMetadata(md).complete();
-                             RandomAccessReader reader = fh.createReader(null, path == ReaderPath.SCAN))
+                             RandomAccessReader reader = fh.createReader(null, path == ReaderPath.SCAN ? ReadPattern.SCAN : ReadPattern.ROW_READ))
                         {
                             assertReadablePrefix(reader, payload, payload.length, moment, path, params, regime);
                         }
@@ -971,7 +972,7 @@ public class DirectCompressedSequentialWriterTest
                                                BufferRegime regime) throws IOException
     {
         try (FileHandle fh = new FileHandle.Builder(dataFile).withCompressionMetadata(md).complete();
-             RandomAccessReader reader = fh.createReader(null, path == ReaderPath.SCAN))
+             RandomAccessReader reader = fh.createReader(null, path == ReaderPath.SCAN ? ReadPattern.SCAN : ReadPattern.ROW_READ))
         {
             if (path == ReaderPath.SCAN)
             {
