@@ -26,16 +26,8 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLConnection;
-import java.net.URLStreamHandler;
 import java.nio.ByteBuffer;
-import java.security.CodeSource;
-import java.security.PermissionCollection;
-import java.security.ProtectionDomain;
 import java.security.SecureClassLoader;
-import java.security.cert.Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -80,8 +72,6 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.security.SecurityThreadGroup;
-import org.apache.cassandra.security.ThreadAwareSecurityManager;
 import org.apache.cassandra.utils.ExecutorUtils;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -93,20 +83,17 @@ public final class JavaBasedUDFunction extends UDFunction
 
     private static final AtomicInteger classSequence = new AtomicInteger();
 
-    // use a JVM standard ExecutorService as ExecutorPlus references internal
-    // classes, which triggers AccessControlException from the UDF sandbox
+    // use a JVM standard ExecutorService as ExecutorPlus references internal Cassandra classes
     private static final UDFExecutorService executor =
         new UDFExecutorService(new NamedThreadFactory("UserDefinedFunctions",
                                                       Thread.MIN_PRIORITY,
                                                       udfClassLoader,
-                                                      new SecurityThreadGroup("UserDefinedFunctions", null, UDFunction::initializeThread)),
+                                                      new ThreadGroup("UserDefinedFunctions")),
                                "userfunction");
 
     private static final EcjTargetClassLoader targetClassLoader = new EcjTargetClassLoader();
 
     private static final UDFByteCodeVerifier udfByteCodeVerifier = new UDFByteCodeVerifier();
-
-    private static final ProtectionDomain protectionDomain;
 
     private static final IErrorHandlingPolicy errorHandlingPolicy = DefaultErrorHandlingPolicies.proceedWithAllProblems();
     private static final IProblemFactory problemFactory = new DefaultProblemFactory(Locale.ENGLISH);
@@ -162,9 +149,14 @@ public final class JavaBasedUDFunction extends UDFunction
         settings.put(CompilerOptions.OPTION_ReportDeprecation,
                      CompilerOptions.IGNORE);
         settings.put(CompilerOptions.OPTION_Source,
-                     CompilerOptions.VERSION_11);
+                     CompilerOptions.VERSION_25);
         settings.put(CompilerOptions.OPTION_TargetPlatform,
-                     CompilerOptions.VERSION_11);
+                     CompilerOptions.VERSION_25);
+        // ECJ 3.44+ defaults to invokedynamic (StringConcatFactory) for string concatenation, which requires the
+        // compiler and the UDF class loader to resolve java.lang.invoke.* types. The UDF sandbox class loader
+        // deliberately disallows java/lang/invoke/, so force the older StringBuilder-based concatenation codegen.
+        settings.put(CompilerOptions.OPTION_UseStringConcatFactory,
+                     CompilerOptions.DISABLED);
 
         compilerOptions = new CompilerOptions(settings);
         compilerOptions.parseLiteralExpressionsAsConstants = true;
@@ -184,24 +176,6 @@ public final class JavaBasedUDFunction extends UDFunction
         {
             throw new RuntimeException(e);
         }
-
-        CodeSource codeSource;
-        try
-        {
-            codeSource = new CodeSource(new URL("udf", "localhost", 0, "/java", new URLStreamHandler()
-            {
-                protected URLConnection openConnection(URL u)
-                {
-                    return null;
-                }
-            }), (Certificate[])null);
-        }
-        catch (MalformedURLException e)
-        {
-            throw new RuntimeException(e);
-        }
-
-        protectionDomain = new ProtectionDomain(codeSource, ThreadAwareSecurityManager.noPermissions, targetClassLoader, null);
     }
 
     private final JavaUDF javaUDF;
@@ -740,14 +714,9 @@ public final class JavaBasedUDFunction extends UDFunction
             byte[] classData = classes.remove(name);
 
             if (classData != null)
-                return defineClass(name, classData, 0, classData.length, protectionDomain);
+                return defineClass(name, classData, 0, classData.length);
 
             return getParent().loadClass(name);
-        }
-
-        protected PermissionCollection getPermissions(CodeSource codesource)
-        {
-            return ThreadAwareSecurityManager.noPermissions;
         }
     }
 

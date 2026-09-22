@@ -30,7 +30,6 @@ import com.google.common.collect.Maps;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.security.ThreadAwareSecurityManager;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
@@ -71,7 +70,7 @@ public class LogbackLoggingSupport implements LoggingSupport
         // while executing sandboxed UDF code.
         //
         // NOTE: this is obsolte with logback versions (at least since 1.2.3)
-        Logger logbackLogger = (Logger) LoggerFactory.getLogger(ThreadAwareSecurityManager.class);
+        Logger logbackLogger = (Logger) LoggerFactory.getLogger(LogbackLoggingSupport.class);
         LoggerContext ctx = logbackLogger.getLoggerContext();
 
         TurboFilterList turboFilterList = ctx.getTurboFilterList();
@@ -216,8 +215,6 @@ public class LogbackLoggingSupport implements LoggingSupport
 
         protected boolean changeDetected(long now)
         {
-            if (ThreadAwareSecurityManager.isSecuredThread())
-                return false;
             return super.changeDetected(now);
         }
     }

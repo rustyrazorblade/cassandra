@@ -45,7 +45,7 @@
         The use of both CASSANDRA_USE_JDK11 and use-jdk11 is deprecated.
     -->
     <property name="java.default" value="11" />
-    <property name="java.supported" value="11,17,21" />
+    <property name="java.supported" value="11,17,21,25" />
 
     <!-- directory details -->
     <property name="basedir" value="."/>
@@ -174,11 +174,11 @@
 
     <property name="jflex.version" value="1.8.2"/>
     <property name="jamm.version" value="0.4.0"/>
-    <property name="ecj.version" value="3.33.0"/>
+    <property name="ecj.version" value="3.44.0"/>
     <!-- When updating ASM, please, do consider whether you might need to update also FBUtilities#ASM_BYTECODE_VERSION
       and the simulator InterceptClasses#BYTECODE_VERSION, in particular if we are looking to provide Cassandra support
       for newer JDKs (CASSANDRA-17873). -->
-    <property name="asm.version" value="9.5"/>
+    <property name="asm.version" value="9.8"/>
     <property name="allocation-instrumenter.version" value="3.1.0"/>
 
     <condition property="is.source.artifact">
@@ -243,6 +243,9 @@
       <!-- This includes every JDK other than 8; so JDK 9 is flagged as JDK 11, and JDK 17 is as well... at the moment this is desired behavior
       and may be relooked at once JDK 8 support is dropped -->
         <not><isset property="java.version.8"/></not>
+    </condition>
+    <condition property="java.version.25">
+        <equals arg1="${ant.java.version}" arg2="25"/>
     </condition>
     <fail message="Unsupported JDK version used: ${ant.java.version}"><condition><not><or>
         <isset property="java.version.8"/>
@@ -400,8 +403,64 @@
         <string>--add-opens jdk.management/com.sun.management=ALL-UNNAMED</string>
     </resources>
     <pathconvert property="_jvm21_args_concat" refid="_jvm21_arg_items" pathsep=" "/>
-    <condition property="java-jvmargs" value="${_jvm21_args_concat}" else="">
+    <condition property="java-jvmargs" value="${_jvm21_args_concat}">
         <equals arg1="${ant.java.version}" arg2="21"/>
+    </condition>
+
+    <resources id="_jvm25_arg_items">
+        <string>-Djdk.attach.allowAttachSelf=true</string>
+
+        <string>-XX:+UseZGC</string>
+        <!-- ZGenerational is the only mode in JDK 25 (non-generational ZGC removed by JEP 490);
+             the -XX:+ZGenerational flag is obsolete/removed, so it is intentionally not set here. -->
+
+        <!-- Temporary workaround for jamm having incorrect default CompressedOops -->
+        <!-- Without this, memory layout and sizing calculations will be incorrect as jamm assumes compressedOops -->
+        <string>-XX:-UseCompressedOops</string>
+
+        <!-- FFM (java.lang.foreign) is final in JDK 25; restricted native access must be granted explicitly. -->
+        <string>--enable-native-access=ALL-UNNAMED</string>
+
+        <!-- NOTE: -Djava.security.manager=allow (used on JDK21) is FATAL on JDK25: the Security Manager was
+             permanently disabled by JEP 486, so the flag throws java.lang.Error at VM init. It is intentionally
+             omitted here. Actual removal of SecurityManager usage in code is a separate step. -->
+
+        <string>--add-exports java.base/java.lang.ref=ALL-UNNAMED</string>
+        <string>--add-exports java.base/java.lang.reflect=ALL-UNNAMED</string>
+        <string>--add-exports java.base/jdk.internal.misc=ALL-UNNAMED</string>
+        <string>--add-exports java.base/jdk.internal.ref=ALL-UNNAMED</string>
+        <string>--add-exports java.base/sun.nio.ch=ALL-UNNAMED</string>
+        <string>--add-exports java.management.rmi/com.sun.jmx.remote.internal.rmi=ALL-UNNAMED</string>
+        <string>--add-exports java.rmi/sun.rmi.registry=ALL-UNNAMED</string>
+        <string>--add-exports java.rmi/sun.rmi.server=ALL-UNNAMED</string>
+        <string>--add-exports java.rmi/sun.rmi.transport.tcp=ALL-UNNAMED</string>
+        <string>--add-exports java.sql/java.sql=ALL-UNNAMED</string>
+        <string>--add-exports jdk.unsupported/sun.misc=ALL-UNNAMED</string>
+        <string>--add-exports jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED</string>
+        <string>--add-exports jdk.attach/sun.tools.attach=ALL-UNNAMED</string>
+
+        <string>--add-opens java.base/java.io=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.lang=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.lang.module=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.lang.reflect=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.math=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.net=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.nio=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.util=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.util.concurrent=ALL-UNNAMED</string>
+        <string>--add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED</string>
+        <string>--add-opens java.base/jdk.internal.loader=ALL-UNNAMED</string>
+        <string>--add-opens java.base/jdk.internal.math=ALL-UNNAMED</string>
+        <string>--add-opens java.base/jdk.internal.module=ALL-UNNAMED</string>
+        <string>--add-opens java.base/jdk.internal.ref=ALL-UNNAMED</string>
+        <string>--add-opens java.base/jdk.internal.reflect=ALL-UNNAMED</string>
+        <string>--add-opens java.base/sun.nio.ch=ALL-UNNAMED</string>
+        <string>--add-opens java.rmi/sun.rmi.transport.tcp=ALL-UNNAMED</string>
+        <string>--add-opens jdk.management/com.sun.management=ALL-UNNAMED</string>
+    </resources>
+    <pathconvert property="_jvm25_args_concat" refid="_jvm25_arg_items" pathsep=" "/>
+    <condition property="java-jvmargs" value="${_jvm25_args_concat}" else="">
+        <equals arg1="${ant.java.version}" arg2="25"/>
     </condition>
 
     <!--
@@ -450,6 +509,21 @@
     </resources>
     <pathconvert property="_jvm21_test_arg_items_concat" refid="_jvm21_test_arg_items" pathsep=" "/>
 
+    <resources id="_jvm25_test_arg_items">
+        <string>-XX:+HeapDumpOnOutOfMemoryError</string>
+        <string>-Dnet.bytebuddy.experimental=true</string>
+        <!-- NOTE: -Djava.security.manager=allow (used on JDK21) is FATAL on JDK25 (JEP 486); omitted. -->
+        <string>-Dio.netty.tryReflectionSetAccessible=true</string>
+
+        <!-- Open things up so we don't run into any jamm rejections that'd then go unsafe and crash out on in-jvm dtests-->
+        <string>--add-opens=java.base/java.lang=ALL-UNNAMED</string>
+        <string>--add-exports=java.base/jdk.internal.vm.annotation=ALL-UNNAMED</string>
+
+        <!-- NOTE: -Djdk.reflect.useDirectMethodHandle=false (used on JDK21) was removed in JDK22 (JDK-8309635)
+             and is invalid on JDK25; a proper fix for FieldUtils overwriting static final fields is a separate step. -->
+    </resources>
+    <pathconvert property="_jvm25_test_arg_items_concat" refid="_jvm25_test_arg_items" pathsep=" "/>
+
     <condition property="_std-test-jvmargs" value="${_jvm11_test_arg_items_concat}">
         <equals arg1="${ant.java.version}" arg2="11"/>
     </condition>
@@ -458,6 +532,9 @@
     </condition>
     <condition property="_std-test-jvmargs" value="${_jvm21_test_arg_items_concat}">
         <equals arg1="${ant.java.version}" arg2="21"/>
+    </condition>
+    <condition property="_std-test-jvmargs" value="${_jvm25_test_arg_items_concat}">
+        <equals arg1="${ant.java.version}" arg2="25"/>
     </condition>
 
     <!-- needed to compile org.apache.cassandra.utils.JMXServerUtils -->
@@ -784,7 +861,7 @@
         <copy todir="${build.classes.main}">
             <fileset dir="${build.src.resources}" />
         </copy>
-        <copy todir="${basedir}/conf" file="${build.classes.main}/META-INF/hotspot_compiler"/>
+        <copy todir="${basedir}/conf" file="${build.classes.main}/META-INF/hotspot_compiler" failonerror="false" quiet="true"/>
     </target>
 
     <target name="check" depends="_main-jar,build-test,gen-asciidoc" description="Verifies the source code and dependencies. This task is intended to run on pre-commit and locally. It should verify mostly modified files compared to the upstream base branch." unless="check.skip">

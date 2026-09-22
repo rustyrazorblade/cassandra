@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.cql3.validation.entities;
 
-import java.security.AccessControlException;
 import java.util.List;
 
 import org.junit.Assert;
@@ -27,7 +26,6 @@ import org.junit.Test;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
-import org.apache.cassandra.exceptions.FunctionExecutionException;
 import org.apache.cassandra.service.ClientWarn;
 import org.apache.cassandra.utils.JavaDriverUtils;
 
@@ -41,21 +39,18 @@ public class UFSecurityTest extends CQLTester
 
         // Java UDFs
 
-        try
-        {
-            String fName = createFunction(KEYSPACE_PER_TEST, "double",
-                                          "CREATE OR REPLACE FUNCTION %s(val double) " +
-                                          "RETURNS NULL ON NULL INPUT " +
-                                          "RETURNS double " +
-                                          "LANGUAGE JAVA\n" +
-                                          "AS 'System.getProperty(\"foo.bar.baz\"); return 0d;';"); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
-            execute("SELECT " + fName + "(dval) FROM %s WHERE key=1");
-            Assert.fail();
-        }
-        catch (FunctionExecutionException e)
-        {
-            assertAccessControlException("System.getProperty(\"foo.bar.baz\"); return 0d;", e); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
-        }
+        // With the SecurityManager removed (JEP 486 makes System.setSecurityManager throw on
+        // JDK 25), Java UDFs run with the daemon's privileges. A UDF that reads a system
+        // property is no longer blocked at run time; it runs to completion instead of failing
+        // with an AccessControlException. The static UDFByteCodeVerifier checks and the UDF
+        // class loader restrictions are unchanged and are still enforced below.
+        String fName = createFunction(KEYSPACE_PER_TEST, "double",
+                                      "CREATE OR REPLACE FUNCTION %s(val double) " +
+                                      "RETURNS NULL ON NULL INPUT " +
+                                      "RETURNS double " +
+                                      "LANGUAGE JAVA\n" +
+                                      "AS 'System.getProperty(\"foo.bar.baz\"); return 0d;';"); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
+        execute("SELECT " + fName + "(dval) FROM %s WHERE key=1");
 
         String[] cfnSources =
         { "try { Class.forName(\"" + JavaDriverUtils.class.getName() + "\"); } catch (Exception e) { throw new RuntimeException(e); } return 0d;",
@@ -136,14 +131,6 @@ public class UFSecurityTest extends CQLTester
                                  "LANGUAGE JAVA\n" +
                                  "AS '" + typeAndSource[1] + "';");
         }
-    }
-
-    private static void assertAccessControlException(String script, FunctionExecutionException e)
-    {
-        for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause())
-            if (t instanceof AccessControlException)
-                return;
-        Assert.fail("no AccessControlException for " + script + " (got " + e + ')');
     }
 
     @Test
