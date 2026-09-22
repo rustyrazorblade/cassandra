@@ -794,7 +794,20 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
 
     private CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
     {
-        // 1. the output really is in the format this scenario selected
+        // 1. copy components first: verification or the dump can fail and roll back the
+        // transaction, deleting the live files; the copies are the only evidence left for
+        // offline decoding
+        Files.createDirectories(dir);
+        SortedMap<String, Long> copiedSizes = new TreeMap<>();
+        for (Component c : sstable.descriptor.discoverComponents())
+        {
+            Path source = sstable.descriptor.fileFor(c).toPath();
+            Path target = dir.resolve(c.name());
+            Files.copy(source, target);
+            copiedSizes.put(c.name(), Files.size(target));
+        }
+
+        // 2. the output really is in the format this scenario selected
         assertOutputFormatIsSelected(sstable);
 
         // 2. structural verification of the output; the debug stream is silenced to avoid OOMing the fork
@@ -842,7 +855,7 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
                                .replaceAll("\"expired\":\"normalized\"");
         }
 
-        // 5. stats spot-check summary
+        // 6. stats spot-check summary
         StatsMetadata stats = sstable.getSSTableMetadata();
         String statsSummary = "minTimestamp=" + stats.minTimestamp +
                               " maxTimestamp=" + stats.maxTimestamp +
@@ -862,16 +875,8 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
                               " minTTL=" + stats.minTTL + " maxTTL=" + stats.maxTTL +
                               " hasPartitionLevelDeletions=" + stats.hasPartitionLevelDeletions;
 
-        // 6. copy components for byte comparison
-        Files.createDirectories(dir);
         CapturedSSTable captured = new CapturedSSTable(dir, json, statsSummary, stats.totalRows);
-        for (Component c : sstable.descriptor.discoverComponents())
-        {
-            Path source = sstable.descriptor.fileFor(c).toPath();
-            Path target = dir.resolve(c.name());
-            Files.copy(source, target);
-            captured.componentSizes.put(c.name(), Files.size(target));
-        }
+        captured.componentSizes.putAll(copiedSizes);
         return captured;
     }
 

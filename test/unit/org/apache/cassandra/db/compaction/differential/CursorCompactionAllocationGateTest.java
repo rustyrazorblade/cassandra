@@ -326,6 +326,66 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
     }
 
+    /**
+     * Counter compaction allocation must not scale with the number of counter cells.  Measured
+     * per input byte like the range-tombstone and complex gates; counter rows are small, so
+     * per-key and test-environment residual dominate.  The ceiling trips at roughly one extra
+     * small object per input cell.
+     */
+    @Test
+    public void allocationDoesNotScaleWithCounterCells() throws Exception
+    {
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
+
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
+            long smallAlloc = measureCounters(SMALL_PARTITIONS);
+            long smallBytes = lastInputBytes;
+            long bigAlloc = measureCounters(SMALL_PARTITIONS * SCALE);
+            long bigBytes = lastInputBytes;
+            long delta = bigAlloc - smallAlloc;
+            long extraBytes = bigBytes - smallBytes;
+            double perInputByte = (double) delta / extraBytes;
+            logger.info("counter cursor compaction allocation: small={}B big={}B delta={}B over {}B extra input = {} B/B (ceiling {})",
+                        smallAlloc, bigAlloc, delta, extraBytes,
+                        String.format("%.3f", perInputByte), counterPerInputByteCeiling());
+            assertTrue(String.format("counter cursor allocation per input byte too high: " +
+                                     "%.3f B/B (delta %,dB over %,dB extra input, ceiling %.2f)",
+                                     perInputByte, delta, extraBytes, counterPerInputByteCeiling()),
+                       perInputByte <= counterPerInputByteCeiling());
+        });
+    }
+
+    protected double counterPerInputByteCeiling()
+    {
+        return 1.7;
+    }
+
+    private long measureCounters(int partitions) throws Exception
+    {
+        DatabaseDescriptor.setCursorCompactionEnabled(true);
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, PRIMARY KEY (pk, ck)) " +
+                    "WITH compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (int round = 0; round < 2; round++)
+        {
+            for (long pk = 0; pk < partitions; pk++)
+                for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                {
+                    execute("UPDATE %s SET c1 = c1 + ? WHERE pk = ? AND ck = ?", ck + round, pk, ck);
+                    if (ck % 3 == 0)
+                        execute("UPDATE %s SET c2 = c2 + ? WHERE pk = ? AND ck = ?", -ck, pk, ck);
+                }
+            flush();
+        }
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+        captureLastInputBytes(cfs);
+        return measureBest(cfs, gcBefore, WARMUP_ITERATIONS, MEASURED_ITERATIONS);
+    }
+
     /** Allocation must not scale with sparse rows in a >= 64-column superset, which uses the
      *  large-subset wire format. */
     @Test
@@ -602,6 +662,40 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
 
             dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-rt.jfr"), 30, cfs, gcBefore);
             logger.info("allocation profile dumped to /tmp/cursor-alloc-rt.jfr");
+        });
+    }
+
+    /** Diagnostic, not a gate: dumps a JFR allocation profile of the big counter table to
+     *  /tmp/cursor-alloc-counter.jfr. */
+    @Test
+    public void recordCounterAllocationProfile() throws Exception
+    {
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
+
+        withMeasurementEnv(() -> {
+            DatabaseDescriptor.setCursorCompactionEnabled(true);
+            createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, PRIMARY KEY (pk, ck)) " +
+                        "WITH compression = {'enabled': 'false'}");
+            ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+            cfs.disableAutoCompaction();
+            int partitions = SMALL_PARTITIONS * SCALE;
+            for (int round = 0; round < 2; round++)
+            {
+                for (long pk = 0; pk < partitions; pk++)
+                    for (long ck = 0; ck < SMALL_ROWS_PER_PARTITION; ck++)
+                    {
+                        execute("UPDATE %s SET c1 = c1 + ? WHERE pk = ? AND ck = ?", ck + round, pk, ck);
+                        if (ck % 3 == 0)
+                            execute("UPDATE %s SET c2 = c2 + ? WHERE pk = ? AND ck = ?", -ck, pk, ck);
+                    }
+                flush();
+            }
+            long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+            assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+
+            dumpAllocationProfile(java.nio.file.Path.of("/tmp/cursor-alloc-counter.jfr"), 30, cfs, gcBefore);
+            logger.info("allocation profile dumped to /tmp/cursor-alloc-counter.jfr");
         });
     }
 

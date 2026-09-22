@@ -41,6 +41,13 @@ public class BtiCursorCompactionAllocationGateTest extends CursorCompactionAlloc
         return 1.3;
     }
 
+    /** Counter allocation ceiling per input byte under BTI. */
+    @Override
+    protected double counterPerInputByteCeiling()
+    {
+        return 2.0;
+    }
+
     /** Complex-column allocation ceiling per input byte under BTI. */
     @Override
     protected double complexPerInputByteCeiling()

@@ -1,0 +1,332 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.cassandra.db.compaction.differential;
+
+import java.nio.ByteBuffer;
+
+import org.junit.Test;
+
+import org.apache.cassandra.db.BufferClustering;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.context.CounterContext;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.rows.BTreeRow;
+import org.apache.cassandra.db.rows.BufferCell;
+import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CounterId;
+
+/**
+ * Differential coverage for COUNTER tables.  Counter merge differs from normal reconciliation:
+ * live counter cells merge their contexts instead of one side winning, and a counter tombstone
+ * beats a live counter cell regardless of timestamp (CASSANDRA-7346).
+ */
+public class CounterDifferentialCompactionTest extends DifferentialCompactionTester
+{
+    /** The same counter cells are incremented across many sstables and merge their contexts. */
+    @Test
+    public void shardMergesAcrossSSTables() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 4; round++)
+        {
+            for (long pk = 0; pk < 4; pk++)
+                for (long ck = 0; ck < 10; ck++)
+                {
+                    execute("UPDATE %s SET c1 = c1 + ? WHERE pk = ? AND ck = ?", ck + round, pk, ck);
+                    if (ck % 3 == 0)
+                        execute("UPDATE %s SET c2 = c2 + ? WHERE pk = ? AND ck = ?", -1L - round, pk, ck);
+                }
+            flush();
+        }
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /**
+     * Counter tombstones interleaved with increments across sstables.  The tombstone wins over
+     * live counter cells regardless of timestamp, so increments after the delete still lose
+     * (CASSANDRA-7346).
+     */
+    @Test
+    public void counterTombstones() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 12; ck++)
+        {
+            execute("UPDATE %s SET c1 = c1 + ?, c2 = c2 + ? WHERE pk = ? AND ck = ?", ck, 100 + ck, 1L, ck);
+            execute("UPDATE %s SET c1 = c1 + ? WHERE pk = ? AND ck = ?", ck, 2L, ck);
+        }
+        flush();
+
+        // cell deletes newer than the increments above
+        for (long ck = 0; ck < 6; ck++)
+            execute("DELETE c1 FROM %s WHERE pk = ? AND ck = ?", 1L, ck);
+        // row deletes
+        execute("DELETE FROM %s WHERE pk = 2 AND ck = 3");
+        execute("DELETE FROM %s WHERE pk = 2 AND ck = 4");
+        flush();
+
+        // increments newer than the deletes: c1 stays dead, c2 keeps merging
+        for (long ck = 0; ck < 6; ck++)
+            execute("UPDATE %s SET c1 = c1 + ?, c2 = c2 + ? WHERE pk = ? AND ck = ?", 1000 + ck, ck, 1L, ck);
+        execute("UPDATE %s SET c1 = c1 + 99 WHERE pk = 2 AND ck = 3");
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Static counters alongside clustered counters, with deletes of each. */
+    @Test
+    public void staticCounters() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c counter, s counter static, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 3; round++)
+        {
+            for (long pk = 0; pk < 5; pk++)
+            {
+                execute("UPDATE %s SET s = s + ? WHERE pk = ?", pk + round + 1, pk);
+                for (long ck = 0; ck < 6; ck++)
+                    execute("UPDATE %s SET c = c + ? WHERE pk = ? AND ck = ?", ck + round, pk, ck);
+            }
+            flush();
+        }
+        execute("DELETE s FROM %s WHERE pk = 3");
+        execute("DELETE c FROM %s WHERE pk = 4 AND ck = 2");
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Counter columns in partitions wide enough to cross index blocks. */
+    @Test
+    public void countersAcrossIndexBlocks() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, c3 counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int round = 0; round < 2; round++)
+        {
+            for (long ck = 0; ck < 400; ck++)
+                execute("UPDATE %s SET c1 = c1 + ?, c2 = c2 + ?, c3 = c3 + ? WHERE pk = ? AND ck = ?",
+                        ck, ck * 31, -ck, 1L, ck);
+            flush();
+        }
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /**
+     * Counter cell shapes that CQL cannot produce but streaming and replication write:
+     * multi-shard contexts, marked local-shard contexts, and a value-carrying tombstone.
+     * Applied as raw mutations to bypass CounterMutation.
+     */
+    @Test
+    public void exoticCounterCellShapes() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, c2 counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000 AND compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        TableMetadata metadata = cfs.metadata();
+        ColumnMetadata c1 = metadata.getColumn(ByteBufferUtil.bytes("c1"));
+        ColumnMetadata c2 = metadata.getColumn(ByteBufferUtil.bytes("c2"));
+
+        // sstable 1
+        applyCounterCell(metadata, 1L, 0L, BufferCell.live(c1, 1000, context(global(1, 5, 100), remote(2, 3, 7))));
+        applyCounterCell(metadata, 1L, 1L, BufferCell.live(c1, 1000, marked(context(local(3, 2, 11), global(4, 1, 5)))));
+        applyCounterCell(metadata, 1L, 2L, BufferCell.live(c1, 1000, context(remote(8, 1, 4))));
+        // a retained tombstone that carries a value
+        applyCounterCell(metadata, 1L, 3L, new BufferCell(c1, 1000, Cell.NO_TTL,
+                                                          org.apache.cassandra.utils.FBUtilities.nowInSeconds() - 60,
+                                                          context(global(9, 1, 1)), null));
+        applyCounterCell(metadata, 1L, 4L, BufferCell.live(c2, 1000, context(remote(5, -2, 42))));
+        flush();
+
+        // sstable 2: overlapping shapes exercising every reconciliation rule
+        applyCounterCell(metadata, 1L, 0L, BufferCell.live(c1, 2000, context(global(1, 7, 200), remote(6, 1, 1))));
+        applyCounterCell(metadata, 1L, 1L, BufferCell.live(c1, 1500, context(remote(3, 4, 13))));
+        applyCounterCell(metadata, 1L, 2L, BufferCell.live(c1, 3000, context(global(7, 2, 9)))); // disjoint ids merge
+        applyCounterCell(metadata, 1L, 3L, BufferCell.live(c1, 4000, context(global(9, 2, 2)))); // loses to the tombstone (7346)
+        applyCounterCell(metadata, 1L, 4L, BufferCell.live(c2, 900, context(remote(5, -1, 50)))); // higher clock wins
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /**
+     * Counter tombstones tied on both timestamp and localDeletionTime break the tie by their
+     * raw value bytes; the greater bytes win, independent of source order.
+     */
+    @Test
+    public void counterTombstoneValueTieBreak() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c1 counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000 AND compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        TableMetadata metadata = cfs.metadata();
+        ColumnMetadata c1 = metadata.getColumn(ByteBufferUtil.bytes("c1"));
+
+        // recent ldt so the tied tombstones are retained; identical across both sstables
+        long ldt = org.apache.cassandra.utils.FBUtilities.nowInSeconds() - 60;
+        long ts = 1000;
+
+        // sstable 1: ck=0 empty-value first, ck=1 valued first, ck=2 valued (smaller bytes)
+        applyCounterCell(metadata, 1L, 0L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
+        applyCounterCell(metadata, 1L, 1L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(9, 1, 1)), null));
+        applyCounterCell(metadata, 1L, 2L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(5, 1, 1)), null));
+        flush();
+
+        // sstable 2: the opposite shapes at identical (ts, ldt)
+        applyCounterCell(metadata, 1L, 0L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(9, 1, 1)), null));
+        applyCounterCell(metadata, 1L, 1L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          ByteBufferUtil.EMPTY_BYTE_BUFFER, null));
+        applyCounterCell(metadata, 1L, 2L, new BufferCell(c1, ts, Cell.NO_TTL, ldt,
+                                                          context(global(7, 2, 2)), null));
+        flush();
+
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    private static void applyCounterCell(TableMetadata metadata, long pk, long ck, Cell<?> cell)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(new BufferClustering(ByteBufferUtil.bytes(ck)));
+        builder.addCell(cell);
+        PartitionUpdate update = PartitionUpdate.singleRowUpdate(
+            metadata, metadata.partitioner.decorateKey(ByteBufferUtil.bytes(pk)), builder.build());
+        new Mutation(update).apply();
+    }
+
+    private static ByteBuffer context(ShardSpec... shards)
+    {
+        int globals = 0, locals = 0, remotes = 0;
+        for (ShardSpec s : shards)
+        {
+            if (s.kind == 0) globals++;
+            else if (s.kind == 1) locals++;
+            else remotes++;
+        }
+        CounterContext.ContextState state = CounterContext.ContextState.allocate(globals, locals, remotes);
+        for (ShardSpec s : shards)
+        {
+            if (s.kind == 0) state.writeGlobal(CounterId.fromInt(s.id), s.clock, s.count);
+            else if (s.kind == 1) state.writeLocal(CounterId.fromInt(s.id), s.clock, s.count);
+            else state.writeRemote(CounterId.fromInt(s.id), s.clock, s.count);
+        }
+        return state.context;
+    }
+
+    private static ByteBuffer marked(ByteBuffer context)
+    {
+        return CounterContext.instance().markLocalToBeCleared(context);
+    }
+
+    private static ShardSpec global(int id, long clock, long count) { return new ShardSpec(0, id, clock, count); }
+    private static ShardSpec local(int id, long clock, long count)  { return new ShardSpec(1, id, clock, count); }
+    private static ShardSpec remote(int id, long clock, long count) { return new ShardSpec(2, id, clock, count); }
+
+    private static final class ShardSpec
+    {
+        final int kind; final int id; final long clock; final long count;
+        ShardSpec(int kind, int id, long clock, long count)
+        {
+            this.kind = kind; this.id = id; this.clock = clock; this.count = count;
+        }
+    }
+
+    /**
+     * Single-winner transcode-decline anchor: a marked-local counter cell as the SOLE surviving
+     * source must have its context cleared on output. The regular-cell fast path in
+     * CursorCompactor.writeMergedCell copies a single winner's value directly from source when
+     * IN_SOURCE; mergeCounterCells must never do this, because a marked-local context must be
+     * cleared through copyCounterContext before it is written. A verbatim copy of a single
+     * marked-local cell would emit an uncleared context and diverge from the iterator.
+     */
+    @Test
+    public void singleMarkedLocalCounterCellCleared() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 864000 AND compression = {'enabled': 'false'}");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        TableMetadata metadata = cfs.metadata();
+        ColumnMetadata c = metadata.getColumn(ByteBufferUtil.bytes("c"));
+
+        // write one marked-local counter cell as the sole surviving source for ck=0
+        applyCounterCell(metadata, 1L, 0L, BufferCell.live(c, 1000, marked(context(local(3, 2, 11)))));
+        flush();
+
+        // compact: the single marked-local cell must be cleared, matching the iterator
+        assertCursorMatchesIteratorAcrossGenerations(cfs);
+    }
+
+    /** Purge boundary for counter tombstones: gcBefore at and past the deletion second. */
+    @Test
+    public void counterTombstonePurge() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c counter, " +
+                    "PRIMARY KEY (pk, ck)) WITH gc_grace_seconds = 0");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (long ck = 0; ck < 8; ck++)
+            execute("UPDATE %s SET c = c + ? WHERE pk = ? AND ck = ?", ck + 1, 1L, ck);
+        flush();
+        for (long ck = 0; ck < 4; ck++)
+            execute("DELETE c FROM %s WHERE pk = ? AND ck = ?", 1L, ck);
+        flush();
+
+        long maxLdt = Long.MIN_VALUE;
+        for (org.apache.cassandra.io.sstable.format.SSTableReader sstable : cfs.getLiveSSTables())
+        {
+            long ldt = sstable.getSSTableMetadata().maxLocalDeletionTime;
+            if (ldt != Long.MAX_VALUE)
+                maxLdt = Math.max(maxLdt, ldt);
+        }
+        org.junit.Assert.assertTrue("scenario produced no deletion times", maxLdt > 0 && maxLdt < Long.MAX_VALUE);
+
+        // retained at the boundary, purged one past
+        assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, maxLdt);
+        assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), DEFAULT_TASK, maxLdt + 1);
+    }
+}

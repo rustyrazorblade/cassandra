@@ -39,8 +39,16 @@ import org.quicktheories.impl.JavaRandom;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.db.BufferClustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.compaction.CursorCompactor;
+import org.apache.cassandra.db.context.CounterContext;
+import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.rows.BTreeRow;
+import org.apache.cassandra.db.rows.BufferCell;
+import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -50,6 +58,7 @@ import org.apache.cassandra.utils.AbstractTypeGenerators.ValueDomain;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CassandraGenerators;
 import org.apache.cassandra.utils.CassandraGenerators.TableMetadataBuilder;
+import org.apache.cassandra.utils.CounterId;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Generators;
 
@@ -142,6 +151,14 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         JavaRandom qtRandom = new JavaRandom(seed);
         Random workload = new Random(seed);
 
+        // ~1 in 5 examples: a COUNTER table.  Counters cannot mix with regular columns, so
+        // they get a dedicated generation mode with counter-update syntax.
+        if (workload.nextInt(5) == 0)
+        {
+            runCounterExample(seed, workload);
+            return;
+        }
+
         TableMetadata metadata = generateSupportedMetadata(qtRandom, workload);
 
         maybeCreateUDTs(metadata);
@@ -222,6 +239,147 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
                || (metadata.clusteringColumns().isEmpty() && !metadata.staticColumns().isEmpty()));
 
         return metadata;
+    }
+
+    /**
+     * Counter-table example: random clustering depth (0-2), 1-3 counter columns, optional
+     * static counter; rounds of increments with random deltas plus cell, static-cell, row,
+     * and partition deletes — the CASSANDRA-7346 tombstone-vs-increment interleavings arise
+     * naturally from delete-then-increment round ordering. A low-rate exotic-shape path exercises
+     * multi-shard, marked-local, and value-carrying-tombstone contexts. Wide hub partitions (when
+     * TEST_DIFFERENTIAL_HUB_ROWS_PER_ROUND is set) cross column_index_size.
+     */
+    private void runCounterExample(long seed, Random workload) throws Throwable
+    {
+        int clusterings = workload.nextInt(3);
+        int counters = 1 + workload.nextInt(3);
+        boolean staticCounter = clusterings > 0 && workload.nextBoolean();
+
+        // disable compression for exotic shapes so raw mutations are not hidden
+        StringBuilder schema = new StringBuilder("CREATE TABLE %s (pk bigint");
+        for (int i = 0; i < clusterings; i++)
+            schema.append(", ck").append(i).append(" bigint");
+        for (int i = 0; i < counters; i++)
+            schema.append(", c").append(i).append(" counter");
+        if (staticCounter)
+            schema.append(", cs counter static");
+        schema.append(", PRIMARY KEY (pk");
+        for (int i = 0; i < clusterings; i++)
+            schema.append(", ck").append(i);
+        schema.append(")) WITH gc_grace_seconds = 864000 AND compression = {'enabled': 'false'}");
+        createTable(schema.toString());
+        logger.info("randomizedDifferential seed={} counter schema:\n{}", seed, schema);
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        TableMetadata metadata = cfs.metadata();
+        List<ColumnMetadata> counterColumns = new ArrayList<>();
+        for (int i = 0; i < counters; i++)
+            counterColumns.add(metadata.getColumn(ByteBufferUtil.bytes("c" + i)));
+
+        StringBuilder where = new StringBuilder(" WHERE pk = ?");
+        for (int i = 0; i < clusterings; i++)
+            where.append(" AND ck").append(i).append(" = ?");
+
+        // wide hub partition (when configured): a dedicated pk that accumulates many rows per round
+        boolean buildWideHub = HUB_ROWS_PER_ROUND_MAX > 0;
+        long hubPk = 9999L;
+        int hubRowsPerRound = buildWideHub ? HUB_ROWS_PER_ROUND_MIN +
+                                             workload.nextInt(HUB_ROWS_PER_ROUND_MAX - HUB_ROWS_PER_ROUND_MIN + 1)
+                                           : 0;
+
+        int rounds = 2 + workload.nextInt(3);
+        for (int round = 0; round < rounds; round++)
+        {
+            int writes = 15 + workload.nextInt(26);
+            for (int w = 0; w < writes; w++)
+            {
+                Object[] key = new Object[1 + clusterings];
+                key[0] = (long) workload.nextInt(4);
+                for (int i = 0; i < clusterings; i++)
+                    key[1 + i] = (long) workload.nextInt(6);
+
+                int op = workload.nextInt(100);
+                if (op < 70)
+                {
+                    int col = workload.nextInt(counters);
+                    Object[] args = new Object[1 + key.length];
+                    args[0] = (long) (workload.nextInt(200) - 100);
+                    System.arraycopy(key, 0, args, 1, key.length);
+                    execute("UPDATE %s SET c" + col + " = c" + col + " + ?" + where, args);
+                }
+                else if (op < 80 && staticCounter)
+                {
+                    execute("UPDATE %s SET cs = cs + ? WHERE pk = ?", (long) (workload.nextInt(50) - 25), key[0]);
+                }
+                else if (op < 90)
+                {
+                    int col = workload.nextInt(counters);
+                    execute("DELETE c" + col + " FROM %s" + where, key);
+                }
+                else if (op < 96)
+                {
+                    execute("DELETE FROM %s" + where, key);
+                }
+                else
+                {
+                    execute("DELETE FROM %s WHERE pk = ?", key[0]);
+                }
+            }
+
+            // low-rate exotic-shape path: multi-shard, marked-local, and value-carrying-tombstone contexts
+            if (clusterings > 0 && workload.nextInt(10) == 0)
+            {
+                long pk = workload.nextInt(4);
+                long ck = workload.nextInt(6);
+                ColumnMetadata col = counterColumns.get(workload.nextInt(counterColumns.size()));
+                int shapeChoice = workload.nextInt(3);
+                if (shapeChoice == 0)
+                {
+                    // multi-shard context
+                    applyCounterCell(metadata, pk, ck, BufferCell.live(
+                        col, 5000 + round * 100,
+                        counterContext(globalShard(1, 5, 100), remoteShard(2, 3, 7))));
+                }
+                else if (shapeChoice == 1)
+                {
+                    // marked-local context
+                    applyCounterCell(metadata, pk, ck, BufferCell.live(
+                        col, 6000 + round * 100,
+                        markedCounterContext(counterContext(localShard(3, 2, 11), globalShard(4, 1, 5)))));
+                }
+                else
+                {
+                    // value-carrying tombstone (a tombstone that still holds a context value)
+                    int nowInSeconds = (int) FBUtilities.nowInSeconds();
+                    applyCounterCell(metadata, pk, ck,
+                        new BufferCell(col, 7000 + round * 100, Cell.NO_TTL,
+                                                                     nowInSeconds - 60,
+                                                                     counterContext(globalShard(9, 1, 1)), null));
+                }
+            }
+
+            // wide hub partition: many rows per round to cross column_index_size
+            if (buildWideHub && clusterings > 0)
+            {
+                for (int h = 0; h < hubRowsPerRound; h++)
+                {
+                    Object[] hubKey = new Object[1 + clusterings];
+                    hubKey[0] = hubPk;
+                    hubKey[1] = (long) (round * hubRowsPerRound + h);
+                    for (int i = 1; i < clusterings; i++)
+                        hubKey[1 + i] = (long) workload.nextInt(3);
+                    int col = workload.nextInt(counters);
+                    Object[] args = new Object[1 + hubKey.length];
+                    args[0] = (long) (h + round * 10);
+                    System.arraycopy(hubKey, 0, args, 1, hubKey.length);
+                    execute("UPDATE %s SET c" + col + " = c" + col + " + ?" + where, args);
+                }
+            }
+
+            flush();
+        }
+
+        assertCursorMatchesIterator(cfs);
     }
 
     /** Appends {@code columns[i].name}, joined by separator. */
@@ -728,6 +886,57 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
                     throw new AssertionError("Failure for seed " + seed + " (example " + i + "): " + t.getMessage(), t);
                 }
             }
+        }
+    }
+
+    // Counter exotic-shape helpers for runCounterExample fuzz
+
+    private static void applyCounterCell(TableMetadata metadata, long pk, long ck, Cell<?> cell)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(new BufferClustering(ByteBufferUtil.bytes(ck)));
+        builder.addCell(cell);
+        PartitionUpdate update =
+            PartitionUpdate.singleRowUpdate(
+                metadata, metadata.partitioner.decorateKey(ByteBufferUtil.bytes(pk)), builder.build());
+        new Mutation(update).apply();
+    }
+
+    private static ByteBuffer counterContext(ShardSpec... shards)
+    {
+        int globals = 0, locals = 0, remotes = 0;
+        for (ShardSpec s : shards)
+        {
+            if (s.kind == 0) globals++;
+            else if (s.kind == 1) locals++;
+            else remotes++;
+        }
+        CounterContext.ContextState state =
+            CounterContext.ContextState.allocate(globals, locals, remotes);
+        for (ShardSpec s : shards)
+        {
+            if (s.kind == 0) state.writeGlobal(CounterId.fromInt(s.id), s.clock, s.count);
+            else if (s.kind == 1) state.writeLocal(CounterId.fromInt(s.id), s.clock, s.count);
+            else state.writeRemote(CounterId.fromInt(s.id), s.clock, s.count);
+        }
+        return state.context;
+    }
+
+    private static ByteBuffer markedCounterContext(ByteBuffer context)
+    {
+        return CounterContext.instance().markLocalToBeCleared(context);
+    }
+
+    private static ShardSpec globalShard(int id, long clock, long count) { return new ShardSpec(0, id, clock, count); }
+    private static ShardSpec localShard(int id, long clock, long count)  { return new ShardSpec(1, id, clock, count); }
+    private static ShardSpec remoteShard(int id, long clock, long count) { return new ShardSpec(2, id, clock, count); }
+
+    private static final class ShardSpec
+    {
+        final int kind; final int id; final long clock; final long count;
+        ShardSpec(int kind, int id, long clock, long count)
+        {
+            this.kind = kind; this.id = id; this.clock = clock; this.count = count;
         }
     }
 }
