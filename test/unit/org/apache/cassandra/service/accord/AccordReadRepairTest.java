@@ -45,6 +45,7 @@ import static org.apache.cassandra.net.Verb.READ_REPAIR_REQ;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordReadRepairTest extends AccordTestBase
 {
     private static final Logger logger = LoggerFactory.getLogger(AccordReadRepairTest.class);

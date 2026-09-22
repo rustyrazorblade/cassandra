@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.util.Arrays;
 
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.Columns;
 import org.apache.cassandra.db.DeletionTime;
@@ -61,6 +62,21 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
     public UnfilteredDescriptor(AbstractType<?>[] clusteringTypes)
     {
         super(clusteringTypes);
+    }
+
+    /**
+     * Builds a comparison-only descriptor from a query-side clustering bound (never handed to a
+     * cursor, never row/marker fields).  The cursor read path uses this to give a not-yet-opened
+     * sstable leg a sortable lower bound in the merge, so the leg's partition header is opened
+     * only when the merge actually reaches its data.  The bound's values go through the same
+     * {@code serializeValuesWithoutSize} wire form {@link #loadClustering} parses, so the result
+     * compares byte-for-byte against a leg's own loaded descriptor.
+     */
+    public static UnfilteredDescriptor forBound(AbstractType<?>[] clusteringTypes, ClusteringBound<?> bound)
+    {
+        UnfilteredDescriptor descriptor = new UnfilteredDescriptor(clusteringTypes);
+        descriptor.storeClustering((byte) bound.kind().ordinal(), bound.size(), bound);
+        return descriptor;
     }
 
     void loadTombstone(RandomAccessReader dataReader,

@@ -41,8 +41,11 @@ import org.apache.cassandra.utils.ByteArrayUtil;
  * CounterId bytes.
  *
  * Instances hold grow-once scratch buffers; one instance per compaction, NOT thread-safe.
+ *
+ * The cursor READ path (CASSANDRA-20428) reuses these primitives to reconcile counter cells
+ * byte-for-byte, so the class and the operations it needs are public.
  */
-final class CursorCounterContexts
+public final class CursorCounterContexts
 {
     private static final Logger logger = LoggerFactory.getLogger(CursorCounterContexts.class);
 
@@ -52,18 +55,18 @@ final class CursorCounterContexts
     private static final int CLOCK_LENGTH = 8;
     private static final int STEP_LENGTH = COUNTER_ID_LENGTH + CLOCK_LENGTH + 8;
 
-    enum MergeResult { LEFT_SUPERSET, RIGHT_SUPERSET, MERGED }
+    public enum MergeResult { LEFT_SUPERSET, RIGHT_SUPERSET, MERGED }
 
     private byte[] scratch = new byte[128];
     private int scratchLength;
 
     /** Valid after {@link #merge} returns MERGED, or after {@link #clearMarkedLocal} returns >= 0. */
-    byte[] scratchBuffer()
+    public byte[] scratchBuffer()
     {
         return scratch;
     }
 
-    int scratchLength()
+    public int scratchLength()
     {
         return scratchLength;
     }
@@ -185,7 +188,7 @@ final class CursorCounterContexts
      * identity-shortcut byte behavior); otherwise the merged context is written to the
      * scratch buffer and MERGED is returned.
      */
-    MergeResult merge(byte[] a, int aOff, int aLen, byte[] b, int bOff, int bLen)
+    public MergeResult merge(byte[] a, int aOff, int aLen, byte[] b, int bOff, int bLen)
     {
         boolean leftIsSuperSet = true;
         boolean rightIsSuperSet = true;
@@ -346,7 +349,7 @@ final class CursorCounterContexts
      * @return the cleared length written into the scratch buffer, or -1 when the context is
      *         not marked (or has no local elts to drop) and the raw window should be used
      */
-    int clearMarkedLocal(byte[] src, int off, int len)
+    public int clearMarkedLocal(byte[] src, int off, int len)
     {
         short n = ByteArrayUtil.getShort(src, off);
         if (n >= 0)

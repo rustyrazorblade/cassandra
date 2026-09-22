@@ -53,6 +53,7 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableId;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
 import org.apache.cassandra.io.sstable.format.big.BigTableReader;
@@ -184,12 +185,30 @@ public class MockSchema
 
     public static SSTableReader sstable(int generation, int size, boolean keepRef, long firstToken, long lastToken, int level, ColumnFamilyStore cfs, int minLocalDeletionTime, long timestamp)
     {
-        SSTableFormat<?, ?> format = DatabaseDescriptor.getSelectedSSTableFormat();
-        Descriptor descriptor = new Descriptor(cfs.getDirectories().getDirectoryForNewSSTables(),
-                                               cfs.getKeyspaceName(),
-                                               cfs.getTableName(),
-                                               sstableId(generation),
-                                               format);
+        return sstable(generation, size, keepRef, firstToken, lastToken, level, cfs, minLocalDeletionTime, timestamp, null);
+    }
+
+    /** A mock sstable whose descriptor carries the given (possibly non-latest) format version. */
+    public static SSTableReader sstableWithVersion(int generation, Version version, ColumnFamilyStore cfs)
+    {
+        return sstable(generation, 0, false, generation, generation, 0, cfs, Integer.MAX_VALUE, System.currentTimeMillis() * 1000, version);
+    }
+
+    /** @param version the descriptor's format version, or null for the selected format's latest */
+    public static SSTableReader sstable(int generation, int size, boolean keepRef, long firstToken, long lastToken, int level, ColumnFamilyStore cfs, int minLocalDeletionTime, long timestamp, Version version)
+    {
+        SSTableFormat<?, ?> format = version != null ? version.format : DatabaseDescriptor.getSelectedSSTableFormat();
+        Descriptor descriptor = version != null
+                                ? new Descriptor(version,
+                                                 cfs.getDirectories().getDirectoryForNewSSTables(),
+                                                 cfs.getKeyspaceName(),
+                                                 cfs.getTableName(),
+                                                 sstableId(generation))
+                                : new Descriptor(cfs.getDirectories().getDirectoryForNewSSTables(),
+                                                 cfs.getKeyspaceName(),
+                                                 cfs.getTableName(),
+                                                 sstableId(generation),
+                                                 format);
 
         if (BigFormat.is(format))
         {

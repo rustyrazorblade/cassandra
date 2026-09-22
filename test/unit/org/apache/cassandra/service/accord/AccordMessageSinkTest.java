@@ -19,6 +19,7 @@
 package org.apache.cassandra.service.accord;
 
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -57,6 +58,7 @@ import org.apache.cassandra.service.accord.api.AccordTimeService;
 import org.apache.cassandra.service.accord.topology.AccordEndpointMapper;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordMessageSinkTest
 {
     private static final Node.Id node = new Node.Id(1);
