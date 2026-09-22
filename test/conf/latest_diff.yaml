@@ -48,6 +48,8 @@ commitlog_disk_access_mode: auto
 
 cursor_compaction_enabled: true
 
+cursor_flush_enabled: true
+
 background_write_disk_access_mode: direct
 
 sstable:

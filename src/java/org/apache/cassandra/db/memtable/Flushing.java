@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.db.memtable;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -32,18 +34,24 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.DiskBoundaries;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.IntervalSet;
+import org.apache.cassandra.db.compaction.unified.ShardedMultiWriter;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.partitions.MemtableCursorFlusher;
 import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.SSTableCursorWriter;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
+import org.apache.cassandra.io.sstable.SimpleSSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.Clock;
@@ -53,6 +61,21 @@ import org.apache.cassandra.utils.ThreadStats;
 public class Flushing
 {
     private static final Logger logger = LoggerFactory.getLogger(Flushing.class);
+
+    // Counters for which flush path ran.  Package-private so tests can confirm the cursor path
+    // was used.  Not production behaviour.
+    private static final java.util.concurrent.atomic.LongAdder cursorFlushesRun = new java.util.concurrent.atomic.LongAdder();
+    private static final java.util.concurrent.atomic.LongAdder iteratorFlushesRun = new java.util.concurrent.atomic.LongAdder();
+
+    static long cursorFlushesRun()
+    {
+        return cursorFlushesRun.sum();
+    }
+
+    static long iteratorFlushesRun()
+    {
+        return iteratorFlushesRun.sum();
+    }
 
     private Flushing() // prevent instantiation
     {
@@ -159,26 +182,10 @@ public class Flushing
             long startCpuTime = ThreadStats.getCurrentThreadCpuTimeNano();
             long startAllocatedBytes = ThreadStats.getCurrentThreadAllocatedBytes();
 
-            // (we can't clear out the map as-we-go to free up memory,
-            //  since the memtable is being used for queries in the "pending flush" category)
-            for (Partition partition : toFlush)
-            {
-                // Each batchlog partition is a separate entry in the log. And for an entry, we only do 2
-                // operations: 1) we insert the entry and 2) we delete it. Further, BL data is strictly local,
-                // we don't need to preserve tombstones for repair. So if both operation are in this
-                // memtable (which will almost always be the case if there is no ongoing failure), we can
-                // just skip the entry (CASSANDRA-4667).
-                if (isBatchLogTable && !partition.partitionLevelDeletion().isLive() && partition.hasRows())
-                    continue;
-
-                if (!partition.isEmpty())
-                {
-                    try (UnfilteredRowIterator iter = partition.unfilteredIterator())
-                    {
-                        writer.append(iter);
-                    }
-                }
-            }
+            if (canUseCursorFlush())
+                writeSortedContentsViaCursor();
+            else
+                writeSortedContentsViaIterator();
 
             if (logCompletion)
             {
@@ -212,6 +219,125 @@ public class Flushing
                 );
                 // Update the metrics
                 metrics.bytesFlushed.inc(bytesFlushed);
+            }
+        }
+
+        /**
+         * Cursor flush needs the underlying {@link SortedTableWriter}(s) that the flush's
+         * {@link SSTableMultiWriter} wraps, so it can build an {@link SSTableCursorWriter} around
+         * each.  Two writer shapes are supported: {@link SimpleSSTableMultiWriter} (a single writer,
+         * from STCS/LCS/TWCS) and {@link ShardedMultiWriter} (one writer per shard, from
+         * {@code UnifiedCompactionStrategy}).  Any other shape falls back to the iterator path.
+         */
+        private boolean canUseCursorFlush()
+        {
+            if (!DatabaseDescriptor.cursorFlushEnabled())
+                return false;
+
+            if (!cursorFlushSupportsWriterShape())
+            {
+                logger.debug("Cursor flush is not supported for {}.{}: SSTableMultiWriter shape {} is not supported",
+                             toFlush.metadata().keyspace, toFlush.metadata().name, writer.getClass().getSimpleName());
+                return false;
+            }
+
+            return MemtableCursorFlusher.isSupported(toFlush.metadata(), toFlush.memtable());
+        }
+
+        private boolean cursorFlushSupportsWriterShape()
+        {
+            if (writer instanceof SimpleSSTableMultiWriter)
+                return ((SimpleSSTableMultiWriter) writer).writer() instanceof SortedTableWriter;
+
+            // Every shard writer is a SortedTableWriter, built the same way as the single-writer
+            // path.  Shards are created lazily, so only the first one exists yet; check that.
+            if (writer instanceof ShardedMultiWriter)
+                return ((ShardedMultiWriter) writer).currentWriter() instanceof SortedTableWriter;
+
+            return false;
+        }
+
+        private void writeSortedContentsViaCursor()
+        {
+            cursorFlushesRun.increment();
+            // The flush transaction finishes and closes each shard writer elsewhere, as it does for
+            // the iterator path.  The flusher's close only releases each cursor's own state.
+            try
+            {
+                new MemtableCursorFlusher(buildOutputWriterProvider(), toFlush.metadata()).flush(toFlush);
+            }
+            catch (IOException e)
+            {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        /**
+         * Gives the flusher the writers to write into.  The single-writer case never switches; the
+         * sharded case delegates to {@link ShardedMultiWriter}'s own {@code currentWriter} and
+         * {@code maybeSwitchWriter}, so the cursor writes into that multi-writer's own per-shard
+         * writers.  {@link #cursorFlushSupportsWriterShape} has already checked the shape.
+         */
+        private MemtableCursorFlusher.OutputWriterProvider buildOutputWriterProvider()
+        {
+            if (writer instanceof ShardedMultiWriter)
+            {
+                ShardedMultiWriter sharded = (ShardedMultiWriter) writer;
+                return new MemtableCursorFlusher.OutputWriterProvider()
+                {
+                    @Override
+                    public SortedTableWriter<?, ?> firstWriter()
+                    {
+                        return (SortedTableWriter<?, ?>) sharded.currentWriter();
+                    }
+
+                    @Override
+                    public SortedTableWriter<?, ?> maybeSwitchWriter(DecoratedKey key)
+                    {
+                        return (SortedTableWriter<?, ?>) sharded.maybeSwitchWriter(key);
+                    }
+                };
+            }
+
+            SortedTableWriter<?, ?> single = (SortedTableWriter<?, ?>) ((SimpleSSTableMultiWriter) writer).writer();
+            return new MemtableCursorFlusher.OutputWriterProvider()
+            {
+                @Override
+                public SortedTableWriter<?, ?> firstWriter()
+                {
+                    return single;
+                }
+
+                @Override
+                public SortedTableWriter<?, ?> maybeSwitchWriter(DecoratedKey key)
+                {
+                    return null;
+                }
+            };
+        }
+
+        private void writeSortedContentsViaIterator()
+        {
+            iteratorFlushesRun.increment();
+            // (we can't clear out the map as-we-go to free up memory,
+            //  since the memtable is being used for queries in the "pending flush" category)
+            for (Partition partition : toFlush)
+            {
+                // Each batchlog partition is a separate entry in the log. And for an entry, we only do 2
+                // operations: 1) we insert the entry and 2) we delete it. Further, BL data is strictly local,
+                // we don't need to preserve tombstones for repair. So if both operation are in this
+                // memtable (which will almost always be the case if there is no ongoing failure), we can
+                // just skip the entry (CASSANDRA-4667).
+                if (isBatchLogTable && !partition.partitionLevelDeletion().isLive() && partition.hasRows())
+                    continue;
+
+                if (!partition.isEmpty())
+                {
+                    try (UnfilteredRowIterator iter = partition.unfilteredIterator())
+                    {
+                        writer.append(iter);
+                    }
+                }
             }
         }
 

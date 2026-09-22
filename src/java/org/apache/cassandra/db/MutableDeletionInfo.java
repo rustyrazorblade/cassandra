@@ -177,6 +177,11 @@ public class MutableDeletionInfo implements DeletionInfo
         return ranges != null && !ranges.isEmpty();
     }
 
+    public RangeTombstoneList rangeTombstoneList()
+    {
+        return ranges;
+    }
+
     public int rangeCount()
     {
         return hasRanges() ? ranges.size() : 0;
