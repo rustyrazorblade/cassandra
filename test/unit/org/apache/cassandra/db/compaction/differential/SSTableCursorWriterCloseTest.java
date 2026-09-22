@@ -120,7 +120,7 @@ public class SSTableCursorWriterCloseTest extends CQLTester
             assertEquals("output writer must be BTI so BtiCursorIndexWriter.close() runs",
                          "bti", outputDescriptor.getFormat().name());
 
-            SSTableCursorWriter cursorWriter = new SSTableCursorWriter(ssTableWriter);
+            SSTableCursorWriter cursorWriter = SSTableCursorWriter.forCompaction(ssTableWriter);
             // Copy the whole sstable through the cursor pipe (static rows, rows, range tombstones).
             SSTableCursorPipeUtil.copySSTable(cursorReader, cursorWriter);
 
