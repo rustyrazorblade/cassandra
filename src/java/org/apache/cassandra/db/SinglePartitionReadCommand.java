@@ -703,7 +703,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
 
                     if (cursorValueTransfer == null)
-                        cursorValueTransfer = new CursorReads.ValueTransfer();
+                        cursorValueTransfer = controller.cursorValueTransfer();
                     CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
                                                                      intersects ? filter.getSlices(metadata()) : Slices.NONE,
                                                                      columnFilter(), metricsCollector, cursorValueTransfer);
@@ -733,7 +733,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 else
                 {
                     if (cursorValueTransfer == null)
-                        cursorValueTransfer = new CursorReads.ValueTransfer();
+                        cursorValueTransfer = controller.cursorValueTransfer();
                     CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
                                                                      Slices.NONE, columnFilter(), metricsCollector,
                                                                      cursorValueTransfer);
@@ -1293,7 +1293,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     if (cursorMergedLegs)
                     {
                         if (cursorValueTransfer == null)
-                            cursorValueTransfer = new CursorReads.ValueTransfer();
+                            cursorValueTransfer = controller.cursorValueTransfer();
                         // Deferred open: the partition header (the counted read) is opened only when
                         // the merge reaches this leg's data, mirroring the iterator path's
                         // makeRowIteratorWithLowerBound.  Returns an already-opened leg (or null for
@@ -1332,10 +1332,12 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         // limit query over-reads sstables the merge never needs.
                         if (filter.isReversed() && intersects)
                             iter = CursorReads.reversedLegWithLowerBound(sstable, metadata(), partitionKey(),
-                                                                         legSlices, columnFilter(), metricsCollector);
+                                                                         legSlices, columnFilter(), metricsCollector,
+                                                                         controller.cursorValueTransfer());
                         else
                             iter = CursorReads.sstableRowIterator(sstable, metadata(), partitionKey(),
-                                                                  legSlices, columnFilter(), metricsCollector, filter.isReversed());
+                                                                  legSlices, columnFilter(), metricsCollector,
+                                                                  filter.isReversed(), controller.cursorValueTransfer());
                     }
                     else
                         iter = intersects ? makeRowIteratorWithLowerBound(cfs, sstable, metricsCollector)
@@ -1360,7 +1362,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     if (cursorMergedLegs)
                     {
                         if (cursorValueTransfer == null)
-                            cursorValueTransfer = new CursorReads.ValueTransfer();
+                            cursorValueTransfer = controller.cursorValueTransfer();
                         CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
                                                                          Slices.NONE, columnFilter(), metricsCollector,
                                                                          cursorValueTransfer);
@@ -1391,7 +1393,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
                     UnfilteredRowIterator iter = cursorReads
                                                  ? CursorReads.sstableRowIterator(sstable, metadata(), partitionKey(),
-                                                                                  Slices.NONE, columnFilter(), metricsCollector, filter.isReversed())
+                                                                                  Slices.NONE, columnFilter(), metricsCollector,
+                                                                                  filter.isReversed(), controller.cursorValueTransfer())
                                                  : makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
 
                     // if the sstable contains a partition delete, then we must include it regardless of whether it
@@ -1740,7 +1743,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             {
                 boolean intersects = intersects(sstable);
                 if (valueTransfer == null)
-                    valueTransfer = new CursorReads.ValueTransfer();
+                    valueTransfer = controller.cursorValueTransfer();
                 CursorReads.PendingLeg leg = CursorReads.openLeg(sstable, metadata(), partitionKey(),
                                                                  intersects ? filter.getSlices(metadata()) : Slices.NONE,
                                                                  columnFilter(), digestMetrics, valueTransfer);
@@ -1956,8 +1959,9 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 
         ImmutableBTreePartition result = null;
         SSTableReadMetricsCollector metricsCollector = new SSTableReadMetricsCollector();
-        // One value-transfer scratch for the whole read: the driver reads legs one at a time.
-        CursorReads.ValueTransfer transfer = new CursorReads.ValueTransfer();
+        // One value-transfer scratch for the whole read: the driver reads legs one at a time.  Sourced
+        // from the controller so it is shared with the other commands of this query execution.
+        CursorReads.ValueTransfer transfer = controller.cursorValueTransfer();
 
         // The whole driver materializes forward (ascending clustering order) and reverses only at the
         // final emit below. This keeps a reversed NAMES read off ReverseSlicedCursorIterator (helper A
