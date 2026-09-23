@@ -473,7 +473,27 @@ public final class CursorReads
                                                            SSTableReadsListener listener,
                                                            boolean reversed)
     {
-        PendingLeg leg = openLeg(sstable, metadata, key, slices, columnFilter, listener, new ValueTransfer());
+        // Callers without a shared per-execution scratch (tests, allocation baselines) get a private
+        // transfer.  The single-partition read path passes the controller's shared instance below.
+        return sstableRowIterator(sstable, metadata, key, slices, columnFilter, listener, reversed, new ValueTransfer());
+    }
+
+    /**
+     * {@link #sstableRowIterator} that reuses a caller-owned {@link ValueTransfer}, so the commands of
+     * one query execution (an IN read, the legacy-2i base-read fan-out) and the single-leg legs of one
+     * command share one 4 KB scratch instead of allocating one per leg.  The transfer is only in flight
+     * during a cell copy, so a merge that interleaves legs is safe (see {@link ValueTransfer}).
+     */
+    public static UnfilteredRowIterator sstableRowIterator(SSTableReader sstable,
+                                                           TableMetadata metadata,
+                                                           DecoratedKey key,
+                                                           Slices slices,
+                                                           ColumnFilter columnFilter,
+                                                           SSTableReadsListener listener,
+                                                           boolean reversed,
+                                                           ValueTransfer transfer)
+    {
+        PendingLeg leg = openLeg(sstable, metadata, key, slices, columnFilter, listener, transfer);
         if (leg == null)
             // mirrors BigTableReader/BtiTableReader.rowIterator with a null index entry
             return absentPartitionIterator(metadata, key, sstable, reversed);
@@ -792,9 +812,10 @@ public final class CursorReads
                                                                   DecoratedKey key,
                                                                   Slices slices,
                                                                   ColumnFilter columnFilter,
-                                                                  SSTableReadsListener listener)
+                                                                  SSTableReadsListener listener,
+                                                                  ValueTransfer transfer)
     {
-        return new ReversedCursorLegWithLowerBound(sstable, metadata, key, slices, columnFilter, listener);
+        return new ReversedCursorLegWithLowerBound(sstable, metadata, key, slices, columnFilter, listener, transfer);
     }
 
     /**
@@ -809,13 +830,15 @@ public final class CursorReads
         private final Slices slices;
         private final ColumnFilter columnFilter;
         private final SSTableReadsListener listener;
+        private final ValueTransfer transfer;
 
         ReversedCursorLegWithLowerBound(SSTableReader sstable,
                                         TableMetadata metadata,
                                         DecoratedKey key,
                                         Slices slices,
                                         ColumnFilter columnFilter,
-                                        SSTableReadsListener listener)
+                                        SSTableReadsListener listener,
+                                        ValueTransfer transfer)
         {
             super(key, sstable, slices, true, columnFilter, listener);
             this.sstable = sstable;
@@ -823,6 +846,7 @@ public final class CursorReads
             this.slices = slices;
             this.columnFilter = columnFilter;
             this.listener = listener;
+            this.transfer = transfer;
         }
 
         @Override
@@ -830,7 +854,7 @@ public final class CursorReads
         {
             // The counted partition-header read happens here, inside openLeg, and only when the merge
             // descends past this leg's lower bound -- exactly the deferral the iterator path gets.
-            return sstableRowIterator(sstable, metadata, partitionKey(), slices, columnFilter, listener, true);
+            return sstableRowIterator(sstable, metadata, partitionKey(), slices, columnFilter, listener, true, transfer);
         }
     }
 
@@ -2422,6 +2446,29 @@ public final class CursorReads
         // chunking buffer for variable-length cell values only; fixed-length values use the final
         // value array itself as the transfer buffer (see CellValueCapture)
         final byte[] transferBuffer = new byte[4096];
+
+        // Single-live guard.  One ValueTransfer is now shared across every leg AND every command of
+        // one query execution (see ReadExecutionController.cursorValueTransfer), so a re-entrant or
+        // concurrent cell copy that shared it would silently corrupt a value.  acquire()/release()
+        // bracket each cell-value materialization; both are only exercised under assertions (-ea), so
+        // production pays nothing.
+        private boolean inUse;
+
+        /** @return true if the scratch was free and is now marked in use; false if already in use. */
+        boolean acquire()
+        {
+            if (inUse)
+                return false;
+            inUse = true;
+            return true;
+        }
+
+        /** Clears the in-use mark; always returns true so it can run as an assert in a finally block. */
+        boolean release()
+        {
+            inUse = false;
+            return true;
+        }
     }
 
     /**
@@ -2715,19 +2762,27 @@ public final class CursorReads
                     }
                     else
                     {
-                        int fixedLength = cellType.valueLengthIfFixed();
-                        if (fixedLength >= 0)
+                        assert transfer.acquire() : "ValueTransfer single-live invariant violated (concurrent cursor cell copy)";
+                        try
                         {
-                            // the final value array IS the transfer buffer: copyCellValue's single
-                            // readFully lands the bytes in place, one copy total
-                            byte[] target = fixedLength == 0 ? ByteArrayAccessor.instance.empty() : new byte[fixedLength];
-                            state = cursor.copyCellValue(transfer.valueCapture.prepareFixed(target), target);
+                            int fixedLength = cellType.valueLengthIfFixed();
+                            if (fixedLength >= 0)
+                            {
+                                // the final value array IS the transfer buffer: copyCellValue's single
+                                // readFully lands the bytes in place, one copy total
+                                byte[] target = fixedLength == 0 ? ByteArrayAccessor.instance.empty() : new byte[fixedLength];
+                                state = cursor.copyCellValue(transfer.valueCapture.prepareFixed(target), target);
+                            }
+                            else
+                            {
+                                state = cursor.copyCellValue(transfer.valueCapture.prepareVariable(), transfer.transferBuffer);
+                            }
+                            value = transfer.valueCapture.finish();
                         }
-                        else
+                        finally
                         {
-                            state = cursor.copyCellValue(transfer.valueCapture.prepareVariable(), transfer.transferBuffer);
+                            assert transfer.release();
                         }
-                        value = transfer.valueCapture.finish();
                     }
 
                     // Live counter cell: apply the marked-local shard clear the iterator path gets
@@ -3813,18 +3868,26 @@ public final class CursorReads
                 }
                 else
                 {
-                    SSTableCursorReader.CellCursor cc = cursor.cellCursor();
-                    int fixedLength = cc.cellType.valueLengthIfFixed();
-                    if (fixedLength >= 0)
+                    assert transfer.acquire() : "ValueTransfer single-live invariant violated (concurrent cursor cell copy)";
+                    try
                     {
-                        byte[] target = fixedLength == 0 ? ByteArrayAccessor.instance.empty() : new byte[fixedLength];
-                        cursor.copyCellValue(transfer.valueCapture.prepareFixed(target), target);
-                        value = transfer.valueCapture.finish();
+                        SSTableCursorReader.CellCursor cc = cursor.cellCursor();
+                        int fixedLength = cc.cellType.valueLengthIfFixed();
+                        if (fixedLength >= 0)
+                        {
+                            byte[] target = fixedLength == 0 ? ByteArrayAccessor.instance.empty() : new byte[fixedLength];
+                            cursor.copyCellValue(transfer.valueCapture.prepareFixed(target), target);
+                            value = transfer.valueCapture.finish();
+                        }
+                        else
+                        {
+                            cursor.copyCellValue(transfer.valueCapture.prepareVariable(), transfer.transferBuffer);
+                            value = transfer.valueCapture.finish();
+                        }
                     }
-                    else
+                    finally
                     {
-                        cursor.copyCellValue(transfer.valueCapture.prepareVariable(), transfer.transferBuffer);
-                        value = transfer.valueCapture.finish();
+                        assert transfer.release();
                     }
                 }
             }
@@ -3851,9 +3914,21 @@ public final class CursorReads
             if (cursor.state() == CELL_VALUE_START)
             {
                 if (pendingValueSkip)
+                {
                     cursor.skipCellValue(); // reconciles as EMPTY, like cellValue()
+                }
                 else
-                    cursor.copyCellValue(scratch, transfer.transferBuffer);
+                {
+                    assert transfer.acquire() : "ValueTransfer single-live invariant violated (concurrent cursor cell copy)";
+                    try
+                    {
+                        cursor.copyCellValue(scratch, transfer.transferBuffer);
+                    }
+                    finally
+                    {
+                        assert transfer.release();
+                    }
+                }
             }
         }
 
