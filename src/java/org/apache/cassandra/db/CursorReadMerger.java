@@ -47,6 +47,7 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_END;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.ROW_START;
@@ -589,7 +590,9 @@ final class CursorReadMerger
             int state = leg.cursorState();
             if (isState(state, ROW_START | TOMBSTONE_START))
                 leg.readUnfilteredHeader();
-            else if (!isState(state, PARTITION_END | DONE))
+            // A force-opened leg is already past its header: a row lands at CELL_HEADER_START, a
+            // range-tombstone marker at UNFILTERED_END.  Its uDesc is loaded, so leave it to sort.
+            else if (!isState(state, CELL_HEADER_START | UNFILTERED_END | PARTITION_END | DONE))
                 throw new IllegalStateException("Leg in an unexpected state before unfiltered sort: " + state);
         }
         CLUSTERING_SORT.sortPerturbed(legs, equalsNext, prevMergeLimit, legs.length);
