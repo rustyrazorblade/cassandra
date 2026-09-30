@@ -330,20 +330,22 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
             if (clusterings > 0 && workload.nextInt(10) == 0)
             {
                 long pk = workload.nextInt(4);
-                long ck = workload.nextInt(6);
+                long[] cks = new long[clusterings];
+                for (int i = 0; i < clusterings; i++)
+                    cks[i] = workload.nextInt(6);
                 ColumnMetadata col = counterColumns.get(workload.nextInt(counterColumns.size()));
                 int shapeChoice = workload.nextInt(3);
                 if (shapeChoice == 0)
                 {
                     // multi-shard context
-                    applyCounterCell(metadata, pk, ck, BufferCell.live(
+                    applyCounterCell(metadata, pk, cks, BufferCell.live(
                         col, 5000 + round * 100,
                         counterContext(globalShard(1, 5, 100), remoteShard(2, 3, 7))));
                 }
                 else if (shapeChoice == 1)
                 {
                     // marked-local context
-                    applyCounterCell(metadata, pk, ck, BufferCell.live(
+                    applyCounterCell(metadata, pk, cks, BufferCell.live(
                         col, 6000 + round * 100,
                         markedCounterContext(counterContext(localShard(3, 2, 11), globalShard(4, 1, 5)))));
                 }
@@ -351,7 +353,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
                 {
                     // value-carrying tombstone (a tombstone that still holds a context value)
                     int nowInSeconds = (int) FBUtilities.nowInSeconds();
-                    applyCounterCell(metadata, pk, ck,
+                    applyCounterCell(metadata, pk, cks,
                         new BufferCell(col, 7000 + round * 100, Cell.NO_TTL,
                                                                      nowInSeconds - 60,
                                                                      counterContext(globalShard(9, 1, 1)), null));
@@ -891,10 +893,14 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
 
     // Counter exotic-shape helpers for runCounterExample fuzz
 
-    private static void applyCounterCell(TableMetadata metadata, long pk, long ck, Cell<?> cell)
+    /** Writes one counter cell directly; the row needs one clustering value per clustering column. */
+    private static void applyCounterCell(TableMetadata metadata, long pk, long[] cks, Cell<?> cell)
     {
+        ByteBuffer[] clustering = new ByteBuffer[cks.length];
+        for (int i = 0; i < cks.length; i++)
+            clustering[i] = ByteBufferUtil.bytes(cks[i]);
         Row.Builder builder = BTreeRow.unsortedBuilder();
-        builder.newRow(new BufferClustering(ByteBufferUtil.bytes(ck)));
+        builder.newRow(new BufferClustering(clustering));
         builder.addCell(cell);
         PartitionUpdate update =
             PartitionUpdate.singleRowUpdate(
