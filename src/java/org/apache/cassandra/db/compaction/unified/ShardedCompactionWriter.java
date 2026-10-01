@@ -28,7 +28,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.ShardTracker;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
-import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
 import org.apache.cassandra.utils.FBUtilities;
@@ -47,7 +47,7 @@ public class ShardedCompactionWriter extends CompactionAwareWriter
 
     public ShardedCompactionWriter(ColumnFamilyStore cfs,
                                    Directories directories,
-                                   LifecycleTransaction txn,
+                                   ILifecycleTransaction txn,
                                    Set<SSTableReader> nonExpiredSSTables,
                                    boolean keepOriginals,
                                    ShardTracker boundaries)

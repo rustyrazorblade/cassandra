@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-package org.apache.cassandra.test.microbench.sstable;
+package org.apache.cassandra.io.sstable;
 
 import java.io.IOException;
 
@@ -24,11 +24,6 @@ import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.ReusableCellLivenessInfo;
-import org.apache.cassandra.io.sstable.PartitionDescriptor;
-import org.apache.cassandra.db.ReusableLivenessInfo;
-import org.apache.cassandra.io.sstable.SSTableCursorReader;
-import org.apache.cassandra.io.sstable.SSTableCursorWriter;
-import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.*;
 
@@ -106,9 +101,9 @@ public class SSTableCursorPipeUtil
 
     public static int copyRangeTombstone(SSTableCursorReader reader, SSTableCursorWriter writer, UnfilteredDescriptor unfilteredDescriptor, int unfilteredIndex) throws IOException
     {
-        int readerState = reader.readTombstoneMarker(unfilteredDescriptor);
+        reader.readTombstoneMarker(unfilteredDescriptor);
         writer.writeRangeTombstone(unfilteredDescriptor, unfilteredIndex == 0);
-        return readerState;
+        return reader.continueReading();
     }
 
     private final static byte[] copyColumnValueBuffer = new byte[4096]; // used to copy cell contents (maybe piecemeal if very large, since we don't have a direct read option)

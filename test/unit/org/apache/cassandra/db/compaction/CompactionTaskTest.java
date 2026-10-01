@@ -42,6 +42,7 @@ import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.compaction.writers.MaxSSTableSizeWriter;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.TestableLifecycleTransaction;
@@ -280,7 +281,7 @@ public class CompactionTaskTest
                 @Override
                 public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs,
                                                                       Directories directories,
-                                                                      LifecycleTransaction transaction,
+                                                                      ILifecycleTransaction transaction,
                                                                       Set<SSTableReader> nonExpiredSSTables)
                 {
                     return new MaxSSTableSizeWriter(cfs, directories, transaction, nonExpiredSSTables,

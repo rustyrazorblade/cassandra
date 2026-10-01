@@ -33,7 +33,7 @@ import org.apache.cassandra.db.DiskBoundaries;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.CompactionTask;
-import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableRewriter;
@@ -63,7 +63,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     protected final boolean isTransient;
 
     protected final SSTableRewriter sstableWriter;
-    protected final LifecycleTransaction txn;
+    protected final ILifecycleTransaction txn;
     private final List<Directories.DataDirectory> locations;
     private final List<PartitionPosition> diskBoundaries;
     private int locationIndex;
@@ -71,7 +71,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     protected String sstableDirectoryPath;
     public CompactionAwareWriter(ColumnFamilyStore cfs,
                                  Directories directories,
-                                 LifecycleTransaction txn,
+                                 ILifecycleTransaction txn,
                                  Set<SSTableReader> nonExpiredSSTables,
                                  boolean keepOriginals)
     {
@@ -144,6 +144,16 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     public final String getSStableDirectoryPath() throws IOException
     {
         return sstableDirectoryPath;
+    }
+
+    /**
+     * Publishes an early-opened partial sstable once enough has been written since the last one.
+     * {@link #append} gets this from {@link SSTableRewriter#append}; the cursor path, which does not append,
+     * calls it directly on each partition boundary.
+     */
+    public final void maybeReopenEarly(DecoratedKey key)
+    {
+        sstableWriter.maybeReopenEarly(key);
     }
 
     @Override

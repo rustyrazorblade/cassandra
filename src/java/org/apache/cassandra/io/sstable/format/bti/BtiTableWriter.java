@@ -27,14 +27,18 @@ import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
+import org.apache.cassandra.io.sstable.CursorIndexWriter;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.format.DataComponent;
@@ -68,6 +72,15 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
     public BtiTableWriter(Builder builder, LifecycleNewTracker lifecycleNewTracker, SSTable.Owner owner)
     {
         super(builder, lifecycleNewTracker, owner);
+    }
+
+    @Override
+    public CursorIndexWriter newCursorIndexWriter(SerializationHeader header)
+    {
+        ClusteringComparator comparator = header.clusteringTypes().isEmpty()
+                                         ? new ClusteringComparator()
+                                         : new ClusteringComparator(header.clusteringTypes());
+        return new BtiCursorIndexWriter(this, comparator, header.clusteringTypes().toArray(AbstractType[]::new));
     }
 
     @Override

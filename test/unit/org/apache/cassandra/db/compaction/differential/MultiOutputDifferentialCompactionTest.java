@@ -27,7 +27,7 @@ import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.CompactionTask;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
 import org.apache.cassandra.db.compaction.writers.MaxSSTableSizeWriter;
-import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 
 import static org.junit.Assert.assertTrue;
@@ -49,7 +49,7 @@ public class MultiOutputDifferentialCompactionTest extends DifferentialCompactio
             @Override
             public CompactionAwareWriter getCompactionAwareWriter(ColumnFamilyStore cfs,
                                                                   Directories directories,
-                                                                  LifecycleTransaction transaction,
+                                                                  ILifecycleTransaction transaction,
                                                                   Set<SSTableReader> nonExpiredSSTables)
             {
                 return new MaxSSTableSizeWriter(cfs, directories, transaction, nonExpiredSSTables,
