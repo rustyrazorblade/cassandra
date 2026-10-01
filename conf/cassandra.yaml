@@ -675,7 +675,7 @@ commitlog_segment_size: 32MiB
 # - direct: use direct I/O - available only when the commitlog is neither compressed nor encrypted
 # - standard: use standard I/O - available only when the commitlog is compressed or encrypted
 # The default setting is legacy when the storage compatibility is set to 4 or auto otherwise.
-commitlog_disk_access_mode: legacy
+commitlog_disk_access_mode: auto
 
 # Compression to apply to SSTables as they flush for compressed tables.
 # Note that tables without compression enabled do not respect this flag.
@@ -719,8 +719,8 @@ seed_provider:
 # On the other hand, since writes are almost never IO bound, the ideal
 # number of "concurrent_writes" is dependent on the number of cores in
 # your system; (8 * number_of_cores) is a good rule of thumb.
-concurrent_reads: 32
-concurrent_writes: 32
+concurrent_reads: 64
+concurrent_writes: 128
 concurrent_counter_writes: 32
 
 # For materialized view writes, as there is a read involved, so this should
@@ -787,7 +787,7 @@ memtable:
     trie:
       class_name: TrieMemtable
     default:
-      inherits: skiplist
+      inherits: trie
 
 # Total permitted memory to use for memtables. Cassandra will stop
 # accepting writes when the limit is exceeded until a flush completes,
@@ -825,7 +825,7 @@ memtable:
 #
 # offheap_objects
 #    off heap objects
-memtable_allocation_type: heap_buffers
+memtable_allocation_type: offheap_objects
 
 # Limit memory usage for Merkle tree calculations during repairs of a certain
 # table and common token range. Repair commands targeting multiple tables or
@@ -939,7 +939,7 @@ memtable_allocation_type: heap_buffers
 # more than this amount of memory.
 # Only relevant to formats that use an index summary, e.g. BIG.
 # Min unit: KiB
-index_summary_capacity:
+# index_summary_capacity:
 
 # How frequently index summaries should be resampled.  This is done
 # periodically to redistribute memory from the fixed-size pool to sstables
@@ -947,7 +947,7 @@ index_summary_capacity:
 # process, leaving existing index summaries at their current sampling level.
 # Only relevant to formats that use an index summary, e.g. BIG.
 # Min unit: m
-index_summary_resize_interval: 60m
+# index_summary_resize_interval: 60m
 
 # Whether to, when doing sequential writing, fsync() at intervals in
 # order to force the operating system to flush the dirty
@@ -1173,8 +1173,8 @@ snapshot_links_per_second: 0
 # The default format is "big", the legacy SSTable format in use since Cassandra 3.0.
 # Cassandra versions 5.0 and later also support the trie-indexed "bti" format,
 # which offers better performance.
-#sstable:
-#  selected_format: big
+sstable:
+  selected_format: bti
 
 # Granularity of the collation index of rows within a partition.
 # Applies to both BIG and BTI SSTable formats. In both formats,
@@ -1216,6 +1216,10 @@ column_index_cache_size: 2KiB
 #   parameters:
 #     min_threshold: 4
 #     max_threshold: 32
+default_compaction:
+  class_name: UnifiedCompactionStrategy
+  parameters:
+    scaling_parameters: L10
 
 
 # Number of simultaneous compactions to allow, NOT including
@@ -1232,7 +1236,7 @@ column_index_cache_size: 2KiB
 #
 # If your data directories are backed by SSD, you should increase this
 # to the number of cores.
-# concurrent_compactors: 1
+concurrent_compactors: 8
 
 # Number of simultaneous repair validations to allow. If not set or set to
 # a value less than 1, it defaults to the value of concurrent_compactors.
@@ -1281,7 +1285,7 @@ uuid_sstable_identifiers_enabled: false
 # When unset, the default is enabled. While this feature tries to keep the
 # disks balanced, it cannot guarantee it. This feature will be automatically
 # disabled if internode encryption is enabled.
-# stream_entire_sstables: true
+stream_entire_sstables: true
 
 # Throttles entire SSTable outbound streaming file transfers on
 # this node to the given total throughput in Mbps.
@@ -1604,7 +1608,7 @@ dynamic_snitch_badness_threshold: 1.0
 #
 # With any v2 variant and `paxos_state_purging: repaired` it is safe to use ANY Commit consistency.
 #
-#paxos_variant: v1
+paxos_variant: v2
 
 # Configures Java crypto provider. By default, it will use DefaultCryptoProvider
 # which will install Amazon Correto Crypto Provider.
@@ -2322,7 +2326,7 @@ drop_compact_storage_enabled: false
 #   and ensures stability. If Cassandra was started at the previous version by accident, a node with disabled
 #   compatibility mode would no longer toggle behaviors as when it was running in the UPGRADING mode.
 #
-storage_compatibility_mode: CASSANDRA_4
+storage_compatibility_mode: NONE
 
 
 # Prevents preparing a repair session or beginning a repair streaming session if pending compactions is over
