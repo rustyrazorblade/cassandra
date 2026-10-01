@@ -23,25 +23,20 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.LeveledManifest;
-import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
-import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
-import org.apache.cassandra.io.sstable.format.SSTableWriter;
 
 public class MajorLeveledCompactionWriter extends CompactionAwareWriter
 {
     private final long maxSSTableSize;
     private int currentLevel = 1;
-    private long averageEstimatedKeysPerSSTable;
-    private long partitionsWritten = 0;
     private long totalWrittenInLevel = 0;
-    private int sstablesWritten = 0;
     private final long keysPerSSTable;
     private final int levelFanoutSize;
 
     public MajorLeveledCompactionWriter(ColumnFamilyStore cfs,
                                         Directories directories,
-                                        LifecycleTransaction txn,
+                                        ILifecycleTransaction txn,
                                         Set<SSTableReader> nonExpiredSSTables,
                                         long maxSSTableSize)
     {
@@ -50,7 +45,7 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
 
     public MajorLeveledCompactionWriter(ColumnFamilyStore cfs,
                                         Directories directories,
-                                        LifecycleTransaction txn,
+                                        ILifecycleTransaction txn,
                                         Set<SSTableReader> nonExpiredSSTables,
                                         long maxSSTableSize,
                                         boolean keepOriginals)
@@ -60,13 +55,6 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
         this.levelFanoutSize = cfs.getLevelFanoutSize();
         long estimatedSSTables = Math.max(1, SSTableReader.getTotalBytes(nonExpiredSSTables) / maxSSTableSize);
         keysPerSSTable = estimatedTotalKeys / estimatedSSTables;
-    }
-
-    @Override
-    public boolean realAppend(UnfilteredRowIterator partition)
-    {
-        partitionsWritten++;
-        return super.realAppend(partition);
     }
 
     @Override
@@ -85,15 +73,6 @@ public class MajorLeveledCompactionWriter extends CompactionAwareWriter
         }
         return false;
 
-    }
-
-    @Override
-    public SSTableWriter switchCompactionWriter(Directories.DataDirectory location, DecoratedKey nextKey)
-    {
-        averageEstimatedKeysPerSSTable = Math.round(((double) averageEstimatedKeysPerSSTable * sstablesWritten + partitionsWritten) / (sstablesWritten + 1));
-        partitionsWritten = 0;
-        sstablesWritten = 0;
-        return super.switchCompactionWriter(location, nextKey);
     }
 
     protected int sstableLevel()

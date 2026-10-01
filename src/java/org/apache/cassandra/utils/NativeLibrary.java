@@ -234,7 +234,7 @@ public final class NativeLibrary
             int sublen = (int) Math.min(Integer.MAX_VALUE, len);
             trySkipCache(fd, offset, sublen, path);
             len -= sublen;
-            offset -= sublen;
+            offset += sublen;
         }
     }
 

@@ -28,7 +28,7 @@ import org.apache.cassandra.db.AbstractCompactionController;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.compaction.writers.CompactionAwareWriter;
-import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.TimeUUID;
 
@@ -115,7 +115,7 @@ abstract class AbstractCompactionPipeline extends CompactionInfo.Holder implemen
 
     public AutoCloseable openWriterResource(ColumnFamilyStore cfs,
                                             Directories directories,
-                                            LifecycleTransaction transaction,
+                                            ILifecycleTransaction transaction,
                                             Set<SSTableReader> nonExpiredSSTables)
     {
         this.writer = task.getCompactionAwareWriter(cfs, directories, transaction, nonExpiredSSTables);
