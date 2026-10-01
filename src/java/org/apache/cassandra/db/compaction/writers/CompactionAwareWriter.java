@@ -33,7 +33,7 @@ import org.apache.cassandra.db.DiskBoundaries;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.CompactionTask;
-import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableRewriter;
@@ -63,7 +63,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     protected final boolean isTransient;
 
     protected final SSTableRewriter sstableWriter;
-    protected final LifecycleTransaction txn;
+    protected final ILifecycleTransaction txn;
     private final List<Directories.DataDirectory> locations;
     private final List<PartitionPosition> diskBoundaries;
     private int locationIndex;
@@ -71,7 +71,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
     protected String sstableDirectoryPath;
     public CompactionAwareWriter(ColumnFamilyStore cfs,
                                  Directories directories,
-                                 LifecycleTransaction txn,
+                                 ILifecycleTransaction txn,
                                  Set<SSTableReader> nonExpiredSSTables,
                                  boolean keepOriginals)
     {
@@ -136,14 +136,29 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
      */
     public final boolean append(UnfilteredRowIterator partition)
     {
-        maybeSwitchWriter(partition.partitionKey());
-        return realAppend(partition);
+        prepareForPartition(partition.partitionKey());
+        return sstableWriter.currentWriter().append(partition) != null;
     }
 
     // hot path, called per partition
     public final String getSStableDirectoryPath() throws IOException
     {
         return sstableDirectoryPath;
+    }
+
+    /**
+     * Call once per partition, before writing it. Switches to a new sstable writer if one is needed, and
+     * otherwise opens the current sstable early once enough has been written since the last early open.
+     * Both {@link #append} and cursor compaction call this, so a partition takes the same steps on both paths.
+     *
+     * @return the new writer, or null if the writer did not switch
+     */
+    public final SSTableWriter prepareForPartition(DecoratedKey key)
+    {
+        SSTableWriter newWriter = maybeSwitchWriter(key);
+        if (newWriter == null)
+            sstableWriter.maybeReopenEarly(key);
+        return newWriter;
     }
 
     @Override
@@ -153,15 +168,10 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
         return super.doPostCleanup(accumulate);
     }
 
-    protected boolean realAppend(UnfilteredRowIterator partition)
-    {
-        return sstableWriter.append(partition) != null;
-    }
-
     /**
      * Switches the writer if necessary, i.e. if the new key should be placed in a different data directory, or if the
      * specific strategy has decided a new sstable is needed.
-     * Guaranteed to be called before the first call to realAppend.
+     * Guaranteed to be called before the first partition is written.
      */
     public final SSTableWriter maybeSwitchWriter(DecoratedKey key)
     {
