@@ -11,6 +11,7 @@ commitlog_directory: build/test/cassandra/commitlog
 commitlog_disk_access_mode: auto
 compaction_read_disk_access_mode: direct
 background_write_disk_access_mode: direct
+cursor_compaction_enabled: true
 cursor_repair_enabled: true
 cursor_reads_enabled: true
 cursor_range_reads_enabled: true
