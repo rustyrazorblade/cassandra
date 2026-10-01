@@ -3,13 +3,12 @@
 # Consider the effects on 'o.a.c.i.s.LegacySSTableTest' before changing schemas in this file.
 #
 cluster_name: Test Cluster
-memtable_allocation_type: heap_buffers
-# memtable_allocation_type: offheap_objects
+memtable_allocation_type: offheap_objects
 commitlog_sync: periodic
 commitlog_sync_period: 10s
 commitlog_segment_size: 5MiB
 commitlog_directory: build/test/cassandra/commitlog
-commitlog_disk_access_mode: legacy
+commitlog_disk_access_mode: auto
 # commitlog_compression:
 # - class_name: LZ4Compressor
 cdc_raw_directory: build/test/cassandra/cdc_raw
@@ -39,7 +38,7 @@ server_encryption_options:
     truststore: conf/.truststore
     truststore_password: cassandra
 incremental_backups: true
-concurrent_compactors: 4
+concurrent_compactors: 8
 compaction_throughput: 0MiB/s
 row_cache_class_name: org.apache.cassandra.cache.OHCProvider
 row_cache_size: 16MiB
@@ -67,6 +66,16 @@ local_read_size_warn_threshold: 4096KiB
 local_read_size_fail_threshold: 8192KiB
 row_index_read_size_warn_threshold: 4096KiB
 row_index_read_size_fail_threshold: 8192KiB
+concurrent_reads: 64
+concurrent_writes: 128
+sstable:
+  selected_format: bti
+storage_compatibility_mode: NONE
+default_compaction:
+  class_name: UnifiedCompactionStrategy
+  parameters:
+    scaling_parameters: L10
+paxos_variant: v2
 
 memtable:
     configurations:
@@ -114,3 +123,5 @@ memtable:
             class_name: TrieMemtable
 # Note: keep the memtable configuration at the end of the file, so that the default mapping can be changed without
 # duplicating the whole section above.
+        default:
+            inherits: trie
