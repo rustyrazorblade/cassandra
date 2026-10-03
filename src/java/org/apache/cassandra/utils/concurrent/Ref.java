@@ -525,7 +525,7 @@ public final class Ref<T> implements RefCounted<T>
             return retval;
         }
 
-        Pair<Object, Field> nextChild() throws IllegalAccessException
+        Pair<Object, Field> nextChild()
         {
             //If the last child returned was a key from a map, the value from that entry is stashed
             //so it can be returned next
@@ -576,7 +576,7 @@ public final class Ref<T> implements RefCounted<T>
 
                 Object nextObject = getFieldValue(o, nextField);
                 if (nextObject != null)
-                    return Pair.create(getFieldValue(o, nextField), nextField);
+                    return Pair.create(nextObject, nextField);
             }
         }
 
@@ -700,9 +700,11 @@ public final class Ref<T> implements RefCounted<T>
                         inProgress = null;
                     }
                 }
-                catch (IllegalAccessException e)
+                catch (RuntimeException e)
                 {
+                    // Give up on this object graph only; the caller goes on with the next GlobalState
                     NoSpamLogger.log(logger, NoSpamLogger.Level.ERROR, 5, TimeUnit.MINUTES, "Could not fully check for self-referential leaks", e);
+                    return;
                 }
             }
         }
@@ -717,14 +719,47 @@ public final class Ref<T> implements RefCounted<T>
         if (fields != null)
             return fields;
         fieldMap.put(clazz, fields = new ArrayList<>());
+        List<String> unreadable = null;
         for (Field field : clazz.getDeclaredFields())
         {
             if (field.getType().isPrimitive() || Modifier.isStatic(field.getModifiers()))
                 continue;
+            if (!canReadField(field))
+            {
+                if (unreadable == null)
+                    unreadable = new ArrayList<>();
+                unreadable.add(field.getName());
+                continue;
+            }
             fields.add(field);
         }
+        // The result is cached per class, so this is logged once per class
+        if (unreadable != null)
+            logger.error("Could not fully check for self-referential leaks: cannot read fields {} of {}", unreadable, clazz.getName());
         fields.addAll(getFields(clazz.getSuperclass()));
         return fields;
+    }
+
+    /**
+     * Returns true if {@link #getFieldValue} can read this field.
+     * Fields of records and hidden classes in packages that are not opened cannot be read, for example
+     * {@code java.security.SecureClassLoader$CodeSourceKey} from JDK 21.
+     */
+    private static boolean canReadField(Field field)
+    {
+        try
+        {
+            if (field.trySetAccessible())
+                return true;
+            if (unsafe == null)
+                return false;
+            unsafe.objectFieldOffset(field);
+            return true;
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
     }
 
     /**

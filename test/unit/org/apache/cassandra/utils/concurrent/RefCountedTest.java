@@ -19,9 +19,12 @@
 package org.apache.cassandra.utils.concurrent;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +40,7 @@ import java.util.function.Function;
 
 import org.awaitility.Awaitility;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -51,6 +55,8 @@ import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.concurrent.Ref.Visitor;
+
+import sun.misc.Unsafe;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_VERSION;
 import static org.apache.cassandra.utils.JavaUtils.parseJavaVersion;
@@ -420,6 +426,116 @@ public class RefCountedTest
         ref.close();
 
         Assert.assertTrue(visitor.haveLoops.isEmpty());
+    }
+
+    private static final class SelfRefTidier implements RefCounted.Tidy
+    {
+        // Declared before the Ref holder, so the visitor reads it first
+        final Object visitedFirst;
+        final AtomicReference<Ref<Object>> refHolder = new AtomicReference<>();
+
+        SelfRefTidier(Object visitedFirst)
+        {
+            this.visitedFirst = visitedFirst;
+        }
+
+        @Override
+        public void tidy()
+        {
+        }
+
+        @Override
+        public String name()
+        {
+            return "42";
+        }
+    }
+
+    private static Ref<Object> newSelfRef(Object visitedFirst)
+    {
+        SelfRefTidier tidier = new SelfRefTidier(visitedFirst);
+        Ref<Object> ref = new Ref(null, tidier);
+        tidier.refHolder.set(ref);
+        return ref;
+    }
+
+    private static Set<Ref.GlobalState> findLoops(List<Ref<Object>> refs)
+    {
+        Visitor visitor = new Visitor();
+        visitor.haveLoops = new HashSet<>();
+        try
+        {
+            visitor.run();
+        }
+        finally
+        {
+            refs.forEach(Ref::close);
+        }
+        return visitor.haveLoops;
+    }
+
+    private static Set<Ref.GlobalState> globalStates(List<Ref<Object>> refs)
+    {
+        Set<Ref.GlobalState> states = new HashSet<>();
+        for (Ref<Object> ref : refs)
+            states.add(ref.state.globalState);
+        return states;
+    }
+
+    /**
+     * From JDK 21 SecureClassLoader$CodeSourceKey is a record in java.security, which is not opened, so the
+     * visitor cannot read its fields. The visitor must skip those fields and still find the self-ref loop that
+     * is reached through a later field of the same object.
+     */
+    @Test
+    public void testUnreadableFieldDoesNotStopLeakCheck() throws Exception
+    {
+        Object unreadable = newUnreadableJdkRecord();
+        List<Ref<Object>> refs = new ArrayList<>();
+        for (int i = 0; i < 10; i++)
+            refs.add(newSelfRef(unreadable));
+
+        assertThat(findLoops(refs)).containsAll(globalStates(refs));
+    }
+
+    /**
+     * An error while walking the object graph of one Ref must not stop the check of the other Refs.
+     */
+    @Test
+    public void testFailedTraversalDoesNotStopLeakCheck()
+    {
+        BlockingQueue<Object> failsOnIteration = new LinkedBlockingQueue<Object>()
+        {
+            @Override
+            public Iterator<Object> iterator()
+            {
+                throw new IllegalStateException("test failure while walking the object graph");
+            }
+        };
+        List<Ref<Object>> selfRefs = new ArrayList<>();
+        List<Ref<Object>> refs = new ArrayList<>();
+        for (int i = 0; i < 10; i++)
+        {
+            refs.add(new Ref(null, new SelfRefTidier(failsOnIteration)));
+            selfRefs.add(newSelfRef(null));
+        }
+        refs.addAll(selfRefs);
+
+        assertThat(findLoops(refs)).containsAll(globalStates(selfRefs));
+    }
+
+    /**
+     * Returns an instance of SecureClassLoader$CodeSourceKey, or skips the test where that class is not a record.
+     */
+    private static Object newUnreadableJdkRecord() throws Exception
+    {
+        Assume.assumeTrue("Records exist from JDK 16", parseJavaVersion(JAVA_VERSION.getString()) >= 16);
+        Class<?> clazz = Class.forName("java.security.SecureClassLoader$CodeSourceKey");
+        Assume.assumeTrue("CodeSourceKey is a record from JDK 21", (Boolean) Class.class.getMethod("isRecord").invoke(clazz));
+        Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+        theUnsafe.setAccessible(true);
+        // The constructor is not accessible, so allocate the instance without it
+        return ((Unsafe) theUnsafe.get(null)).allocateInstance(clazz);
     }
 
     static class LambdaTestClassTidier implements RefCounted.Tidy
