@@ -21,6 +21,7 @@ package org.apache.cassandra.db.cursorreads;
 import java.util.function.Supplier;
 
 import org.junit.Test;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -28,9 +29,15 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.FBUtilities;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -182,6 +189,62 @@ public class CursorReadGateTest extends CursorReadDifferentialTester
         long now = FBUtilities.nowInSeconds();
         assertFallsBackUnchanged(cfs, () -> (SinglePartitionReadCommand)
             Util.cmd(cfs, 1L).withNowInSeconds(now).build());
+    }
+
+    /**
+     * The read gate runs on every read, so it must not log when it rejects a table.  An indexed
+     * table is always rejected, and a log line per read floods debug.log.
+     */
+    @Test
+    public void indexedTableReadGateDoesNotLog() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, PRIMARY KEY (pk, ck))");
+        createIndex("CREATE INDEX ON %s (v1)");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (?, ?, ?)", 1L, 1L, 1L);
+        flush();
+        assertReadGateRejectsWithoutLogging(cfs);
+    }
+
+    /**
+     * An sstable that still carries a dropped collection column is rejected for each read too, so
+     * that rejection must not log either.
+     */
+    @Test
+    public void droppedCollectionReadGateDoesNotLog() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, s set<int>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        execute("INSERT INTO %s (pk, ck, v1, s) VALUES (?, ?, ?, ?)", 1L, 1L, 1L, set(1));
+        flush();
+        execute("ALTER TABLE %s DROP s");
+        assertReadGateRejectsWithoutLogging(cfs);
+    }
+
+    private void assertReadGateRejectsWithoutLogging(ColumnFamilyStore cfs)
+    {
+        Logger logger = (Logger) LoggerFactory.getLogger(CursorCompactor.class.getName());
+        Level previousLevel = logger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(Level.DEBUG);
+        DatabaseDescriptor.setCursorReadsEnabled(true);
+        try
+        {
+            long now = FBUtilities.nowInSeconds();
+            SinglePartitionReadCommand cmd = (SinglePartitionReadCommand) Util.cmd(cfs, 1L).withNowInSeconds(now).build();
+            assertFalse(CursorReads.isReadSupported(cmd, cfs, liveSSTablesFor(cfs, cmd)));
+            assertEquals("the read gate must not log", 0, appender.list.size());
+        }
+        finally
+        {
+            DatabaseDescriptor.setCursorReadsEnabled(false);
+            logger.detachAppender(appender);
+            logger.setLevel(previousLevel);
+        }
     }
 
     /**

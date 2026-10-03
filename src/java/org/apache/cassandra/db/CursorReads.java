@@ -403,7 +403,7 @@ public final class CursorReads
             return false;
 
         TableMetadata metadata = cfs.metadata();
-        if (CursorCompactor.unsupportedMetadata(metadata))
+        if (CursorCompactor.unsupportedMetadata(metadata, false))
             return false;
         if (metadata.isView())
             return false;
@@ -437,7 +437,7 @@ public final class CursorReads
         {
             if (!sstable.descriptor.version.isLatestVersion())
                 return false;
-            if (CursorCompactor.unsupportedHeaderColumns(metadata, sstable))
+            if (CursorCompactor.unsupportedHeaderColumns(metadata, sstable, false))
                 return false;
         }
         return true;

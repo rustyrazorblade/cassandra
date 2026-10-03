@@ -335,20 +335,30 @@ public class CursorCompactor extends CompactionInfo.Holder
 
     public static boolean unsupportedMetadata(TableMetadata metadata)
     {
+        return unsupportedMetadata(metadata, true);
+    }
+
+    /**
+     * @param logReason false on the read path, which runs this check on every read
+     */
+    public static boolean unsupportedMetadata(TableMetadata metadata, boolean logReason)
+    {
         if (metadata.keyspace.equals(SchemaConstants.ACCORD_KEYSPACE_NAME))
             return true;
 
         if (!metadata.partitioner.supportsReusableKeys())
         {
-            LOGGER.debug("Cursor compaction is not supported for {}.{}: partitioner {} does not support reusable keys",
-                         metadata.keyspace, metadata.name, metadata.partitioner.getClass().getSimpleName());
+            if (logReason)
+                LOGGER.debug("Cursor compaction is not supported for {}.{}: partitioner {} does not support reusable keys",
+                             metadata.keyspace, metadata.name, metadata.partitioner.getClass().getSimpleName());
             return true;
         }
 
         if (metadata.indexes.size() != 0)
         {
-            LOGGER.debug("Cursor compaction is not supported for {}.{}: additional indexes are not supported, metadata.indexes={}",
-                         metadata.keyspace, metadata.name, metadata.indexes);
+            if (logReason)
+                LOGGER.debug("Cursor compaction is not supported for {}.{}: additional indexes are not supported, metadata.indexes={}",
+                             metadata.keyspace, metadata.name, metadata.indexes);
             return true;
         }
 
@@ -433,15 +443,24 @@ public class CursorCompactor extends CompactionInfo.Holder
     // the exact same dropped-complex/counter-header-column gate rather than re-deriving it
     public static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader)
     {
+        return unsupportedHeaderColumns(metadata, reader, true);
+    }
+
+    /**
+     * @param logReason false on the read path, which runs this check on every read
+     */
+    public static boolean unsupportedHeaderColumns(TableMetadata metadata, SSTableReader reader, boolean logReason)
+    {
         // RegularAndStaticColumns iterates statics then regulars, so this covers both
         for (ColumnMetadata column : reader.header.columns())
         {
             if (isDroppedMultiCellOrCounterColumn(metadata, column, reader.header.getType(column)))
             {
-                LOGGER.debug("Cursor compaction for table: {} keyspace: {} is not supported. REASON: A multi-cell " +
-                             "or counter column dropped from the schema is still carried in the header of {}, which " +
-                             "the cursor path does not yet cover. column={}",
-                             metadata.name, metadata.keyspace, reader.descriptor, column);
+                if (logReason)
+                    LOGGER.debug("Cursor compaction for table: {} keyspace: {} is not supported. REASON: A multi-cell " +
+                                 "or counter column dropped from the schema is still carried in the header of {}, which " +
+                                 "the cursor path does not yet cover. column={}",
+                                 metadata.name, metadata.keyspace, reader.descriptor, column);
                 return true;
             }
         }
