@@ -64,6 +64,9 @@
   <!-- Logs why cursor compaction is not used on every compaction task; tests run many tasks -->
   <logger name="org.apache.cassandra.db.compaction.CursorCompactor" level="INFO"/>
 
+  <!-- Logs why cursor validation is not used on every validation; tests run many -->
+  <logger name="org.apache.cassandra.db.repair.CassandraTableRepairManager" level="INFO"/>
+
   <!-- Do not change the name of this appender. LogbackStatusListener uses the thread name
        tied to the appender name to know when to write to real stdout/stderr vs forwarding to logback -->
   <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
