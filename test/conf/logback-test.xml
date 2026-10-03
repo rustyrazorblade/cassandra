@@ -67,6 +67,9 @@
   <!-- Logs why cursor validation is not used on every validation; tests run many -->
   <logger name="org.apache.cassandra.db.repair.CassandraTableRepairManager" level="INFO"/>
 
+  <!-- Logs why cursor flush is not used on every flush; tests run many flushes -->
+  <logger name="org.apache.cassandra.db.partitions.MemtableCursorFlusher" level="INFO"/>
+
   <!-- Do not change the name of this appender. LogbackStatusListener uses the thread name
        tied to the appender name to know when to write to real stdout/stderr vs forwarding to logback -->
   <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
