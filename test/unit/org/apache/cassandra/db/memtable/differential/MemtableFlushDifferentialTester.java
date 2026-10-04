@@ -39,6 +39,8 @@ import org.junit.Before;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
+import org.apache.cassandra.cql3.QueryProcessor;
+import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.memtable.FlushPipelineCounts;
 import org.apache.cassandra.db.partitions.MemtableCursorFlusher;
@@ -71,6 +73,11 @@ import static org.junit.Assert.fail;
 public abstract class MemtableFlushDifferentialTester extends CQLTester
 {
     private static final long DUMP_NOW_SEC = 0;
+
+    private static final long NO_FIXED_NOW = Long.MIN_VALUE;
+
+    /** The "now" every write uses during a strict capture; see {@link #captureBothPaths}. */
+    private long fixedNowInSec = NO_FIXED_NOW;
 
     /**
      * The cursor flush path accepts only a heap-based memtable allocator, so the suite pins one;
@@ -171,7 +178,7 @@ public abstract class MemtableFlushDifferentialTester extends CQLTester
      */
     protected CapturedOutput assertFlushMatches(String tableCql, BiConsumer<String, String> populate) throws Exception
     {
-        return assertFlushMatchesImpl(tableCql, populate, both -> assertEquivalentOutputs(both[0], both[1]));
+        return assertFlushMatchesImpl(tableCql, populate, true, both -> assertEquivalentOutputs(both[0], both[1]));
     }
 
     /**
@@ -187,20 +194,20 @@ public abstract class MemtableFlushDifferentialTester extends CQLTester
      */
     protected CapturedOutput assertFlushMatchesLogically(String tableCql, BiConsumer<String, String> populate, boolean ignoreCellTimestamps) throws Exception
     {
-        return assertFlushMatchesImpl(tableCql, populate, both -> assertEquivalentOutputsLogically(both[0], both[1], ignoreCellTimestamps));
+        return assertFlushMatchesImpl(tableCql, populate, false, both -> assertEquivalentOutputsLogically(both[0], both[1], ignoreCellTimestamps));
     }
 
     /**
      * Shared by {@link #assertFlushMatches} and {@link #assertFlushMatchesLogically}, which
      * differ only in which comparison they apply to the two captures.
      */
-    private CapturedOutput assertFlushMatchesImpl(String tableCql, BiConsumer<String, String> populate, Consumer<CapturedOutput[]> compare) throws Exception
+    private CapturedOutput assertFlushMatchesImpl(String tableCql, BiConsumer<String, String> populate, boolean strict, Consumer<CapturedOutput[]> compare) throws Exception
     {
         tableCql = withSkipListMemtable(tableCql);
         Path scratch = Files.createTempDirectory("differential-flush");
         try
         {
-            CapturedOutput[] both = captureBothPaths(tableCql, populate, scratch);
+            CapturedOutput[] both = captureBothPaths(tableCql, populate, strict, scratch);
             compare.accept(both);
             return both[0];
         }
@@ -241,38 +248,18 @@ public abstract class MemtableFlushDifferentialTester extends CQLTester
         return sb.toString();
     }
 
-    // A short scenario keeps the strict byte comparison; if its two captures straddle a wall-clock
-    // second (which shifts local_delete_time/expires_at by one second), it retries.  The retry
-    // only fires when the output actually carries such a field, so a plain-insert scenario under
-    // USING TIMESTAMP is never retried needlessly.  Long scenarios use assertFlushMatchesLogically.
-    private static final int WALL_CLOCK_STRADDLE_ATTEMPTS = 4;
-
-    private CapturedOutput[] captureBothPaths(String tableCql, BiConsumer<String, String> populate, Path scratch) throws Exception
+    /**
+     * Writes the scenario into two tables and flushes one with each path.
+     * <p>
+     * For the strict comparison, every write to both tables uses the same fixed "now", taken once
+     * before the first table is written.  A TTL's expires_at and a deletion's local_delete_time
+     * are computed from "now", so both tables get identical values however long each table takes
+     * to write.  The logical comparison already ignores those fields, so it writes as usual.
+     */
+    private CapturedOutput[] captureBothPaths(String tableCql, BiConsumer<String, String> populate, boolean strict, Path scratch) throws Exception
     {
-        for (int attempt = 1; ; attempt++)
-        {
-            long startedAtSecond = Clock.Global.nowInSeconds();
-            CapturedOutput[] both = captureBothPathsOnce(tableCql, populate, scratch.resolve("attempt-" + attempt));
-            if (Clock.Global.nowInSeconds() == startedAtSecond
-                || !(hasWallClockField(both[0]) || hasWallClockField(both[1])))
-                return both;
-            assertTrue("scenario straddled a wall-clock second on all " + WALL_CLOCK_STRADDLE_ATTEMPTS +
-                       " attempts; it is too long for the strict comparison, use assertFlushMatchesLogically",
-                       attempt < WALL_CLOCK_STRADDLE_ATTEMPTS);
-        }
-    }
-
-    /** Whether any captured sstable carries a wall-clock-derived field; see {@link #captureBothPaths}. */
-    private static boolean hasWallClockField(CapturedOutput out)
-    {
-        for (CapturedSSTable s : out.sstables)
-            if (WALL_CLOCK_DELETION_FIELD.matcher(s.json).find())
-                return true;
-        return false;
-    }
-
-    private CapturedOutput[] captureBothPathsOnce(String tableCql, BiConsumer<String, String> populate, Path scratch) throws Exception
-    {
+        if (strict)
+            fixedNowInSec = Clock.Global.nowInSeconds();
         try
         {
             String tableA = createTable(tableCql);
@@ -302,8 +289,22 @@ public abstract class MemtableFlushDifferentialTester extends CQLTester
         }
         finally
         {
+            fixedNowInSec = NO_FIXED_NOW;
             DatabaseDescriptor.setCursorFlushEnabled(false);
         }
+    }
+
+    /**
+     * While {@link #captureBothPaths} runs a strict comparison, runs each statement with the fixed
+     * "now" instead of the wall clock.  Bound values are converted by the statement's own column
+     * types rather than by {@link CQLTester}'s conversion.
+     */
+    @Override
+    protected UntypedResultSet execute(String query, Object... values)
+    {
+        if (fixedNowInSec == NO_FIXED_NOW)
+            return super.execute(query, values);
+        return QueryProcessor.executeInternalWithNowInSec(formatQuery(query), fixedNowInSec, values);
     }
 
     /**

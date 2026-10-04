@@ -18,9 +18,13 @@
 
 package org.apache.cassandra.db.memtable.differential;
 
+import java.time.Duration;
+
+import org.awaitility.Awaitility;
 import org.junit.Test;
 
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.Clock;
 
 /**
  * Basic end-to-end checks of the memtable cursor flush path, via
@@ -174,6 +178,33 @@ public class BasicFlushDifferentialTest extends MemtableFlushDifferentialTester
                                // UPDATE builds a row with no primary-key liveness, so its cells can never
                                // take USE_ROW_TIMESTAMP_MASK.
                                execute("UPDATE " + t + " USING TIMESTAMP " + (ts++) + " SET v = ? WHERE k = ? AND c = ?", "updated", 1, 3);
+                           });
+    }
+
+    /**
+     * The strict comparison must not depend on how long each table takes to write.  The scenario
+     * writes TTL cells and deletions, whose expires_at and local_delete_time come from the wall
+     * clock, then waits for the wall-clock second to change, so the two tables are always written
+     * in different seconds.
+     */
+    @Test
+    public void strictComparisonIgnoresWallClockBetweenTables() throws Exception
+    {
+        assertFlushMatches("CREATE TABLE %s (k int, c int, v text, w text, PRIMARY KEY (k, c))",
+                           (ks, tbl) -> {
+                               String t = ks + "." + tbl;
+                               long ts = BASE_TS;
+                               execute("INSERT INTO " + t + " (k, c, v, w) VALUES (?, ?, ?, ?) USING TTL 12345 AND TIMESTAMP " + (ts++), 1, 1, "a", "b");
+                               execute("UPDATE " + t + " USING TTL 6789 AND TIMESTAMP " + (ts++) + " SET v = ? WHERE k = ? AND c = ?", "c", 1, 2);
+                               execute("DELETE w FROM " + t + " USING TIMESTAMP " + (ts++) + " WHERE k = ? AND c = ?", 1, 1);
+                               execute("DELETE FROM " + t + " USING TIMESTAMP " + (ts++) + " WHERE k = ? AND c = ?", 1, 3);
+                               execute("DELETE FROM " + t + " USING TIMESTAMP " + (ts++) + " WHERE k = ? AND c >= ? AND c < ?", 2, 5, 8);
+                               execute("DELETE FROM " + t + " USING TIMESTAMP " + (ts++) + " WHERE k = ?", 3);
+                               long second = Clock.Global.nowInSeconds();
+                               Awaitility.await()
+                                         .pollInterval(Duration.ofMillis(10))
+                                         .atMost(Duration.ofSeconds(5))
+                                         .until(() -> Clock.Global.nowInSeconds() > second);
                            });
     }
 
