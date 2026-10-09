@@ -54,7 +54,7 @@ public class ReadExecutionController implements AutoCloseable
      * pushdown, or null (the overwhelmingly common case) when pushdown accounting is not engaged
      * for this execution. Attached by the cursor merge's call site
      * ({@code SinglePartitionReadCommand.queryMemtableAndDiskInternal}, under the same
-     * final-stream routing gate as the pushdown itself) BEFORE the eager merge runs, and read by
+     * final-stream routing gate as the pushdown itself) BEFORE the merge produces anything, and read by
      * {@code ReadCommand.withMetricsRecording} — created later in the same {@code executeLocally}
      * run — so the metrics recorded for the query still include the rows the merge dropped at
      * production instead of materializing. One accumulator per execution: a fresh attach replaces

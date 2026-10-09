@@ -52,9 +52,9 @@ import static org.junit.Assert.assertTrue;
  *       {@link CursorReads#cursorMergesServed()} / {@link CursorReads#sstableLegsCursorMerged()};</li>
  *   <li>the single-leg materializer, guarded by {@link CursorReads#sstableLegsServed()};</li>
  *   <li>the production replica response path
- *       ({@code SinglePartitionReadCommand.queryStorageToResponseBytes}): counters must DECLINE the
- *       single-winner transcode fast path and still return a byte-identical response through the
- *       merge, guarded by {@link CursorReads#transcodeResponsesServed()} not advancing.</li>
+ *       ({@code SinglePartitionReadCommand.queryStorageToResponseBytes}): the transcode path serves
+ *       counter reads, folding the contexts in the cursor merge, with a byte-identical response,
+ *       guarded by {@link CursorReads#transcodeResponsesServed()} advancing.</li>
  * </ul>
  */
 public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTester
@@ -114,9 +114,14 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
         }
     }
 
-    /** A counter read must DECLINE the single-winner transcode fast path (it cannot fold contexts)
-     *  and still return a byte-identical response through the cursor merge. */
-    private void assertCounterDeclinesTranscodeButServesIdentical(Supplier<SinglePartitionReadCommand> command) throws Exception
+    /** A counter read returns a byte-identical response.  The transcode path serves it, folding the
+     *  counter contexts in the cursor merge, unless it is a names read, which it declines. */
+    private void assertCounterServedByTranscodeAndIdentical(Supplier<SinglePartitionReadCommand> command) throws Exception
+    {
+        assertCounterResponseIdentical(command, true);
+    }
+
+    private void assertCounterResponseIdentical(Supplier<SinglePartitionReadCommand> command, boolean transcodeServes) throws Exception
     {
         DatabaseDescriptor.setCursorReadsEnabled(false);
         byte[] off = fullResponseBytes(command.get());
@@ -129,7 +134,9 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
             long after = CursorReads.transcodeResponsesServed();
 
             assertResponseBytesEqual(off, on);
-            assertEquals("counters must decline the single-winner transcode fast path", before, after);
+            assertEquals(transcodeServes ? "the transcode path must serve the counter read"
+                                         : "the transcode path must decline the counter names read",
+                         transcodeServes ? before + 1 : before, after);
         }
         finally
         {
@@ -160,7 +167,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
 
         long now = FBUtilities.nowInSeconds();
         assertMergedCounterMatches(cfs, fullPartition(cfs, now, 1L), legs);
-        assertCounterDeclinesTranscodeButServesIdentical(fullPartition(cfs, now, 1L));
+        assertCounterServedByTranscodeAndIdentical(fullPartition(cfs, now, 1L));
     }
 
     /** Newer legs increment rows the older legs never touched, and vice versa: each leg contributes
@@ -185,7 +192,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
 
         long now = FBUtilities.nowInSeconds();
         assertMergedCounterMatches(cfs, fullPartition(cfs, now, 1L), 3);
-        assertCounterDeclinesTranscodeButServesIdentical(fullPartition(cfs, now, 1L));
+        assertCounterServedByTranscodeAndIdentical(fullPartition(cfs, now, 1L));
     }
 
     /** A cell delete in a middle leg, live increments before and after: CASSANDRA-7346 tombstone
@@ -216,7 +223,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
 
         long now = FBUtilities.nowInSeconds();
         assertMergedCounterMatches(cfs, fullPartition(cfs, now, 1L), 3);
-        assertCounterDeclinesTranscodeButServesIdentical(fullPartition(cfs, now, 1L));
+        assertCounterServedByTranscodeAndIdentical(fullPartition(cfs, now, 1L));
     }
 
     // ---------------------------------------------------------------- memtable + sstable
@@ -242,7 +249,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
         long now = FBUtilities.nowInSeconds();
         // one sstable leg joins the merge; the memtable leg folds too but is not an sstable leg
         assertMergedCounterMatches(cfs, fullPartition(cfs, now, 1L), 1);
-        assertCounterDeclinesTranscodeButServesIdentical(fullPartition(cfs, now, 1L));
+        assertCounterServedByTranscodeAndIdentical(fullPartition(cfs, now, 1L));
     }
 
     /** Memtable-only counter read (zero sstables): a single memtable leg, no clear applied. */
@@ -262,7 +269,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
 
         long now = FBUtilities.nowInSeconds();
         // no sstable legs to guard on; the response-path decline proves byte-identical merge service
-        assertCounterDeclinesTranscodeButServesIdentical(fullPartition(cfs, now, 1L));
+        assertCounterServedByTranscodeAndIdentical(fullPartition(cfs, now, 1L));
     }
 
     // ---------------------------------------------------------------- single leg
@@ -286,7 +293,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
 
         long now = FBUtilities.nowInSeconds();
         assertCursorReadMatchesIterator(cfs, fullPartition(cfs, now, 1L));
-        assertCounterDeclinesTranscodeButServesIdentical(fullPartition(cfs, now, 1L));
+        assertCounterServedByTranscodeAndIdentical(fullPartition(cfs, now, 1L));
     }
 
     // ---------------------------------------------------------------- slice + names
@@ -310,7 +317,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
         long now = FBUtilities.nowInSeconds();
         assertMergedCounterMatches(cfs, () -> (SinglePartitionReadCommand)
             Util.cmd(cfs, 1L).withNowInSeconds(now).fromIncl(4L).toIncl(12L).build(), 3);
-        assertCounterDeclinesTranscodeButServesIdentical(() -> (SinglePartitionReadCommand)
+        assertCounterServedByTranscodeAndIdentical(() -> (SinglePartitionReadCommand)
             Util.cmd(cfs, 1L).withNowInSeconds(now).fromIncl(4L).toIncl(12L).build());
     }
 
@@ -334,7 +341,7 @@ public class CounterCursorReadDifferentialTest extends CursorReadDifferentialTes
         long now = FBUtilities.nowInSeconds();
         assertMergedCounterMatches(cfs, () -> (SinglePartitionReadCommand)
             Util.cmd(cfs, 1L).withNowInSeconds(now).includeRow(3L).includeRow(7L).includeRow(15L).build(), 3);
-        assertCounterDeclinesTranscodeButServesIdentical(() -> (SinglePartitionReadCommand)
-            Util.cmd(cfs, 1L).withNowInSeconds(now).includeRow(3L).includeRow(7L).includeRow(15L).build());
+        assertCounterResponseIdentical(() -> (SinglePartitionReadCommand)
+            Util.cmd(cfs, 1L).withNowInSeconds(now).includeRow(3L).includeRow(7L).includeRow(15L).build(), false);
     }
 }

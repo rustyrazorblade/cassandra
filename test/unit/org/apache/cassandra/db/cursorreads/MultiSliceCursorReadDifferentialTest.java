@@ -58,9 +58,10 @@ import static org.junit.Assert.assertTrue;
  * filter, so the read served on the legacy iterator path.
  *
  * <p>A multi-slice slice read reuses the same machinery the names fix (gap #9) built: the merge core
- * scans the covering span (the first slice's start to the last slice's end) once, validates per slice
- * through {@code isInSlice}, and the emission slicer re-filters to the exact requested slices while
- * tracking the open range-tombstone marker across the gaps between slices. A range slice differs from
+ * reads one slice at a time and validates within the current slice, and the emission slicer
+ * emits the exact requested slices while tracking the open range-tombstone marker across the gaps
+ * between slices.  {@link MultiSliceSeekCursorReadDifferentialTest} covers the seeks between slices
+ * on partitions large enough to have a row index. A range slice differs from
  * a names point slice only in that its start and end bound distinct clusterings and it may contain
  * range-tombstone markers internally, both of which the generic slicer already handles.
  *
@@ -252,9 +253,8 @@ public class MultiSliceCursorReadDifferentialTest extends CursorReadDifferential
 
     // ---------------------------------------------------------------- limit
 
-    /** Multi-slice read with a CQL limit. {@code limitBoundFor} declines multi-slice, so production
-     *  stays unbounded and the top-of-stack limit counter stays authoritative; the result must still
-     *  be byte-identical to the iterator path. */
+    /** Multi-slice read with a CQL limit. The top-of-stack limit counter stops the lazy merge; the
+     *  result must still be byte-identical to the iterator path. */
     @Test
     public void multiSliceWithLimit() throws Throwable
     {
@@ -350,14 +350,12 @@ public class MultiSliceCursorReadDifferentialTest extends CursorReadDifferential
     }
 
     /**
-     * A multi-slice slice read must DECLINE the single-slice transcode fast path
-     * ({@code queryStorageToResponseBytes}) and serve on the plain cursor merge path instead. The
-     * transcode path streams one contiguous slice and would mis-read several ranges. This asserts the
-     * transcode counter does not advance while the gate-on response stays byte-identical to the
-     * gate-off (iterator) oracle, so the decline routes to the cursor path, not to a wrong result.
+     * A multi-slice slice read is served by the transcode path ({@code queryStorageToResponseBytes}),
+     * which merges one slice at a time and adds the slice-bound markers, with a response
+     * byte-identical to the gate-off (iterator) oracle.
      */
     @Test
-    public void multiSliceDeclinesTranscodePath() throws Throwable
+    public void multiSliceEngagesTranscodePath() throws Throwable
     {
         createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, PRIMARY KEY (pk, ck))");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
@@ -384,8 +382,7 @@ public class MultiSliceCursorReadDifferentialTest extends CursorReadDifferential
             long after = CursorReads.transcodeResponsesServed();
 
             assertResponseBytesEqual(off, on);
-            assertEquals("a multi-slice slice read must not engage the single-slice transcode fast path",
-                         before, after);
+            assertEquals("the transcode path must serve the multi-slice read", before + 1, after);
         }
         finally
         {

@@ -274,9 +274,8 @@ public class LateMaterializationDifferentialTest extends CursorReadDifferentialT
                    CursorReads.mergesStoppedByLimit() > stopped);
     }
 
-    /** Byte-identity plus the inverse guard: the bound must NOT have engaged (RowFilter present,
-     *  or no limit) — engaging where the gate says not to is the under-production risk
-     *  {@code CursorReads.limitBoundFor}'s conservative scoping exists to prevent. */
+    /** Byte-identity plus the inverse guard: the merge must NOT have stopped early (no limit, or a
+     *  limit the scenario never reaches). */
     private void assertCursorMatchesWithoutBound(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> cmd)
     {
         long stopped = CursorReads.mergesStoppedByLimit();

@@ -62,10 +62,9 @@ import static org.junit.Assert.assertTrue;
  * <ul>
  *   <li><b>Basic engagement across LIMIT shapes</b> ({@link #pushableFilterEngagesAcrossLimitShapes}):
  *       LIMIT 1, LIMIT 16, and a LIMIT larger than the total match count (an "effectively
- *       unlimited" shape that is still a real, finite {@code CQL_LIMIT} — the production bound
- *       must still ATTEMPT to engage via {@code limitBoundFor}'s kind check, but
- *       {@code mergesStoppedByLimit} must NOT advance since the counter is never actually
- *       satisfied, exactly mirroring the top counter's own behavior).</li>
+ *       unlimited" shape that is still a real, finite {@code CQL_LIMIT} — the top counter is
+ *       never satisfied, so the merge reads to the end of the slice and
+ *       {@code mergesStoppedByLimit} must NOT advance).</li>
  *   <li><b>The critical edge case</b> ({@link #limitLandsExactlyPastFilterDroppedRows}): the LIMIT's
  *       positional landing point (counting ALL produced rows, filter-dropped or not) falls on a
  *       row the filter drops — a broken implementation that counted every produced row toward the
@@ -82,12 +81,11 @@ import static org.junit.Assert.assertTrue;
  *       correctness across page boundaries with filter-dropped rows interspersed, via the real
  *       {@code SinglePartitionPager} machinery and per-page serialized {@link
  *       org.apache.cassandra.service.pager.PagingState} equality.</li>
- *   <li><b>Unpushable filters keep the limit bound disengaged</b>
- *       ({@link #unpushableFilterShapesKeepLimitBoundDisengaged}): multi-cell CONTAINS, complex
+ *   <li><b>Unpushable filters keep filter pushdown disengaged</b>
+ *       ({@link #unpushableFilterShapesKeepFilterPushdownDisengaged}): multi-cell CONTAINS, complex
  *       MAP_ELEMENT and a needsReconciliation filter, each combined with a LIMIT — proving
- *       {@code limitBoundFor} correctly declines when {@code filterPushdownFor} would (the "only
- *       lift when filterPushdownFor also engages" condition), not merely that the query still
- *       runs.</li>
+ *       {@code filterPushdownFor} declines them and the cursor result still matches the iterator
+ *       path.</li>
  *   <li><b>Three-way composition</b> (filter + tombstone threshold + LIMIT,
  *       {@link #abortStillFiresWhenThresholdCrossedBeforeLimitIsSatisfied} and
  *       {@link #abortMustNotFireWhenLimitIsSatisfiedBeforeThresholdCrossing}): the sharpest test of
@@ -210,23 +208,22 @@ public class LimitedFilterPushdownDifferentialTest extends CursorReadDifferentia
     // ---------------------------------------------------------------- unpushable filters
 
     @Test
-    public void unpushableFilterShapesKeepLimitBoundDisengaged() throws Throwable
+    public void unpushableFilterShapesKeepFilterPushdownDisengaged() throws Throwable
     {
         Workload w = loadComplexColumnWorkload();
 
         // multi-cell CONTAINS on a SET column: SIMPLE kind but a COMPLEX column, unpushable
-        assertLimitBoundStaysDisengaged(w.cfs,
+        assertFilterPushdownStaysDisengaged(w.cfs,
             w.limitFiltered(10, f -> f.add(w.col("tags"), Operator.CONTAINS, ByteBufferUtil.bytes("common"))));
 
         // MAP_ELEMENT: not Kind.SIMPLE, unpushable
-        assertLimitBoundStaysDisengaged(w.cfs,
+        assertFilterPushdownStaysDisengaged(w.cfs,
             w.limitFiltered(10, f -> f.addMapEquality(w.col("m"), ByteBufferUtil.bytes("stable"),
                                                       Operator.EQ, ByteBufferUtil.bytes("x"))));
 
         // needsReconciliation: purge-before-evaluate semantics differ, gated out wholesale —
         // Util.cmd's own filterOn builds exactly this shape (RowFilter.create(true)), so this is
         // also every ordinary CQL-path filtered+limited query until a future increment revisits it
-        long stoppedBefore = CursorReads.mergesStoppedByLimit();
         long engagedBefore = CursorReads.filterPushdownEngaged();
         Supplier<SinglePartitionReadCommand> needsReconciliation =
             () -> (SinglePartitionReadCommand) Util.cmd(w.cfs, 0L).withNowInSeconds(w.nowInSec)
@@ -236,9 +233,6 @@ public class LimitedFilterPushdownDifferentialTest extends CursorReadDifferentia
         assertCursorReadMatchesIterator(w.cfs, needsReconciliation);
         assertEquals("filter pushdown must not engage on a needsReconciliation filter",
                      engagedBefore, CursorReads.filterPushdownEngaged());
-        assertEquals("the limit bound must stay disengaged when the filter is not fully pushable "
-                     + "(the 'only lift when filterPushdownFor also engages' condition)",
-                     stoppedBefore, CursorReads.mergesStoppedByLimit());
     }
 
     // ---------------------------------------------------------------- three-way composition
@@ -351,15 +345,12 @@ public class LimitedFilterPushdownDifferentialTest extends CursorReadDifferentia
                          droppedBefore, CursorReads.rowsDroppedByFilter());
     }
 
-    private void assertLimitBoundStaysDisengaged(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> cmd)
+    private void assertFilterPushdownStaysDisengaged(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> cmd)
     {
-        long stoppedBefore = CursorReads.mergesStoppedByLimit();
         long engagedBefore = CursorReads.filterPushdownEngaged();
         assertCursorReadMatchesIterator(cfs, cmd);
         assertEquals("filter pushdown must not engage on an unpushable filter shape",
                      engagedBefore, CursorReads.filterPushdownEngaged());
-        assertEquals("the limit bound must stay disengaged when filterPushdownFor declines",
-                     stoppedBefore, CursorReads.mergesStoppedByLimit());
     }
 
     private ScanMetricsCapture.Snapshot assertScanMetricsParity(ColumnFamilyStore cfs,

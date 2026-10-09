@@ -46,7 +46,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Differential scenarios for {@link CursorReads.TranscodeMergeSink}'s streaming
+ * Differential scenarios for {@link org.apache.cassandra.db.ResponseSink}'s streaming
  * {@code addCellFromWire} path. Sstable-winner cell values stream straight from
  * {@code CursorReads.MergeLeg#stageCellValue} (or, for a tie-broken winner, from the merge's own
  * tie-break scratch) directly into {@link org.apache.cassandra.db.rows.ResponseWireWriter}'s row
@@ -55,7 +55,7 @@ import static org.junit.Assert.fail;
  * Extends {@link TranscodeWireFormatDifferentialTest} rather than duplicating its corpus: every one
  * of that class's scenarios (and the same set again under BTI, via
  * {@link BtiTranscodeWireFormatDifferentialTest}'s inheritance pattern) is inherited here unchanged
- * and re-runs automatically — since {@code TranscodeMergeSink} unconditionally overrides
+ * and re-runs automatically — since {@code ResponseSink} unconditionally overrides
  * {@code wantsWireStreamedCells()} to {@code true}, every inherited scenario already exercises the
  * streaming code path. What this class adds: value-length shapes (fixed vs. variable, wide enough
  * to force multiple transfer-buffer chunks through {@code MergeLeg#stageCellValue}'s chunked-write
@@ -237,7 +237,7 @@ public class TranscodeCellStreamingDifferentialTest extends TranscodeWireFormatD
     /**
      * The allocation payoff: {@link CursorReads#sstableCellValuesMaterialized()} — advanced only
      * by {@code CursorReadMerger.mergeCellGroup}'s non-streaming branch — must advance by exactly
-     * zero when the same merge runs through {@code TranscodeMergeSink} (streaming), while the
+     * zero when the same merge runs through {@code ResponseSink} (streaming), while the
      * reference {@code MaterializingMergeSink} run over the identical legs/workload advances it
      * once per sstable-won cell. This production counter is exact and deterministic, so it is the
      * primary assertion; a secondary {@code ThreadMXBean}-based measurement corroborates with real
@@ -273,17 +273,17 @@ public class TranscodeCellStreamingDifferentialTest extends TranscodeWireFormatD
         // byte[]/Cell object
         List<CursorReads.PendingLeg> refLegs = openAllLegs(sstables, metadata, dk, slices, columnFilter);
         long refBefore = CursorReads.sstableCellValuesMaterialized();
-        try (UnfilteredRowIterator refIter = CursorReads.mergeLegs(refLegs, metadata, dk, slices, columnFilter, null, null))
+        try (UnfilteredRowIterator refIter = CursorReads.mergeLegs(refLegs, metadata, dk, slices, columnFilter, null))
         {
             while (refIter.hasNext())
                 refIter.next();
         }
         long refDelta = CursorReads.sstableCellValuesMaterialized() - refBefore;
 
-        // candidate: the streaming path (TranscodeMergeSink) over the identical legs/workload —
+        // candidate: the streaming path (ResponseSink) over the identical legs/workload —
         // must materialize zero byte[]/Cell objects for those same sstable-won cells
         List<CursorReads.PendingLeg> headerLegs = openAllLegs(sstables, metadata, dk, slices, columnFilter);
-        UnfilteredRowIterator headerIter = CursorReads.mergeLegs(headerLegs, metadata, dk, slices, columnFilter, null, null);
+        UnfilteredRowIterator headerIter = CursorReads.mergeLegs(headerLegs, metadata, dk, slices, columnFilter, null);
         RegularAndStaticColumns cols = headerIter.columns();
         EncodingStats stats = headerIter.stats();
         headerIter.close();
@@ -295,7 +295,7 @@ public class TranscodeCellStreamingDifferentialTest extends TranscodeWireFormatD
         long candDelta = CursorReads.sstableCellValuesMaterialized() - candBefore;
 
         logger.info("allocation gate: sstable-won cell materializations — " +
-                    "reference(MaterializingMergeSink)={} candidate(TranscodeMergeSink)={}", refDelta, candDelta);
+                    "reference(MaterializingMergeSink)={} candidate(ResponseSink)={}", refDelta, candDelta);
         assertEquals("expected one materialization per sstable-won cell (2 cols x " + (rowsPerLeg * 2) + " rows) " +
                      "on the reference path", (long) rowsPerLeg * 2 * 2, refDelta);
         assertEquals("streaming path must materialize zero sstable-won cell byte[]/Cell objects",
@@ -325,7 +325,7 @@ public class TranscodeCellStreamingDifferentialTest extends TranscodeWireFormatD
         for (int i = 0; i < warmup; i++)
         {
             List<CursorReads.PendingLeg> legs = openAllLegs(sstables, metadata, dk, slices, columnFilter);
-            try (UnfilteredRowIterator iter = CursorReads.mergeLegs(legs, metadata, dk, slices, columnFilter, null, null))
+            try (UnfilteredRowIterator iter = CursorReads.mergeLegs(legs, metadata, dk, slices, columnFilter, null))
             {
                 while (iter.hasNext())
                     iter.next();
@@ -339,7 +339,7 @@ public class TranscodeCellStreamingDifferentialTest extends TranscodeWireFormatD
         {
             List<CursorReads.PendingLeg> legs = openAllLegs(sstables, metadata, dk, slices, columnFilter);
             long before = bean.getThreadAllocatedBytes(tid);
-            try (UnfilteredRowIterator iter = CursorReads.mergeLegs(legs, metadata, dk, slices, columnFilter, null, null))
+            try (UnfilteredRowIterator iter = CursorReads.mergeLegs(legs, metadata, dk, slices, columnFilter, null))
             {
                 while (iter.hasNext())
                     iter.next();
@@ -355,7 +355,7 @@ public class TranscodeCellStreamingDifferentialTest extends TranscodeWireFormatD
             candBest = Math.min(candBest, bean.getThreadAllocatedBytes(tid) - before);
         }
         logger.info("allocation gate (secondary, ThreadMXBean, informational): " +
-                    "reference(MaterializingMergeSink)={}B candidate(TranscodeMergeSink)={}B ratio={}",
+                    "reference(MaterializingMergeSink)={}B candidate(ResponseSink)={}B ratio={}",
                     refBest, candBest, String.format("%.4f", (double) candBest / refBest));
     }
 }

@@ -89,7 +89,7 @@ import static org.junit.Assert.assertTrue;
  *
  * Known divergence kept OUT of the parity gate: there is no intra-partition seek yet
  * ({@code PartitionMaterializer} materializes the WHOLE partition eagerly;
- * {@code SlicedMaterializedIterator} applies the slice afterwards), so a mid-partition slice of a
+ * {@code ForwardSlicedCursorIterator} applies the slice afterwards), so a mid-partition slice of a
  * wide partition allocates ~(partitionRows/sliceRows)x the iterator path, which skips/seeks
  * (4KiB column index in the test config) instead of materializing. It is gated separately by
  * {@link #widePartitionMidSliceEagerMaterializationStaysBounded} with a loose ceiling that only
@@ -365,7 +365,7 @@ public class CursorReadAllocationGateTest extends CursorReadDifferentialTester
             long key = pk;
             commands.add(() -> (SinglePartitionReadCommand) Util.cmd(cfs, key).withNowInSeconds(now).build());
         }
-        // near-full slices: exercise SlicedMaterializedIterator's bound handling; the iterator
+        // near-full slices: exercise ForwardSlicedCursorIterator's bound handling; the iterator
         // path skips exactly one row that the cursor path still materializes (see class javadoc)
         commands.add(() -> (SinglePartitionReadCommand)
             Util.cmd(cfs, 1L).withNowInSeconds(now).fromIncl(1L).build());

@@ -30,6 +30,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RegularAndStaticColumns;
+import org.apache.cassandra.db.ResponseSink;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.Slice;
@@ -55,16 +56,16 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Differential scenarios for {@link CursorReads.TranscodeMergeSink} / {@link ResponseWireWriter} —
+ * Differential scenarios for {@link ResponseSink} / {@link ResponseWireWriter} —
  * the sink that transcodes merged cursor state directly into {@code ReadResponse} wire bytes instead
  * of materializing {@code Row}/{@code Cell} objects first. Every scenario drives the merge/legs
  * machinery via {@link CursorReads#mergeLegsWithSink} twice over the same sstables — once with
  * {@code MaterializingMergeSink} (via the production {@link CursorReads#mergeLegs}), once with
- * {@code TranscodeMergeSink} — and asserts the two per-partition byte streams are identical, then
+ * {@code ResponseSink} — and asserts the two per-partition byte streams are identical, then
  * proves the candidate bytes are readable by the production deserializer
  * ({@code UnfilteredRowIteratorSerializer}, the class {@code ReadResponse} deserialization uses).
  * <p>
- * No production call site reaches {@code TranscodeMergeSink}. {@link CursorReads#mergeLegsWithSink}
+ * No production call site reaches {@code ResponseSink}. {@link CursorReads#mergeLegsWithSink}
  * is {@code @VisibleForTesting}, and this class is the only caller besides {@code mergeLegs} itself
  * (which always uses {@code MaterializingMergeSink}). {@code cursor_reads_enabled} plays no role
  * here; legs are opened directly via {@link CursorReads#openLeg}.
@@ -104,7 +105,7 @@ public class TranscodeWireFormatDifferentialTest extends CursorReadDifferentialT
                                           DecoratedKey key, Slices slices, ColumnFilter columnFilter,
                                           PurgeFunction purge) throws Exception
     {
-        UnfilteredRowIterator iter = CursorReads.mergeLegs(legs, metadata, key, slices, columnFilter, null, null);
+        UnfilteredRowIterator iter = CursorReads.mergeLegs(legs, metadata, key, slices, columnFilter, null);
         if (purge != null)
         {
             iter = Transformation.apply(iter, purge);
@@ -122,7 +123,7 @@ public class TranscodeWireFormatDifferentialTest extends CursorReadDifferentialT
         }
     }
 
-    /** The candidate side: {@link CursorReads.TranscodeMergeSink} via
+    /** The candidate side: {@link ResponseSink} via
      *  {@link CursorReads#mergeLegsWithSink}, with the header taken from the caller (so both sides
      *  serialize against the IDENTICAL {@code SerializationHeader}). */
     protected byte[] transcodeCandidate(List<CursorReads.PendingLeg> legs, TableMetadata metadata, DecoratedKey key,
@@ -133,14 +134,14 @@ public class TranscodeWireFormatDifferentialTest extends CursorReadDifferentialT
         DataOutputBuffer rowEvents = new DataOutputBuffer();
         ResponseWireWriter writer = new ResponseWireWriter(rowEvents, header, MessagingService.current_version);
         Slice slice = slices.get(0);
-        CursorReads.MergeSinkFactory<CursorReads.TranscodeMergeSink> factory =
-            () -> new CursorReads.TranscodeMergeSink(writer, metadata.comparator, slice, nowInSec, gcBefore,
+        CursorReads.MergeSinkFactory<ResponseSink> factory =
+            () -> new ResponseSink(writer, metadata.comparator, slice, nowInSec, gcBefore,
                                                       onlyPurgeRepairedTombstones, oldestUnrepairedTombstone);
-        CursorReads.MergeContext<CursorReads.TranscodeMergeSink> ctx =
-            CursorReads.mergeLegsWithSink(legs, metadata, key, slices, columnFilter, null, null, factory);
+        CursorReads.MergeContext<ResponseSink> ctx =
+            CursorReads.mergeLegsWithSink(legs, metadata, key, slices, columnFilter, null, factory);
         // runs once the merge has fully completed, closing any still-open range tombstone at the
         // slice end with a synthetic marker
-        ctx.sink.finishPartition();
+        ctx.sink.finishSlice();
 
         boolean hasStatic = !ctx.mergedStatic.isEmpty();
         boolean isEmpty = ctx.mergedDeletion.isLive() && !hasStatic && rowEvents.getLength() == 0;
@@ -206,7 +207,7 @@ public class TranscodeWireFormatDifferentialTest extends CursorReadDifferentialT
         // are independent of purging) purely to read off .columns()/.stats(), exactly the values
         // UnfilteredRowIteratorSerializer's own 2-arg serialize() overload would derive.
         List<CursorReads.PendingLeg> headerLegs = openAllLegs(sstables, metadata, dk, slices, columnFilter);
-        UnfilteredRowIterator headerIter = CursorReads.mergeLegs(headerLegs, metadata, dk, slices, columnFilter, null, null);
+        UnfilteredRowIterator headerIter = CursorReads.mergeLegs(headerLegs, metadata, dk, slices, columnFilter, null);
         RegularAndStaticColumns cols = headerIter.columns();
         EncodingStats stats = headerIter.stats();
         headerIter.close();

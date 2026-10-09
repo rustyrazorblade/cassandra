@@ -22,12 +22,12 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.Columns;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -86,14 +86,11 @@ import static org.apache.cassandra.db.SerializationHeader.MessagingHeaderSeriali
  *       Two-phase discipline throughout: nothing this writer stages for a row reaches {@code out}
  *       (the final response buffer) before {@link #endRow} confirms the row is complete — a
  *       row-local scratch buffer, flush-on-{@code endRow}, never streamed byte-by-byte as events
- *       arrive. Not needed for correctness today (there is no mid-row abandonment path on this
- *       slice — {@code RowFilter} composition with the transcode sink is out of scope), but it
- *       means a future increment that DOES need to abandon a
- *       partially-built row (the way {@code MaterializingMergeSink.abandonRow()}'s build-and-reset
- *       can) only has to stop calling {@link #endRow} — no rework of this class's staging shape.</li>
+ *       arrive.  A row the caller drops after staging it (a row filter or a limit rejects it) is
+ *       discarded by {@link #abandonRow} and never reaches {@code out}.</li>
  * </ul>
  * Purge-free, exactly like the merge core it sits below: every event this class receives is
- * assumed ALREADY PURGED by the caller ({@code CursorReads.TranscodeMergeSink}) — this class only
+ * assumed ALREADY PURGED by the caller ({@code org.apache.cassandra.db.ResponseSink}) — this class only
  * ever encodes what it is handed.
  */
 public final class ResponseWireWriter
@@ -106,7 +103,9 @@ public final class ResponseWireWriter
     // ---- row-local staging (reset per row by startRow; flushed to `out` only by endRow) ----
     private final DataOutputBuffer rowHeaderBuffer = new DataOutputBuffer();
     private final DataOutputBuffer rowBody = new DataOutputBuffer();
-    private Clustering<?> rowClustering;
+    /** The open row's clustering in its wire form, {@code Clustering.serializer}'s, valid until endRow. */
+    private byte[] rowClustering;
+    private int rowClusteringLength;
     private LivenessInfo rowLiveness;
     private DeletionTime rowDeletion;
     private boolean rowOpen;
@@ -136,6 +135,12 @@ public final class ResponseWireWriter
         this.header = header;
         this.helper = new SerializationHelper(header);
         this.version = version;
+    }
+
+    /** The clustering types the response header serializes clusterings with. */
+    public AbstractType<?>[] clusteringTypes()
+    {
+        return header.clusteringTypes();
     }
 
     // ---------------------------------------------------------------- partition-level passthrough
@@ -204,10 +209,18 @@ public final class ResponseWireWriter
     // incrementally from CursorReadMerger.MergeSink's row-group event stream instead of pulled from
     // a materialized Row via Row.apply(). See the class javadoc for the staging discipline.
 
-    public void startRow(Clustering<?> clustering, LivenessInfo liveness, DeletionTime rowDeletion) throws IOException
+    /**
+     * Opens a row.  The arguments must stay unchanged until {@link #endRow} or {@link #abandonRow}.
+     *
+     * @param clustering the row's clustering serialized as {@code Clustering.serializer} writes it,
+     *                   with this writer's header clustering types, in its first
+     *                   {@code clusteringLength} bytes
+     */
+    public void startRow(byte[] clustering, int clusteringLength, LivenessInfo liveness, DeletionTime rowDeletion) throws IOException
     {
         assert !rowOpen : "startRow called while a row is already open";
         this.rowClustering = clustering;
+        this.rowClusteringLength = clusteringLength;
         this.rowLiveness = liveness;
         this.rowDeletion = rowDeletion;
         this.rowColumns.clear();
@@ -235,7 +248,7 @@ public final class ResponseWireWriter
      *  {@code CursorReadMerger.mergeCellGroup}'s contract: this is called at most once per complex
      *  column, before any of its cells, and ONLY when the merged complex deletion is non-live (a
      *  live-deletion complex column is announced only by its first {@link #addCell}, exactly like
-     *  the {@code MergeSink} grammar it mirrors — see {@code CursorReads.TranscodeMergeSink}). */
+     *  the {@code MergeSink} grammar it mirrors — see {@code ResponseSink}). */
     public void addComplexDeletion(ColumnMetadata column, DeletionTime complexDeletion) throws IOException
     {
         openComplexColumn(column, complexDeletion);
@@ -266,7 +279,7 @@ public final class ResponseWireWriter
      * flags-byte/timestamp/TTL/deletion/path grammar as {@link Cell.Serializer#serialize}
      * (mirrored here, not reused, since there is no materialized {@code Cell} to ask), but the
      * VALUE itself is streamed from {@code source} instead of read off a {@code Cell} object —
-     * the caller (only ever {@code CursorReads.TranscodeMergeSink}) has already resolved any
+     * the caller (only ever {@code ResponseSink}) has already resolved any
      * purge/tombstone-conversion decision, so {@code hasValue} here is authoritative and this
      * method never calls {@code source.hasValue()} itself.
      *
@@ -365,6 +378,21 @@ public final class ResponseWireWriter
         return a == b || (a != null && b != null && a.name.equals(b.name));
     }
 
+    /** Whether the open row is empty so far, {@code Row.isEmpty()}'s definition: empty liveness,
+     *  live deletion, no columns. */
+    public boolean rowIsEmpty()
+    {
+        assert rowOpen : "rowIsEmpty called with no open row";
+        return rowLiveness.isEmpty() && rowDeletion.isLive() && rowColumns.isEmpty();
+    }
+
+    /** Discards the open row: nothing staged for it reaches {@code out}. */
+    public void abandonRow()
+    {
+        assert rowOpen : "abandonRow called with no open row";
+        rowOpen = false;
+    }
+
     /**
      * Flushes the staged row to {@code out}, or discards it entirely if it merged to nothing —
      * mirrors {@code MaterializingMergeSink.endRow}'s {@code !row.isEmpty()} guard
@@ -407,12 +435,12 @@ public final class ResponseWireWriter
         // No EXTENSION_FLAG/extended-flags byte ever: rows reaching this class are never static
         // (the static row takes the separate writeStaticRow passthrough) and never carry a
         // shadowable deletion (the merge core only ever hands this class a bare DeletionTime, and
-        // CursorReads.TranscodeMergeSink — like MaterializingMergeSink — treats every merged row
+        // ResponseSink — like MaterializingMergeSink — treats every merged row
         // deletion as Row.Deletion.regular; hasExtendedFlags(row) == row.isStatic() ||
         // row.deletion().isShadowable() is therefore always false here).
 
         out.writeByte((byte) flags);
-        Clustering.serializer.serialize(rowClustering, out, version, header.clusteringTypes());
+        out.write(rowClustering, 0, rowClusteringLength);
 
         if (!hasAllColumns)
             Columns.serializer.serializeSubset(rowColumns, header.columns(false), rowHeaderBuffer);

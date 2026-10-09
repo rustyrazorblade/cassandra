@@ -28,25 +28,12 @@ import org.apache.cassandra.io.sstable.format.SSTableFormat;
  * The {@link LateMaterializationAllocationBaselineTest} shapes under the BTI format, so the
  * before/after comparisons have baselines for both formats. The paged shape is the interesting
  * one here: each page's forPaging command is a sub-slice, so BTI legs seek to the page start
- * instead of walking from the partition head — the per-page remainder re-materialization being
- * baselined is the same, but the constant per page differs.
+ * instead of walking from the partition head.  Both formats materialize only the rows the pages
+ * return.
  */
 public class BtiLateMaterializationAllocationBaselineTest extends LateMaterializationAllocationBaselineTest
 {
     private SSTableFormat<?, ?> originalFormat;
-
-    /** Under the production bound, each BTI page seeks past its already-returned prefix AND stops
-     *  at its page budget, so the paging sequence materializes just the rows it returns
-     *  (8 x 128 = 1024) plus the block-granularity seek overshoot (the seek parks at the
-     *  row-index-block boundary at-or-before each page's resume point, so a few pre-slice rows per
-     *  page-leg still materialize, unchanged by the bound since those rows precede the counted
-     *  slice). MEASURED: 1193 = 1024 + 169. Layout-sensitive: re-measure and re-record if the
-     *  index encoding, block size or this workload changes. */
-    @Override
-    protected long expectedPagedMaterialization()
-    {
-        return 1193;
-    }
 
     @Before
     public void selectBti()

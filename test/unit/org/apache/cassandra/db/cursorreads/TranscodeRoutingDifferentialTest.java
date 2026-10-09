@@ -119,36 +119,34 @@ public class TranscodeRoutingDifferentialTest extends CursorReadDifferentialTest
 
     // ---------------------------------------------------------------- declining scenarios
 
-    /** CASSANDRA-20428 gap #3: a digest query is now served on the cursor transcode entry point
-     *  (the digest is computed over a cursor merge in iterator form) instead of declining to the
-     *  base executeLocally default. Full digest-response coverage lives in
-     *  {@link DigestCursorReadDifferentialTest}. */
+    /** A digest query declines: {@code executeLocally} computes the digest over the cursor merge.
+     *  Full digest-response coverage lives in {@link DigestCursorReadDifferentialTest}. */
     @Test
-    public void digestQueryEngagesTranscodePath() throws Throwable
-    {
-        setUpTwoLegTable();
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-
-        assertEngagesTranscodePath(() -> (SinglePartitionReadCommand)
-            Util.cmd(cfs, 1L).build().copyAsDigestQuery(ReplicaUtils.full(FBUtilities.getBroadcastAddressAndPort())));
-    }
-
-    @Test
-    public void limitQueryDeclines() throws Throwable
-    {
-        setUpTwoLegTable();
-        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
-
-        assertDeclinesTranscodePath(() -> (SinglePartitionReadCommand) Util.cmd(cfs, 1L).withLimit(5).build());
-    }
-
-    @Test
-    public void filteredQueryWithPushableFilterDeclines() throws Throwable
+    public void digestQueryDeclines() throws Throwable
     {
         setUpTwoLegTable();
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
 
         assertDeclinesTranscodePath(() -> (SinglePartitionReadCommand)
+            Util.cmd(cfs, 1L).build().copyAsDigestQuery(ReplicaUtils.full(FBUtilities.getBroadcastAddressAndPort())));
+    }
+
+    @Test
+    public void limitQueryEngagesTranscodePath() throws Throwable
+    {
+        setUpTwoLegTable();
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+
+        assertEngagesTranscodePath(() -> (SinglePartitionReadCommand) Util.cmd(cfs, 1L).withLimit(5).build());
+    }
+
+    @Test
+    public void filteredQueryWithPushableFilterEngagesTranscodePath() throws Throwable
+    {
+        setUpTwoLegTable();
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+
+        assertEngagesTranscodePath(() -> (SinglePartitionReadCommand)
             Util.cmd(cfs, 1L).filterOn("v1", Operator.EQ, 7L).build());
     }
 

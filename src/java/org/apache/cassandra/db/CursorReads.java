@@ -20,13 +20,14 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Function;
+import java.util.function.Supplier;
 
 import com.carrotsearch.hppc.LongStack;
 import com.google.common.annotations.VisibleForTesting;
@@ -51,7 +52,6 @@ import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellLivenessInfo;
 import org.apache.cassandra.db.rows.CellPath;
-import org.apache.cassandra.db.rows.CellValueSource;
 import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.DeserializationHelper;
@@ -76,11 +76,11 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
 import org.apache.cassandra.io.sstable.format.bti.BtiCursorSeekSupport;
 import org.apache.cassandra.io.sstable.format.bti.BtiTableReader;
+import org.apache.cassandra.io.sstable.format.bti.RowIndexReader;
 import org.apache.cassandra.io.sstable.keycache.KeyCacheSupport;
-import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.metrics.TableMetrics;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ParamType;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -133,6 +133,9 @@ public final class CursorReads
     private static final AtomicLong SSTABLE_LEGS_SERVED = new AtomicLong();
     /** Gated-in legs where the sstable turned out not to contain the partition (no cursor opened). */
     private static final AtomicLong SSTABLE_LEGS_WITHOUT_PARTITION = new AtomicLong();
+    /** Sstable legs of a read that passed {@link #isReadSupported} but were still read through the
+     *  iterator path.  Counted once per leg.  Must stay zero. */
+    private static final AtomicLong SSTABLE_LEGS_FELL_BACK_TO_ITERATOR = new AtomicLong();
     /** Sstable legs where the BTI row index produced a forward seek into the partition.  Counts
      *  merged-mode legs too: a merged read over N indexed BTI legs with a slice start advances
      *  this by N. */
@@ -162,7 +165,8 @@ public final class CursorReads
     private static final AtomicLong MEMTABLE_ROWS_REUSED = new AtomicLong();
     /** Merged cells emitted by reusing the memtable's own live {@code Cell} object. */
     private static final AtomicLong MEMTABLE_CELLS_REUSED = new AtomicLong();
-    /** Cursor merges whose production was bounded by the query limit. */
+    /** Cursor merges closed before they reached the end of their slices, because the reader
+     *  stopped asking for rows (a limit or page was reached). */
     private static final AtomicLong MERGES_STOPPED_BY_LIMIT = new AtomicLong();
     /** Cursor merges that ran with a RowFilter pushdown context attached. */
     private static final AtomicLong FILTER_PUSHDOWNS_ENGAGED = new AtomicLong();
@@ -204,6 +208,21 @@ public final class CursorReads
     public static long transcodeResponsesServed()
     {
         return TRANSCODE_RESPONSES_SERVED.get();
+    }
+
+    /** Replica data reads, with cursor reads enabled, that the transcode path declined: they are
+     *  served by {@code executeLocally} instead. */
+    private static final AtomicLong TRANSCODE_RESPONSES_DECLINED = new AtomicLong();
+
+    static void countTranscodeResponseDeclined()
+    {
+        TRANSCODE_RESPONSES_DECLINED.incrementAndGet();
+    }
+
+    @VisibleForTesting
+    public static long transcodeResponsesDeclined()
+    {
+        return TRANSCODE_RESPONSES_DECLINED.get();
     }
 
     public static long sstableLegsServed()
@@ -294,6 +313,16 @@ public final class CursorReads
         return SSTABLE_LEGS_WITHOUT_PARTITION.get();
     }
 
+    static void countSstableLegFellBackToIterator()
+    {
+        SSTABLE_LEGS_FELL_BACK_TO_ITERATOR.incrementAndGet();
+    }
+
+    public static long sstableLegsFellBackToIterator()
+    {
+        return SSTABLE_LEGS_FELL_BACK_TO_ITERATOR.get();
+    }
+
     public static long sstableLegRowIndexSeeks()
     {
         return SSTABLE_LEG_ROW_INDEX_SEEKS.get();
@@ -342,7 +371,7 @@ public final class CursorReads
     @VisibleForTesting
     public static volatile boolean TEST_SKEW_DROPPED_ROW_ACCOUNTING = false;
 
-    /** Test only: skews the row liveness timestamp {@link TranscodeMergeSink} hands
+    /** Test only: skews the row liveness timestamp {@link ResponseSink} hands
      *  {@link ResponseWireWriter} (+1), so the byte-comparison harness can prove it catches a wrong
      *  encoded value.  Never set outside tests. */
     @VisibleForTesting
@@ -355,7 +384,7 @@ public final class CursorReads
     public static volatile boolean TEST_TRANSCODE_WRONG_FLAGS = false;
 
     /** Test only: flips the low bit of the first byte of a sstable-winner cell value when
-     *  {@link TranscodeMergeSink} streams it, so the harness can prove it catches a wrong value on
+     *  {@link ResponseSink} streams it, so the harness can prove it catches a wrong value on
      *  the streaming path.  Never set outside tests. */
     @VisibleForTesting
     public static volatile boolean TEST_CORRUPT_STREAMED_CELL_VALUE = false;
@@ -375,17 +404,15 @@ public final class CursorReads
      *   <li>a slice filter may hold any number of forward slices (CASSANDRA-20428 gap #8): a
      *       full-partition read, a single slice, or several slices from a compound-clustering
      *       restriction.  A names filter selects a fixed set of clusterings and resolves to one point
-     *       slice per clustering.  For both, the merge scans the covering range once and the emission
-     *       slicer re-filters to the requested slices, tracking the open range-tombstone marker across
-     *       the gaps between slices</li>
+     *       slice per clustering.  For both, the merge reads one slice at a time, seeking forward
+     *       to each slice start where the row index allows, and skips the rows between slices
+     *       without reading their cells</li>
      *   <li>no row cache on the table (a cursor result cannot populate {@code CachedBTreePartition}
      *       without materializing anyway)</li>
      *   <li>counter tables ARE served (CASSANDRA-20428 counter gap): the single-leg materializer and
      *       the cursor merge both apply the marked-local shard clear
      *       ({@code DeserializationHelper.maybeClearCounterValue} equivalent) and fold live contexts
-     *       via {@link CursorCounterContexts}, byte-for-byte with the iterator path.  Counters stay
-     *       off the single-winner transcode fast path (queryStorageToResponseBytes declines them),
-     *       which cannot fold contexts</li>
+     *       via {@link CursorCounterContexts}, byte-for-byte with the iterator path</li>
      *   <li>no materialized views: legacy shadowable row deletions are rejected mid-read by
      *       {@link SSTableCursorReader}</li>
      *   <li>all candidate sstables at the latest format version, none carrying dropped
@@ -420,15 +447,14 @@ public final class CursorReads
         // slice end backward (the cursor analog of BTI SSTableReversedIterator), emitting in
         // descending clustering order; the surviving legs reconcile in the shared reverse merge
         // (UnfilteredRowIterators.merge over per-leg reverse iterators), the same composition the
-        // iterator path uses for a reverse read.  A reverse read stays off the single-slice transcode
-        // fast path (queryStorageToResponseBytes declines it) and off the cursor-level merge
+        // iterator path uses for a reverse read.  A reverse read stays off the transcode path
+        // (queryStorageToResponseBytes declines it) and off the cursor-level merge
         // (cursorMergedLegs is forced false for a reversed read).
         // A multi-slice read is served on the cursor path (CASSANDRA-20428 gap #8 for a slice filter
         // of several ranges, gap #9 for a names filter of several clusterings).  The cursor merge
-        // scans the covering range once and the emission slicer re-filters to the exact requested
-        // slices, tracking the open range-tombstone marker across the gaps.  A multi-slice read stays
-        // off the single-slice transcode fast path (queryStorageToResponseBytes declines it) and off
-        // the single-slice limit/filter pushdown (limitBoundFor and filterPushdownFor decline it).
+        // reads one slice at a time, seeking forward to each slice start where the row index
+        // allows, and the emission slicer adds the slice-bound markers.  A multi-slice read stays
+        // off the single-slice filter pushdown (filterPushdownFor declines it).
 
         // No sstable-count floor: a single sstable, a memtable-only read (zero sstables), and a
         // read that collapses to one surviving leg after tombstone pruning are all served. The
@@ -441,6 +467,12 @@ public final class CursorReads
                 return false;
         }
         return true;
+    }
+
+    /** Counts a deferred leg opened early because its data may start at or before a slice start. */
+    static void countLegForceOpened()
+    {
+        SSTABLE_LEGS_FORCE_OPENED.incrementAndGet();
     }
 
     /**
@@ -747,17 +779,33 @@ public final class CursorReads
     }
 
     /**
-     * Finishes a single pending leg: BTI row-index seek and slice-end stop when applicable, bounded
-     * materialization, cursor closed, result wrapped in the slice-applying iterator.  Byte-identical
-     * to the {@link #sstableRowIterator} output.  This is the per-leg fast path for a lone sstable
-     * leg with no memtable; {@link #mergeLegs} serves every other leg count, one and up.
+     * Finishes a single pending leg: the BTI row-index seek when applicable, then a lazy forward
+     * iterator that reads the leg one unfiltered at a time as its reader pulls.  The leg's rows
+     * are read as stored, with no merge, like the iterator path's single sstable iterator, and
+     * the read stops at the slice end.  Byte-identical to the {@link #sstableRowIterator} output.
+     * The returned iterator owns the leg and closes it in {@link UnfilteredRowIterator#close()}.
+     * This is the per-leg path for a lone sstable leg with no memtable; {@link #mergeLegs} serves
+     * every other leg count.
      */
     public static UnfilteredRowIterator completeSingleLeg(PendingLeg leg)
     {
-        MaterializedPartition materialized;
+        MaterializingMergeSink sink = new MaterializingMergeSink();
+        CursorReadMerger merger = null;
+        DeletionTime openMarkerAtStart = null;
         try
         {
-            materialized = leg.completeSingle();
+            // A lone surviving cursor leg may still be deferred (elimination left one intersecting
+            // sstable, no memtable): open it now.  A single-leg read always reads its one sstable,
+            // so the count matches the iterator path either way.  An absent partition leaves the
+            // cursor null, like a Slices.NONE leg: the iterator then has no rows.
+            if (leg.deferred)
+                leg.doDeferredOpen();
+            if (leg.cursor != null)
+            {
+                openMarkerAtStart = leg.seekForSingleRead();
+                merger = CursorReadMerger.forSingleLeg(leg, sink);
+                merger.prepare();
+            }
         }
         catch (RuntimeException | Error e)
         {
@@ -769,16 +817,16 @@ public final class CursorReads
             leg.close();
             throw new RuntimeException("cursor read failed for " + leg.sstable, e);
         }
-        leg.close();
-        return new SlicedMaterializedIterator(leg.metadata, leg.key, leg.sstable, leg.sstable.stats(),
-                                              leg.columnFilter, leg.legSlices, materialized,
-                                              true); // single leg: this iterator is the leg's validation surface
+        // single leg: this iterator is the leg's validation surface
+        return new ForwardSlicedCursorIterator(leg.metadata, leg.key, leg.sstable, leg.sstable.stats(), leg.columnFilter,
+                                               leg.legSlices, leg.partitionLevelDeletion(), leg.staticRow(),
+                                               openMarkerAtStart, merger, sink, null,
+                                               Collections.singletonList(leg), true, false);
     }
 
     /**
      * Reverse counterpart of {@link #completeSingleLeg}: wraps the pending leg in a LAZY reverse
-     * iterator (descending clustering order) instead of eagerly materializing the whole slice.
-     * Laziness is required, not incidental: a reverse read with a small limit must touch only the
+     * iterator (descending clustering order).  Laziness is required, not incidental: a reverse read with a small limit must touch only the
      * tail blocks, so the leg keeps its cursor open and reads (and counts) only the unfiltereds the
      * consumer actually pulls.  The returned iterator owns the leg and closes it in
      * {@link UnfilteredRowIterator#close()}.  For a multi-leg reverse read every leg is wrapped this
@@ -858,59 +906,9 @@ public final class CursorReads
         }
     }
 
-    /**
-     * Engagement gate for the cursor merge's production bound: returns a fresh detached counter that
-     * matches the counter {@code ReadCommand.executeLocally} applies above the merge, or null when
-     * the bound must not engage and production stays unbounded.  Each decline is conservative: the
-     * bound's one failure mode is under-production, so any query shape whose top-of-stack counting
-     * this cannot reproduce exactly falls back to unbounded:
-     * <ul>
-     *   <li>only CQL_LIMIT / CQL_PAGING_LIMIT kinds; GROUP BY counters count group boundaries, which
-     *       this does not reproduce;</li>
-     *   <li>not for unlimited limits ({@code DataLimits.NONE} lands here);</li>
-     *   <li>a non-empty {@code RowFilter} does not block outright: the filter sits below the counter
-     *       and drops rows before they are counted, so a filter-blind bound would stop while the
-     *       counter still wants rows, unless every dropped row is also one {@link #filterPushdownFor}
-     *       pushes into the merge.  Declined whenever {@link #filterPushdownFor} would decline (any
-     *       unpushable expression), since then production-side filtering does not match the top
-     *       counter's population.  See {@link RowLevelFilterProbe} and {@link LimitingMergeSink} for
-     *       how the two bounds compose once both engage;</li>
-     *   <li>not under MV strict liveness (defensive: MV tables are gated out of cursor reads).</li>
-     * </ul>
-     *
-     * Caller contract: pass the returned counter into {@link #mergeLegs} only for a read whose merged
-     * iterator is consumed by {@code executeLocally}'s stack.  The other {@code queryMemtableAndDisk}
-     * entry points return unlimited partition contents and must pass null, or a bounded merge would
-     * under-produce.
-     */
-    static DataLimits.Counter limitBoundFor(SinglePartitionReadCommand command)
-    {
-        DataLimits limits = command.limits();
-        if (!isBoundableLimitKind(limits.kind()))
-            return null;
-        if (limits.isUnlimited())
-            return null;
-        // The limiting merge sink simulates the top counter over a single contiguous slice; a
-        // multi-slice read (a names filter of several clusterings) would mis-count across the gaps.
-        // Decline so production stays unbounded and the top-of-stack counter stays authoritative.
-        if (command.clusteringIndexFilter().getSlices(command.metadata()).size() > 1)
-            return null;
-        // A non-empty filter only blocks the bound when it is not fully pushable; filterPushdownFor
-        // decides whether production-side filtering keeps the merge's row count equal to what
-        // survives to the top counter.  It never calls back into limitBoundFor, so there is no
-        // recursion.
-        if (!command.rowFilter().isEmpty() && filterPushdownFor(command) == null)
-            return null;
-        if (command.metadata().enforceStrictLiveness())
-            return null;
-        return limits.newCounter(command.nowInSec(), false, command.selectsFullPartition(),
-                                 command.metadata().enforceStrictLiveness());
-    }
-
-    /** Whether {@code kind} is a limit shape {@link #limitBoundFor} engages for (CQL_LIMIT or
-     *  CQL_PAGING_LIMIT; GROUP BY counters count group boundaries and are excluded).  Shared by
-     *  {@link #limitBoundFor} and {@link FilterPushdown}'s row-level eligibility so the two cannot
-     *  drift. */
+    /** Whether {@code kind} is CQL_LIMIT or CQL_PAGING_LIMIT, the limit shapes
+     *  {@link FilterPushdown}'s row-level eligibility accepts.  GROUP BY counters count group
+     *  boundaries and are excluded. */
     private static boolean isBoundableLimitKind(DataLimits.Kind kind)
     {
         return kind == DataLimits.Kind.CQL_LIMIT || kind == DataLimits.Kind.CQL_PAGING_LIMIT;
@@ -935,15 +933,14 @@ public final class CursorReads
      *       column;</li>
      *   <li>query-size tracking is not active for this command and purgeable-tombstone recording is
      *       disabled (both walk the object stream below the top filter);</li>
-     *   <li>caller contract, as {@code limitBoundFor}'s: the context may reach {@link #mergeLegs}
-     *       only for a read whose merged iterator is consumed by {@code executeLocally}'s stack; the
-     *       other entry points must pass null.</li>
+     *   <li>caller contract: the context may reach {@link #mergeLegs} only for a read whose merged
+     *       iterator is consumed by {@code executeLocally}'s stack; the other entry points must pass
+     *       null.</li>
      * </ul>
      *
      * The partition-level short-circuit ({@link FilterPushdown#partitionLevelMatches}) is always
      * active once the gate engages.  Clustering- and regular-column expressions additionally drop
-     * rows at production, cooperating with {@code limitBoundFor}'s bound rather than requiring its
-     * absence; see {@link FilterPushdown#rowLevelPushdownEligible}.
+     * rows at production; see {@link FilterPushdown#rowLevelPushdownEligible}.
      */
     static FilterPushdown filterPushdownFor(SinglePartitionReadCommand command)
     {
@@ -958,7 +955,7 @@ public final class CursorReads
         if (command.clusteringIndexFilter().getSlices(command.metadata()).size() > 1)
             return null;
         if (command.metadata().enforceStrictLiveness())
-            return null; // MV tables are outside isReadSupported entirely; purely defensive, like limitBoundFor's check
+            return null; // MV tables are outside isReadSupported entirely; purely defensive
         for (RowFilter.Expression e : rowFilter.getExpressions())
         {
             // exact-class check for Kind.SIMPLE (Kind is not visible outside the filter package);
@@ -1013,19 +1010,14 @@ public final class CursorReads
         private final List<RowFilter.Expression> regularExpressions;
         /**
          * Whether row-level pushdown may actually drop rows for this query.  Requires row-level
-         * (clustering- or regular-column) expressions and either an unlimited query or a production
-         * LIMIT bound that will attach for it ({@code isBoundableLimitKind(limits().kind())}).  Both
-         * arms exist for the same reason: the top-level {@code DataLimits} counter sits above
-         * {@code withMetricsRecording}, so a limited query stops scanning and metric-counting once
-         * the limit is satisfied.  An eager merge that dropped and accounted the whole slice would
-         * over-count dropped rows the iterator path never scans, and could abort on tombstones it
-         * never reaches.  {@code mergeLegs} wires {@link RowLevelFilterProbe} together with
-         * {@link LimitingMergeSink} so the same bound that stops the top counter also stops the merge.
-         * The "will attach" check does not re-derive filter pushability or call back into
-         * {@code limitBoundFor}/{@code filterPushdownFor}: this constructor runs only after
-         * {@link #filterPushdownFor}'s gate already passed for this command, so the only residual
-         * question is the limit's shape.  This is not part of the gate itself: the context still
-         * attaches for the partition-level short-circuit, which is consumption-independent.
+         * (clustering- or regular-column) expressions and either an unlimited query or a
+         * CQL_LIMIT / CQL_PAGING_LIMIT limit ({@code isBoundableLimitKind(limits().kind())}).  The
+         * merge is pulled by the top-level {@code DataLimits} counter, so it drops and accounts
+         * rows only as far as that counter reads, the same rows the iterator path scans.  This
+         * constructor runs only after {@link #filterPushdownFor}'s gate already passed for this
+         * command, so the only residual question is the limit's shape.  This is not part of the
+         * gate itself: the context still attaches for the partition-level short-circuit, which is
+         * consumption-independent.
          */
         private final boolean rowLevelPushdownEligible;
         private final long nowInSec;
@@ -1141,15 +1133,16 @@ public final class CursorReads
      *   <li>the dropped-row classification ({@link #beginDroppedRow} ... {@link #endDroppedRow}):
      *       {@code MetricRecording.applyToRow}'s three-way logic on post-purge content, keeping cell
      *       liveness ({@code Cell.isLive}) and row liveness ({@code LivenessInfo.isLive}) apart;</li>
-     *   <li>the production-time abort ({@link #productionAbort}): the merge is eager, so it maintains
-     *       a combined tombstone/live-row count over the surface {@code MetricRecording} would scan
-     *       and aborts at the same element with the same side effects (Tracing message, metric
-     *       increment, exception message, at-abort recordings).</li>
+     *   <li>the production-time abort ({@link #productionAbort}): {@code MetricRecording} never sees
+     *       a dropped row, so the merge keeps a combined tombstone count over the surface
+     *       {@code MetricRecording} would scan.  When a dropped row's tombstone crosses the
+     *       threshold, it aborts with the same side effects (Tracing message, metric increment,
+     *       exception message).  An emitted tombstone that crosses it is left to
+     *       {@code MetricRecording}, which sees it next.</li>
      * </ul>
      *
-     * Engagement requires a fully-consumed query (see
-     * {@code FilterPushdown.rowLevelPushdownEligible}) so the eager combined count equals what the
-     * pull side would have scanned.
+     * The merge runs only as far as the reader pulls, so the combined count covers the same rows
+     * the iterator path scans (see {@code FilterPushdown.rowLevelPushdownEligible}).
      */
     static final class ScanStatsAccumulator
     {
@@ -1161,9 +1154,7 @@ public final class CursorReads
         private final boolean onlyPurgeRepairedTombstones;
         private final boolean purgeEnabled;
         private final int failureThreshold;
-        private final int warningThreshold;
         private final boolean respectTombstoneThresholds;
-        private final long queryStartNanos;
 
         // dropped-row totals folded into MetricRecording (pull side)
         private int droppedLiveRows;
@@ -1171,9 +1162,8 @@ public final class CursorReads
         private int sampledDroppedLiveRows;
         private int sampledDroppedTombstones;
 
-        // production-order combined counts driving the abort (statics + emitted surface + dropped
-        // rows, counted in the order MetricRecording would scan them)
-        private int combinedLiveRows;
+        // production-order combined tombstone count driving the abort (statics + emitted surface +
+        // dropped rows, counted in the order MetricRecording would scan them)
         private int combinedTombstones;
 
         // streaming classification state for the dropped row currently being walked; the clustering
@@ -1198,9 +1188,7 @@ public final class CursorReads
             this.gcBefore = purgeEnabled ? cfs.gcBefore(nowInSec) : Long.MIN_VALUE;
             this.onlyPurgeRepairedTombstones = cfs.getCompactionStrategyManager().onlyPurgeRepairedTombstones();
             this.failureThreshold = DatabaseDescriptor.getTombstoneFailureThreshold();
-            this.warningThreshold = DatabaseDescriptor.getTombstoneWarnThreshold();
             this.respectTombstoneThresholds = !SchemaConstants.isLocalSystemKeyspace(command.metadata().keyspace);
-            this.queryStartNanos = nanoTime();
         }
 
         // ---- MetricRecording consumption (pull side) ----
@@ -1272,9 +1260,9 @@ public final class CursorReads
         /**
          * Classifies a merged, about-to-be-emitted row (or the merged static row) as
          * {@code MetricRecording.applyToRow} will after the purge stage, feeding only the combined
-         * production-order counters.  Two passes: the first computes the post-purge
+         * production-order tombstone count.  Two passes: the first computes the post-purge
          * {@code hasDeletion(nowInSec)} gate, the second counts in MetricRecording's order
-         * (surviving dead cells first, then the live-row / PK-deletion-only verdict).
+         * (surviving dead cells first, then the PK-deletion-only verdict).
          */
         void accountRow(Row row)
         {
@@ -1318,14 +1306,12 @@ public final class CursorReads
                         && !cellPurged(cell.timestamp(), cell.localDeletionTime(), cell.ttl()))
                     {
                         hasTombstones = true;
-                        combinedTombstone(row.clustering());
+                        emittedTombstone();
                     }
                 }
             }
-            if (pkLive || anyLiveCell)
-                ++combinedLiveRows;
-            else if (!pkLive && hasDeletion && !hasTombstones)
-                combinedTombstone(row.clustering());
+            if (!pkLive && !anyLiveCell && hasDeletion && !hasTombstones)
+                emittedTombstone();
         }
 
         /** An emitted range-tombstone marker, purge-tested: {@code PurgeFunction.applyToMarker}
@@ -1344,7 +1330,7 @@ public final class CursorReads
                 survives = !shouldPurge(((RangeTombstoneBoundMarker) marker).deletionTime());
             }
             if (survives)
-                combinedTombstone(marker.clustering());
+                emittedTombstone();
         }
 
         /** An artificial slice-bound marker the slicer will synthesize (open at the slice start /
@@ -1354,7 +1340,7 @@ public final class CursorReads
         void accountArtificialMarker(ClusteringBound<?> bound, DeletionTime openDeletion)
         {
             if (!shouldPurge(openDeletion))
-                combinedTombstone(bound);
+                emittedTombstone();
         }
 
         // ---- dropped-row streaming classification (fed by RowLevelFilterProbe) ----
@@ -1439,7 +1425,6 @@ public final class CursorReads
             if (droppedPkLive || droppedAnyLiveCell)
             {
                 ++droppedLiveRows;
-                ++combinedLiveRows;
             }
             else if (!droppedPkLive && droppedHasDeletion && !hasTombstones && !skewAccounting)
             {
@@ -1462,19 +1447,22 @@ public final class CursorReads
                                 : droppedClusteringSource.materializeClusteringPrefix());
         }
 
-        private void combinedTombstone(ClusteringPrefix<?> position)
+        /** A tombstone on the emitted surface.  It is only counted: the reader takes it next, and
+         *  {@code MetricRecording} aborts on it if it crosses the threshold, as on the iterator path. */
+        private void emittedTombstone()
         {
             ++combinedTombstones;
-            if (combinedTombstones > failureThreshold && respectTombstoneThresholds)
-                productionAbort(position);
         }
 
         // ---- the production-time abort ----
 
         /**
-         * Aborts the query when the tombstone count passes the failure threshold.  Records the
-         * same tracing, metrics, and warnings the iterator path records at abort, then throws
-         * TombstoneOverwhelmingException.
+         * Aborts the query when the tombstone count passes the failure threshold, with what
+         * {@code MetricRecording.countTombstone} does at its own abort: the trace, the failure
+         * count, the warning params, and TombstoneOverwhelmingException.  The merge runs inside
+         * the {@code MetricRecording} stream, so its {@code onPartitionClose}/{@code onClose}
+         * record the samples, latency, histograms and totals once the read closes, folding in the
+         * dropped rows, exactly as on the iterator path.
          */
         private void productionAbort(ClusteringPrefix<?> position)
         {
@@ -1487,35 +1475,6 @@ public final class CursorReads
                 MessageParams.remove(ParamType.TOMBSTONE_WARNING);
                 MessageParams.add(ParamType.TOMBSTONE_FAIL, combinedTombstones);
             }
-
-            // sample the partial counts scanned so far
-            if (combinedLiveRows > 0)
-                metric.topReadPartitionRowCount.addSample(command.partitionKey().getKey(), combinedLiveRows);
-            metric.topReadPartitionTombstoneCount.addSample(command.partitionKey().getKey(), combinedTombstones);
-
-            // at-abort recordings: latency, histograms, totals, then the warn block
-            metric.readLatency.addNano(nanoTime() - queryStartNanos);
-            metric.tombstoneScannedHistogram.update(combinedTombstones);
-            metric.liveScannedHistogram.update(combinedLiveRows);
-            metric.totalRowsRead.inc(combinedLiveRows);
-            boolean warnTombstones = combinedTombstones > warningThreshold && respectTombstoneThresholds;
-            if (warnTombstones)
-            {
-                String msg = String.format("Read %d live rows and %d tombstone cells for query %1.512s; token %s (see tombstone_warn_threshold)",
-                                           combinedLiveRows, combinedTombstones, query,
-                                           command.partitionKey().getToken());
-                if (command.isTrackingWarnings())
-                    MessageParams.add(ParamType.TOMBSTONE_WARNING, combinedTombstones);
-                else
-                    ClientWarn.instance.warn(msg);
-                if (combinedTombstones < failureThreshold)
-                    metric.tombstoneWarnings.inc();
-                logger.warn(msg);
-            }
-            Tracing.trace("Read {} live rows and {} tombstone cells{}",
-                          combinedLiveRows, combinedTombstones,
-                          (warnTombstones ? " (see tombstone_warn_threshold)" : ""));
-
             throw new TombstoneOverwhelmingException(combinedTombstones, query, command.metadata(),
                                                      command.partitionKey(), position);
         }
@@ -1527,12 +1486,9 @@ public final class CursorReads
      * accounting), so both interleave in stream order and the accumulator's counts match what the
      * iterator path would scan.
      *
-     * When a production LIMIT bound is engaged for the same query, this probe is the outer layer of
-     * a two-decorator chain: {@link CursorReads#mergeLegs} points {@code next} at
-     * {@link LimitingMergeSink} instead of the base materializer.  The probe forwards every event
-     * to {@code next} unconditionally.  {@code CursorReadMerger} calls {@code endRow}/{@code addRow}
-     * on the top sink only for a row group it did NOT abandon, so a filter-dropped row never reaches
-     * {@link LimitingMergeSink}'s counter.
+     * The probe forwards every event to the materializing sink unconditionally.
+     * {@code CursorReadMerger} calls {@code endRow}/{@code addRow} only for a row group it did NOT
+     * abandon, so a filter-dropped row never reaches the reader or its limit counter.
      *
      * The filter verdict ({@link #rowGroupMatches}) evaluates each gate-approved CLUSTERING-column
      * expression as {@code operator.isSatisfiedBy(column.type, componentWindow, value)}, matching
@@ -1545,7 +1501,7 @@ public final class CursorReads
      * {@code ByteBuffer.wrap} window goes only to {@code Operator.isSatisfiedBy}, which retains
      * nothing and is discarded after the call.
      *
-     * The emitted-surface simulation matches {@code SlicedMaterializedIterator}: elements at or
+     * The emitted-surface simulation matches {@code ForwardSlicedCursorIterator}: elements at or
      * before the slice start do not count, skipped and emitted markers both update the open-marker
      * state, the artificial open marker counts when a range deletion covers it at slice-open time,
      * and the artificial close counts when one is still open at exhaustion ({@link #finishPartition}).
@@ -1558,18 +1514,9 @@ public final class CursorReads
      */
     static final class RowLevelFilterProbe implements CursorReadMerger.MergeSink, CursorReadMerger.FilterProbe
     {
-        /**
-         * Where this probe forwards the MergeSink events it observes: {@link #base} directly when no
-         * production bound is engaged, or {@link LimitingMergeSink} wrapping {@link #base} when one
-         * is.  Forwarding through {@code next} makes {@link LimitingMergeSink}'s counting see the
-         * same event stream this probe does.
-         */
-        private final CursorReadMerger.MergeSink next;
-        /** The base materializer, reached directly (never through {@link #next}) for the two calls
-         *  no MergeSink method can serve: {@link MaterializingMergeSink#abandonRow()} and the
-         *  materialized-row peek ({@code materializedCount()}/{@code unfiltereds()}) that
-         *  {@link #accountEmittedRow} needs. */
-        private final MaterializingMergeSink base;
+        /** The materializing sink this probe forwards every MergeSink event to.  Typed so
+         *  {@link #accountEmittedRow} can look at the row it just built. */
+        private final MaterializingMergeSink next;
         private final ScanStatsAccumulator acc;
         private final ClusteringComparator comparator;
         private final ClusteringBound<?> sliceStart; // null when the slice starts at BOTTOM
@@ -1604,12 +1551,10 @@ public final class CursorReads
         private boolean sliceOpened;    // the artificial-open accounting fired
         private DeletionTime simOpenMarker;
 
-        RowLevelFilterProbe(CursorReadMerger.MergeSink next, MaterializingMergeSink base,
-                            FilterPushdown pushdown, DecoratedKey key,
+        RowLevelFilterProbe(MaterializingMergeSink next, FilterPushdown pushdown, DecoratedKey key,
                             ClusteringComparator comparator, Slice slice)
         {
             this.next = next;
-            this.base = base;
             this.acc = pushdown.scanStats();
             this.comparator = comparator;
             this.sliceStart = slice.start().isBottom() ? null : slice.start();
@@ -1639,7 +1584,7 @@ public final class CursorReads
         }
 
         /** Seeds the open-marker simulation with the merged row-index seek state — the same value
-         *  the slicer receives as {@code MaterializedPartition.openMarkerAtStart}. */
+         *  the slicing iterator starts its open-marker tracking from. */
         void initOpenMarker(DeletionTime openMarkerAtStart)
         {
             this.simOpenMarker = openMarkerAtStart;
@@ -1809,9 +1754,8 @@ public final class CursorReads
             if (sawStartRow)
             {
                 // discard the partially-built output row and open the dropped accounting on the
-                // already-materialized shell.  abandonRow() resets the shared row builder, so it
-                // must reach base directly rather than through the forwarding chain.
-                base.abandonRow();
+                // already-materialized shell
+                next.abandonRow();
                 acc.beginDroppedRow(trackedClustering, onEmittedSurface,
                                     trackedLiveness.isEmpty() ? null : trackedLiveness,
                                     trackedRowDeletion);
@@ -1902,26 +1846,25 @@ public final class CursorReads
         @Override
         public void endRow()
         {
-            // peek/count against base directly; base.endRow() fires at most once per this call
-            long before = base.materializedCount();
+            // next.endRow() emits at most one row, and drops a row that merged to empty
+            long before = next.materializedCount();
             next.endRow();
-            if (base.materializedCount() != before)
+            if (next.materializedCount() != before)
                 accountEmittedRow();
         }
 
         @Override
         public void addRow(Row row)
         {
-            long before = base.materializedCount();
+            long before = next.materializedCount();
             next.addRow(row);
-            if (base.materializedCount() != before)
+            if (next.materializedCount() != before)
                 accountEmittedRow();
         }
 
         private void accountEmittedRow()
         {
-            List<Unfiltered> unfiltereds = base.unfiltereds();
-            Row row = (Row) unfiltereds.get(unfiltereds.size() - 1);
+            Row row = (Row) next.peek();
             if (!countsTowardSurface(row.clustering()))
                 return;
             openSurface();
@@ -1941,18 +1884,7 @@ public final class CursorReads
             simOpenMarker = marker.isOpen(false) ? marker.openDeletionTime(false) : null;
         }
 
-        /**
-         * Delegates to {@link #next}.  When a production bound is engaged, {@code next} is
-         * {@link LimitingMergeSink}, so its bound stops the merge once satisfied.  Otherwise
-         * {@code next} is {@link #base}, whose default is unbounded.
-         */
-        @Override
-        public boolean wantsMore()
-        {
-            return next.wantsMore();
-        }
-
-        /** Matches {@code SlicedMaterializedIterator.computeNextInSlice}'s non-strict pre-slice
+        /** Matches {@code ForwardSlicedCursorIterator.computeNextInSlice}'s non-strict pre-slice
          *  skip: only elements strictly after the slice start reach the metrics stage.  Sticky,
          *  since the merged stream is clustering-ordered. */
         private boolean countsTowardSurface(ClusteringPrefix<?> clustering)
@@ -1973,9 +1905,10 @@ public final class CursorReads
                 acc.accountArtificialMarker(sliceStart, simOpenMarker);
         }
 
-        /** Called after the merge loop completes normally: the slicer opens the slice even when
-         *  nothing survived to be emitted, and artificially closes a still-open range deletion at
-         *  the slice end — both reach MetricRecording on the iterator path. */
+        /** Called once the read reaches the end of its slice, never when the reader stops early:
+         *  the slicer opens the slice even when nothing survived to be emitted, and artificially
+         *  closes a still-open range deletion at the slice end — both reach MetricRecording on the
+         *  iterator path. */
         void finishPartition()
         {
             openSurface();
@@ -1988,96 +1921,73 @@ public final class CursorReads
      * The cursor-level k-way merge across one or more pending sstable legs of one partition read.
      * Reconciles at the descriptor/byte level below materialization; only merge winners become
      * {@code Row}/{@code Cell} objects.  Returns one iterator whose emitted stream is byte-identical
-     * to the object-level merge of the per-leg iterators.  Memtable legs, if any, still object-merge
-     * with this result above.  Legs are always closed before this returns.
+     * to the object-level merge of the per-leg iterators.  Memtable legs join the same merge
+     * through {@link MemtableMergeLeg}.
      *
-     * Each indexed BTI leg of a single-slice read seeks to its row-index floor block for the slice
-     * start before the merge runs ({@link PendingLeg#seekForMerge}), with its open-range-tombstone
-     * state seeded into the merge's cross-leg open-marker set.  A narrow slice of a wide partition
-     * no longer walks every leg from the partition start.  BIG legs keep the eager walk.  Combined
-     * with the merge core's slice end-stop, the merge is bounded on both sides.
+     * The merge is lazy: it merges one group each time the returned iterator needs another
+     * unfiltered, so a read that stops early (a limit, a page) never merges the rest of the
+     * partition.  The returned iterator owns the legs and closes them in
+     * {@link UnfilteredRowIterator#close()}; if setup fails, the legs are closed before this throws.
+     *
+     * Each indexed BTI leg seeks to its row-index floor block for the first slice start before the
+     * merge runs ({@link PendingLeg#seekForMerge}), with its open-range-tombstone state seeded into
+     * the merge's cross-leg open-marker set, and again at each later slice start whose floor block
+     * lies ahead of it ({@code CursorReadMerger.moveToSlice}).  BIG legs read from the partition
+     * start.  The merge core stops at each slice end.
      *
      * This merge reconciles only.  It makes no purge decisions (reads purge above the merge via
      * {@code withoutPurgeableTombstones}), no expired-TTL-to-tombstone conversion, and no MV row
      * skipping (MV tables are gated out).  Corrupted-tombstone validation stays at the per-leg,
      * in-slice placement.
      *
-     * @param productionBound a detached {@code DataLimits} counter matching the query's limit
-     *                        ({@link #limitBoundFor}), or null for unbounded production.  Non-null
-     *                        only when the caller has verified this merge's output is the final
-     *                        merged stream the counter consumes.  The authoritative
-     *                        {@code limits().filter} above stays in place either way.  May be
-     *                        non-null at the same time as {@code filterPushdown}.
      * @param filterPushdown  the query's filter pushdown context ({@link #filterPushdownFor}), or
      *                        null when pushdown is disengaged.  When set, its partition-level
      *                        expressions can skip the row-group merge, and once
      *                        {@code filterPushdown.scanStats() != null} its row-level expressions
-     *                        can drop individual rows.  When both this and {@code productionBound}
-     *                        are set, this method wires {@link RowLevelFilterProbe} as the outermost
-     *                        sink forwarding through {@link LimitingMergeSink}, so the limit counts
-     *                        only rows that also survive the filter.
+     *                        can drop individual rows through {@link RowLevelFilterProbe}.
      */
     public static UnfilteredRowIterator mergeLegs(List<? extends MergeLeg> legs,
                                                   TableMetadata metadata,
                                                   DecoratedKey key,
                                                   Slices slices,
                                                   ColumnFilter columnFilter,
-                                                  DataLimits.Counter productionBound,
                                                   FilterPushdown filterPushdown)
     {
         assert !legs.isEmpty() : "the merge core needs at least one leg";
-        try
+        MaterializingMergeSink sink = new MaterializingMergeSink();
+        MergeContext<MaterializingMergeSink> ctx = setUpMergeOrCloseLegs(legs, metadata, key, slices, columnFilter,
+                                                                          filterPushdown, sink, sink);
+        SSTableReader attribution = null;
+        for (MergeLeg leg : legs)
         {
-            MergeContext<MaterializingMergeSink> ctx = runMergeLegs(legs, metadata, key, slices, columnFilter,
-                                                                     productionBound, filterPushdown,
-                                                                     MaterializingMergeSink::new);
-            MaterializingMergeSink sink = ctx.sink;
-            UNFILTEREDS_MATERIALIZED.addAndGet(sink.materializedCount());
-            CURSOR_MERGES_SERVED.incrementAndGet();
-            if (ctx.limitingSink != null && !ctx.limitingSink.wantsMore())
-                MERGES_STOPPED_BY_LIMIT.incrementAndGet();
-            int sstableLegCount = 0;
-            SSTableReader attribution = null;
-            for (MergeLeg leg : legs)
+            if (leg.sstableOrNull() != null)
             {
-                if (leg.sstableOrNull() != null)
-                {
-                    sstableLegCount++;
-                    if (attribution == null)
-                        attribution = leg.sstableOrNull();
-                }
+                attribution = leg.sstableOrNull();
+                break;
             }
-            SSTABLE_LEGS_CURSOR_MERGED.addAndGet(sstableLegCount);
-            MEMTABLE_LEGS_CURSOR_MERGED.addAndGet(legs.size() - sstableLegCount);
-            assert attribution != null : "the gate requires at least one sstable leg";
+        }
+        assert attribution != null : "the gate requires at least one sstable leg";
 
-            // min-merge over the same per-leg stats the per-leg iterators would report, so the
-            // response's stats total matches the object merge's. Non-tracking NAMES reads no longer
-            // reach this merge (they take the timestamp-order driver
-            // queryMemtableAndCursorsInTimestampOrder), so the NO_STATS tombstone-only-leg quirk is
-            // gone: every leg here folds its real stats.
-            EncodingStats stats = EncodingStats.merge(legs, MergeLeg::legStats);
-            MaterializedPartition partition = new MaterializedPartition(ctx.mergedDeletion, ctx.mergedStatic,
-                                                                       sink.unfiltereds(), ctx.openMarkerAtStart);
-            // validateOnEmission = false: per-leg validation inside the merge is the read's entire
-            // validation, like the iterator path
-            return new SlicedMaterializedIterator(metadata, key, attribution, stats,
-                                                  columnFilter, ctx.emitSlices, partition, false);
-        }
-        finally
-        {
-            for (MergeLeg leg : legs)
-                leg.close();
-        }
+        // min-merge over the same per-leg stats the per-leg iterators would report, so the
+        // response's stats total matches the object merge's. Non-tracking NAMES reads no longer
+        // reach this merge (they take the timestamp-order driver
+        // queryMemtableAndCursorsInTimestampOrder), so the NO_STATS tombstone-only-leg quirk is
+        // gone: every leg here folds its real stats.
+        EncodingStats stats = EncodingStats.merge(legs, MergeLeg::legStats);
+        // validateOnEmission = false: per-leg validation inside the merge is the read's entire
+        // validation, like the iterator path
+        return new ForwardSlicedCursorIterator(metadata, key, attribution, stats, columnFilter, ctx.emitSlices,
+                                               ctx.mergedDeletion, ctx.mergedStatic, ctx.openMarkerAtStart,
+                                               ctx.merger, sink, ctx.filterProbe, legs, false, true);
     }
 
     /**
-     * The sink-injection overload of {@link #mergeLegs}, parameterized by a {@link MergeSinkFactory}
-     * instead of a hardcoded {@code MaterializingMergeSink}.  Runs the identical leg-setup, limit,
-     * and filter-pushdown machinery via the shared {@link #runMergeLegs}; {@code mergeLegs} is this
-     * overload called with {@code MaterializingMergeSink::new} plus its materialization tail.  This
-     * overload is {@code @VisibleForTesting} and lets the {@code TranscodeMergeSink} test suite
-     * drive the real merge core against a non-materializing sink.  No production call site uses it.
+     * The form of {@link #mergeLegs} that merges the whole partition into a caller's sink, made by
+     * a {@link MergeSinkFactory} instead of a hardcoded {@code MaterializingMergeSink}: the same leg
+     * setup, then every group merged into the sink ({@code CursorReadMerger.mergeUnfiltereds}) before this returns.  The legs are
+     * closed before this returns.  The transcode response path uses it, and tests drive the real
+     * merge core through it against a non-materializing sink.  Row-level filter pushdown is not
+     * supported here: only the partition-level short-circuit of {@code filterPushdown} applies.
      *
      * @return a context carrying the populated sink plus the per-partition state outside the sink
      *         (the merged partition deletion, static row, start-of-merge open marker, and the
@@ -2090,14 +2000,28 @@ public final class CursorReads
         DecoratedKey key,
         Slices slices,
         ColumnFilter columnFilter,
-        DataLimits.Counter productionBound,
         FilterPushdown filterPushdown,
         MergeSinkFactory<S> sinkFactory)
     {
         assert !legs.isEmpty() : "the merge core needs at least one leg";
         try
         {
-            return runMergeLegs(legs, metadata, key, slices, columnFilter, productionBound, filterPushdown, sinkFactory);
+            MergeContext<S> ctx = setUpMerge(legs, metadata, key, slices, columnFilter, filterPushdown,
+                                             sinkFactory.newSink(), null);
+            if (ctx.sink instanceof ResponseSink)
+            {
+                // the production path purges and counts the static row when it writes the header
+                Row purgedStatic = ((ResponseSink) ctx.sink).purgeAndCountStaticRow(ctx.mergedStatic);
+                ctx = new MergeContext<>(ctx.sink, ctx.mergedDeletion, purgedStatic, ctx.openMarkerAtStart,
+                                         ctx.emitSlices, ctx.merger, ctx.filterProbe);
+            }
+            if (ctx.merger != null)
+                ctx.merger.mergeUnfiltereds();
+            return ctx;
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException("cursor merge failed for " + key + " over " + legs.size() + " legs", e);
         }
         finally
         {
@@ -2107,20 +2031,152 @@ public final class CursorReads
     }
 
     /**
-     * The shared core of {@link #mergeLegs}/{@link #mergeLegsWithSink}: everything from the
-     * partition-deletion and static-row merge through {@code CursorReadMerger.mergeUnfiltereds()},
-     * generic over the sink type.  Sink-specific post-processing stays in each caller.  Does not
-     * close the legs; both callers wrap this in their own try/finally.
+     * Writes one partition's replica data response into {@code out} through {@code sink}, merging
+     * {@code legs}: the partition header, then each slice's merge groups while the sink wants more,
+     * then the partition end.  A lone sstable leg the iterator path would read without a merge is
+     * read as stored ({@link CursorReadMerger#forSingleLeg}).  Does not close the legs.
+     *
+     * @return whether the partition reached the response; false when it was removed
      */
-    private static <S extends CursorReadMerger.MergeSink> MergeContext<S> runMergeLegs(
+    static boolean streamResponse(List<? extends MergeLeg> legs, TableMetadata metadata, DecoratedKey key, Slices slices,
+                                  ColumnFilter columnFilter, ResponseSink sink, ResponseSink.ResponseBuffer out) throws IOException
+    {
+        if (legs.isEmpty())
+        {
+            // no sstable holds the partition: the iterator path merges empty sources, which give
+            // an empty partition
+            sink.partitionMetadataKnown(DeletionTime.LIVE, Rows.EMPTY_STATIC_ROW);
+            sink.beginPartition(out, key, columnFilter, DeletionTime.LIVE, Rows.EMPTY_STATIC_ROW);
+            return sink.finishPartition();
+        }
+        MergeContext<ResponseSink> ctx = sink.singleSource && legs.get(0) instanceof PendingLeg
+                                         ? setUpSingleLeg((PendingLeg) legs.get(0), sink)
+                                         : setUpMerge(legs, metadata, key, slices, columnFilter, null, sink, null);
+        sink.beginPartition(out, key, columnFilter, ctx.mergedDeletion, ctx.mergedStatic);
+        CursorReadMerger merger = ctx.merger;
+        if (merger != null)
+        {
+            boolean movedToAdjacentSlice = false;
+            for (int i = 0; i < ctx.emitSlices.size() && sink.wantsMore(); i++)
+            {
+                if (i > 0 && !movedToAdjacentSlice)
+                {
+                    boolean seeked = merger.moveToSlice(i);
+                    sink.beginSlice(i, seeked, seeked ? merger.openDeletionAtSeek() : null);
+                }
+                movedToAdjacentSlice = false;
+                while (sink.wantsMore() && merger.advance())
+                {
+                    // each advance merges one group into the sink
+                }
+                if (!sink.wantsMore())
+                    break;
+                if (merger.isAdjacentSliceInMerge(i + 1))
+                {
+                    List<RangeTombstoneMarker> markers = merger.moveToAdjacentSlice(i + 1);
+                    sink.finishSliceBeforeAdjacent(markers, i + 1, merger.openDeletionAtSeek());
+                    movedToAdjacentSlice = true;
+                }
+                else
+                {
+                    sink.finishSlice();
+                }
+            }
+        }
+        return sink.finishPartition();
+    }
+
+    /**
+     * {@link #streamResponse} for a lone object-backed source (a memtable, or the merged repaired
+     * sstables of a read that tracks repaired data): the iterator path serializes that iterator
+     * unchanged, so its rows and markers go to the sink as they come, already sliced.  Pulls from
+     * {@code source} only while the sink wants more.  Does not close it.
+     */
+    static boolean streamResponse(UnfilteredRowIterator source, ColumnFilter columnFilter, ResponseSink sink,
+                                  ResponseSink.ResponseBuffer out) throws IOException
+    {
+        sink.partitionMetadataKnown(source.partitionLevelDeletion(), source.staticRow());
+        sink.beginPartition(out, source.partitionKey(), columnFilter, source.partitionLevelDeletion(), source.staticRow());
+        sink.inputAlreadySliced();
+        while (sink.wantsMore() && source.hasNext())
+        {
+            Unfiltered unfiltered = source.next();
+            if (unfiltered.isRow())
+                sink.addRow((Row) unfiltered);
+            else
+                sink.addRangeTombstoneMarker((RangeTombstoneMarker) unfiltered);
+        }
+        return sink.finishPartition();
+    }
+
+    /** The single-leg setup of {@link #completeSingleLeg}, for {@link #streamResponse}. */
+    private static MergeContext<ResponseSink> setUpSingleLeg(PendingLeg leg, ResponseSink sink) throws IOException
+    {
+        // a lone leg may still be deferred (elimination left one intersecting sstable): open it now
+        if (leg.deferred)
+            leg.doDeferredOpen();
+        DeletionTime partitionDeletion = leg.partitionLevelDeletion();
+        Row staticRow = leg.staticRow();
+        sink.partitionMetadataKnown(partitionDeletion, staticRow);
+        CursorReadMerger merger = null;
+        DeletionTime openMarkerAtStart = null;
+        if (leg.cursor != null)
+        {
+            openMarkerAtStart = leg.seekForSingleRead();
+            merger = CursorReadMerger.forSingleLeg(leg, sink);
+            merger.prepare();
+            sink.initOpenMarker(openMarkerAtStart);
+        }
+        return new MergeContext<>(sink, partitionDeletion, staticRow, openMarkerAtStart,
+                                  merger == null ? Slices.NONE : leg.legSlices, merger, null);
+    }
+
+    /** {@link #setUpMerge} for {@link #mergeLegs}: on failure the legs are closed before this throws,
+     *  since no iterator exists yet to own them. */
+    private static <S extends CursorReadMerger.MergeSink> MergeContext<S> setUpMergeOrCloseLegs(
         List<? extends MergeLeg> legs,
         TableMetadata metadata,
         DecoratedKey key,
         Slices slices,
         ColumnFilter columnFilter,
-        DataLimits.Counter productionBound,
         FilterPushdown filterPushdown,
-        MergeSinkFactory<S> sinkFactory)
+        S sink,
+        MaterializingMergeSink probeTarget)
+    {
+        try
+        {
+            return setUpMerge(legs, metadata, key, slices, columnFilter, filterPushdown, sink, probeTarget);
+        }
+        catch (IOException e)
+        {
+            RuntimeException failure = new RuntimeException("cursor merge failed for " + key + " over " + legs.size() + " legs", e);
+            closeAll(legs, failure);
+            throw failure;
+        }
+        catch (RuntimeException | Error e)
+        {
+            closeAll(legs, e);
+            throw e;
+        }
+    }
+
+    /**
+     * The setup shared by {@link #mergeLegs} and {@link #mergeLegsWithSink}: the partition
+     * deletion and static row merge, the partition-level filter short-circuit, the per-leg seeks,
+     * and the prepared {@code CursorReadMerger}.  No group is merged yet.  Does not close the legs.
+     *
+     * @param probeTarget the materializing sink a {@link RowLevelFilterProbe} forwards to, or null
+     *                    for {@link #mergeLegsWithSink}, which does not support row-level filter pushdown
+     */
+    private static <S extends CursorReadMerger.MergeSink> MergeContext<S> setUpMerge(
+        List<? extends MergeLeg> legs,
+        TableMetadata metadata,
+        DecoratedKey key,
+        Slices slices,
+        ColumnFilter columnFilter,
+        FilterPushdown filterPushdown,
+        S sink,
+        MaterializingMergeSink probeTarget) throws IOException
     {
         // supersedes-max over every leg, like UnfilteredRowIterators.merge's
         // collectPartitionLevelDeletion
@@ -2132,7 +2188,19 @@ public final class CursorReads
                 mergedDeletion = legDeletion;
         }
 
-        Row mergedStatic = mergeStaticRows(legs, columnFilter.fetchedColumns().statics, mergedDeletion);
+        Row mergedStatic;
+        if (sink instanceof ResponseSink)
+        {
+            ResponseSink response = (ResponseSink) sink;
+            // UnfilteredRowIterators.merge returns a lone source unchanged, static row included
+            mergedStatic = response.singleSource ? legs.get(0).staticRow()
+                                                 : mergeStaticRows(legs, columnFilter.fetchedColumns().statics, mergedDeletion);
+            response.partitionMetadataKnown(mergedDeletion, mergedStatic);
+        }
+        else
+        {
+            mergedStatic = mergeStaticRows(legs, columnFilter.fetchedColumns().statics, mergedDeletion);
+        }
 
         // partition-level filter short-circuit, evaluated where the merged static row first
         // exists, like RowFilter.filter's applyToPartition check.  On failure the row legs never
@@ -2152,7 +2220,7 @@ public final class CursorReads
         // Only legs with a non-empty slice contribute rows; a Slices.NONE leg joins through its
         // partition deletion and static row alone.  Memtable legs always carry the query's real
         // slices.  A partition skipped by the filter short-circuit contributes no row legs; their
-        // cursors are closed unread in the finally below.
+        // cursors are closed unread when the legs close.
         List<MergeLeg> rowLegs = new ArrayList<>(legs.size());
         if (!partitionSkippedByFilter)
         {
@@ -2163,119 +2231,97 @@ public final class CursorReads
             }
         }
 
-        S sink = sinkFactory.newSink();
-        LimitingMergeSink limitingSink = null;
+        CursorReadMerger merger = null;
+        RowLevelFilterProbe filterProbe = null;
         DeletionTime openMarkerAtStart = null;
         if (!rowLegs.isEmpty())
         {
             // The full slice set drives the merge scan and per-slice validation. A slice read has
-            // one slice; a names read has one point slice per requested clustering. The two sinks
-            // below engage only for a single-slice read (limit and filter pushdown decline
-            // multi-slice), so they take the representative first slice.
+            // one slice; a names read has one point slice per requested clustering. The filter
+            // probe below engages only for a single-slice read (filter pushdown declines
+            // multi-slice), so it takes the representative first slice.
             Slices rowLegSlices = rowLegs.get(0).legSlices();
             Slice slice = rowLegSlices.get(0);
-            try
+            for (MergeLeg leg : rowLegs)
             {
-                for (MergeLeg leg : rowLegs)
+                if (leg.isDeferred())
                 {
-                    if (leg.isDeferred())
-                    {
-                        // A deferred leg whose data may start at or before the merge start must be
-                        // opened now, so its row-index open marker seeds the merger's
-                        // start-of-merge snapshot; dropping that seed would silently drop a range
-                        // tombstone open across the slice start.  A leg that begins strictly after
-                        // the merge start stays deferred and is opened lazily, only if the merge
-                        // reaches its data (the SSTablesIterated cost win).
-                        //
-                        // This force-open is reachable only on BIG format with a primed key cache.
-                        // A deferred leg's lower bound comes from metadataLowerBound: on BTI that is
-                        // only the covered-clustering bound, and a leg is deferred against it only
-                        // when the slice start is strictly below the covered start (an unbounded
-                        // slice short-circuits on mergeStart.isBottom()), so a BTI leg can never be
-                        // both deferred AND spanning the merge start.  Only the per-row key-cache
-                        // bound -- KeyCacheSupport, which BigTableReader implements and
-                        // BtiTableReader does not -- can sit at or before the slice start while the
-                        // leg stays deferred.  On BTI SSTABLE_LEGS_FORCE_OPENED therefore stays zero.
-                        if (leg.deferredSpansMergeStart(slice.start(), metadata.comparator))
-                        {
-                            SSTABLE_LEGS_FORCE_OPENED.incrementAndGet();
-                            leg.openForMerge();
-                        }
-                        continue;
-                    }
-                    // A leg force-opened for its metadata -- partition-level deletion or a fetched
-                    // static row pulled it through the deferred gate (ensureOpenedForMetadata) before
-                    // this loop -- can find the partition absent: doDeferredOpen took its absent branch
-                    // and left the leg non-deferred, exhausted, and without a cursor.  Its cursor
-                    // reaches the DONE state and contributes no rows, so skip merge-mode entry, exactly
-                    // as openForMerge does for an exhausted leg.  This keeps enterMergeMode's
-                    // `assert cursor != null` intact instead of tripping it.
+                    // A deferred leg whose data may start at or before the merge start must be
+                    // opened now, so its row-index open marker seeds the merger's
+                    // start-of-merge snapshot; dropping that seed would silently drop a range
+                    // tombstone open across the slice start.  A leg that begins strictly after
+                    // the merge start stays deferred and is opened lazily, only if the merge
+                    // reaches its data (the SSTablesIterated cost win).
                     //
-                    // Behaviour-preserving for every DONE leg, not only the exhausted-absent one: the
-                    // sole way a leg seeds an open range tombstone into the merge start is
-                    // mergeSeekOpenMarker, which is assigned only inside seekForMerge, which
-                    // early-returns before that assignment on any DONE cursor (a DONE partition has no
-                    // unfiltered to seek over).  A DONE leg therefore carries no open range tombstone
-                    // the merger would otherwise pick up, so skipping the seek drops nothing.
-                    if (leg.cursorState() == DONE)
-                        continue;
-                    leg.enterMergeMode();
-                    // per-leg BTI row-index seek, after the elimination loop confirmed the leg
-                    // participates.  No-op for memtable legs (already in memory).
-                    leg.seekForMerge();
+                    // This force-open is reachable only on BIG format with a primed key cache.
+                    // A deferred leg's lower bound comes from metadataLowerBound: on BTI that is
+                    // only the covered-clustering bound, and a leg is deferred against it only
+                    // when the slice start is strictly below the covered start (an unbounded
+                    // slice short-circuits on mergeStart.isBottom()), so a BTI leg can never be
+                    // both deferred AND spanning the merge start.  Only the per-row key-cache
+                    // bound -- KeyCacheSupport, which BigTableReader implements and
+                    // BtiTableReader does not -- can sit at or before the slice start while the
+                    // leg stays deferred.  On BTI SSTABLE_LEGS_FORCE_OPENED therefore stays zero
+                    // here; a later slice start can still force a BTI leg open
+                    // (CursorReadMerger.moveToSlice).
+                    if (leg.deferredSpansMergeStart(slice.start(), metadata.comparator))
+                    {
+                        SSTABLE_LEGS_FORCE_OPENED.incrementAndGet();
+                        leg.openForMerge(slice.start());
+                    }
+                    continue;
                 }
-                // wrap the sink in the limit counter.  Seeding it with the key and merged static
-                // row here mirrors the top counter's per-partition attach.  LimitingMergeSink wraps
-                // MaterializingMergeSink concretely, so a non-materializing sink cannot compose with
-                // a non-null productionBound.
-                CursorReadMerger.MergeSink mergeSink = sink;
-                if (productionBound != null)
-                {
-                    productionBound.countPartition(key, mergedStatic);
-                    limitingSink = new LimitingMergeSink((MaterializingMergeSink) sink, productionBound,
-                                                         metadata.comparator, slice);
-                    mergeSink = limitingSink;
-                }
-                // row-level filter pushdown and its scan-stats accounting.  When engaged,
-                // RowLevelFilterProbe is the outermost sink, forwarding events through whatever
-                // mergeSink already is (the base sink, or LimitingMergeSink wrapping it).  It peeks
-                // and abandons against sink cast to MaterializingMergeSink directly.
-                CursorReadMerger.FilterProbe probe = null;
-                RowLevelFilterProbe filterProbe = null;
-                if (filterPushdown != null && filterPushdown.scanStats() != null)
-                {
-                    filterProbe = new RowLevelFilterProbe(mergeSink, (MaterializingMergeSink) sink, filterPushdown,
-                                                          key, metadata.comparator, slice);
-                    mergeSink = filterProbe;
-                    probe = filterProbe;
-                }
-                CursorReadMerger merger = new CursorReadMerger(rowLegs.toArray(new MergeLeg[0]), metadata,
-                                                              mergedDeletion, rowLegSlices, mergeSink, probe);
-                // supersedes-max over the seeked legs' row-index open-deletion seeds; the slicer
-                // synthesizes the artificial open marker from it
-                openMarkerAtStart = merger.openMarkerAtMergeStart();
-                if (filterProbe != null)
-                {
-                    filterProbe.initOpenMarker(openMarkerAtStart);
-                    // the merged static row is scanned first on the pull side, so account it before
-                    // any stream element
-                    filterPushdown.scanStats().accountRow(mergedStatic);
-                }
-                // TranscodeMergeSink needs the same seek-state seed for its own open-marker tracking
-                if (sink instanceof TranscodeMergeSink)
-                    ((TranscodeMergeSink) sink).initOpenMarker(openMarkerAtStart);
-                merger.mergeUnfiltereds();
-                if (filterProbe != null)
-                    filterProbe.finishPartition();
+                // A leg force-opened for its metadata -- partition-level deletion or a fetched
+                // static row pulled it through the deferred gate (ensureOpenedForMetadata) before
+                // this loop -- can find the partition absent: doDeferredOpen took its absent branch
+                // and left the leg non-deferred, exhausted, and without a cursor.  Its cursor
+                // reaches the DONE state and contributes no rows, so skip merge-mode entry, exactly
+                // as openForMerge does for an exhausted leg.  This keeps enterMergeMode's
+                // `assert cursor != null` intact instead of tripping it.
+                //
+                // Behaviour-preserving for every DONE leg, not only the exhausted-absent one: the
+                // sole way a leg seeds an open range tombstone into the merge start is
+                // openDeletion, which is set only by a seek, and seekPointFor returns no seek for
+                // a DONE cursor (a DONE partition has no unfiltered to seek over).  A DONE leg therefore carries no open range tombstone
+                // the merger would otherwise pick up, so skipping the seek drops nothing.
+                if (leg.cursorState() == DONE)
+                    continue;
+                leg.enterMergeMode();
+                // per-leg BTI row-index seek for the first slice, after the elimination loop
+                // confirmed the leg participates.  No-op for memtable legs (already in memory).
+                // Later slices seek in CursorReadMerger.moveToSlice.
+                leg.seekForMerge(slice.start());
             }
-            catch (IOException e)
+            // Row-level filter pushdown and its scan-stats accounting.  When engaged,
+            // RowLevelFilterProbe sits in front of the materializing sink.
+            CursorReadMerger.MergeSink mergeSink = sink;
+            if (filterPushdown != null && filterPushdown.scanStats() != null)
             {
-                throw new RuntimeException("cursor merge failed for " + key + " over " + legs.size() + " legs", e);
+                if (probeTarget == null)
+                    throw new IllegalArgumentException("row-level filter pushdown needs a materializing sink");
+                filterProbe = new RowLevelFilterProbe(probeTarget, filterPushdown, key, metadata.comparator, slice);
+                mergeSink = filterProbe;
             }
+            merger = new CursorReadMerger(rowLegs.toArray(new MergeLeg[0]), metadata,
+                                          mergedDeletion, rowLegSlices, mergeSink, filterProbe);
+            // supersedes-max over the seeked legs' row-index open-deletion seeds; the slicing
+            // iterator synthesizes the artificial open marker from it
+            openMarkerAtStart = merger.openMarkerAtMergeStart();
+            if (filterProbe != null)
+            {
+                filterProbe.initOpenMarker(openMarkerAtStart);
+                // the merged static row is scanned first on the pull side, so account it before
+                // any stream element
+                filterPushdown.scanStats().accountRow(mergedStatic);
+            }
+            // ResponseSink needs the same seek-state seed for its own open-marker tracking
+            if (sink instanceof ResponseSink)
+                ((ResponseSink) sink).initOpenMarker(openMarkerAtStart);
+            merger.prepare();
         }
 
         Slices emitSlices = rowLegs.isEmpty() ? Slices.NONE : rowLegs.get(0).legSlices();
-        return new MergeContext<>(sink, mergedDeletion, mergedStatic, openMarkerAtStart, emitSlices, limitingSink);
+        return new MergeContext<>(sink, mergedDeletion, mergedStatic, openMarkerAtStart, emitSlices, merger, filterProbe);
     }
 
     /**
@@ -2306,18 +2352,21 @@ public final class CursorReads
         public final Row mergedStatic;
         public final DeletionTime openMarkerAtStart;
         public final Slices emitSlices;
-        /** null unless a production bound was engaged; {@link #mergeLegs} consults it for its counter. */
-        final LimitingMergeSink limitingSink;
+        /** The prepared merge core, or null when no leg contributes rows. */
+        final CursorReadMerger merger;
+        /** The row-level filter probe in front of the sink, or null when not engaged. */
+        final RowLevelFilterProbe filterProbe;
 
-        private MergeContext(S sink, DeletionTime mergedDeletion, Row mergedStatic,
-                             DeletionTime openMarkerAtStart, Slices emitSlices, LimitingMergeSink limitingSink)
+        private MergeContext(S sink, DeletionTime mergedDeletion, Row mergedStatic, DeletionTime openMarkerAtStart,
+                             Slices emitSlices, CursorReadMerger merger, RowLevelFilterProbe filterProbe)
         {
             this.sink = sink;
             this.mergedDeletion = mergedDeletion;
             this.mergedStatic = mergedStatic;
             this.openMarkerAtStart = openMarkerAtStart;
             this.emitSlices = emitSlices;
-            this.limitingSink = limitingSink;
+            this.merger = merger;
+            this.filterProbe = filterProbe;
         }
     }
 
@@ -2365,36 +2414,6 @@ public final class CursorReads
     }
 
     /**
-     * The non-exceptional counterpart of {@link #closeAll}: closes every already-opened leg/iterator
-     * when {@code SinglePartitionReadCommand.queryStorageToResponseBytes}'s gate declines after some
-     * legs are already open (for example, the leg-count >= 2 requirement fails once the real
-     * candidate count is known).  This is the normal fall-back path, not an error path, so there is
-     * no in-flight exception to attach suppressed failures to.
-     */
-    static void closeAllQuietly(List<? extends AutoCloseable> items)
-    {
-        if (items == null)
-            return;
-        RuntimeException failure = null;
-        for (AutoCloseable item : items)
-        {
-            try
-            {
-                item.close();
-            }
-            catch (Exception e)
-            {
-                if (failure == null)
-                    failure = new RuntimeException("failed to close a cursor-read leg/iterator while declining the transcode path", e);
-                else
-                    failure.addSuppressed(e);
-            }
-        }
-        if (failure != null)
-            throw failure;
-    }
-
-    /**
      * Copies a (possibly reusable) DeletionTime into an immutable one, preserving the exact
      * unsigned-int local-deletion-time representation. NOT {@code DeletionTime.build(mfda, ldt)}:
      * build() takes the LONG domain and classifies {@code localDeletionTime() == Long.MAX_VALUE}
@@ -2409,30 +2428,6 @@ public final class CursorReads
                                                              deletionTime.localDeletionTimeUnsignedInteger());
     }
 
-    /** The materialized content of one sstable's partition (whole partition, or the stretch
-     *  covering the queried slice on a seeked or end-bounded BTI read), or of the merged stream of
-     *  several sstables' partitions. */
-    static final class MaterializedPartition
-    {
-        final DeletionTime partitionDeletion;
-        final Row staticRow;
-        final List<Unfiltered> unfiltereds;
-        /** The range-tombstone deletion open at the first materialized unfiltered, per the BTI row
-         *  index; non-null only when a row-index seek was issued, like
-         *  {@code ForwardIndexedReader.setForSlice}.  For a merged partition, the supersedes-max
-         *  over the seeked legs' seeds.  Null means track open markers from the stream alone. */
-        final DeletionTime openMarkerAtStart;
-
-        MaterializedPartition(DeletionTime partitionDeletion, Row staticRow, List<Unfiltered> unfiltereds,
-                              DeletionTime openMarkerAtStart)
-        {
-            this.partitionDeletion = partitionDeletion;
-            this.staticRow = staticRow;
-            this.unfiltereds = unfiltereds;
-            this.openMarkerAtStart = openMarkerAtStart;
-        }
-    }
-
     /**
      * Per-query cell-value transfer scratch, shared by every cursor-served leg of one
      * single-partition read: the 4KB bounce buffer for variable-length value chunking and the
@@ -2443,9 +2438,6 @@ public final class CursorReads
     public static final class ValueTransfer
     {
         final CellValueCapture valueCapture = new CellValueCapture();
-        // chunking buffer for variable-length cell values only; fixed-length values use the final
-        // value array itself as the transfer buffer (see CellValueCapture)
-        final byte[] transferBuffer = new byte[4096];
 
         // Single-live guard.  One ValueTransfer is now shared across every leg AND every command of
         // one query execution (see ReadExecutionController.cursorValueTransfer), so a re-entrant or
@@ -2540,7 +2532,7 @@ public final class CursorReads
             cursor.pauseAtEmptyComplexColumns(true);
         }
 
-        // set by openPartition; consumed by readRows / the merge path
+        // set by openPartition
         private DeletionTime partitionDeletion;
         private Row staticRow = Rows.EMPTY_STATIC_ROW;
 
@@ -2557,8 +2549,7 @@ public final class CursorReads
         /**
          * The leg-open phase: seeks to the partition, reads and validates the header, materializes
          * the static row.  Returns the cursor state at the first unfiltered (or
-         * {@code PARTITION_END}); rows are produced separately by {@link #readRows} or consumed
-         * descriptor-level by the merge core.
+         * {@code PARTITION_END}); rows are then read by the merge core.
          */
         int openPartition(long position) throws IOException
         {
@@ -2596,84 +2587,6 @@ public final class CursorReads
                     state = cursor.continueReading();
             }
             return state;
-        }
-
-        /**
-         * The row phase for a single cursor-served leg.
-         *
-         * @param seekPoint when non-null (BTI, indexed partition, single slice with a real start
-         *                  bound), the row-index floor block for the slice start: the cursor jumps
-         *                  there instead of walking every row before it.  Rows between the block
-         *                  start and the slice start are still materialized and skipped by
-         *                  {@link SlicedMaterializedIterator}'s pre-slice logic.
-         * @param endBound when non-null, materialization stops at the first unfiltered at or past
-         *                 this bound, mirroring {@code ForwardReader.computeNext}'s end cutoff.
-         */
-        MaterializedPartition readRows(int state, boolean readRows,
-                                       BtiCursorSeekSupport.SeekPoint seekPoint,
-                                       ClusteringBound<?> endBound) throws IOException
-        {
-            List<Unfiltered> unfiltereds = new ArrayList<>();
-
-            DeletionTime openMarkerAtStart = null;
-            if (readRows && seekPoint != null && isState(state, ROW_START | TOMBSTONE_START))
-            {
-                // the current unfiltered's flags byte is already consumed, so its start is one byte
-                // behind the cursor.  Like ForwardIndexedReader.setForSlice, only seek forward; when
-                // the floor block is the one already being read, keep reading sequentially.
-                long currentUnfilteredStart = cursor.position() - 1;
-                if (seekPoint.dataPosition > currentUnfilteredStart)
-                {
-                    state = cursor.seekUnfiltered(seekPoint.dataPosition);
-                    openMarkerAtStart = seekPoint.openMarker == null ? null : copyOf(seekPoint.openMarker);
-                    SSTABLE_LEG_ROW_INDEX_SEEKS.incrementAndGet();
-                }
-            }
-
-            long materializedCount = 0;
-            readLoop:
-            while (readRows && !isState(state, PARTITION_END | DONE))
-            {
-                switch (state)
-                {
-                    case ROW_START:
-                    {
-                        state = cursor.readRowHeader(uDesc);
-                        Clustering<?> clustering = (Clustering<?>) toClusteringPrefix();
-                        // end-stop: at or past the slice end, nothing further can be emitted, so
-                        // stop before materializing this row's cells
-                        if (endBound != null && metadata.comparator.compare(clustering, endBound) >= 0)
-                            break readLoop;
-                        rowBuilder.newRow(clustering);
-                        state = materializeRowContents(state);
-                        materializedCount++;
-                        Row row = rowBuilder.build();
-                        // mirrors ForwardReader.computeNext's next.isEmpty() skip
-                        if (!row.isEmpty())
-                            unfiltereds.add(row);
-                        break;
-                    }
-                    case TOMBSTONE_START:
-                    {
-                        state = cursor.readTombstoneMarker(uDesc);
-                        RangeTombstoneMarker marker = materializeMarker();
-                        // a marker at or past the slice end is never emitted; the artificial close
-                        // comes from the open-marker state
-                        if (endBound != null && metadata.comparator.compare(marker.clustering(), endBound) >= 0)
-                            break readLoop;
-                        materializedCount++;
-                        unfiltereds.add(marker);
-                        break;
-                    }
-                    default:
-                        throw new IllegalStateException("unexpected cursor state " + state);
-                }
-                if (state == UNFILTERED_END)
-                    state = cursor.continueReading();
-            }
-
-            UNFILTEREDS_MATERIALIZED.addAndGet(materializedCount);
-            return new MaterializedPartition(partitionDeletion, staticRow, unfiltereds, openMarkerAtStart);
         }
 
         /**
@@ -2775,7 +2688,7 @@ public final class CursorReads
                             }
                             else
                             {
-                                state = cursor.copyCellValue(transfer.valueCapture.prepareVariable(), transfer.transferBuffer);
+                                state = cursor.copyCellValue(transfer.valueCapture.prepareVariable(), null);
                             }
                             value = transfer.valueCapture.finish();
                         }
@@ -3085,15 +2998,52 @@ public final class CursorReads
         /** The backing sstable, or null for an object-backed (memtable) leg. */
         SSTableReader sstableOrNull();
         void enterMergeMode();
-        void seekForMerge() throws IOException;
-        DeletionTime mergeSeekOpenMarker();
+        /** The row-index seek for the first slice start; see {@link PendingLeg#seekForMerge}. */
+        void seekForMerge(ClusteringBound<?> sliceStart) throws IOException;
+
+        /**
+         * The range deletion open in this leg's own stream at its current position, or null.  Set
+         * by a row-index seek and kept current by {@link #noteMarker}.  Reused storage, valid until
+         * the leg moves.  Always null for a leg that never seeks (a memtable leg).
+         */
+        default DeletionTime openDeletion()
+        {
+            return null;
+        }
+
+        /** Updates {@link #openDeletion} from the marker currently in {@link #unfiltered()}, which
+         *  the merge has just applied. */
+        default void noteMarker()
+        {
+        }
+
+        /**
+         * The row-index block to seek to for a slice starting at {@code sliceStart}: the floor
+         * block, when it lies past this leg's current position.  Null when no forward seek
+         * applies (a BIG or memtable leg, an unindexed partition, or a floor block already reached).
+         */
+        default BtiCursorSeekSupport.SeekPoint seekPointFor(ClusteringBound<?> sliceStart)
+        {
+            return null;
+        }
+
+        /** Seeks to a block {@link #seekPointFor} returned, and takes the block's open deletion as
+         *  this leg's {@link #openDeletion}. */
+        default void seekTo(BtiCursorSeekSupport.SeekPoint point) throws IOException
+        {
+            throw new UnsupportedOperationException("only a seekable leg can seek");
+        }
+
+        /** Consumes the row whose header is loaded without reading its cells, leaving the leg at
+         *  {@code UNFILTERED_END}. */
+        void skipRow() throws IOException;
 
         /**
          * A deferred leg: its partition header (the sstable lookup the {@code SSTablesIterated}
          * metric counts) is NOT yet read.  The leg presents a metadata lower bound through
          * {@link #unfiltered()} so the merge can sort it without touching the file, exactly like the
          * iterator path's {@code UnfilteredRowIteratorWithLowerBound}.  It is opened by
-         * {@link #openForMerge()} only when the merge reaches its data.  Always false for memtable
+         * {@link #openForMerge} only when the merge reaches its data.  Always false for memtable
          * legs and for a leg whose header is already read.
          */
         default boolean isDeferred()
@@ -3103,12 +3053,12 @@ public final class CursorReads
 
         /**
          * Opens a still-{@link #isDeferred() deferred} leg for merge consumption: performs the
-         * partition lookup (the counted read), enters merge mode, applies the row-index seek, and
-         * reads the first unfiltered header.  When the partition is absent from the sstable the leg
+         * partition lookup (the counted read), enters merge mode, applies the row-index seek for
+         * the current slice start, and reads the first unfiltered header.  When the partition is absent from the sstable the leg
          * becomes exhausted (its {@link #cursorState()} reports {@code DONE}, no count), matching an
          * iterator whose lazy init finds no partition.  A no-op on non-deferred legs.
          */
-        default void openForMerge() throws IOException
+        default void openForMerge(ClusteringBound<?> sliceStart) throws IOException
         {
             throw new UnsupportedOperationException("only a deferred leg can be opened for merge");
         }
@@ -3180,7 +3130,7 @@ public final class CursorReads
      * header read and validated, static row materialized, rows not yet touched.  The call site
      * collects these across the {@code mostRecentPartitionTombstone} elimination loop, then finishes
      * them through {@link CursorReads#completeSingleLeg} (1 leg) or {@link CursorReads#mergeLegs}
-     * ({@code >= 2} legs).
+     * ({@code >= 2} legs).  Either way the returned iterator owns the leg and closes it.
      *
      * In merge mode this class is the byte-backed {@link MergeLeg} implementation.
      */
@@ -3198,6 +3148,8 @@ public final class CursorReads
         private final ValueTransfer transfer;
 
         private SSTableCursorReader cursor; // null once closed
+        /** The partition's row index, opened at the first seek and kept for later slices. */
+        private RowIndexReader rowIndex;
         private PartitionMaterializer materializer;
         private int openState;
 
@@ -3214,8 +3166,12 @@ public final class CursorReads
         private UnfilteredDescriptor deferredLowerBound;
         /** the same lower bound as a live bound, for the merge-start slice-span check. */
         private ClusteringBound<?> deferredLowerBoundValue;
-        /** see {@link #mergeSeekOpenMarker()} */
-        private DeletionTime mergeSeekOpenMarker;
+        // ---- row-index seek state ----
+        /** see {@link #openDeletion()}; meaningful only while {@link #hasOpenDeletion} */
+        private final DeletionTime.ReusableDeletionTime openDeletion = DeletionTime.ReusableDeletionTime.live();
+        private boolean hasOpenDeletion;
+        /** The file position of the unfiltered whose header {@link #readUnfilteredHeader} loaded. */
+        private long loadedUnfilteredStart;
 
         // ---- merge-mode cell-walk state (meaningful only after enterMergeMode) ----
         /** The physically-parked cell was read off the wire but not yet filter-evaluated (set when
@@ -3265,9 +3221,8 @@ public final class CursorReads
             // The bounds constructor seeks to the partition and validates the end-of-partition
             // marker before it, which is the reader's own single implementation of that seek; the
             // upper bound is the file length, so reading past this partition behaves as before.
-            cursor = new SSTableCursorReader(sstable,
-                                             Collections.singletonList(new PartitionPositionBounds(position, sstable.uncompressedLength())),
-                                             null);
+            cursor = SSTableCursorReader.forRead(sstable,
+                                                 Collections.singletonList(new PartitionPositionBounds(position, sstable.uncompressedLength())));
             materializer = new PartitionMaterializer(cursor, sstable, metadata, key, columnFilter, transfer);
             openState = materializer.openPartition(position);
             if (legSlices.isEmpty())
@@ -3367,7 +3322,7 @@ public final class CursorReads
         }
 
         @Override
-        public void openForMerge() throws IOException
+        public void openForMerge(ClusteringBound<?> sliceStart) throws IOException
         {
             if (!deferred)
                 return;
@@ -3375,7 +3330,7 @@ public final class CursorReads
             if (deferredExhausted)
                 return; // absent partition: cursorState() reports DONE, no rows, no count
             enterMergeMode();
-            seekForMerge();
+            seekForMerge(sliceStart);
             // read the first unfiltered header so unfiltered() returns real data for the re-sort;
             // an empty in-slice partition sits at PARTITION_END/DONE and sorts to the tail
             if (isState(cursor.state(), ROW_START | TOMBSTONE_START))
@@ -3441,32 +3396,29 @@ public final class CursorReads
             return null;
         }
 
-        /** Single-leg completion; see {@link CursorReads#completeSingleLeg}. */
-        MaterializedPartition completeSingle() throws IOException
+        /**
+         * Single-leg read: materializes the unfiltered whose header {@link #readUnfilteredHeader}
+         * just loaded, as stored (the iterator path's deserialization, no merge), and moves the
+         * cursor to the next unfiltered.  A row may come back empty; the sink drops it, like
+         * {@code ForwardReader}.
+         */
+        Unfiltered readStoredUnfiltered() throws IOException
         {
-            // A lone surviving cursor leg may still be deferred (elimination left one intersecting
-            // sstable, no memtable): open it now.  A single-leg read always reads its one sstable,
-            // so the count matches the iterator path either way.  An absent partition leaves the
-            // cursor null and falls through to the empty result below.
-            if (deferred)
-                doDeferredOpen();
-            if (cursor == null) // Slices.NONE leg, or a deferred open that found no partition
-                return new MaterializedPartition(partitionLevelDeletion(), staticRow(), new ArrayList<>(), null);
-
-            BtiCursorSeekSupport.SeekPoint seekPoint = null;
-            ClusteringBound<?> endBound = null;
-            if (btiEntry != null && btiEntry.isIndexed() && legSlices.size() == 1)
+            Unfiltered result;
+            if (materializer.uDesc.clusteringKind() == ClusteringPrefix.Kind.CLUSTERING)
             {
-                // bounded materialization, BTI only.  A full-partition slice (BOTTOM..TOP) leaves
-                // both of these null and keeps the eager walk.
-                Slice slice = legSlices.get(0);
-                if (!slice.end().isTop())
-                    endBound = slice.end();
-                if (!slice.start().isBottom())
-                    seekPoint = BtiCursorSeekSupport.floorBlock((BtiTableReader) sstable, btiEntry,
-                                                                metadata.comparator, slice.start());
+                Row.Builder builder = materializer.rowBuilder;
+                builder.newRow((Clustering<?>) materializer.toClusteringPrefix());
+                materializer.materializeRowContents(cursor.state());
+                result = builder.build();
             }
-            return materializer.readRows(openState, !legSlices.isEmpty(), seekPoint, endBound);
+            else
+            {
+                result = materializer.materializeMarker();
+            }
+            if (cursor.state() == UNFILTERED_END)
+                cursor.continueReading();
+            return result;
         }
 
         /**
@@ -3482,55 +3434,120 @@ public final class CursorReads
         }
 
         /**
-         * The merge-mode counterpart of {@link #completeSingle}'s row-index seek: same gate (BTI,
-         * row-indexed partition, single slice with a real start bound), same forward-only
-         * floor-block jump.  Positions this leg's cursor at its floor block for the slice start so
-         * the k-way merge never walks the partition prefix; rows between the block start and the
-         * slice start still enter the merge and are dropped by the post-merge slicer's pre-slice skip.
+         * The merge-mode row-index seek for the first slice start.  Positions this leg's cursor at
+         * its floor block so the k-way merge never walks the partition prefix; rows between the
+         * block start and the slice start are skipped by the merge without reading their cells.
          *
          * The range-tombstone deletion open at the seek point is the one piece of leg state a
-         * mid-partition entry cannot recover from the stream, so it is retained in
-         * {@link #mergeSeekOpenMarker} for {@code CursorReadMerger} to seed into its cross-leg
-         * open-marker set.  Misaligned per-leg seek points are safe: a leg's seed is valid from its
-         * floor block onward, and any close marker for the seeded deletion arrives in this leg's own
+         * mid-partition entry cannot recover from the stream, so it is kept as this leg's
+         * {@link #openDeletion} for {@code CursorReadMerger} to seed into its cross-leg open-marker
+         * set.  Misaligned per-leg seek points are safe: a leg's seed is valid from its floor block
+         * onward, and any close marker for the seeded deletion arrives in this leg's own
          * post-seek stream.
          *
-         * No-op for BIG legs, unindexed partitions, full-partition slices, and legs already at or
-         * past the floor block.  A merge may mix seeked BTI legs with unseeked BIG legs.
+         * No-op for BIG legs, unindexed partitions, slices starting at BOTTOM, and legs already at
+         * or past the floor block.  A merge may mix seeked BTI legs with unseeked BIG legs.
          */
-        public void seekForMerge() throws IOException
+        public void seekForMerge(ClusteringBound<?> sliceStart) throws IOException
         {
-            if (btiEntry == null || !btiEntry.isIndexed() || legSlices.size() != 1)
-                return;
-            Slice slice = legSlices.get(0);
-            if (slice.start().isBottom())
-                return;
-            // PARTITION_END/DONE: the partition has no unfiltereds to seek over
-            if (!isState(cursor.state(), ROW_START | TOMBSTONE_START))
-                return;
-            BtiCursorSeekSupport.SeekPoint seekPoint = BtiCursorSeekSupport.floorBlock((BtiTableReader) sstable, btiEntry,
-                                                                                      metadata.comparator, slice.start());
-            // the current unfiltered's flags byte is already consumed, so its start is one byte
-            // behind the cursor.  Like ForwardIndexedReader.setForSlice, only seek forward; when the
-            // floor block is the one already being read, keep the sequential walk.
-            if (seekPoint.dataPosition <= cursor.position() - 1)
-                return;
-            cursor.seekUnfiltered(seekPoint.dataPosition);
-            SSTABLE_LEG_ROW_INDEX_SEEKS.incrementAndGet();
-            if (TEST_DROP_MERGE_SEEK_OPEN_MARKER || seekPoint.openMarker == null)
-                return;
-            mergeSeekOpenMarker = TEST_SKEW_MERGE_SEEK_OPEN_MARKER
-                                  ? DeletionTime.buildUnsafeWithUnsignedInteger(seekPoint.openMarker.markedForDeleteAt() + 1,
-                                                                               seekPoint.openMarker.localDeletionTimeUnsignedInteger())
-                                  : copyOf(seekPoint.openMarker);
+            BtiCursorSeekSupport.SeekPoint point = seekPointFor(sliceStart);
+            if (point != null)
+                seekTo(point);
         }
 
-        /** The open-range-tombstone deletion at this leg's merge-mode seek point (immutable copy
-         *  of the BTI row index's {@code IndexInfo.openDeletion}), or null when no merge-mode
-         *  seek was issued or no deletion is open at the target block start. */
-        public DeletionTime mergeSeekOpenMarker()
+        /**
+         * The single-leg row-index seek for the first slice start.
+         *
+         * @return the range-tombstone deletion open at the seek point (an immutable copy of the BTI
+         *         row index's {@code IndexInfo.openDeletion}), or null when no seek was issued or no
+         *         deletion is open there, like {@code ForwardIndexedReader.setForSlice}
+         */
+        DeletionTime seekForSingleRead() throws IOException
         {
-            return mergeSeekOpenMarker;
+            BtiCursorSeekSupport.SeekPoint point = seekPointFor(legSlices.get(0).start());
+            if (point == null)
+                return null;
+            seekTo(point);
+            return point.openMarker == null ? null : copyOf(point.openMarker);
+        }
+
+        /**
+         * The row-index seek every read shape shares.  Gate: BTI, row-indexed partition, a slice
+         * with a real start bound, a cursor not past the partition.  Returns the floor block for
+         * the slice start when it begins past the current unfiltered; when that block is the one
+         * already being read, the leg keeps reading sequentially, like
+         * {@code ForwardIndexedReader.setForSlice}.
+         */
+        @Override
+        public BtiCursorSeekSupport.SeekPoint seekPointFor(ClusteringBound<?> sliceStart)
+        {
+            if (btiEntry == null || !btiEntry.isIndexed() || cursor == null || sliceStart.isBottom())
+                return null;
+            int state = cursor.state();
+            long current;
+            if (isState(state, ROW_START | TOMBSTONE_START))
+                current = cursor.position() - 1; // the flags byte is already consumed
+            else if (isState(state, PARTITION_END | DONE))
+                return null; // the partition has no unfiltereds left to seek over
+            else
+                current = loadedUnfilteredStart; // a header is loaded and its unfiltered not consumed
+            if (rowIndex == null)
+                rowIndex = BtiCursorSeekSupport.openRowIndex((BtiTableReader) sstable, btiEntry);
+            BtiCursorSeekSupport.SeekPoint point = BtiCursorSeekSupport.floorBlock((BtiTableReader) sstable, rowIndex, btiEntry,
+                                                                                  metadata.comparator, sliceStart);
+            return point.dataPosition > current ? point : null;
+        }
+
+        @Override
+        public void seekTo(BtiCursorSeekSupport.SeekPoint point) throws IOException
+        {
+            cursor.seekUnfiltered(point.dataPosition);
+            SSTABLE_LEG_ROW_INDEX_SEEKS.incrementAndGet();
+            hasOpenDeletion = point.openMarker != null && !TEST_DROP_MERGE_SEEK_OPEN_MARKER;
+            if (!hasOpenDeletion)
+                return;
+            if (TEST_SKEW_MERGE_SEEK_OPEN_MARKER)
+                openDeletion.reset(point.openMarker.markedForDeleteAt() + 1, point.openMarker.localDeletionTimeUnsignedInteger());
+            else
+                openDeletion.reset(point.openMarker);
+        }
+
+        /** The range deletion open in this leg's stream at its current position: the one its last
+         *  row-index seek found, then kept current by {@link #noteMarker}; null when none. */
+        @Override
+        public DeletionTime openDeletion()
+        {
+            return hasOpenDeletion ? openDeletion : null;
+        }
+
+        @Override
+        public void noteMarker()
+        {
+            UnfilteredDescriptor marker = materializer.uDesc;
+            if (marker.isStartBound())
+            {
+                openDeletion.reset(marker.deletionTime());
+                hasOpenDeletion = true;
+            }
+            else if (marker.isBoundary())
+            {
+                openDeletion.reset(marker.deletionTime2());
+                hasOpenDeletion = true;
+            }
+            else
+            {
+                hasOpenDeletion = false;
+            }
+        }
+
+        @Override
+        public void skipRow() throws IOException
+        {
+            int state = cursor.state();
+            if (isState(state, CELL_HEADER_START | CELL_VALUE_START | CELL_END))
+                cursor.skipRowCells(materializer.uDesc.dataStart(), materializer.uDesc.size(), false);
+            else if (state != UNFILTERED_END)
+                throw new IllegalStateException("no row to skip in cursor state " + state);
         }
 
         // ---- merge-source surface (consumed by CursorReadMerger) ----
@@ -3563,6 +3580,7 @@ public final class CursorReads
          *  and resets the per-row cell-walk state. */
         public void readUnfilteredHeader() throws IOException
         {
+            loadedUnfilteredStart = cursor.position() - 1;
             int s = cursor.state();
             if (s == ROW_START)
                 cursor.readRowHeader(materializer.uDesc);
@@ -3881,7 +3899,7 @@ public final class CursorReads
                         }
                         else
                         {
-                            cursor.copyCellValue(transfer.valueCapture.prepareVariable(), transfer.transferBuffer);
+                            cursor.copyCellValue(transfer.valueCapture.prepareVariable(), null);
                             value = transfer.valueCapture.finish();
                         }
                     }
@@ -3922,7 +3940,7 @@ public final class CursorReads
                     assert transfer.acquire() : "ValueTransfer single-live invariant violated (concurrent cursor cell copy)";
                     try
                     {
-                        cursor.copyCellValue(scratch, transfer.transferBuffer);
+                        cursor.copyCellValue(scratch, null);
                     }
                     finally
                     {
@@ -3974,6 +3992,12 @@ public final class CursorReads
         @Override
         public void close()
         {
+            if (rowIndex != null)
+            {
+                RowIndexReader toClose = rowIndex;
+                rowIndex = null;
+                toClose.close();
+            }
             if (cursor != null)
             {
                 SSTableCursorReader toClose = cursor;
@@ -3985,14 +4009,15 @@ public final class CursorReads
 
     /**
      * The read-side merge sink: clustering-first events (see {@code CursorReadMerger.MergeSink})
-     * materialized into {@code Row}/{@code Unfiltered} objects.  One reused
-     * {@code BTreeRow.sortedBuilder} serves all merged rows; rows that merge to empty are dropped
-     * like {@code Row.Merger} returning null.
+     * materialized into {@code Row}/{@code Unfiltered} objects.  Holds one unfiltered: one merge
+     * group yields at most one row or marker, and the reader takes it before the next group runs.
+     * One reused {@code BTreeRow.sortedBuilder} serves all merged rows; rows that merge to empty
+     * are dropped like {@code Row.Merger} returning null.
      */
     static final class MaterializingMergeSink implements CursorReadMerger.MergeSink
     {
         private final Row.Builder rowBuilder = BTreeRow.sortedBuilder();
-        private final List<Unfiltered> unfiltereds = new ArrayList<>();
+        private Unfiltered slot;
         private long materializedCount;
 
         @Override
@@ -4023,16 +4048,14 @@ public final class CursorReads
             Row row = rowBuilder.build();
             // mirrors Row.Merger.merge returning null for a row that merged to nothing
             if (!row.isEmpty())
-            {
-                unfiltereds.add(row);
-                materializedCount++;
-            }
+                put(row);
         }
 
         /** Discards the partially-built row of an abandoned group (a regular-column filter failure
          *  found mid-cell-walk or at row end).  build() resets the shared sorted builder for the
          *  next group. */
-        void abandonRow()
+        @Override
+        public void abandonRow()
         {
             rowBuilder.build();
         }
@@ -4040,25 +4063,37 @@ public final class CursorReads
         @Override
         public void addRow(Row row)
         {
-            // whole-row escape hatch: the merged row is this live memtable object, like
-            // Row.Merger.merge's single-version fast path.  The empty-drop is defensive only.
+            // a whole row: a memtable row standing as the merged row, or a single leg's row as
+            // stored.  An empty row is dropped, like ForwardReader and Row.Merger.
             if (!row.isEmpty())
-            {
-                unfiltereds.add(row);
-                materializedCount++;
-            }
+                put(row);
         }
 
         @Override
         public void addRangeTombstoneMarker(RangeTombstoneMarker marker)
         {
-            unfiltereds.add(marker);
+            put(marker);
+        }
+
+        private void put(Unfiltered unfiltered)
+        {
+            assert slot == null : "one merge group produced two unfiltereds";
+            slot = unfiltered;
             materializedCount++;
         }
 
-        List<Unfiltered> unfiltereds()
+        /** The held unfiltered, or null; it stays held. */
+        Unfiltered peek()
         {
-            return unfiltereds;
+            return slot;
+        }
+
+        /** Removes and returns the held unfiltered, or null when the last group produced none. */
+        Unfiltered take()
+        {
+            Unfiltered unfiltered = slot;
+            slot = null;
+            return unfiltered;
         }
 
         long materializedCount()
@@ -4068,127 +4103,8 @@ public final class CursorReads
     }
 
     /**
-     * The production-bound decorator around {@link MaterializingMergeSink}: a conservative bound,
-     * not a counter replacement.  It drives a detached copy of the authoritative
-     * {@code DataLimits} counter ({@link #limitBoundFor} builds it with the same {@code newCounter}
-     * arguments {@code ReadCommand.executeLocally} uses) over every merged row the slicer will
-     * emit, and flips {@link #wantsMore()} once that counter is done, so the merge stops producing
-     * where the top counter stops consuming.  The authoritative counter stays in place above, so
-     * over-production is invisible; under-production is the only failure mode.
-     *
-     * Fidelity notes, all achieved by reusing the production counter object:
-     * <ul>
-     *   <li><b>Liveness</b>: rows are counted via {@code Counter.countRow}, the same predicate the
-     *       top counter applies, {@code nowInSec} included.  The merge core stays nowInSec-free; the
-     *       liveness semantics live in this decorator, on already-materialized rows.  The
-     *       {@code withoutPurgeableTombstones} stage above cannot flip a verdict.</li>
-     *   <li><b>Emitted-surface filter</b>: rows at or before the slice start are materialized but
-     *       discarded by {@code SlicedMaterializedIterator}'s non-strict pre-slice skip, so the top
-     *       counter never sees them.  {@code countsTowardLimit} applies the slicer's predicate
-     *       (count iff strictly after the slice start).</li>
-     *   <li><b>Paging resume</b>: {@code CQLPagingLimits}' counter seeds its per-partition count at
-     *       {@code countPartition}, called by {@code mergeLegs} before any row event.</li>
-     *   <li><b>Empty-merged rows</b>: a group that merges to nothing emits no events; a row the
-     *       inner sink drops as empty is never counted.</li>
-     *   <li><b>Markers and statics</b> never count and never stop, so marker events pass through.</li>
-     * </ul>
-     *
-     * This class is unchanged when row-level filter pushdown is also engaged: it always wraps the
-     * base {@link MaterializingMergeSink} directly, and {@code CursorReads.mergeLegs} makes
-     * {@link RowLevelFilterProbe} the outer sink with this object as its {@code next}.  Because
-     * {@code CursorReadMerger} never calls the top sink's {@code endRow} for an abandoned row,
-     * {@link #counter} only counts rows that also survive the filter.
-     */
-    static final class LimitingMergeSink implements CursorReadMerger.MergeSink
-    {
-        private final MaterializingMergeSink inner;
-        private final DataLimits.Counter counter;
-        private final ClusteringComparator comparator;
-        /** The emitted slice's start bound, or null when the slice starts at BOTTOM. */
-        private final ClusteringBound<?> sliceStart;
-        /** Sticky in-slice latch — the merged stream is clustering-ordered, so once one row is
-         *  strictly past the slice start every later row is too and the comparison is skipped. */
-        private boolean pastSliceStart;
-        /** Whether the row currently being streamed (startRow..endRow) is on the emitted surface. */
-        private boolean currentRowCounts;
-
-        LimitingMergeSink(MaterializingMergeSink inner, DataLimits.Counter counter,
-                          ClusteringComparator comparator, Slice slice)
-        {
-            this.inner = inner;
-            this.counter = counter;
-            this.comparator = comparator;
-            this.sliceStart = slice.start().isBottom() ? null : slice.start();
-            this.pastSliceStart = sliceStart == null;
-        }
-
-        /** Matches the slicer: {@code SlicedMaterializedIterator.computeNextInSlice} skips
-         *  pre-slice data with a non-strict comparison, so only rows strictly after the slice
-         *  start reach the top counter. */
-        private boolean countsTowardLimit(ClusteringPrefix<?> clustering)
-        {
-            if (!pastSliceStart)
-                pastSliceStart = comparator.compare(clustering, (ClusteringPrefix<?>) sliceStart) > 0;
-            return pastSliceStart;
-        }
-
-        @Override
-        public void startRow(Clustering<?> clustering, LivenessInfo mergedLiveness, DeletionTime mergedRowDeletion)
-        {
-            currentRowCounts = countsTowardLimit(clustering);
-            inner.startRow(clustering, mergedLiveness, mergedRowDeletion);
-        }
-
-        @Override
-        public void addComplexDeletion(ColumnMetadata column, DeletionTime mergedComplexDeletion)
-        {
-            inner.addComplexDeletion(column, mergedComplexDeletion);
-        }
-
-        @Override
-        public void addCell(Cell<?> cell)
-        {
-            inner.addCell(cell);
-        }
-
-        @Override
-        public void endRow()
-        {
-            long before = inner.materializedCount();
-            inner.endRow();
-            if (currentRowCounts && inner.materializedCount() != before)
-            {
-                List<Unfiltered> unfiltereds = inner.unfiltereds();
-                counter.countRow((Row) unfiltereds.get(unfiltereds.size() - 1));
-            }
-        }
-
-        @Override
-        public void addRow(Row row)
-        {
-            inner.addRow(row);
-            if (countsTowardLimit(row.clustering()))
-                counter.countRow(row);
-        }
-
-        @Override
-        public void addRangeTombstoneMarker(RangeTombstoneMarker marker)
-        {
-            inner.addRangeTombstoneMarker(marker);
-        }
-
-        @Override
-        public boolean wantsMore()
-        {
-            // isDoneForPartition is true when the top counter would have stopped: the row limit or
-            // the per-partition limit is reached
-            return !counter.isDoneForPartition();
-        }
-    }
-
-    /**
      * Wire-level counterpart of {@code ReadCommand.withMetricsRecording}'s tombstone/live-row
-     * accounting and tombstone-overwhelming abort, hooked into {@link TranscodeMergeSink}'s
+     * accounting and tombstone-overwhelming abort, hooked into {@link ResponseSink}'s
      * purge-aware row/cell/marker call sites.  The transcode response path never runs
      * {@code executeLocally}'s stack, so without this a transcode-served read would skip both the
      * {@code tombstone_failure_threshold} abort and the scan histograms/counters a materializing
@@ -4213,6 +4129,7 @@ public final class CursorReads
         private final int failureThreshold;
         private final int warningThreshold;
         private final boolean respectTombstoneThresholds;
+        private final boolean enforceStrictLiveness;
 
         private int liveRows;
         private int tombstones;
@@ -4220,8 +4137,11 @@ public final class CursorReads
         // per-row scratch, reset by startRow / wholeRow
         private long rowMinDeletionTime;
         private boolean rowLivenessLive;
+        private boolean rowHasLiveCell;
         private boolean rowHasTombstoneCell;
+        /** The row's clustering, or null when {@link #rowClusteringSource} builds it on an abort. */
         private ClusteringPrefix<?> rowClustering;
+        private Supplier<ClusteringPrefix<?>> rowClusteringSource;
 
         TombstoneScanGuard(ReadCommand command, TableMetrics metric, long startTimeNanos, long nowInSec, DecoratedKey key)
         {
@@ -4233,18 +4153,28 @@ public final class CursorReads
             this.failureThreshold = DatabaseDescriptor.getTombstoneFailureThreshold();
             this.warningThreshold = DatabaseDescriptor.getTombstoneWarnThreshold();
             this.respectTombstoneThresholds = !SchemaConstants.isLocalSystemKeyspace(command.metadata().keyspace);
+            this.enforceStrictLiveness = command.metadata().enforceStrictLiveness();
         }
 
+        /** Builds the current row's clustering for a {@link #startRow} that was given none. */
+        void rowClusteringSource(Supplier<ClusteringPrefix<?>> source)
+        {
+            this.rowClusteringSource = source;
+        }
+
+        /** @param clustering the row's clustering, or null to build it from {@link #rowClusteringSource}
+         *                   if the row aborts the read */
         void startRow(ClusteringPrefix<?> clustering, LivenessInfo liveness, DeletionTime rowDeletion)
         {
             rowClustering = clustering;
             rowMinDeletionTime = Math.min(minDeletionTime(liveness), minDeletionTime(rowDeletion));
             rowLivenessLive = liveness.isLive(nowInSec);
+            rowHasLiveCell = false;
             rowHasTombstoneCell = false;
         }
 
         /** Only called for a non-live complex deletion (see
-         *  {@link TranscodeMergeSink#addComplexDeletion}'s early return); its
+         *  {@link ResponseSink#addComplexDeletion}'s early return); its
          *  {@code minDeletionTime} is always {@code Long.MIN_VALUE}. */
         void complexDeletion()
         {
@@ -4252,14 +4182,18 @@ public final class CursorReads
         }
 
         /** timestamp, ttl and localDeletionTime are the post-purge values
-         *  {@link TranscodeMergeSink} is about to write, what a materialize-then-purge
+         *  {@link ResponseSink} is about to write, what a materialize-then-purge
          *  {@code Cell} would report, including the expired-but-not-gcable convert to tombstone. */
         void cell(long timestamp, int ttl, long localDeletionTime)
         {
             boolean isTombstone = localDeletionTime != Cell.NO_DELETION_TIME && ttl == Cell.NO_TTL;
             rowMinDeletionTime = Math.min(rowMinDeletionTime, isTombstone ? Long.MIN_VALUE : localDeletionTime);
             boolean isLive = localDeletionTime == Cell.NO_DELETION_TIME || (ttl != Cell.NO_TTL && nowInSec < localDeletionTime);
-            if (!isLive)
+            if (isLive)
+            {
+                rowHasLiveCell = true;
+            }
+            else
             {
                 rowHasTombstoneCell = true;
                 countTombstone(rowClustering);
@@ -4269,7 +4203,8 @@ public final class CursorReads
         void endRow()
         {
             boolean rowHasDeletion = nowInSec >= rowMinDeletionTime;
-            if (rowLivenessLive)
+            // Row.hasLiveData: live primary key liveness, or any live cell unless liveness is strict
+            if (rowLivenessLive || (rowHasLiveCell && !enforceStrictLiveness))
                 ++liveRows;
             else if (rowHasDeletion && !rowHasTombstoneCell)
                 countTombstone(rowClustering);
@@ -4292,7 +4227,7 @@ public final class CursorReads
                     }
                 }
             }
-            if (row.hasLiveData(nowInSec, false))
+            if (row.hasLiveData(nowInSec, enforceStrictLiveness))
                 ++liveRows;
             else if (!row.primaryKeyLivenessInfo().isLive(nowInSec) && rowHasDeletion && !hasTombstones)
                 countTombstone(row.clustering());
@@ -4326,13 +4261,14 @@ public final class CursorReads
                     MessageParams.remove(ParamType.TOMBSTONE_WARNING);
                     MessageParams.add(ParamType.TOMBSTONE_FAIL, tombstones);
                 }
-                throw new TombstoneOverwhelmingException(tombstones, query, command.metadata(), key, clustering);
+                throw new TombstoneOverwhelmingException(tombstones, query, command.metadata(), key,
+                                                         clustering != null ? clustering : rowClusteringSource.get());
             }
         }
 
-        /** Must be called once, after the merge this guard was attached to has completed, like
-         *  {@link TranscodeMergeSink#finishPartition}.  Records latency, histograms, counters, and
-         *  warn logging, like {@code MetricRecording.onClose()}. */
+        /** Must be called once, when the read ends, failed or not, like {@code MetricRecording}'s
+         *  close.  Records latency, histograms, counters, and warn logging, like
+         *  {@code MetricRecording.onPartitionClose()} and {@code onClose()}. */
         void finish()
         {
             command.recordLatency(metric, nanoTime() - startTimeNanos);
@@ -4364,480 +4300,6 @@ public final class CursorReads
     }
 
     /**
-     * Transcodes merge events directly into {@code ReadResponse} wire bytes through
-     * {@link ResponseWireWriter}, instead of materializing {@code Row}/{@code Cell} objects first.
-     * {@link #addCell} still receives an already-materialized {@code Cell<?>}.  {@code RowFilter}
-     * composition ({@link RowLevelFilterProbe}) is out of scope: a wire writer that already flushed
-     * bytes cannot un-flush them.
-     *
-     * <p>Purging: {@code ReadCommand.withoutPurgeableTombstones} purges gcable tombstones above the
-     * merge in the iterator path.  The transcode path applies the identical purge decisions at
-     * emission, reusing the real production purge primitives:
-     * <ul>
-     *   <li>PK liveness, row deletion, and complex deletion: {@link DeletionPurger#shouldPurge}.</li>
-     *   <li>Cells: {@link Cell#purge(DeletionPurger, long)}, called on the already-materialized
-     *       {@code Cell<?>} that {@link #addCell} receives.</li>
-     *   <li>Range tombstone markers: the combining logic of {@code PurgeFunction.applyToMarker} is
-     *       mirrored here, since that method has no standalone entry point.  A boundary drops only
-     *       when both sides purge, degrades to the surviving side's bound marker when one does, and
-     *       passes through otherwise; a plain bound drops when its deletion purges.  {@code reversed}
-     *       is always {@code false}: cursor reads do not support reversed-order queries.</li>
-     * </ul>
-     * A row or marker that purges to nothing never reaches the wire, like the iterator path.
-     *
-     * <p>Slice-boundary trimming: the raw merge stream is not slice-trimmed.  In the iterator path
-     * {@code SlicedMaterializedIterator} trims it and synthesizes the open/close range-tombstone
-     * markers at the slice bounds.  {@link #admitOrSkip} and {@link #finishPartition} replicate that
-     * algorithm in streaming form: a sticky {@code pastSliceStart} latch plus a running
-     * {@code openMarker} state seeded through {@link #initOpenMarker}.  This class purge-tests each
-     * real marker before computing slice admission from its raw shape, then purge-tests synthetic
-     * markers when they are written.  Both orders produce identical bytes, because {@code shouldPurge}
-     * is a pure function of a deletion's (timestamp, localDeletionTime) pair and a
-     * boundary-to-bound downgrade always keeps the side that determines {@code isOpen()}.
-     */
-    public static final class TranscodeMergeSink implements CursorReadMerger.MergeSink
-    {
-        private final ResponseWireWriter writer;
-        private final DeletionPurger purger;
-        private final long nowInSec;
-        private final boolean purgeEnabled;
-        private long eventsWritten;
-
-        // ---- slice-boundary state (see class javadoc) ----
-        private final ClusteringComparator comparator;
-        /** null when the slice starts at BOTTOM (no pre-slice trimming/synthesis needed). */
-        private final ClusteringBound<?> sliceStart;
-        private final ClusteringBound<?> sliceEnd;
-        /** Sticky: once true, every remaining event this partition is in-slice. Starts true when
-         *  the slice starts at BOTTOM (nothing to trim). */
-        private boolean pastSliceStart;
-        /** Whether a range tombstone is currently open: null means no open marker.  Seeded by
-         *  {@link #initOpenMarker}, updated from every raw (pre-purge) marker this sink sees. */
-        private DeletionTime openMarker;
-        /** Whether the row currently being staged (between startRow/endRow) was admitted by the
-         *  slice.  addComplexDeletion/addCell/endRow no-op when false. */
-        private boolean currentRowAdmitted;
-        /** Optional tombstone/live-row accounting, attached only by the production call site
-         *  ({@link #attachScanGuard}).  Null means no accounting happens. */
-        private TombstoneScanGuard scanGuard;
-
-        /** Attaches the tombstone/live-row accounting.  Must be called before any merge event
-         *  reaches this sink. */
-        void attachScanGuard(TombstoneScanGuard scanGuard)
-        {
-            this.scanGuard = scanGuard;
-        }
-
-        /** Purge-disabled convenience constructor: {@code nowInSec == 0} disables purging, matching
-         *  {@code ReadCommand}'s own gate. */
-        public TranscodeMergeSink(ResponseWireWriter writer, ClusteringComparator comparator, Slice slice)
-        {
-            this(writer, comparator, slice, 0, Long.MIN_VALUE, false, Long.MIN_VALUE);
-        }
-
-        /**
-         * @param nowInSec 0 disables purging entirely, matching {@code ReadCommand}'s own gate
-         */
-        public TranscodeMergeSink(ResponseWireWriter writer, ClusteringComparator comparator, Slice slice,
-                                  long nowInSec, long gcBefore, boolean onlyPurgeRepairedTombstones,
-                                  long oldestUnrepairedTombstone)
-        {
-            this.writer = writer;
-            this.comparator = comparator;
-            this.sliceStart = slice.start().isBottom() ? null : slice.start();
-            this.sliceEnd = slice.end();
-            this.pastSliceStart = (sliceStart == null);
-            this.nowInSec = nowInSec;
-            this.purgeEnabled = nowInSec != 0;
-            // PurgeFunction's purger field, specialized to the read path's inputs.
-            // ignoreGcGraceSeconds is compaction-only and the purge evaluator is constant-true, so
-            // both are elided.
-            this.purger = (timestamp, localDeletionTime) ->
-                          purgeEnabled
-                          && !(onlyPurgeRepairedTombstones && localDeletionTime >= oldestUnrepairedTombstone)
-                          && localDeletionTime < gcBefore;
-        }
-
-        /** Seeds the slice-start open-marker state with the merged row-index seek state.  Must be
-         *  called after the {@code CursorReadMerger} is constructed but before
-         *  {@code mergeUnfiltereds()} runs.  If never called, {@code openMarker} stays null, correct
-         *  for the empty-legs case where no seek state exists. */
-        public void initOpenMarker(DeletionTime openMarkerAtStart)
-        {
-            this.openMarker = openMarkerAtStart;
-        }
-
-        /** Must be called once, after the merge this sink was driving has completed.  Artificially
-         *  closes an open range tombstone at the slice end.  Not part of the {@code MergeSink}
-         *  contract. */
-        public void finishPartition()
-        {
-            if (!pastSliceStart)
-            {
-                // No admitted row or marker arrived after the slice start, so admitOrSkip's
-                // transition never fired.  Perform that transition here before the slice-end close,
-                // matching computeNextInSlice, which runs this check even when the stream is empty.
-                pastSliceStart = true;
-                if (openMarker != null)
-                    purgeAndWriteMarker(new RangeTombstoneBoundMarker(sliceStart, openMarker));
-            }
-            if (openMarker == null)
-                return;
-            DeletionTime toClose = openMarker;
-            openMarker = null;
-            purgeAndWriteMarker(new RangeTombstoneBoundMarker(sliceEnd, toClose));
-        }
-
-        /**
-         * The slice-admission decision for a row or marker's clustering, replayed one element at a
-         * time.  Returns false (drop) for anything at or before the slice start.  On the transition
-         * into the slice, emits the synthetic open marker first, purge-tested like any other marker,
-         * if a deletion is running open at that point.
-         */
-        private boolean admitOrSkip(ClusteringPrefix<?> clustering)
-        {
-            if (pastSliceStart)
-                return true;
-            if (sliceStart != null && comparator.compare(clustering, sliceStart) <= 0)
-                return false;
-            pastSliceStart = true;
-            if (openMarker != null)
-                purgeAndWriteMarker(new RangeTombstoneBoundMarker(sliceStart, openMarker));
-            return true;
-        }
-
-        /** Purge-tests any {@code RangeTombstoneMarker} reaching the wire: real markers admitted by
-         *  {@link #admitOrSkip}, and the synthetic slice-boundary markers it and
-         *  {@link #finishPartition} construct.  Production purge-tests those synthetic markers too,
-         *  since they are ordinary markers by the time {@code withoutPurgeableTombstones} sees them. */
-        private void purgeAndWriteMarker(RangeTombstoneMarker marker)
-        {
-            try
-            {
-                if (marker.isBoundary())
-                {
-                    RangeTombstoneBoundaryMarker boundary = (RangeTombstoneBoundaryMarker) marker;
-                    boolean purgeClose = purger.shouldPurge(boundary.closeDeletionTime(false));
-                    boolean purgeOpen = purger.shouldPurge(boundary.openDeletionTime(false));
-                    if (purgeClose && purgeOpen)
-                        // both sides gcable: the whole marker drops
-                        return;
-                    if (purgeClose)
-                        writer.writeMarker(boundary.createCorrespondingOpenMarker(false));
-                    else if (purgeOpen)
-                        writer.writeMarker(boundary.createCorrespondingCloseMarker(false));
-                    else
-                        writer.writeMarker(marker);
-                }
-                else
-                {
-                    if (purger.shouldPurge(((RangeTombstoneBoundMarker) marker).deletionTime()))
-                        return;
-                    writer.writeMarker(marker);
-                }
-                eventsWritten++;
-                if (scanGuard != null)
-                    scanGuard.marker(marker.clustering());
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("transcode wire write failed", e);
-            }
-        }
-
-        /** Diagnostic only: rows and markers that reached the wire, post-purge.  Used by test
-         *  sanity checks. */
-        long eventsWritten()
-        {
-            return eventsWritten;
-        }
-
-        @Override
-        public void startRow(Clustering<?> clustering, LivenessInfo mergedLiveness, DeletionTime mergedRowDeletion)
-        {
-            currentRowAdmitted = admitOrSkip(clustering);
-            if (!currentRowAdmitted)
-                return;
-            LivenessInfo liveness = purger.shouldPurge(mergedLiveness, nowInSec) ? LivenessInfo.EMPTY : mergedLiveness;
-            DeletionTime deletion = purger.shouldPurge(mergedRowDeletion) ? DeletionTime.LIVE : mergedRowDeletion;
-            if (scanGuard != null)
-                scanGuard.startRow(clustering, liveness, deletion);
-            if (TEST_TRANSCODE_SKEW_TIMESTAMP && !liveness.isEmpty())
-                liveness = LivenessInfo.withExpirationTime(liveness.timestamp() + 1, liveness.ttl(), liveness.localExpirationTime());
-            if (TEST_TRANSCODE_WRONG_FLAGS && !deletion.isLive())
-                deletion = DeletionTime.LIVE;
-            try
-            {
-                writer.startRow(clustering, liveness, deletion);
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("transcode wire write failed", e);
-            }
-        }
-
-        @Override
-        public void addComplexDeletion(ColumnMetadata column, DeletionTime mergedComplexDeletion)
-        {
-            if (!currentRowAdmitted)
-                return;
-            DeletionTime deletion = purger.shouldPurge(mergedComplexDeletion) ? DeletionTime.LIVE : mergedComplexDeletion;
-            if (deletion.isLive())
-                // a live complex deletion is never announced; the column is opened lazily by its
-                // first surviving addCell instead
-                return;
-            if (scanGuard != null)
-                scanGuard.complexDeletion();
-            try
-            {
-                writer.addComplexDeletion(column, deletion);
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("transcode wire write failed", e);
-            }
-        }
-
-        @Override
-        public void addCell(Cell<?> cell)
-        {
-            if (!currentRowAdmitted)
-                return;
-            Cell<?> purged = cell.purge(purger, nowInSec);
-            if (purged == null)
-                // fully purged: dropped from the wire entirely
-                return;
-            if (scanGuard != null)
-                scanGuard.cell(purged.timestamp(), purged.ttl(), purged.localDeletionTime());
-            try
-            {
-                writer.addCell(purged);
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("transcode wire write failed", e);
-            }
-        }
-
-        @Override
-        public boolean wantsWireStreamedCells()
-        {
-            return true;
-        }
-
-        /**
-         * Outcome of {@link #purgeCellLiveness}: mirrors the three branches of
-         * {@code AbstractCell.purge(DeletionPurger, long)}.
-         */
-        private enum CellPurgeOutcome { UNCHANGED, CONVERT_TO_TOMBSTONE, DROP }
-
-        /** Set by {@link #purgeCellLiveness} on a {@code CONVERT_TO_TOMBSTONE} outcome, read
-         *  immediately after by {@link #addCellFromWire}.  Avoids a per-cell result-tuple
-         *  allocation. */
-        private long convertedLocalDeletionTime;
-
-        /**
-         * Mirrors {@code AbstractCell.purge(DeletionPurger, long)}'s decision tree, operating on the
-         * cell's liveness metadata alone so the purge/convert/drop decision is made before the value
-         * bytes are touched.  This lets streaming and purging compose: {@link #addCellFromWire} must
-         * decide without materializing the value.  The tree: not live → shouldPurge(timestamp,
-         * localDeletionTime) → DROP; else, if expiring, convert to a tombstone at the adjusted
-         * localDeletionTime and check shouldPurge again → DROP or CONVERT; else → UNCHANGED.
-         */
-        private CellPurgeOutcome purgeCellLiveness(long timestamp, int ttl, long localDeletionTime)
-        {
-            boolean isLive = localDeletionTime == Cell.NO_DELETION_TIME
-                             || (ttl != Cell.NO_TTL && nowInSec < localDeletionTime);
-            if (isLive)
-                return CellPurgeOutcome.UNCHANGED;
-            if (purger.shouldPurge(timestamp, localDeletionTime))
-                return CellPurgeOutcome.DROP;
-            if (ttl != Cell.NO_TTL)
-            {
-                long adjustedLocalDeletionTime = localDeletionTime - ttl;
-                if (purger.shouldPurge(timestamp, adjustedLocalDeletionTime))
-                    return CellPurgeOutcome.DROP;
-                convertedLocalDeletionTime = adjustedLocalDeletionTime;
-                return CellPurgeOutcome.CONVERT_TO_TOMBSTONE;
-            }
-            return CellPurgeOutcome.UNCHANGED;
-        }
-
-        /**
-         * The streaming form of {@link #addCell}: identical purge outcome to
-         * {@code cell.purge(purger, nowInSec)}, but the purge/convert/drop decision is made before
-         * the value is streamed, so a dropped or converted cell never reaches {@code source}.
-         * {@code CursorReadMerger.mergeCellGroup}'s {@code discardCellValue()} reclaims the leg's
-         * unconsumed bytes in that case.
-         */
-        @Override
-        public void addCellFromWire(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime,
-                                    CellPath path, CellValueSource source) throws IOException
-        {
-            if (!currentRowAdmitted)
-                return;
-            CellPurgeOutcome outcome = purgeCellLiveness(timestamp, ttl, localDeletionTime);
-            if (outcome == CellPurgeOutcome.DROP)
-                // fully purged: dropped from the wire entirely; the leg's unconsumed value bytes are
-                // reclaimed by mergeCellGroup's discardCellValue()
-                return;
-            boolean forceEmpty = outcome == CellPurgeOutcome.CONVERT_TO_TOMBSTONE;
-            if (forceEmpty)
-            {
-                // an expired-but-not-yet-gcable cell is re-emitted as a plain tombstone: no TTL,
-                // value dropped, localDeletionTime moved back to the write-time value
-                ttl = LivenessInfo.NO_TTL;
-                localDeletionTime = convertedLocalDeletionTime;
-            }
-            if (scanGuard != null)
-                scanGuard.cell(timestamp, ttl, localDeletionTime);
-            boolean hasValue = !forceEmpty && source.hasValue();
-            try
-            {
-                writer.addCellFromWire(column, timestamp, ttl, localDeletionTime, path, hasValue, source);
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("transcode wire write failed", e);
-            }
-        }
-
-        @Override
-        public void endRow()
-        {
-            if (!currentRowAdmitted)
-                return;
-            if (scanGuard != null)
-                scanGuard.endRow();
-            try
-            {
-                if (writer.endRow())
-                    eventsWritten++;
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("transcode wire write failed", e);
-            }
-        }
-
-        @Override
-        public void addRow(Row row)
-        {
-            if (!admitOrSkip(row.clustering()))
-                return;
-            // whole-row path: purge with the real Row.purge (enforceStrictLiveness is always false,
-            // since MV tables are gated out of cursor reads), then pass the result to the writer.
-            Row purged = row.purge(purger, nowInSec, false);
-            if (purged == null || purged.isEmpty())
-                return;
-            if (scanGuard != null)
-                scanGuard.wholeRow(purged);
-            try
-            {
-                writer.writeRow(purged);
-                eventsWritten++;
-            }
-            catch (IOException e)
-            {
-                throw new RuntimeException("transcode wire write failed", e);
-            }
-        }
-
-        @Override
-        public void addRangeTombstoneMarker(RangeTombstoneMarker marker)
-        {
-            boolean admitted = admitOrSkip(marker.clustering());
-            // Open-marker tracking updates from the raw marker unconditionally, independent of both
-            // admission and purging (see the class javadoc's order note).
-            DeletionTime rawOpenAfter = marker.isOpen(false) ? CursorReads.copyOf(marker.openDeletionTime(false)) : null;
-            if (!admitted)
-            {
-                openMarker = rawOpenAfter;
-                return;
-            }
-            purgeAndWriteMarker(marker);
-            openMarker = rawOpenAfter;
-        }
-    }
-
-    /**
-     * Drives the real merge core through {@link #mergeLegsWithSink} with a {@link TranscodeMergeSink},
-     * producing the full {@code UnfilteredPartitionIterators.Serializer} envelope wire bytes for the
-     * one partition a {@code SinglePartitionReadCommand} returns.  The caller must have verified the
-     * gate and computed the purge parameters as {@code ReadCommand.withoutPurgeableTombstones} would.
-     *
-     * @param legs       one or more legs (the caller declines the zero-leg absent-partition case
-     *                   before reaching here).  A single leg is served: the merge core does not need
-     *                   two.
-     * @param extraStats additional {@code EncodingStats} contributions the merge never sees, one per
-     *                   gated-in candidate sstable whose {@code openLeg} returned null (the partition
-     *                   was absent).  Reproduces the stats contribution the object path's absent
-     *                   placeholder iterator would make, without an actual placeholder.
-     * @param scanGuard  optional tombstone/live-row accounting (see {@link TombstoneScanGuard}); null
-     *                   disables it.
-     */
-    static ByteBuffer buildTranscodeResponseBytes(List<? extends MergeLeg> legs,
-                                                   TableMetadata metadata,
-                                                   DecoratedKey key,
-                                                   Slices slices,
-                                                   ColumnFilter columnFilter,
-                                                   long nowInSec,
-                                                   long gcBefore,
-                                                   boolean onlyPurgeRepairedTombstones,
-                                                   long oldestUnrepairedTombstone,
-                                                   List<EncodingStats> extraStats,
-                                                   TombstoneScanGuard scanGuard) throws IOException
-    {
-        RegularAndStaticColumns cols = columnFilter.fetchedColumns();
-        List<EncodingStats> allStats = new ArrayList<>(legs.size() + (extraStats == null ? 0 : extraStats.size()));
-        for (MergeLeg leg : legs)
-            allStats.add(leg.legStats());
-        if (extraStats != null)
-            allStats.addAll(extraStats);
-        EncodingStats stats = EncodingStats.merge(allStats, Function.identity());
-        SerializationHeader header = new SerializationHeader(false, metadata, cols, stats);
-
-        DataOutputBuffer rowEvents = new DataOutputBuffer();
-        ResponseWireWriter writer = new ResponseWireWriter(rowEvents, header, MessagingService.current_version);
-        Slice slice = slices.get(0);
-        TranscodeMergeSink sink = new TranscodeMergeSink(writer, metadata.comparator, slice, nowInSec, gcBefore,
-                                                          onlyPurgeRepairedTombstones, oldestUnrepairedTombstone);
-        if (scanGuard != null)
-            sink.attachScanGuard(scanGuard);
-        MergeSinkFactory<TranscodeMergeSink> factory = () -> sink;
-        MergeContext<TranscodeMergeSink> ctx = mergeLegsWithSink(legs, metadata, key, slices, columnFilter, null, null, factory);
-        // once the merge has completed, close any still-open range tombstone at the slice end with a
-        // purge-tested synthetic marker
-        ctx.sink.finishPartition();
-        if (scanGuard != null)
-            scanGuard.finish();
-
-        boolean hasStatic = !ctx.mergedStatic.isEmpty();
-        boolean isEmptyPartition = ctx.mergedDeletion.isLive() && !hasStatic && rowEvents.getLength() == 0;
-
-        try (DataOutputBuffer out = new DataOutputBuffer())
-        {
-            // UnfilteredPartitionIterators.Serializer's envelope: the legacy isForThrift
-            // placeholder, then "has next partition" (always true), the partition itself, then
-            // "has next partition" again (always false, since there is exactly one partition).
-            out.writeBoolean(false);
-            out.writeBoolean(true);
-            ResponseWireWriter envelope = new ResponseWireWriter(out, header, MessagingService.current_version);
-            envelope.writeKey(key.getKey());
-            envelope.writeHeader(isEmptyPartition, false, ctx.mergedDeletion, hasStatic, columnFilter);
-            if (!isEmptyPartition)
-            {
-                if (hasStatic)
-                    envelope.writeStaticRow(ctx.mergedStatic);
-                out.write(rowEvents.getData(), 0, rowEvents.getLength());
-                envelope.writeEndOfPartition();
-            }
-            out.writeBoolean(false);
-            return out.buffer(false);
-        }
-    }
-
-    /**
      * Receives {@link SSTableCursorReader#copyCellValue}'s wire-form output directly into the final
      * cell value array, avoiding a scratch-buffer round trip.  copyCellValue makes two kinds of
      * calls on its writer: {@link #writeUnsignedVInt32} with the decoded value length
@@ -4854,7 +4316,7 @@ public final class CursorReads
      * Every other output method throws {@link UnsupportedOperationException}: if the cursor reader's
      * copy loop ever changes shape, this fails loudly instead of corrupting values.
      */
-    private static final class CellValueCapture implements DataOutputPlus
+    private static final class CellValueCapture implements DataOutputPlus, SSTableCursorReader.DirectValueTarget
     {
         private byte[] target;
         private int written;
@@ -4895,6 +4357,15 @@ public final class CursorReads
             if (fixed || target != null)
                 throw new IllegalStateException("unexpected value length vint");
             target = length == 0 ? ByteArrayAccessor.instance.empty() : new byte[length];
+        }
+
+        @Override
+        public void readValue(DataInputPlus in, int length) throws IOException
+        {
+            if (target == null || written + length > target.length)
+                throw new IllegalStateException("cell value of " + length + " bytes does not fit the capture");
+            in.readFully(target, written, length);
+            written += length;
         }
 
         @Override
@@ -4951,13 +4422,18 @@ public final class CursorReads
     }
 
     /**
-     * Applies the query's slices to the materialized partition with the same semantics as
+     * A LAZY forward iterator over one cursor read: a single leg read as stored, or a cursor-level
+     * merge.  Each {@link #hasNext()} pulls merge groups ({@code CursorReadMerger.advance}) until
+     * the one-slot sink holds an unfiltered, so the read touches only as much of the partition as
+     * its reader consumes.  The query's slices are applied with the same semantics as
      * {@code AbstractSSTableIterator.ForwardReader}: pre-slice skip with open-marker tracking,
-     * artificial {@link RangeTombstoneBoundMarker}s at slice start/end when a range tombstone covers
-     * the bound, and non-strict start / strict end comparisons.  The emitted stream is identical to
-     * the iterator path's.
+     * artificial {@link RangeTombstoneBoundMarker}s at slice start/end when a range tombstone
+     * covers the bound, and non-strict start / strict end comparisons.  The emitted stream is
+     * identical to the iterator path's.
+     *
+     * <p>Owns its legs: they close in {@link #close()}, like {@link ReverseSlicedCursorIterator}.
      */
-    private static final class SlicedMaterializedIterator implements UnfilteredRowIterator
+    private static final class ForwardSlicedCursorIterator implements UnfilteredRowIterator
     {
         private final TableMetadata metadata;
         private final DecoratedKey key;
@@ -4965,37 +4441,68 @@ public final class CursorReads
         private final EncodingStats stats;
         private final ColumnFilter columnFilter;
         private final Slices slices;
-        private final MaterializedPartition partition;
+        private final DeletionTime partitionDeletion;
+        private final Row staticRow;
         private final ClusteringComparator comparator;
         private final boolean validateOnEmission;
+        /** The prepared merge core, or null when no leg contributes rows. */
+        private final CursorReadMerger merger;
+        private final MaterializingMergeSink sink;
+        /** The row-level filter probe of a merged read, or null. */
+        private final RowLevelFilterProbe filterProbe;
+        private final List<? extends MergeLeg> legs;
+        /** A cursor-level merge rather than a single leg; only merges count toward the merge counters. */
+        private final boolean merged;
 
+        // merge pull state
+        private Unfiltered pending;     // pulled from the merge, not yet consumed by the slicer
+        private boolean mergeDone;      // the merge has no unfiltereds left in the current slice
+        private boolean probeFinished;  // filterProbe.finishPartition() has run
+        private boolean exhausted;      // hasNext() returned false: the read reached its end
+        private boolean failed;         // reading threw; the merge counters are not advanced
+        private boolean closed;
+
+        // slice state
         private int sliceIdx;            // next slice to open
-        private int listIdx;             // position in partition.unfiltereds
         private ClusteringBound<?> start; // null once past the current slice's start, or when it starts at BOTTOM
         private ClusteringBound<?> end;
         private boolean sliceOpen;
         private DeletionTime openMarker;
         private Unfiltered next;
+        /** The markers between the last slice and the next, when it starts where the last ended. */
+        private final ArrayDeque<RangeTombstoneMarker> adjacentSliceMarkers = new ArrayDeque<>(2);
+        /** The merge has already moved to the next slice, past what lies at or before its start. */
+        private boolean movedToAdjacentSlice;
 
         /**
          * @param sstable for a single leg, the leg's sstable; for a merged partition, the first
          *                leg's, used to attribute emission-time corrupted-tombstone validation
          * @param stats   the stats this iterator reports: the leg sstable's own for a single leg,
          *                {@code EncodingStats.merge} over the legs for a merged partition
+         * @param openMarkerAtStart the range-tombstone deletion open at the first unfiltered the
+         *                merge reads, from the BTI row index when the read seeked mid-partition;
+         *                null to track open markers from the stream alone
          * @param validateOnEmission true for a single leg, where this iterator is the leg's emission
          *                surface and owns the per-leg in-slice validation; false for a merged
          *                partition, whose legs were each already validated inside the merge.
          *                Validating a merged partition here would duplicate the work and reject
          *                reads the iterator path serves.
          */
-        SlicedMaterializedIterator(TableMetadata metadata,
-                                   DecoratedKey key,
-                                   SSTableReader sstable,
-                                   EncodingStats stats,
-                                   ColumnFilter columnFilter,
-                                   Slices slices,
-                                   MaterializedPartition partition,
-                                   boolean validateOnEmission)
+        ForwardSlicedCursorIterator(TableMetadata metadata,
+                                    DecoratedKey key,
+                                    SSTableReader sstable,
+                                    EncodingStats stats,
+                                    ColumnFilter columnFilter,
+                                    Slices slices,
+                                    DeletionTime partitionDeletion,
+                                    Row staticRow,
+                                    DeletionTime openMarkerAtStart,
+                                    CursorReadMerger merger,
+                                    MaterializingMergeSink sink,
+                                    RowLevelFilterProbe filterProbe,
+                                    List<? extends MergeLeg> legs,
+                                    boolean validateOnEmission,
+                                    boolean merged)
         {
             this.metadata = metadata;
             this.key = key;
@@ -5003,13 +4510,17 @@ public final class CursorReads
             this.stats = stats;
             this.columnFilter = columnFilter;
             this.slices = slices;
-            this.partition = partition;
+            this.partitionDeletion = partitionDeletion;
+            this.staticRow = staticRow;
             this.comparator = metadata.comparator;
+            this.merger = merger;
+            this.sink = sink;
+            this.filterProbe = filterProbe;
+            this.legs = legs;
             this.validateOnEmission = validateOnEmission;
-            // Seeded from the BTI row index when the materialization seeked mid-partition: the range
-            // tombstone open at the first materialized element cannot be found from the truncated
-            // stream itself.  Null for unseeked materializations.
-            this.openMarker = partition.openMarkerAtStart;
+            this.merged = merged;
+            this.openMarker = openMarkerAtStart;
+            this.mergeDone = merger == null;
         }
 
         @Override
@@ -5039,13 +4550,13 @@ public final class CursorReads
         @Override
         public DeletionTime partitionLevelDeletion()
         {
-            return partition.partitionDeletion;
+            return partitionDeletion;
         }
 
         @Override
         public Row staticRow()
         {
-            return partition.staticRow;
+            return staticRow;
         }
 
         @Override
@@ -5057,19 +4568,41 @@ public final class CursorReads
         @Override
         public boolean hasNext()
         {
-            while (next == null)
+            try
             {
-                if (!sliceOpen)
+                while (next == null)
                 {
-                    if (sliceIdx >= slices.size())
-                        return false;
-                    setForSlice(slices.get(sliceIdx++));
+                    if (!adjacentSliceMarkers.isEmpty())
+                    {
+                        next = adjacentSliceMarkers.poll();
+                        break;
+                    }
+                    if (!sliceOpen)
+                    {
+                        if (sliceIdx >= slices.size())
+                        {
+                            exhausted = true;
+                            finishProbe();
+                            return false;
+                        }
+                        setForSlice(sliceIdx++);
+                    }
+                    // returns null only after setting sliceOpen = false, so a null just loops back
+                    // to open the next slice (or hit the sliceIdx exhaustion check above)
+                    next = computeNextInSlice();
                 }
-                // returns null only after setting sliceOpen = false, so a null just loops back
-                // to open the next slice (or hit the sliceIdx exhaustion check above)
-                next = computeNextInSlice();
+                return true;
             }
-            return true;
+            catch (IOException e)
+            {
+                failed = true;
+                throw new RuntimeException("cursor read failed for " + key + " over " + legs.size() + " legs", e);
+            }
+            catch (RuntimeException | Error e)
+            {
+                failed = true;
+                throw e;
+            }
         }
 
         @Override
@@ -5082,25 +4615,45 @@ public final class CursorReads
             return toReturn;
         }
 
-        private void setForSlice(Slice slice)
+        private void setForSlice(int index) throws IOException
         {
+            Slice slice = slices.get(index);
             start = slice.start().isBottom() ? null : slice.start();
             end = slice.end();
             sliceOpen = true;
+            if (movedToAdjacentSlice)
+            {
+                // the merge already read past this slice's start and gave the markers there
+                movedToAdjacentSlice = false;
+                mergeDone = false;
+                start = null;
+                openMarker = merger.openDeletionAtSeek();
+                return;
+            }
+            // The merge stops before the first group at or past a slice end, so nothing is
+            // pending here.  It reads the next slice from here, seeking forward where the row
+            // index allows; a seek replaces the open range deletion, as on the iterator path.
+            if (index > 0 && merger != null)
+            {
+                assert pending == null : "the merge read past the end of slice " + (index - 1);
+                mergeDone = false;
+                if (merger.moveToSlice(index))
+                    openMarker = merger.openDeletionAtSeek();
+            }
         }
 
         // mirrors ForwardReader's in-slice iteration; only called with sliceOpen == true, and
         // clears sliceOpen when the slice is exhausted
-        private Unfiltered computeNextInSlice()
+        private Unfiltered computeNextInSlice() throws IOException
         {
             if (start != null)
             {
                 // Skip pre-slice data with a NON-strict comparison (see handlePreSliceData's
                 // comment on RT start markers equal to the slice start), tracking the open marker.
-                while (listIdx < partition.unfiltereds.size()
-                       && comparator.compare(partition.unfiltereds.get(listIdx).clustering(), start) <= 0)
+                Unfiltered skipped;
+                while ((skipped = peekMerged()) != null && comparator.compare(skipped.clustering(), start) <= 0)
                 {
-                    Unfiltered skipped = partition.unfiltereds.get(listIdx++);
+                    takeMerged();
                     if (skipped.kind() == Unfiltered.Kind.RANGE_TOMBSTONE_MARKER)
                         updateOpenMarker((RangeTombstoneMarker) skipped);
                 }
@@ -5111,10 +4664,10 @@ public final class CursorReads
             }
 
             // in-slice: strict end comparison
-            if (listIdx < partition.unfiltereds.size()
-                && comparator.compare(partition.unfiltereds.get(listIdx).clustering(), end) < 0)
+            Unfiltered unfiltered = peekMerged();
+            if (unfiltered != null && comparator.compare(unfiltered.clustering(), end) < 0)
             {
-                Unfiltered unfiltered = partition.unfiltereds.get(listIdx++);
+                takeMerged();
                 // Single-leg mode: corrupted_tombstone_strategy check, applied where the iterator
                 // path applies it: each in-slice unfiltered as it is emitted.  Pre-slice skipped
                 // data, the artificial slice-bound markers, the static row, and anything at or past
@@ -5131,9 +4684,66 @@ public final class CursorReads
 
             // slice exhausted: artificially close an open range tombstone at the slice end
             sliceOpen = false;
+            if (merger != null && pending == null && merger.isAdjacentSliceInMerge(sliceIdx))
+            {
+                // the next slice starts here: the merge gives the markers the iterator path writes
+                adjacentSliceMarkers.addAll(merger.moveToAdjacentSlice(sliceIdx));
+                movedToAdjacentSlice = true;
+                return adjacentSliceMarkers.poll();
+            }
             if (openMarker != null)
                 return new RangeTombstoneBoundMarker(end, openMarker);
             return null;
+        }
+
+        /** The next merged unfiltered, pulling merge groups until one yields it; null at the end. */
+        private Unfiltered peekMerged() throws IOException
+        {
+            while (pending == null && !mergeDone)
+            {
+                if (merger.advance())
+                {
+                    pending = sink.take();
+                }
+                else
+                {
+                    mergeDone = true;
+                    if (sliceIdx >= slices.size())
+                        finishProbe();
+                }
+            }
+            return pending;
+        }
+
+        private void takeMerged()
+        {
+            pending = null;
+        }
+
+        /** The merge counters, advanced once a merged read closes without failing. */
+        private void countServedMerge()
+        {
+            CURSOR_MERGES_SERVED.incrementAndGet();
+            int sstableLegCount = 0;
+            for (MergeLeg leg : legs)
+            {
+                if (leg.sstableOrNull() != null)
+                    sstableLegCount++;
+            }
+            SSTABLE_LEGS_CURSOR_MERGED.addAndGet(sstableLegCount);
+            MEMTABLE_LEGS_CURSOR_MERGED.addAndGet(legs.size() - sstableLegCount);
+            if (merger != null && !exhausted)
+                MERGES_STOPPED_BY_LIMIT.incrementAndGet();
+        }
+
+        /** The probe's end-of-slice accounting, once, when the read reaches its end; never on an
+         *  early close. */
+        private void finishProbe()
+        {
+            if (probeFinished || filterProbe == null)
+                return;
+            probeFinished = true;
+            filterProbe.finishPartition();
         }
 
         private void updateOpenMarker(RangeTombstoneMarker marker)
@@ -5144,7 +4754,29 @@ public final class CursorReads
         @Override
         public void close()
         {
-            // fully materialized; the cursor was closed at creation
+            if (closed)
+                return;
+            closed = true;
+            UNFILTEREDS_MATERIALIZED.addAndGet(sink.materializedCount());
+            if (merged && !failed)
+                countServedMerge();
+            RuntimeException failure = null;
+            for (MergeLeg leg : legs)
+            {
+                try
+                {
+                    leg.close();
+                }
+                catch (RuntimeException e)
+                {
+                    if (failure == null)
+                        failure = e;
+                    else
+                        failure.addSuppressed(e);
+                }
+            }
+            if (failure != null)
+                throw failure;
         }
     }
 

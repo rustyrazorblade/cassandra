@@ -163,6 +163,14 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
             runTrial(seedPicker.nextLong(), "trial " + trial);
     }
 
+    /** Seed -4715507501933830118L: a names read that once wrapped a row in a range tombstone whose
+     *  exclusive end does not reach it. */
+    @Test
+    public void namesReadNextToRangeTombstoneSeed() throws Throwable
+    {
+        runTrial(-4715507501933830118L, "names read next to a range tombstone");
+    }
+
     private void runTrial(long trialSeed, String label) throws Throwable
     {
         TrialParams params = TrialParams.derive(trialSeed);

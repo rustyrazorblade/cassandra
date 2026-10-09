@@ -20,7 +20,11 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -38,12 +42,14 @@ import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.io.sstable.ClusteringDescriptor;
 import org.apache.cassandra.io.sstable.OpenRangeDeletions;
+import org.apache.cassandra.io.sstable.SSTableCursorReader;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
-import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.io.sstable.format.bti.BtiCursorSeekSupport;
+import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 
@@ -101,8 +107,8 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  * the object path they replace.  A memtable leg never seeks and is never validated, and participates
  * in the open-marker set as a normal, always-current source.
  *
- * For indexed BTI legs of a single-slice read, the eager whole-partition walk is gone: each leg
- * enters the merge already seeked to its row-index floor block for the slice start
+ * For indexed BTI legs, the eager whole-partition walk is gone: each leg enters the merge already
+ * seeked to its row-index floor block for the first slice start
  * ({@code CursorReads.MergeLeg.seekForMerge}), and its open-range-tombstone deletion at the seek
  * point ({@code IndexInfo.openDeletion}, the payload {@code ForwardIndexedReader.setForSlice} seeds
  * per leg on the iterator path) is seeded into {@code openRanges} by this constructor, so cross-leg
@@ -112,6 +118,16 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  * element the slicer can emit has every leg's contribution.  Under-reconciled elements exist only
  * before the slice start, where the slicer discards them, and a leg's seeded deletion is genuinely
  * open at every position from its floor block's separator to its in-stream close.
+ *
+ * The merge reads one slice at a time.  At each later slice ({@link #moveToSlice}) every leg whose
+ * floor block for the slice start lies past its current position seeks forward to it and swaps
+ * its open deletion in {@code openRanges} for the block's.  Rows at or before the current slice
+ * start are skipped without reading their cells.
+ *
+ * The merge runs one group per {@link #advance} call.  A forward read pulls groups only as its
+ * reader asks for rows, so a read that stops early (a limit, a page) never merges the rest of the
+ * partition.  {@link #mergeUnfiltereds} pushes groups into a sink until the sink stops wanting
+ * more.
  */
 final class CursorReadMerger
 {
@@ -150,11 +166,10 @@ final class CursorReadMerger
         void addRangeTombstoneMarker(RangeTombstoneMarker marker);
 
         /**
-         * Production bound: consulted by {@link #mergeUnfiltereds} before each merge group.
-         * {@code false} means the sink is confident nothing it could still receive can reach the
-         * query result (for example, the query's {@code DataLimits} counter would already have
-         * stopped consuming), so the merge stops producing: remaining groups are never sorted,
-         * merged, validated or materialized.  Default true, for unbounded production.
+         * Consulted by {@link #mergeUnfiltereds} before each merge group.  {@code false} stops the
+         * merge: remaining groups are never sorted, merged, validated or materialized.  Default
+         * true.  A read through {@code CursorReads.mergeLegs} ignores this; its iterator calls
+         * {@link #advance} only when its reader asks for more.
          */
         default boolean wantsMore()
         {
@@ -162,20 +177,41 @@ final class CursorReadMerger
         }
 
         /**
+         * Discards the row started by {@link #startRow}, for a row group a regular-column filter
+         * rejected part way through its cells.  Only a sink that can still drop a started row
+         * supports this.
+         */
+        default void abandonRow()
+        {
+            throw new UnsupportedOperationException(getClass().getSimpleName() + " cannot discard a started row");
+        }
+
+        /**
          * Capability flag: true iff this sink wants a resolved sstable-winner cell's value streamed
          * directly from its source ({@link #addCellFromWire}) instead of a fully materialized
-         * {@link Cell} object via {@link #addCell}.  Default false: {@code MaterializingMergeSink},
-         * {@code LimitingMergeSink}, and {@code RowLevelFilterProbe} never override it, so
-         * {@code mergeCellGroup}'s sstable-winner materialization path for them is unchanged.
+         * {@link Cell} object via {@link #addCell}.  Default false: {@code MaterializingMergeSink}
+         * and {@code RowLevelFilterProbe} never override it, so {@code mergeCellGroup}'s
+         * sstable-winner materialization path for them is unchanged.
          * <p>
          * A capability flag rather than an {@code instanceof} check keeps the read-owned merge core
          * from importing a concrete sink implementation, the same reasoning that governs
-         * {@link #wantsMore()}.  It is also cheaper for the three existing sinks: no
+         * {@link #wantsMore()}.  It is also cheaper for the sinks that do not stream: no
          * {@link CellValueSource} view is ever constructed on their behalf.
          */
         default boolean wantsWireStreamedCells()
         {
             return false;
+        }
+
+        /**
+         * The form of {@link #startRow} a sink that streams cells ({@link #wantsWireStreamedCells()})
+         * receives: the clustering is the descriptor of the leg the row group takes it from, and the
+         * liveness and deletion may be the merge's reusable state.  All three stay valid until
+         * {@link #endRow}.  The merge calls it only for rows after the start of the current slice.
+         */
+        default void startRow(UnfilteredDescriptor clustering, LivenessInfo mergedLiveness, DeletionTime mergedRowDeletion)
+        {
+            throw new UnsupportedOperationException(getClass().getSimpleName() + " takes a built clustering");
         }
 
         /**
@@ -187,7 +223,7 @@ final class CursorReadMerger
          * destination without an intermediate {@code byte[]}/{@code Cell} object.
          * <p>
          * The default implementation materializes a real {@link Cell} and forwards to
-         * {@link #addCell}, for interface completeness.  Only {@code CursorReads.TranscodeMergeSink}
+         * {@link #addCell}, for interface completeness.  Only {@code ResponseSink}
          * overrides {@code wantsWireStreamedCells()}, and it overrides this method too, so this
          * default body is never actually invoked.
          */
@@ -334,9 +370,14 @@ final class CursorReadMerger
     }
 
     private final CursorReads.MergeLeg[] legs;
+    /** The only leg of a single-leg read, or null for a merge.  A single leg is read as stored,
+     *  see {@link #advanceSingle}. */
+    private final CursorReads.PendingLeg singleLeg;
     private final boolean[] equalsNext;
     private final ClusteringComparator comparator;
     private final MergeSink sink;
+    /** {@link MergeSink#wantsWireStreamedCells()}, read once: a sink's answer never changes. */
+    private final boolean streamCells;
     /** Clustering filter pushdown, or null when disengaged. */
     private final FilterProbe filterProbe;
 
@@ -381,23 +422,34 @@ final class CursorReadMerger
     private boolean groupValidateInSlice;
 
     // Regular-column pushdown state (reset per row group; meaningful only with a probe):
-    // rowOnEmittedSurface is the group's slicer-emission verdict (strictly after the slice
-    // start), computed ONCE per probed row group from the descriptor-level comparison in
-    // mergeUnfiltereds — needed at abandonment time, when the failure may surface mid-cell-walk;
     // rowAbandonedByFilter flips when a regular-column expression fails, switching the rest of
-    // the row's cell walk from the emitting merge to the metadata-only accounting walk.
-    private boolean rowOnEmittedSurface;
+    // the row's cell walk from the emitting merge to the metadata-only accounting walk.  Every
+    // row group that reaches the probe is in the slice (rows at or before the slice start are
+    // skipped first), so the probe's onEmittedSurface argument is always true.
     private boolean rowAbandonedByFilter;
 
     // Validation runs per leg, in-slice only. A slice read has one slice; a names read has one
-    // point slice per requested clustering. sliceStart and sliceEnd span the whole request (the
-    // first slice's start to the last slice's end) and drive the scan end-stop. isInSlice checks
-    // each point slice, so validation still gates to the exact requested clusterings.
-    // A null start/end = BOTTOM/TOP.
+    // point slice per requested clustering. The merge reads one slice at a time: sliceIndex is the
+    // current slice, and moveToSlice moves it forward only.
     private final boolean validationEnabled;
     private final Slices slices;
-    private final ClusteringBound<?> sliceStart;
-    private final ClusteringBound<?> sliceEnd;
+    private int sliceIndex;
+
+    // Set by prepare() and moveToSlice().  sliceEndStop and sliceStartStop are the current slice's
+    // bounds in the legs' wire form (see SliceBoundDescriptor), null for BOTTOM/TOP; the two
+    // descriptors behind them are reused for every slice.  prevMergeLimit is the part of legs[]
+    // the next sort must re-place.  sliceDone turns true once the current slice has nothing left;
+    // finished turns true once every leg is exhausted.
+    private SliceBoundDescriptor sliceStartDescriptor;
+    private SliceBoundDescriptor sliceEndDescriptor;
+    private ClusteringDescriptor sliceEndStop;
+    private ClusteringDescriptor sliceStartStop;
+    private int prevMergeLimit;
+    private boolean prepared;
+    private boolean sliceDone;
+    private boolean finished;
+    /** The open range deletion right after the last {@link #moveToSlice} seek, or null. */
+    private DeletionTime openDeletionAtSeek;
 
     // hoisted so sorting never allocates a lambda per call (compaction's cellComparator pattern);
     // one PreSortedBubbleInsert per comparison kind, the insert sort shared with compaction
@@ -441,19 +493,40 @@ final class CursorReadMerger
                      MergeSink sink,
                      FilterProbe filterProbe)
     {
+        this(legs, null, metadata, mergedPartitionDeletion, slices, sink, filterProbe);
+    }
+
+    /**
+     * The merge core for a read with exactly one sstable leg and no memtable data.  The iterator
+     * path serves that shape from the one sstable iterator without any merge, so this reads the
+     * leg as stored: no shadowing, no marker reconciliation.  The caller has already seeked the
+     * leg.  A sink that builds rows gets each one whole, and its caller validates it, like the
+     * sstable iterator; for a sink that streams cells, this validates the leg as it reads.
+     */
+    static CursorReadMerger forSingleLeg(CursorReads.PendingLeg leg, MergeSink sink)
+    {
+        return new CursorReadMerger(new CursorReads.MergeLeg[]{ leg }, leg, leg.metadata, leg.partitionLevelDeletion(),
+                                    leg.legSlices(), sink, null);
+    }
+
+    private CursorReadMerger(CursorReads.MergeLeg[] legs,
+                             CursorReads.PendingLeg singleLeg,
+                             TableMetadata metadata,
+                             DeletionTime mergedPartitionDeletion,
+                             Slices slices,
+                             MergeSink sink,
+                             FilterProbe filterProbe)
+    {
         this.legs = legs;
+        this.singleLeg = singleLeg;
         this.equalsNext = new boolean[legs.length];
         this.comparator = metadata.comparator;
         this.mergedPartitionDeletion = mergedPartitionDeletion;
         this.activeDeletion = mergedPartitionDeletion;
         this.sink = sink;
+        this.streamCells = sink.wantsWireStreamedCells();
         this.filterProbe = filterProbe;
         this.slices = slices;
-        // The scan spans the whole request: the first slice's start to the last slice's end.
-        ClusteringBound<?> spanStart = slices.get(0).start();
-        ClusteringBound<?> spanEnd = slices.get(slices.size() - 1).end();
-        this.sliceStart = spanStart.isBottom() ? null : spanStart;
-        this.sliceEnd = spanEnd.isTop() ? null : spanEnd;
         this.validationEnabled = DatabaseDescriptor.getCorruptedTombstoneStrategy() != Config.CorruptedTombstoneStrategy.disabled;
 
         // Seed the open-marker set with each seeked leg's open deletion at its seek point.
@@ -464,11 +537,15 @@ final class CursorReadMerger
         // with the filter the seed's eventual close hits in removeOpenRangeDeletion, so a seed
         // shadowed by the merged partition deletion is dropped on both sides consistently
         // (RangeTombstoneMarker.Merger parity).
-        for (CursorReads.MergeLeg leg : legs)
+        // A single leg is read as stored and tracks no open markers here.
+        if (singleLeg == null)
         {
-            DeletionTime seed = leg.mergeSeekOpenMarker();
-            if (seed != null)
-                openRanges.open(seed, mergedPartitionDeletion);
+            for (CursorReads.MergeLeg leg : legs)
+            {
+                DeletionTime seed = leg.openDeletion();
+                if (seed != null)
+                    openRanges.open(seed, mergedPartitionDeletion);
+            }
         }
         // a seeded open supersedes the partition deletion by the filter above, so it is the
         // active shadowing deletion at merge start — the same formula mergeUnfiltereds applies
@@ -481,98 +558,414 @@ final class CursorReadMerger
     }
 
     /** See {@link #openMarkerAtMergeStart} — consumed by {@code CursorReads.mergeLegs} for the
-     *  post-merge slicer's artificial slice-start open marker. */
+     *  slicing iterator's artificial slice-start open marker. */
     DeletionTime openMarkerAtMergeStart()
     {
         return openMarkerAtMergeStart;
     }
 
     /**
-     * Drives the whole within-partition merge: the adapted shape of CursorCompactor's
-     * mergePartitions unfiltered loop (static rows and the partition deletion are reconciled by
-     * the caller; every leg enters positioned at its first unfiltered or partition end).
+     * Merges groups into the sink until it stops wanting more or the partition ends.  The
+     * adapted shape of CursorCompactor's mergePartitions unfiltered loop (static rows and the
+     * partition deletion are reconciled by the caller; every leg enters positioned at its first
+     * unfiltered or partition end).  Serves one slice only: the sinks this drives track the open
+     * range deletion from the stream, which a seek to a later slice would hide from them.
      */
     void mergeUnfiltereds() throws IOException
     {
-        // Slice end-stop (the merge-core analog of the single-leg readRows endBound cutoff): an
-        // element at-or-past the slice end is never emitted, never validated (isInSlice is
-        // strictly-before-end) and never open-marker tracked downstream — the iterator path's
-        // ForwardReader stops at compareNextTo(end) >= 0 without ever deserializing past it — so
-        // the k-way merge can stop outright at the FIRST group there instead of merging the
-        // partition's whole tail only for SlicedMaterializedIterator to discard it. The end bound
-        // is staged ONCE as a descriptor holding the same serialized-values wire form the legs'
-        // descriptors hold, so the per-group check is the shared descriptor-level comparator —
-        // no per-group clustering materialization (which the pre-emission marker path never pays).
-        final ClusteringDescriptor sliceEndStop = sliceEnd == null ? null : sliceBoundDescriptor(sliceEnd);
-        // The slice START staged the same way, so a filter-dropped group's emitted-surface
-        // verdict (strictly after the slice start; LimitingMergeSink applies the same predicate
-        // to materialized clusterings) is a descriptor-level comparison with no clustering
-        // materialization. Only needed when a probe is attached: groups at-or-before the slice
-        // start reach the metrics stage on neither path.
-        final ClusteringDescriptor sliceStartStop = filterProbe == null || sliceStart == null
-                                                    ? null : sliceBoundDescriptor(sliceStart);
-        int prevMergeLimit = legs.length;
-        for (;;)
+        assert slices.size() == 1 : "mergeUnfiltereds reads one slice, not " + slices.size();
+        prepare();
+        while (sink.wantsMore())
         {
-            // Production bound (the sink-driven analog of the slice end-stop below): once the
-            // sink no longer wants rows — the query's counter would already have stopped
-            // consuming — the remaining tail is never even sorted. Checked BEFORE the
-            // group so a bound that was already satisfied on entry (e.g. a paging resume with an
-            // exhausted per-partition budget) merges nothing at all. Under-production is the only
-            // failure mode here and it is byte-divergent (a truncated result), which is exactly
-            // what the differential harness compares; stopping late merely wastes allocation.
-            if (!sink.wantsMore())
+            if (!advance())
                 return;
+        }
+    }
+
+    /**
+     * Stages the first slice's bounds.  Called once, before the first {@link #advance}.  The
+     * caller has already seeked the legs for the first slice.
+     */
+    void prepare() throws IOException
+    {
+        if (prepared)
+            return;
+        prepared = true;
+        // The bounds are staged in the legs' wire form, so the per-group checks are the shared
+        // descriptor-level comparator with no clustering materialization.  They are built with
+        // the LEGS' clustering types, since ClusteringComparator.compare(ClusteringDescriptor,
+        // ClusteringDescriptor) decodes both buffers with the first argument's (a leg's) types.
+        AbstractType<?>[] types = legs[0].unfiltered().clusteringTypes();
+        sliceStartDescriptor = new SliceBoundDescriptor(types);
+        sliceEndDescriptor = new SliceBoundDescriptor(types);
+        stageSlice(0);
+        prevMergeLimit = legs.length;
+    }
+
+    /**
+     * Stages slice {@code index}'s bounds.  Slice end-stop: an element at or past the slice end is
+     * never emitted, never validated and never open-marker tracked downstream.  The iterator
+     * path's ForwardReader stops at compareNextTo(end) >= 0 without deserializing past it, so the
+     * merge stops at the FIRST group there.  Slice start: a row at or before it is skipped without
+     * being merged, like AbstractSSTableIterator.handlePreSliceData.
+     */
+    private void stageSlice(int index)
+    {
+        sliceIndex = index;
+        Slice slice = slices.get(index);
+        sliceStartStop = slice.start().isBottom() ? null : sliceStartDescriptor.load(slice.start());
+        sliceEndStop = slice.end().isTop() ? null : sliceEndDescriptor.load(slice.end());
+    }
+
+    /**
+     * Merges exactly one group of the current slice: a row group yields at most one row, a marker
+     * group at most one marker, either possibly none.  Returns false once the current slice has
+     * no group left: every leg is exhausted, or the next group is at or past the slice end.
+     * Deferred legs open here, only when a group reaches them.
+     */
+    boolean advance() throws IOException
+    {
+        assert prepared : "prepare() must run before advance()";
+        if (finished || sliceDone)
+            return false;
+        boolean advanced = singleLeg != null ? advanceSingle() : advanceMerge();
+        if (!advanced)
+            sliceDone = true;
+        return advanced;
+    }
+
+    /**
+     * Moves the read to slice {@code index}, which must come after the current one, once the
+     * current slice has nothing left.  Each BTI leg whose row-index floor block for the new slice
+     * start lies past its current position seeks forward to it, like the iterator path's
+     * ForwardIndexedReader.setForSlice.  A leg that seeks replaces its open range deletion with
+     * the one the row index stores for that block, so the merged open deletion stays exact.
+     *
+     * @return true when a leg seeked; {@link #openDeletionAtSeek} then holds the open range
+     *         deletion at the new read position, which replaces the one the reader has tracked
+     */
+    boolean moveToSlice(int index) throws IOException
+    {
+        assert prepared && index > sliceIndex && index < slices.size() : "slice " + index + " after " + sliceIndex;
+        stageSlice(index);
+        sliceDone = false;
+        if (finished || sliceStartStop == null)
+            return false;
+        return singleLeg != null ? seekSingleLeg() : seekMergeLegs();
+    }
+
+    /**
+     * Whether slice {@code index} starts where the slice before it ends (for example {@code c < 5}
+     * then {@code c >= 5}) in a merge of several legs.  The iterator path slices each leg before it
+     * merges them, so the merge can join one leg's slice-end close and another leg's slice-start
+     * open into one boundary marker there; {@link #moveToAdjacentSlice} gives those markers.
+     */
+    boolean isAdjacentSliceInMerge(int index)
+    {
+        return singleLeg == null && index > 0 && index < slices.size()
+               && comparator.compare(slices.get(index - 1).end(), slices.get(index).start()) == 0;
+    }
+
+    /**
+     * {@link #moveToSlice} for a slice {@link #isAdjacentSliceInMerge} accepts, once the current
+     * slice has nothing left.  Reads past what lies at or before the new slice's start, then
+     * returns the range tombstone markers the iterator path writes at that position: what its
+     * {@code RangeTombstoneMarker.Merger} makes of each leg's slice-end close and slice-start
+     * open.  These replace both the close at the old slice's end and the open at the new slice's
+     * start.  Afterwards {@link #openDeletionAtSeek} holds the open range deletion in the new slice.
+     */
+    List<RangeTombstoneMarker> moveToAdjacentSlice(int index) throws IOException
+    {
+        assert isAdjacentSliceInMerge(index) && index == sliceIndex + 1 : "slice " + index + " after " + sliceIndex;
+        // each leg's open deletion at the old slice's end
+        Map<CursorReads.MergeLeg, DeletionTime> atEnd = new IdentityHashMap<>();
+        stageSlice(index);
+        for (CursorReads.MergeLeg leg : legs)
+            atEnd.put(leg, openAtSliceEnd(leg));
+        sliceDone = false;
+        if (!finished)
+            seekMergeLegs();
+        // each leg's open deletion at the new slice's start: an object leg is sliced already, so its
+        // own slice-bound markers say it; an sstable leg tracks its own
+        Map<CursorReads.MergeLeg, DeletionTime> atStart = new IdentityHashMap<>(atEnd);
+        while (!finished)
+        {
             int mergeLimit = prepareAndSortUnfilteredForMerge(prevMergeLimit);
+            prevMergeLimit = 0;
             if (mergeLimit == 0)
-                return;
-            if (sliceEndStop != null && ClusteringComparator.compare(legs[0].unfiltered(), sliceEndStop) >= 0)
-                return; // merge minimum at-or-past the slice end: nothing further can be emitted
-            // Row vs marker via the descriptor's clustering kind (CLUSTERING = row, bound/boundary
-            // = marker; statics never reach the merge) — kind-based rather than wire-flags-based,
-            // so the object-backed memtable leg needs no synthetic flags byte. For
-            // byte-backed legs the two are equivalent by construction: loadRow always sets
-            // CLUSTERING, loadTombstone always sets a bound/boundary kind.
+            {
+                finished = true;
+                break;
+            }
             UnfilteredDescriptor minimum = legs[0].unfiltered();
+            if (!isAtOrBeforeSliceStart(minimum))
+                break;
             if (minimum.clusteringKind() == ClusteringPrefix.Kind.CLUSTERING)
             {
-                // Clustering-column filter verdict at group formation, from the
-                // descriptor's clustering wire bytes — BEFORE the escape hatch, any cell work or
-                // (on default validation-disabled configs) any clustering materialization. A
-                // rejected group takes the metadata-only accounting walk instead of the emitting
-                // merge: it allocates nothing and its cells' values are skipped at the byte
-                // level, but its scan-metrics contributions (what MetricRecording would have
-                // counted for it below the top-level filter) are still recorded.
-                // The group's emitted-surface verdict is computed HERE for every probed
-                // group (not just clustering-rejected ones) because a regular-column failure can
-                // surface later, mid-cell-walk, when the descriptor comparison is still the only
-                // allocation-free way to answer it — the abandoned row may never have
-                // materialized a clustering.
-                rowOnEmittedSurface = sliceStartStop == null
-                                      || ClusteringComparator.compare(minimum, sliceStartStop) > 0;
-                if (filterProbe != null && !filterProbe.rowGroupMatches(minimum))
-                {
-                    accountDroppedRowGroup(mergeLimit, rowOnEmittedSurface);
-                }
-                else
-                {
-                    mergeRowGroup(mergeLimit);
-                }
-            }
-            else if (minimum.isStartBound() || minimum.isEndBound() || minimum.isBoundary())
-            {
-                mergeMarkerGroup(mergeLimit);
-                activeDeletion = openRanges.active() == DeletionTime.LIVE
-                                 ? mergedPartitionDeletion
-                                 : openRanges.active();
+                for (int i = 0; i < mergeLimit; i++)
+                    legs[i].skipRow();
             }
             else
             {
-                throw new IllegalStateException("Unexpected unfiltered type (not row or tombstone): " + minimum.clusteringKind());
+                updateOpenMarkers(mergeLimit);
+                activeDeletion = openRanges.active() == DeletionTime.LIVE ? mergedPartitionDeletion : openRanges.active();
+                for (int i = 0; i < mergeLimit; i++)
+                {
+                    DeletionTime open = legs[i].unfiltered().openDeletionTime();
+                    atStart.put(legs[i], open == null ? null : CursorReads.copyOf(open));
+                }
             }
             continueReadingAfterMerge(mergeLimit);
             prevMergeLimit = mergeLimit;
         }
+        for (CursorReads.MergeLeg leg : legs)
+        {
+            if (leg.sstableOrNull() != null && !leg.isDeferred())
+                atStart.put(leg, leg.openDeletion() == null ? null : CursorReads.copyOf(leg.openDeletion()));
+        }
+
+        // RangeTombstoneMarker.Merger over the legs' markers at this position: first each leg's
+        // close, or its open when it had nothing open; then the opens of the legs that closed
+        DeletionTime before = visible(atEnd.values());
+        List<DeletionTime> middle = new ArrayList<>(legs.length);
+        for (CursorReads.MergeLeg leg : legs)
+            middle.add(atEnd.get(leg) != null ? null : atStart.get(leg));
+        DeletionTime between = visible(middle);
+        DeletionTime after = visible(atStart.values());
+        ClusteringBound<?> position = slices.get(index).start();
+        List<RangeTombstoneMarker> markers = new ArrayList<>(2);
+        addMergedMarker(markers, position, before, between);
+        addMergedMarker(markers, position, between, after);
+        openDeletionAtSeek = after.isLive() ? null : after;
+        return markers;
+    }
+
+    /** A leg's open range deletion at the end of the slice the merge has just finished. */
+    private DeletionTime openAtSliceEnd(CursorReads.MergeLeg leg)
+    {
+        if (leg.isDeferred() || isState(leg.cursorState(), PARTITION_END | DONE))
+            return null;
+        if (leg.sstableOrNull() != null)
+            return leg.openDeletion() == null ? null : CursorReads.copyOf(leg.openDeletion());
+        // an object leg is sliced already: it closes what it has open with a marker at the slice end
+        UnfilteredDescriptor head = leg.unfiltered();
+        if ((head.isEndBound() || head.isBoundary()) && ClusteringComparator.compare(head, sliceStartStop) == 0)
+            return CursorReads.copyOf(head.deletionTime());
+        return null;
+    }
+
+    /** {@code RangeTombstoneMarker.Merger}'s open deletion in the merged stream. */
+    private DeletionTime visible(Iterable<DeletionTime> open)
+    {
+        DeletionTime biggest = null;
+        for (DeletionTime deletion : open)
+        {
+            if (deletion != null && (biggest == null || deletion.supersedes(biggest)))
+                biggest = deletion;
+        }
+        return biggest == null || mergedPartitionDeletion.supersedes(biggest) ? DeletionTime.LIVE : biggest;
+    }
+
+    /** {@code RangeTombstoneMarker.Merger.merge}'s marker for a change of the merged open deletion. */
+    private static void addMergedMarker(List<RangeTombstoneMarker> markers, ClusteringBound<?> position,
+                                        DeletionTime previous, DeletionTime next)
+    {
+        if (previous.equals(next))
+            return;
+        boolean isBeforeClustering = position.kind().comparedToClustering < 0;
+        if (previous.isLive())
+            markers.add(isBeforeClustering ? RangeTombstoneBoundMarker.inclusiveOpen(false, position, next)
+                                           : RangeTombstoneBoundMarker.exclusiveOpen(false, position, next));
+        else if (next.isLive())
+            markers.add(isBeforeClustering ? RangeTombstoneBoundMarker.exclusiveClose(false, position, previous)
+                                           : RangeTombstoneBoundMarker.inclusiveClose(false, position, previous));
+        else
+            markers.add(isBeforeClustering ? RangeTombstoneBoundaryMarker.exclusiveCloseInclusiveOpen(false, position, previous, next)
+                                           : RangeTombstoneBoundaryMarker.inclusiveCloseExclusiveOpen(false, position, previous, next));
+    }
+
+    /** See {@link #moveToSlice}: the open range deletion at the position the seek moved to. */
+    DeletionTime openDeletionAtSeek()
+    {
+        return openDeletionAtSeek;
+    }
+
+    private boolean seekSingleLeg() throws IOException
+    {
+        BtiCursorSeekSupport.SeekPoint point = singleLeg.seekPointFor(slices.get(sliceIndex).start());
+        if (point == null)
+            return false;
+        singleLeg.seekTo(point);
+        // a single leg is read as stored: the reader's open deletion is the block's, as on the
+        // iterator path, where setForSlice replaces openMarker with indexInfo.openDeletion
+        openDeletionAtSeek = point.openMarker == null ? null : CursorReads.copyOf(point.openMarker);
+        return true;
+    }
+
+    private boolean seekMergeLegs() throws IOException
+    {
+        ClusteringBound<?> start = slices.get(sliceIndex).start();
+        boolean seeked = false;
+        for (CursorReads.MergeLeg leg : legs)
+        {
+            if (leg.isDeferred())
+            {
+                // Same rule as the first slice (CursorReads.setUpMerge): a deferred leg whose data
+                // may start at or before this slice's start opens now, so its open deletion at its
+                // seek point joins the merge here.  A leg that starts after the slice start
+                // carries no open deletion there and stays deferred.
+                if (leg.deferredSpansMergeStart(start, comparator))
+                {
+                    CursorReads.countLegForceOpened();
+                    leg.openForMerge(start);
+                    DeletionTime open = leg.openDeletion();
+                    if (open != null)
+                        openRanges.open(open, mergedPartitionDeletion);
+                    seeked = true;
+                }
+                continue;
+            }
+            BtiCursorSeekSupport.SeekPoint point = leg.seekPointFor(start);
+            if (point == null)
+                continue;
+            // the leg's open deletion is reused storage: take it out of the open set before the
+            // seek overwrites it
+            DeletionTime before = leg.openDeletion();
+            if (before != null)
+                openRanges.close(before, mergedPartitionDeletion);
+            leg.seekTo(point);
+            DeletionTime after = leg.openDeletion();
+            if (after != null)
+                openRanges.open(after, mergedPartitionDeletion);
+            seeked = true;
+        }
+        if (!seeked)
+            return false;
+        openRanges.settle();
+        activeDeletion = openRanges.active() == DeletionTime.LIVE ? mergedPartitionDeletion : openRanges.active();
+        openDeletionAtSeek = openRanges.active() == DeletionTime.LIVE ? null : CursorReads.copyOf(openRanges.active());
+        // seeked legs sit at a new unfiltered: every leg is re-placed by the next sort
+        prevMergeLimit = legs.length;
+        return true;
+    }
+
+    /**
+     * One leg, read as stored: each row and marker goes to the sink as the sstable holds it,
+     * exactly what the iterator path's single sstable iterator returns.  The leg's own partition
+     * and range deletions do not shadow its rows here, because that path never merges them.  A row
+     * at or before the slice start is skipped without being read, like handlePreSliceData; a
+     * marker there still goes to the sink, whose reader tracks the open range deletion from it.
+     */
+    private boolean advanceSingle() throws IOException
+    {
+        int state = singleLeg.cursorState();
+        if (isState(state, ROW_START | TOMBSTONE_START))
+            singleLeg.readUnfilteredHeader();
+        else if (isState(state, PARTITION_END | DONE))
+        {
+            finished = true;
+            return false;
+        }
+        // otherwise the header is already loaded: the previous call stopped at a slice end on it
+        UnfilteredDescriptor current = singleLeg.unfiltered();
+        if (sliceEndStop != null && ClusteringComparator.compare(current, sliceEndStop) >= 0)
+            return false;
+        boolean isRow = current.clusteringKind() == ClusteringPrefix.Kind.CLUSTERING;
+        if (isRow && isAtOrBeforeSliceStart(current))
+        {
+            singleLeg.skipRow();
+            singleLeg.continueReading();
+            return true;
+        }
+        if (streamCells)
+        {
+            // A streaming sink builds no row object, so this read owns the leg's validation, as the
+            // sstable iterator does for each in-slice unfiltered.
+            if (isRow)
+            {
+                // the row's cells go to the sink as stored: prepareRowGroup and foldComplexDeletion
+                // apply no deletion to a single leg
+                mergeRowGroup(1);
+                if (singleLeg.cursorState() == UNFILTERED_END)
+                    singleLeg.continueReading();
+                return true;
+            }
+            if (validationEnabled && !isAtOrBeforeSliceStart(current))
+                singleLeg.validateMarkerHeader();
+        }
+        Unfiltered unfiltered = singleLeg.readStoredUnfiltered();
+        if (unfiltered.isRow())
+            sink.addRow((Row) unfiltered);
+        else
+            sink.addRangeTombstoneMarker((RangeTombstoneMarker) unfiltered);
+        return true;
+    }
+
+    private boolean advanceMerge() throws IOException
+    {
+        int mergeLimit = prepareAndSortUnfilteredForMerge(prevMergeLimit);
+        // every leg now has its header loaded and sits in sorted order
+        prevMergeLimit = 0;
+        if (mergeLimit == 0)
+        {
+            finished = true;
+            return false;
+        }
+        if (sliceEndStop != null && ClusteringComparator.compare(legs[0].unfiltered(), sliceEndStop) >= 0)
+            return false; // merge minimum at-or-past the slice end: nothing further can be emitted
+        // Row vs marker via the descriptor's clustering kind (CLUSTERING = row, bound/boundary
+        // = marker; statics never reach the merge) — kind-based rather than wire-flags-based,
+        // so the object-backed memtable leg needs no synthetic flags byte. For
+        // byte-backed legs the two are equivalent by construction: loadRow always sets
+        // CLUSTERING, loadTombstone always sets a bound/boundary kind.
+        UnfilteredDescriptor minimum = legs[0].unfiltered();
+        if (minimum.clusteringKind() == ClusteringPrefix.Kind.CLUSTERING)
+        {
+            if (isAtOrBeforeSliceStart(minimum))
+            {
+                // A row at or before the slice start is never emitted, validated or counted on
+                // the iterator path (handlePreSliceData skips it), so no leg reads its cells.
+                for (int i = 0; i < mergeLimit; i++)
+                    legs[i].skipRow();
+            }
+            // Clustering-column filter verdict at group formation, from the
+            // descriptor's clustering wire bytes — BEFORE the escape hatch, any cell work or
+            // any clustering materialization. A rejected group takes the metadata-only
+            // accounting walk instead of the emitting merge: it allocates nothing and its cells'
+            // values are skipped at the byte level, but its scan-metrics contributions (what
+            // MetricRecording would have counted for it below the top-level filter) are still
+            // recorded.
+            else if (filterProbe != null && !filterProbe.rowGroupMatches(minimum))
+            {
+                accountDroppedRowGroup(mergeLimit);
+            }
+            else
+            {
+                mergeRowGroup(mergeLimit);
+            }
+        }
+        else if (minimum.isStartBound() || minimum.isEndBound() || minimum.isBoundary())
+        {
+            mergeMarkerGroup(mergeLimit);
+            activeDeletion = openRanges.active() == DeletionTime.LIVE
+                             ? mergedPartitionDeletion
+                             : openRanges.active();
+        }
+        else
+        {
+            throw new IllegalStateException("Unexpected unfiltered type (not row or tombstone): " + minimum.clusteringKind());
+        }
+        // the next group resumes here
+        continueReadingAfterMerge(mergeLimit);
+        prevMergeLimit = mergeLimit;
+        return true;
+    }
+
+    /** Whether {@code position} is at or before the current slice's start (non-strict, like
+     *  handlePreSliceData).  Elements after it and before the slice end are in the slice. */
+    private boolean isAtOrBeforeSliceStart(ClusteringDescriptor position)
+    {
+        return sliceStartStop != null && ClusteringComparator.compare(position, sliceStartStop) <= 0;
     }
 
     // ---------------------------------------------------------------- sort and merge limits
@@ -600,11 +993,20 @@ final class CursorReadMerger
         // bound, so its partition header (the counted sstable read) is needed now.  This is the
         // exact point the iterator path's lazy lower-bound iterator initializes.  Opening changes
         // only legs[0], so re-insert just that element; repeat until the front is a real (or
-        // exhausted) leg.  The caller gates entry on sink.wantsMore(), so a satisfied limit never
-        // reaches here and never opens a leg the iterator path would have left untouched.
+        // exhausted) leg.  advance() runs only when its caller needs another group, so a read
+        // that has all its rows never opens a leg the iterator path would have left untouched.
         while (legs[0].isDeferred())
         {
-            legs[0].openForMerge();
+            legs[0].openForMerge(slices.get(sliceIndex).start());
+            // A leg left deferred starts after the current slice start, so its seek finds the
+            // first block and no open deletion; the check keeps the open set exact regardless.
+            DeletionTime open = legs[0].openDeletion();
+            if (open != null)
+            {
+                openRanges.open(open, mergedPartitionDeletion);
+                openRanges.settle();
+                activeDeletion = openRanges.active() == DeletionTime.LIVE ? mergedPartitionDeletion : openRanges.active();
+            }
             CLUSTERING_SORT.sortPerturbed(legs, equalsNext, 1, legs.length);
         }
         if (isState(legs[0].cursorState(), PARTITION_END | DONE))
@@ -711,7 +1113,7 @@ final class CursorReadMerger
                 // dropped-row accounting cycle over the object's own content instead.
                 if (filterProbe != null && !filterProbe.existingRowMatches(existing))
                 {
-                    filterProbe.abandonExistingRow(existing, rowOnEmittedSurface);
+                    filterProbe.abandonExistingRow(existing, true);
                     return;
                 }
                 sink.addRow(existing);
@@ -721,16 +1123,23 @@ final class CursorReadMerger
         }
 
         DeletionTime rowActiveDeletion = prepareRowGroup(rowMergeLimit);
-        // liveness shadowed by the active deletion is dropped; the sink keeps what it is handed,
-        // so the surviving row deletion becomes a stable copy
-        DeletionTime rowDeletionOut = groupDeletionSurvives ? CursorReads.copyOf(groupMergedDeletion)
-                                                            : DeletionTime.LIVE;
+        // liveness shadowed by the active deletion is dropped.  A sink that builds rows keeps what it
+        // is handed, so it gets stable copies; a streaming sink is done with them at endRow.
+        DeletionTime rowDeletionOut;
         LivenessInfo livenessOut;
-        if (groupMergedInfo.isEmpty() || rowActiveDeletion.deletes(groupMergedInfo))
-            livenessOut = LivenessInfo.EMPTY;
+        boolean livenessSurvives = !groupMergedInfo.isEmpty() && !rowActiveDeletion.deletes(groupMergedInfo);
+        if (streamCells)
+        {
+            rowDeletionOut = groupDeletionSurvives ? groupMergedDeletion : DeletionTime.LIVE;
+            livenessOut = livenessSurvives ? groupMergedInfo : LivenessInfo.EMPTY;
+        }
         else
-            livenessOut = LivenessInfo.withExpirationTime(groupMergedInfo.timestamp(), groupMergedInfo.ttl(),
-                                                          groupMergedInfo.localExpirationTime());
+        {
+            rowDeletionOut = groupDeletionSurvives ? CursorReads.copyOf(groupMergedDeletion) : DeletionTime.LIVE;
+            livenessOut = livenessSurvives ? LivenessInfo.withExpirationTime(groupMergedInfo.timestamp(), groupMergedInfo.ttl(),
+                                                                             groupMergedInfo.localExpirationTime())
+                                           : LivenessInfo.EMPTY;
+        }
 
         // a surviving shell makes the merged row non-empty no matter what its cells do: start it
         // now; an empty shell defers to the first surviving cell/complex deletion (ensureRowStarted)
@@ -802,15 +1211,9 @@ final class CursorReadMerger
         rowClusteringLeg = legs[0];
         rowClustering = null;
         rowStarted = false;
-        // isInSlice's comparator walks exist only to gate validation to in-slice elements,
-        // so they — and the eager clustering materialization feeding them — are short-circuited
-        // away entirely on the default validation-disabled configs
-        groupValidateInSlice = false;
-        if (validationEnabled)
-        {
-            rowClustering = (Clustering<?>) rowClusteringLeg.materializeClusteringPrefix();
-            groupValidateInSlice = isInSlice(rowClustering);
-        }
+        // a row group reaching here is in the current slice (advanceMerge skips rows at or
+        // before its start and stops at its end), so validation applies whenever it is enabled
+        groupValidateInSlice = validationEnabled;
         if (groupValidateInSlice)
         {
             // per-leg parity with the iterator path, which validates EACH leg's deserialized row
@@ -819,6 +1222,12 @@ final class CursorReadMerger
                 legs[i].validateRowHeader();
         }
 
+        if (singleLeg != null)
+        {
+            // a single leg is read as stored: its row deletion is kept and shadows nothing
+            groupDeletionSurvives = !mergedDeletion.isLive();
+            return DeletionTime.LIVE;
+        }
         groupDeletionSurvives = mergedDeletion.supersedes(activeDeletion);
         // when the merged row deletion does not survive, the partition/range deletion takes over
         return groupDeletionSurvives ? mergedDeletion : activeDeletion;
@@ -864,17 +1273,24 @@ final class CursorReadMerger
     private void abandonRowByFilter(CellLivenessInfo failedWinnerLiveness)
     {
         rowAbandonedByFilter = true;
-        filterProbe.abandonRowGroup(rowClusteringLeg, rowOnEmittedSurface, failedWinnerLiveness);
+        filterProbe.abandonRowGroup(rowClusteringLeg, true, failedWinnerLiveness);
         rowStarted = false;
     }
 
-    /** Starts the output row: materializes the group's clustering (once, from the leg captured at
-     *  group formation) and opens the sink's row. */
+    /** Starts the output row with the group's clustering, taken from the leg captured at group
+     *  formation: as that leg's descriptor for a streaming sink, else built once. */
     private void startRow(LivenessInfo livenessOut, DeletionTime rowDeletionOut)
     {
-        if (rowClustering == null)
-            rowClustering = (Clustering<?>) rowClusteringLeg.materializeClusteringPrefix();
-        sink.startRow(rowClustering, livenessOut, rowDeletionOut);
+        if (streamCells)
+        {
+            sink.startRow(rowClusteringLeg.unfiltered(), livenessOut, rowDeletionOut);
+        }
+        else
+        {
+            if (rowClustering == null)
+                rowClustering = (Clustering<?>) rowClusteringLeg.materializeClusteringPrefix();
+            sink.startRow(rowClustering, livenessOut, rowDeletionOut);
+        }
         rowStarted = true;
     }
 
@@ -925,6 +1341,9 @@ final class CursorReadMerger
                 mergedComplexDeletion.resetLive();
             complexDeletionNeedsReport = !mergedComplexDeletion.isLive();
         }
+        // a single leg is read as stored: its complex deletion is kept and shadows nothing
+        if (singleLeg != null)
+            return rowActiveDeletion;
         if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(rowActiveDeletion))
             return mergedComplexDeletion;
         return rowActiveDeletion;
@@ -1119,7 +1538,7 @@ final class CursorReadMerger
         if (CursorReads.TEST_CORRUPT_CELL_TIMESTAMPS)
             timestamp += 1;
         ensureRowStarted();
-        if (sink.wantsWireStreamedCells())
+        if (streamCells)
         {
             // Stream the winner's value bytes straight from wherever they currently
             // live into the sink's own destination — the allocation win, replacing the
@@ -1133,7 +1552,7 @@ final class CursorReadMerger
             // method: a no-op if the sink already streamed the leg's value (state has moved past
             // CELL_VALUE_START), or if the value lived in scratch all along (this leg was never
             // touched by this cell) — but mandatory if the sink chose not to consume it at all
-            // (e.g. TranscodeMergeSink dropping a purged cell, or the row not being admitted),
+            // (e.g. ResponseSink dropping a purged cell, or the row not being admitted),
             // since advancePastCellPosition() throws if a value is left unconsumed.
             winner.discardCellValue();
         }
@@ -1353,7 +1772,7 @@ final class CursorReadMerger
      * walk works for object-backed legs too (their cell surface is the same), and one accounting
      * code path beats two.
      */
-    private void accountDroppedRowGroup(int rowMergeLimit, boolean onEmittedSurface) throws IOException
+    private void accountDroppedRowGroup(int rowMergeLimit) throws IOException
     {
         DeletionTime rowActiveDeletion = prepareRowGroup(rowMergeLimit);
         // the same merged shell mergeRowGroup computes, minus the output-copy allocations: the
@@ -1363,7 +1782,7 @@ final class CursorReadMerger
                                    ? null
                                    : groupMergedInfo;
 
-        filterProbe.beginDroppedRow(rowClusteringLeg, onEmittedSurface, livenessOut, rowDeletionOut);
+        filterProbe.beginDroppedRow(rowClusteringLeg, true, livenessOut, rowDeletionOut);
         walkCellGroups(rowMergeLimit, rowActiveDeletion, true);
         filterProbe.endDroppedRow();
     }
@@ -1432,31 +1851,19 @@ final class CursorReadMerger
             updateOpenMarkers(rangeTombstoneMergeLimit);
             DeletionTime newDeletionInMerged = openRanges.active();
 
-            // The group's clustering values are decoded AT MOST ONCE per group and shared between
-            // the validation gate's position and the emitted marker's prefix — only the prefix
-            // Kind ever differs between the two uses, never the values, and the component arrays
-            // are immutable once materialized.
-            byte[][] groupClusteringValues = null;
-
-            if (validationEnabled)
+            // markers are validated per leg when in the slice: after its start (the merge has
+            // already stopped at its end)
+            if (validationEnabled && !isAtOrBeforeSliceStart(legs[0].unfiltered()))
             {
-                // markers are validated per leg when in-slice; the group's
-                // slice position needs its clustering, materialized here only on
-                // validation-enabled configs
-                groupClusteringValues = legs[0].materializeBoundValues();
-                ClusteringPrefix<?> groupPosition = boundOrBoundary(legs[0].unfiltered().clusteringKind(), groupClusteringValues);
-                if (isInSlice(groupPosition))
-                {
-                    for (int i = 0; i < rangeTombstoneMergeLimit; i++)
-                        legs[i].validateMarkerHeader();
-                }
+                for (int i = 0; i < rangeTombstoneMergeLimit; i++)
+                    legs[i].validateMarkerHeader();
             }
 
             if (previousDeletionInMerged.equals(newDeletionInMerged))
                 return; // the merged open deletion did not change: no marker in the merged stream
 
-            if (groupClusteringValues == null)
-                groupClusteringValues = legs[0].materializeBoundValues();
+            // decoded once, shared by every prefix kind the marker below may take
+            byte[][] groupClusteringValues = legs[0].materializeBoundValues();
             boolean isBeforeClustering = legs[0].unfiltered().clusteringKind().comparedToClustering < 0;
             if (previousDeletionInMerged == DeletionTime.LIVE)
             {
@@ -1492,7 +1899,10 @@ final class CursorReadMerger
     private void updateOpenMarkers(int rangeTombstoneMergeLimit)
     {
         for (int i = 0; i < rangeTombstoneMergeLimit; i++)
+        {
             openRanges.apply(legs[i].unfiltered(), mergedPartitionDeletion);
+            legs[i].noteMarker();
+        }
         openRanges.settle();
     }
 
@@ -1513,62 +1923,22 @@ final class CursorReadMerger
     // ---------------------------------------------------------------- slice position
 
     /**
-     * Whether an element at {@code position} is on the emission surface the iterator path
-     * validates: strictly after the slice start (handlePreSliceData's NON-strict skip consumes
-     * clustering {@code <= start} without validating) and strictly before the slice end
-     * (ForwardReader stops at {@code >= end}).
+     * A {@link ClusteringDescriptor} loaded from a query-side slice bound instead of from the data
+     * file, comparison-only (never handed to any cursor).  The bound is serialized in the exact
+     * wire form every leg's descriptor holds, so the shared descriptor-level comparator compares
+     * it against each group's minimum without allocating.  Reused for every slice.
      */
-    private boolean isInSlice(ClusteringPrefix<?> position)
-    {
-        // A position is in-slice when it sits strictly after the start and strictly before the end
-        // of any one requested slice. A slice read has one slice; a names read has one point slice
-        // per requested clustering. Matching per slice keeps validation gated to the exact
-        // requested clusterings, so it matches the iterator path even for a multi-slice names read.
-        for (int i = 0; i < slices.size(); i++)
-        {
-            Slice slice = slices.get(i);
-            ClusteringBound<?> start = slice.start();
-            ClusteringBound<?> end = slice.end();
-            boolean afterStart = start.isBottom() || comparator.compare(position, (ClusteringPrefix<?>) start) > 0;
-            boolean beforeEnd = end.isTop() || comparator.compare(position, (ClusteringPrefix<?>) end) < 0;
-            if (afterStart && beforeEnd)
-                return true;
-        }
-        return false;
-    }
-
-    /**
-     * Stages a slice bound as a {@link ClusteringDescriptor} so the merge loop's end-stop (and the
-     * filter probe's emitted-surface check against the slice start) can use the
-     * shared descriptor-level comparator against each group's minimum, allocation-free per group.
-     * The bound's values are serialized with {@code serializeValuesWithoutSize} — the exact
-     * wire form {@code readUnfilteredClustering} loads into every leg's descriptor buffer (header
-     * vint per 32-component block, raw bytes for fixed-length components, length-vint-prefixed for
-     * variable) — and with the LEGS' clustering types, since
-     * {@link ClusteringComparator#compare(ClusteringDescriptor, ClusteringDescriptor)} decodes
-     * both buffers with the first argument's (a leg's) types.
-     */
-    private ClusteringDescriptor sliceBoundDescriptor(ClusteringBound<?> bound) throws IOException
-    {
-        AbstractType<?>[] types = legs[0].unfiltered().clusteringTypes();
-        try (DataOutputBuffer out = new DataOutputBuffer(64))
-        {
-            ClusteringPrefix.serializer.serializeValuesWithoutSize(bound, out, MessagingService.current_version,
-                                                                   types);
-            return new SliceBoundDescriptor(types, bound, out.getData(), out.getLength());
-        }
-    }
-
-    /** A {@link ClusteringDescriptor} loaded from a query-side bound instead of from the data
-     *  file — comparison-only (never handed to any cursor), see {@link #sliceBoundDescriptor}. */
     private static final class SliceBoundDescriptor extends ClusteringDescriptor
     {
-        SliceBoundDescriptor(AbstractType<?>[] types, ClusteringBound<?> bound, byte[] serializedValues, int length)
+        SliceBoundDescriptor(AbstractType<?>[] types)
         {
             super(types);
-            clusteringKind(bound.kind());
-            clusteringColumnsBound = bound.size();
-            overwrite(serializedValues, length);
+        }
+
+        SliceBoundDescriptor load(ClusteringBound<?> bound)
+        {
+            storeClustering((byte) bound.kind().ordinal(), bound.size(), bound);
+            return this;
         }
     }
 
@@ -1585,7 +1955,7 @@ final class CursorReadMerger
      * loudly (the CellValueCapture discipline: a copy-loop shape change breaks the build of the
      * comparison, not the comparison's result).
      */
-    static final class CellValueScratch implements DataOutputPlus
+    static final class CellValueScratch implements DataOutputPlus, SSTableCursorReader.DirectValueTarget
     {
         private byte[] buffer = new byte[64];
         private int length;
@@ -1678,6 +2048,14 @@ final class CursorReadMerger
             ensureCapacity(length + chunkLength);
             System.arraycopy(chunk, offset, buffer, length, chunkLength);
             length += chunkLength;
+        }
+
+        @Override
+        public void readValue(DataInputPlus in, int valueLength) throws IOException
+        {
+            ensureCapacity(length + valueLength);
+            in.readFully(buffer, length, valueLength);
+            length += valueLength;
         }
 
         private void ensureCapacity(int size)

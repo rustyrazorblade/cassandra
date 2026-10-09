@@ -582,9 +582,7 @@ public abstract class ReadCommand extends AbstractReadQuery
                 iterator = withQuerySizeTracking(iterator);
                 iterator = maybeSlowDownForTesting(iterator);
                 iterator = withQueryCancellation(iterator);
-                iterator = maybeRecordPurgeableTombstones(iterator, cfs);
-                iterator = RTBoundValidator.validate(withoutPurgeableTombstones(iterator, cfs, executionController), Stage.PURGED, false);
-                iterator = withMetricsRecording(iterator, cfs.metric, startTimeNanos, executionController);
+                iterator = withPurgeAndMetrics(iterator, cfs, startTimeNanos, executionController);
 
                 // If we've used a 2ndary index, we know the result already satisfy the primary expression used, so
                 // no point in checking it again.
@@ -650,6 +648,21 @@ public abstract class ReadCommand extends AbstractReadQuery
     }
 
     /**
+     * The purge and scan-metric stages {@link #executeLocally} applies to the merged stream: the
+     * purgeable tombstone count, the purge, and the scan metrics with the tombstone thresholds.
+     * Package-private so a cursor read that builds its own merged stream applies the same stages.
+     */
+    UnfilteredPartitionIterator withPurgeAndMetrics(UnfilteredPartitionIterator iterator,
+                                                    ColumnFamilyStore cfs,
+                                                    long startTimeNanos,
+                                                    ReadExecutionController executionController)
+    {
+        iterator = maybeRecordPurgeableTombstones(iterator, cfs);
+        iterator = RTBoundValidator.validate(withoutPurgeableTombstones(iterator, cfs, executionController), Stage.PURGED, false);
+        return withMetricsRecording(iterator, cfs.metric, startTimeNanos, executionController);
+    }
+
+    /**
      * Wraps the provided iterator so that metrics on what is scanned by the command are recorded.
      * This also log warning/trow TombstoneOverwhelmingException if appropriate.
      */
@@ -669,12 +682,12 @@ public abstract class ReadCommand extends AbstractReadQuery
              * when pushdown accounting is not engaged. On the iterator path those rows flow
              * through this very transformation (it sits below the row filter) before the filter
              * discards them; the cursor path accounts them in the accumulator instead, so every
-             * count here folds the dropped totals in. The totals are final before this wrapper is
-             * even created: the cursor merge is eager, completing inside queryStorage. The
-             * production side carries its own abort that fires at the same crossing element
-             * the in-flow check below would have hit, so at most one site ever throws per query
-             * (if production did not abort, the combined count here can never exceed the
-             * production-time total, which stayed at or under the threshold).
+             * count here folds the dropped totals in. The cursor merge is lazy: it accounts each
+             * dropped row before the next emitted row reaches this wrapper, so the dropped totals
+             * read here are always up to date with the stream. The production side carries its
+             * own abort for the tombstones only it sees (dropped rows), and counts every emitted
+             * element before this wrapper does, so it fires at the same crossing element the
+             * in-flow check below would have hit; at most one site ever throws per query.
              */
             private final CursorReads.ScanStatsAccumulator scanStats = controller.scanStats();
 
@@ -996,10 +1009,16 @@ public abstract class ReadCommand extends AbstractReadQuery
 
     private UnfilteredPartitionIterator maybeSlowDownForTesting(UnfilteredPartitionIterator iter)
     {
-        if (TEST_ITERATION_DELAY_MILLIS > 0 && !SchemaConstants.isSystemKeyspace(metadata().keyspace))
+        if (slowedDownForTesting())
             return Transformation.apply(iter, new DelayInjector());
         else
             return iter;
+    }
+
+    /** Whether {@link #executeLocally} slows each row down for a test. */
+    boolean slowedDownForTesting()
+    {
+        return TEST_ITERATION_DELAY_MILLIS > 0 && !SchemaConstants.isSystemKeyspace(metadata().keyspace);
     }
 
     /**

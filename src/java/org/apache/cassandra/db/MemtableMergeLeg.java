@@ -103,7 +103,7 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTER
  * <b>Range tombstones</b>: the memtable's markers (from {@code DeletionInfo}, including the
  * artificial slice-bound markers the pre-clipped stream carries) enter the merge's cross-leg
  * open-marker set as normal, always-current contributions — a memtable leg never seeks, so
- * {@link #mergeSeekOpenMarker()} is always null and the seed machinery never applies to it.
+ * {@link #openDeletion()} is always null and the seed machinery never applies to it.
  */
 // Public (was package-private) so the mergeLegsWithSink test hook
 // (CursorReads.mergeLegsWithSink, @VisibleForTesting) can be driven with real memtable-adapter
@@ -136,10 +136,27 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
     private DeletionTime parkedComplexDeletion = DeletionTime.LIVE;
     private boolean parked;
 
+    /** See {@link #MemtableMergeLeg(UnfilteredRowIterator, Slices, boolean)}. */
+    private final boolean pullOnDemand;
+    /** The merge has moved past the current unfiltered; the next one is pulled with its header. */
+    private boolean pullPending;
+
     public MemtableMergeLeg(UnfilteredRowIterator iter, Slices slices)
+    {
+        this(iter, slices, false);
+    }
+
+    /**
+     * @param pullOnDemand pull each next unfiltered from {@code iter} only when the merge reads its
+     *                     header, not as soon as the merge has used the current one.  The iterator
+     *                     path's merge pulls its inputs this way.  A source whose pulls are counted
+     *                     (the repaired-data digest) needs it to be pulled exactly as far.
+     */
+    MemtableMergeLeg(UnfilteredRowIterator iter, Slices slices, boolean pullOnDemand)
     {
         this.iter = iter;
         this.slices = slices;
+        this.pullOnDemand = pullOnDemand;
         this.clusteringTypes = iter.metadata().comparator.subtypes();
         this.desc = new MemtableDescriptor(clusteringTypes);
         advance();
@@ -193,14 +210,9 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
         // nothing to switch: the adapter is merge-shaped from construction
     }
 
-    public void seekForMerge()
+    public void seekForMerge(ClusteringBound<?> sliceStart)
     {
-        // memtable legs never seek: the stream is already in memory and pre-clipped to the slice
-    }
-
-    public DeletionTime mergeSeekOpenMarker()
-    {
-        return null;
+        // memtable legs never seek: the stream is already in memory and pre-clipped to the slices
     }
 
     // ---------------------------------------------------------------- unfiltered walk
@@ -217,6 +229,13 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
 
     public void readUnfilteredHeader()
     {
+        if (pullPending)
+        {
+            pullPending = false;
+            advance();
+            if (state == PARTITION_END)
+                return;
+        }
         if (state == ROW_START)
         {
             currentRow = (Row) current;
@@ -284,6 +303,13 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
     {
         if (state != UNFILTERED_END)
             throw new IllegalStateException("adapter asked to continue from state " + state);
+        if (pullOnDemand)
+        {
+            // readUnfilteredHeader pulls the next unfiltered; until then the leg reports a header to read
+            pullPending = true;
+            state = ROW_START;
+            return;
+        }
         advance();
     }
 
@@ -309,6 +335,13 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
     }
 
     private static final byte[][] NO_VALUES = new byte[0][];
+
+    public void skipRow()
+    {
+        // the stream is pre-clipped to the slices, so the merge never asks; consuming the row
+        // object is all a skip needs
+        consumeExistingRow();
+    }
 
     public Row consumeExistingRow()
     {

@@ -588,17 +588,17 @@ public class SSTableCursorReader implements AutoCloseable
     {
         TableMetadata metadata = Util.metadataFromSSTable(desc);
         SSTableReader reader = SSTableReader.openNoValidation(null, desc, TableMetadataRef.forOfflineTools(metadata));
-        return new SSTableCursorReader(reader, metadata, reader.ref(), null, null);
+        return new SSTableCursorReader(reader, metadata, reader.ref(), null, null, true);
     }
 
     public SSTableCursorReader(SSTableReader reader)
     {
-        this(reader, reader.metadata(), null, null, null);
+        this(reader, reader.metadata(), null, null, null, true);
     }
 
     public SSTableCursorReader(SSTableReader reader, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, null, diskAccessMode);
+        this(reader, reader.metadata(), null, null, diskAccessMode, true);
     }
 
     /**
@@ -610,12 +610,26 @@ public class SSTableCursorReader implements AutoCloseable
      */
     public SSTableCursorReader(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, bounds, diskAccessMode);
+        this(reader, reader.metadata(), null, bounds, diskAccessMode, true);
     }
 
-    /** @param bounds the segments to read, or null for the whole file */
+    /**
+     * A cursor for a read, over the given ranges like the constructor above.  It reads the data
+     * file through the chunk cache, like the iterator read path.  The constructors read ahead and
+     * bypass the cache, as a scan does; a short read would then pay a disk read, a decompression
+     * and a new read-ahead buffer every time.
+     */
+    public static SSTableCursorReader forRead(SSTableReader reader, Collection<PartitionPositionBounds> bounds)
+    {
+        return new SSTableCursorReader(reader, reader.metadata(), null, bounds, null, false);
+    }
+
+    /**
+     * @param bounds the segments to read, or null for the whole file
+     * @param scan   read ahead and bypass the chunk cache, as a scan does, or read through the cache
+     */
     private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
-                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
+                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode, boolean scan)
     {
         ssTableReader = reader;
         ssTableReaderRef = readerRef;
@@ -632,7 +646,7 @@ public class SSTableCursorReader implements AutoCloseable
         serializationHeader = reader.header;
         sstableHasDroppedColumns = anyDroppedColumn(deserializationHelper, serializationHeader);
 
-        dataReader = reader.openDataReaderForScan(diskAccessMode);
+        dataReader = scan ? reader.openDataReaderForScan(diskAccessMode) : reader.openDataReader(diskAccessMode);
         // the HEADER decides whether this sstable can contain static rows: after
         // ALTER TABLE ... DROP of the last static column, current metadata has no static
         // columns but older sstables legitimately still carry static rows
@@ -869,6 +883,17 @@ public class SSTableCursorReader implements AutoCloseable
         return cellCursor.cellValueLength;
     }
 
+    /**
+     * A {@link #copyCellValue} destination that reads the value bytes straight from the data
+     * file, so the copy needs no transfer buffer.
+     */
+    public interface DirectValueTarget
+    {
+        /** Reads exactly {@code length} value bytes from {@code in}.  For a variable-length value,
+         *  {@code writeUnsignedVInt32(length)} is called first, as for any destination. */
+        void readValue(DataInputPlus in, int length) throws IOException;
+    }
+
     public int copyCellValue(DataOutputPlus writer, byte[] buffer) throws IOException
     {
         if (state != CELL_VALUE_START) throw new IllegalStateException();
@@ -945,7 +970,21 @@ public class SSTableCursorReader implements AutoCloseable
             }
             return;
         }
+        if (writer instanceof DirectValueTarget)
+        {
+            try
+            {
+                ((DirectValueTarget) writer).readValue(dataReader, length);
+            }
+            catch (IOException e)
+            {
+                corruptSSTable(e);
+            }
+            return;
+        }
         // Fallback for any other DataOutputPlus: copy in blocks the size of the transfer buffer.
+        if (transferBuffer == null || transferBuffer.length == 0)
+            throw new IllegalArgumentException("copying a cell value to " + writer.getClass().getSimpleName() + " needs a transfer buffer");
         int remaining = length;
         while (remaining > 0)
         {

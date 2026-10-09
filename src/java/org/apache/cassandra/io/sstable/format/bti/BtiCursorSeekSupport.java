@@ -100,21 +100,33 @@ public final class BtiCursorSeekSupport
     }
 
     /**
+     * Opens the row index of an indexed partition, for {@link #floorBlock}.  One reader serves every
+     * slice of a read, like {@code ForwardIndexedReader}'s.  The caller closes it.
+     *
+     * @param entry a lookup result with {@link PartitionEntry#isIndexed()} true
+     */
+    public static RowIndexReader openRowIndex(BtiTableReader sstable, PartitionEntry entry)
+    {
+        assert entry.isIndexed();
+        return new RowIndexReader(sstable.rowIndexFile(), entry.indexTrieRoot, sstable.descriptor.version);
+    }
+
+    /**
      * Floor query on an indexed partition's row index: the latest index block that could contain
      * the first unfiltered at-or-after {@code sliceStart}. Mirrors
      * {@code ForwardIndexedReader.setForSlice}'s
      * {@code indexReader.separatorFloor(comparator.asByteComparable(slice.start()))} exactly,
      * including the base-position rebasing of the block's data offset.
      *
-     * @param entry a lookup result with {@link PartitionEntry#isIndexed()} true
+     * @param index the partition's row index, from {@link #openRowIndex}
      */
     public static SeekPoint floorBlock(BtiTableReader sstable,
+                                       RowIndexReader index,
                                        PartitionEntry entry,
                                        ClusteringComparator comparator,
                                        ClusteringBound<?> sliceStart)
     {
-        assert entry.isIndexed();
-        try (RowIndexReader index = new RowIndexReader(sstable.rowIndexFile(), entry.indexTrieRoot, sstable.descriptor.version))
+        try
         {
             IndexInfo info = index.separatorFloor(comparator.asByteComparable(sliceStart));
             assert info != null; // same invariant ForwardIndexedReader asserts

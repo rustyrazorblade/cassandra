@@ -137,6 +137,12 @@ public abstract class ReadResponse
      * -- not {@code FROM_REMOTE} -- since this response is built HERE, on the replica that owns the
      * data, from local sstable/memtable legs, exactly like {@code LocalDataResponse} is.
      */
+    /** Adds a serialized data response's size to the moving average that sizes the buffer of the next one. */
+    static void recordDataResponseSize(int bytes)
+    {
+        LocalDataResponse.estimatedResponseBytes.update(bytes);
+    }
+
     static ReadResponse createTranscodedDataResponse(ByteBuffer data, RepairedDataInfo rdi)
     {
         return new TranscodedDataResponse(data, rdi.getDigest(), rdi.isConclusive());
@@ -329,7 +335,7 @@ public abstract class ReadResponse
             super(data, repairedDataDigest, isRepairedDigestConclusive, MessagingService.current_version, DeserializationHelper.Flag.LOCAL);
         }
 
-        private static ByteBuffer build(UnfilteredPartitionIterator iter, ColumnFilter selection)
+        private static int initialBufferSize()
         {
             int initialBufferSize = bufferInitialSizeMin;
 
@@ -340,8 +346,12 @@ public abstract class ReadResponse
                 double bufferSizeEstimate = Double.isNaN(estimatedResponseSize) ? bufferInitialSizeMin : estimatedResponseSize * 1.1;
                 initialBufferSize = Math.min((int) bufferSizeEstimate, bufferInitialSizeMax);
             }
+            return initialBufferSize;
+        }
 
-            try (DataOutputBuffer buffer = new DataOutputBuffer(initialBufferSize))
+        private static ByteBuffer build(UnfilteredPartitionIterator iter, ColumnFilter selection)
+        {
+            try (DataOutputBuffer buffer = new DataOutputBuffer(initialBufferSize()))
             {
                 UnfilteredPartitionIterators.serializerForIntraNode().serialize(iter, selection, buffer, MessagingService.current_version);
                 estimatedResponseBytes.update(buffer.position());

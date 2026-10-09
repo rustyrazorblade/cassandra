@@ -41,6 +41,7 @@ import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -87,6 +88,11 @@ public abstract class CursorReadDifferentialTester extends CQLTester
         CursorReads.TEST_SKEW_MEMTABLE_LEG_TIMESTAMPS = false;
         CursorReads.TEST_FORCE_MEMTABLE_ROW_REUSE = false;
         CursorReads.TEST_SKEW_DROPPED_ROW_ACCOUNTING = false;
+        CursorReads.TEST_DROP_MERGE_SEEK_OPEN_MARKER = false;
+        CursorReads.TEST_SKEW_MERGE_SEEK_OPEN_MARKER = false;
+        CursorReads.TEST_TRANSCODE_SKEW_TIMESTAMP = false;
+        CursorReads.TEST_TRANSCODE_WRONG_FLAGS = false;
+        CursorReads.TEST_CORRUPT_STREAMED_CELL_VALUE = false;
     }
 
     protected static List<SSTableReader> liveSSTablesFor(ColumnFamilyStore cfs, SinglePartitionReadCommand command)
@@ -283,6 +289,13 @@ public abstract class CursorReadDifferentialTester extends CQLTester
     protected static List<String> canonicalRecords(UnfilteredPartitionIterator partitions)
     {
         List<String> out = new ArrayList<>();
+        canonicalRecordsInto(partitions, out);
+        return out;
+    }
+
+    /** Appends records to {@code out} as they are read, so a read that throws keeps what it emitted. */
+    protected static void canonicalRecordsInto(UnfilteredPartitionIterator partitions, List<String> out)
+    {
         while (partitions.hasNext())
         {
             try (UnfilteredRowIterator partition = partitions.next())
@@ -291,7 +304,9 @@ public abstract class CursorReadDifferentialTester extends CQLTester
                 out.add("PARTITION key=" + ByteBufferUtil.bytesToHex(partition.partitionKey().getKey())
                         + " deletion=" + dt(partition.partitionLevelDeletion().markedForDeleteAt(),
                                             partition.partitionLevelDeletion().localDeletionTime())
-                        + " columns=" + partition.columns());
+                        + " columns=" + partition.columns()
+                        // the serializers write a static row unless it is the EMPTY_STATIC_ROW singleton
+                        + (partition.staticRow() == Rows.EMPTY_STATIC_ROW ? "" : " static-row-written"));
                 if (!partition.staticRow().isEmpty())
                     rowRecords("STATIC", partition.staticRow(), out);
                 while (partition.hasNext())
@@ -300,11 +315,10 @@ public abstract class CursorReadDifferentialTester extends CQLTester
                     if (unfiltered.isRow())
                         rowRecords("ROW", (Row) unfiltered, out);
                     else
-                        markerRecord((RangeTombstoneMarker) unfiltered, out);
+                        markerRecord((RangeTombstoneMarker) unfiltered, partition.isReverseOrder(), out);
                 }
             }
         }
-        return out;
     }
 
     protected static byte[] responseBytes(SinglePartitionReadCommand command)
@@ -362,17 +376,18 @@ public abstract class CursorReadDifferentialTester extends CQLTester
                + " v=" + ByteBufferUtil.bytesToHex(cell.buffer());
     }
 
-    private static void markerRecord(RangeTombstoneMarker marker, List<String> out)
+    /** Renders a marker in the order it was read: a reversed iterator flips which side opens. */
+    private static void markerRecord(RangeTombstoneMarker marker, boolean reversed, List<String> out)
     {
         StringBuilder sb = new StringBuilder("MARKER clustering=").append(clusteringString(marker.clustering()));
-        if (marker.isClose(false))
-            sb.append(" close=").append(dt(marker.closeDeletionTime(false).markedForDeleteAt(),
-                                           marker.closeDeletionTime(false).localDeletionTime()))
-              .append(marker.closeIsInclusive(false) ? ",incl" : ",excl");
-        if (marker.isOpen(false))
-            sb.append(" open=").append(dt(marker.openDeletionTime(false).markedForDeleteAt(),
-                                          marker.openDeletionTime(false).localDeletionTime()))
-              .append(marker.openIsInclusive(false) ? ",incl" : ",excl");
+        if (marker.isClose(reversed))
+            sb.append(" close=").append(dt(marker.closeDeletionTime(reversed).markedForDeleteAt(),
+                                           marker.closeDeletionTime(reversed).localDeletionTime()))
+              .append(marker.closeIsInclusive(reversed) ? ",incl" : ",excl");
+        if (marker.isOpen(reversed))
+            sb.append(" open=").append(dt(marker.openDeletionTime(reversed).markedForDeleteAt(),
+                                          marker.openDeletionTime(reversed).localDeletionTime()))
+              .append(marker.openIsInclusive(reversed) ? ",incl" : ",excl");
         out.add(sb.toString());
     }
 

@@ -29,6 +29,7 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.ReadCommandVerbHandler;
 import org.apache.cassandra.db.ReadResponse;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
@@ -40,19 +41,18 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Differential coverage for DIGEST queries on the cursor read path (CASSANDRA-20428, gap #3).
- * A digest query returns a hash of the merged partition, not its data bytes. Before this fix the
- * cursor transcode entry point declined every digest query and delegated to the base
- * {@code executeLocally}+{@code createResponse} path, so on a multi-replica read the digest replicas
- * never used the cursor transcode entry point.
+ * A digest query returns a hash of the merged partition, not its data bytes, so the response
+ * writer declines it and {@code executeLocally} computes the digest over the cursor merge.
  *
  * Each scenario builds the SAME digest command, runs it twice through the replica-serving entry
  * point ({@link ReadCommandVerbHandler#doRead}) -- {@code cursor_reads_enabled} off (iterator
  * oracle) then on (cursor path) -- and byte-compares the full {@code ReadResponse.serializer}
- * output. It also asserts {@link CursorReads#transcodeResponsesServed()} advanced, proving the
- * cursor path actually served the digest rather than silently falling back.
+ * output.  It also asserts the cursor path served every sstable leg, and none fell back to the
+ * iterator path.
  *
  * The tests pin the BTI format, the priority format for cursor work.
  */
@@ -100,13 +100,18 @@ public class DigestCursorReadDifferentialTest extends CursorReadDifferentialTest
         DatabaseDescriptor.setCursorReadsEnabled(true);
         try
         {
-            long before = CursorReads.transcodeResponsesServed();
-            byte[] cursorResponse = responseBytes(command.get(), trackRepairedData);
-            long after = CursorReads.transcodeResponsesServed();
+            SinglePartitionReadCommand cmd = command.get();
+            boolean hasSSTables = !Keyspace.openAndGetStore(cmd.metadata()).getLiveSSTables().isEmpty();
+            long servedBefore = CursorReads.sstableLegsServed();
+            long fellBackBefore = CursorReads.sstableLegsFellBackToIterator();
+            byte[] cursorResponse = responseBytes(cmd, trackRepairedData);
 
             assertResponseBytesEqual(iteratorResponse, cursorResponse);
-            assertEquals("cursor path did not serve the digest query (silent fallback?)",
-                         before + 1, after);
+            assertEquals("an sstable leg of the digest read fell back to the iterator path",
+                         fellBackBefore, CursorReads.sstableLegsFellBackToIterator());
+            if (hasSSTables)
+                assertTrue("the cursor path served no sstable leg of the digest read",
+                           CursorReads.sstableLegsServed() > servedBefore);
         }
         finally
         {

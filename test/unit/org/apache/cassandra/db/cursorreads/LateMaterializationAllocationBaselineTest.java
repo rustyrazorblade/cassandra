@@ -273,15 +273,12 @@ public class LateMaterializationAllocationBaselineTest extends CursorReadDiffere
 
         assertEquals("paged sequence must return every row exactly once", WIDE_ROWS, paged.output);
         // Payoff gate: each page's merge stops at the page's row budget instead of re-merging to
-        // the partition end. What remains per page is the pre-slice walk to the resume point —
-        // rows the slicer discards below the counter: under BIG the cursor walks from the
-        // partition head (no intra-partition seek), so page k materializes k*PAGE_SIZE skipped
-        // rows plus the PAGE_SIZE it returns (head-sum: 128+256+...+1024 = 4608); under BTI the
-        // seek skips the prefix too, leaving ~rows-returned plus the block-granularity overshoot
-        // (the BTI subclass records the measured value). Asserted exactly so any production drift
-        // re-records the number.
+        // the partition end, and the rows before the page's resume point are skipped without
+        // being materialized (BIG walks to them from the partition head, BTI seeks to their row
+        // index block), so the sequence materializes exactly the rows it returns. Asserted
+        // exactly so any production drift shows.
         assertEquals("per-page materialization under the production bound changed",
-                     expectedPagedMaterialization(), paged.materializedPerPass);
+                     (long) WIDE_ROWS, paged.materializedPerPass);
         assertEquals("every data page's merge must be stopped by its page-limit bound",
                      WIDE_ROWS / PAGE_SIZE, paged.stoppedByLimitPerPass);
     }
@@ -328,17 +325,6 @@ public class LateMaterializationAllocationBaselineTest extends CursorReadDiffere
                    result.memtableLegsPerPass > 0);
         assertEquals("the production bound must not engage on an unlimited read",
                      0, result.stoppedByLimitPerPass);
-    }
-
-    /** Merged unfiltereds materialized by one full paging sequence, per format: BIG has no
-     *  intra-partition seek, so page k walks (and materializes) the k*PAGE_SIZE rows before its
-     *  resume point, then the bound stops it after the PAGE_SIZE rows the page returns — the
-     *  head-sum PAGE_SIZE*(1+2+...+pages). The BTI subclass overrides with its seek-assisted
-     *  expectation (rows returned + block-granularity overshoot). */
-    protected long expectedPagedMaterialization()
-    {
-        long pages = WIDE_ROWS / PAGE_SIZE;
-        return PAGE_SIZE * pages * (pages + 1) / 2;
     }
 
     // ---------------------------------------------------------------- passes

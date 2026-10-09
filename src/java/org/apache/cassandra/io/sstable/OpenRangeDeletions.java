@@ -128,7 +128,17 @@ public final class OpenRangeDeletions
             active = reusable;
     }
 
-    private void removeOpen(DeletionTime closeRangeDeletion, DeletionTime partitionDeletion, UnfilteredDescriptor marker)
+    /**
+     * Closes a range deletion directly, rather than through a marker.  The read path takes a
+     * leg's open deletion out this way before the leg seeks past its close.
+     */
+    public void close(DeletionTime openRangeDeletion, DeletionTime partitionDeletion)
+    {
+        removeOpen(openRangeDeletion, partitionDeletion, openRangeDeletion);
+    }
+
+    /** @param closedBy the marker or deletion that closes it, for the error message only */
+    private void removeOpen(DeletionTime closeRangeDeletion, DeletionTime partitionDeletion, Object closedBy)
     {
         if (!partitionDeletion.isLive() && !closeRangeDeletion.supersedes(partitionDeletion))
             return;
@@ -143,7 +153,7 @@ public final class OpenRangeDeletions
                 break;
         }
         if (j == size)
-            throw new IllegalStateException("Expected an open marker for this closing marker:" + marker);
+            throw new IllegalStateException("Expected an open marker for this closing marker:" + closedBy);
 
         if (matched == active)
             active = null; // trigger the rescan in settle()
