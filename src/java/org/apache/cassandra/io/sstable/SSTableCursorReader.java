@@ -29,6 +29,7 @@ import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.Columns;
+import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
 import org.apache.cassandra.db.ReusableLivenessInfo;
@@ -1358,6 +1359,61 @@ public class SSTableCursorReader implements AutoCloseable
             dataReader.seek(dataReader.getPosition() + rowSize);
 
             return checkNextFlagsAfterStaticRowOrUnfilteredStart(autoContinue);
+        }
+        catch (Exception e)
+        {
+            return corruptSSTable(e);
+        }
+    }
+
+    /**
+     * Skips the rows at or before {@code bound}, from a row whose flags are read, reading only the
+     * clustering and the size of each, like {@code ForwardReader.handlePreSliceData}.  Stops at a
+     * row past the bound, still at its start, or at a marker or the partition end.
+     *
+     * @param scratch takes each row's clustering for the comparison
+     */
+    public int skipRowsAtOrBefore(ClusteringDescriptor bound, ClusteringDescriptor scratch)
+    {
+        try
+        {
+            while (state == State.ROW_START)
+            {
+                long rowStart = dataReader.getPosition();
+                scratch.loadClustering(dataReader, ClusteringDescriptor.ROW_CLUSTERING_KIND, clusteringColumnTypes.length);
+                if (ClusteringComparator.compare(scratch, bound) > 0)
+                {
+                    dataReader.seek(rowStart);
+                    return state;
+                }
+                long rowSize = dataReader.readUnsignedVInt();
+                dataReader.seek(dataReader.getPosition() + rowSize);
+                // the next unfiltered, or this partition's end: never past it
+                checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
+                continueReading();
+            }
+            return state;
+        }
+        catch (Exception e)
+        {
+            return corruptSSTable(e);
+        }
+    }
+
+    /**
+     * Reads the clustering of the row whose flags are read into {@code scratch}, then skips the
+     * rest of the row.  Returns the state at the next unfiltered or this partition's end.
+     */
+    public int readRowClusteringAndSkip(ClusteringDescriptor scratch)
+    {
+        if (state != State.ROW_START) throw new IllegalStateException();
+        try
+        {
+            scratch.loadClustering(dataReader, ClusteringDescriptor.ROW_CLUSTERING_KIND, clusteringColumnTypes.length);
+            long rowSize = dataReader.readUnsignedVInt();
+            dataReader.seek(dataReader.getPosition() + rowSize);
+            checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
+            return continueReading();
         }
         catch (Exception e)
         {

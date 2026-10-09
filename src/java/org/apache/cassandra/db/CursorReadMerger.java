@@ -505,8 +505,15 @@ final class CursorReadMerger
      */
     static CursorReadMerger forSingleLeg(CursorReads.PendingLeg leg, MergeSink sink)
     {
+        return forSingleLeg(leg, sink, leg.legSlices());
+    }
+
+    /** {@link #forSingleLeg} over {@code slices} instead of the leg's own; a reverse read passes
+     *  {@code Slices.ALL}, having picked the in-slice unfiltereds itself. */
+    static CursorReadMerger forSingleLeg(CursorReads.PendingLeg leg, MergeSink sink, Slices slices)
+    {
         return new CursorReadMerger(new CursorReads.MergeLeg[]{ leg }, leg, leg.metadata, leg.partitionLevelDeletion(),
-                                    leg.legSlices(), sink, null);
+                                    slices, sink, null);
     }
 
     private CursorReadMerger(CursorReads.MergeLeg[] legs,
@@ -859,6 +866,8 @@ final class CursorReadMerger
     private boolean advanceSingle() throws IOException
     {
         int state = singleLeg.cursorState();
+        if (state == ROW_START && sliceStartStop != null)
+            state = singleLeg.skipRowsAtOrBefore(sliceStartStop);
         if (isState(state, ROW_START | TOMBSTONE_START))
             singleLeg.readUnfilteredHeader();
         else if (isState(state, PARTITION_END | DONE))
@@ -868,15 +877,16 @@ final class CursorReadMerger
         }
         // otherwise the header is already loaded: the previous call stopped at a slice end on it
         UnfilteredDescriptor current = singleLeg.unfiltered();
-        if (sliceEndStop != null && ClusteringComparator.compare(current, sliceEndStop) >= 0)
-            return false;
         boolean isRow = current.clusteringKind() == ClusteringPrefix.Kind.CLUSTERING;
+        // a row at or before the slice start is before its end too, so it needs one comparison
         if (isRow && isAtOrBeforeSliceStart(current))
         {
             singleLeg.skipRow();
             singleLeg.continueReading();
             return true;
         }
+        if (sliceEndStop != null && ClusteringComparator.compare(current, sliceEndStop) >= 0)
+            return false;
         if (streamCells)
         {
             // A streaming sink builds no row object, so this read owns the leg's validation, as the
@@ -981,6 +991,8 @@ final class CursorReadMerger
             if (leg.isDeferred())
                 continue; // presents its lower bound; opened below only if it sorts to the front
             int state = leg.cursorState();
+            if (state == ROW_START && sliceStartStop != null)
+                state = leg.skipRowsAtOrBefore(sliceStartStop);
             if (isState(state, ROW_START | TOMBSTONE_START))
                 leg.readUnfilteredHeader();
             // A force-opened leg is already past its header: a row lands at CELL_HEADER_START, a
@@ -1928,7 +1940,7 @@ final class CursorReadMerger
      * wire form every leg's descriptor holds, so the shared descriptor-level comparator compares
      * it against each group's minimum without allocating.  Reused for every slice.
      */
-    private static final class SliceBoundDescriptor extends ClusteringDescriptor
+    static final class SliceBoundDescriptor extends ClusteringDescriptor
     {
         SliceBoundDescriptor(AbstractType<?>[] types)
         {

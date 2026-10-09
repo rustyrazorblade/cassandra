@@ -96,8 +96,9 @@ public class CqlResultMessageDifferentialTest extends CursorReadOracle
         "SELECT * FROM %s WHERE pk = 4",
     };
 
-    /** Queries the transcode path declines: reverse order, names, and a GROUP BY page that resumes
-     *  in a new partition with its limit already reached.  Every other read must be written by it. */
+    /** Queries the transcode path may decline: reverse order and names (served only over one
+     *  sstable and no memtable data), and a GROUP BY page that resumes in a new partition with its
+     *  limit already reached.  Every other read must be written by it. */
     private static boolean transcodeServesEveryRead(String query)
     {
         return !query.contains("DESC")

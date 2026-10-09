@@ -2109,6 +2109,36 @@ public final class CursorReads
         return sink.finishPartition();
     }
 
+    /**
+     * {@link #streamResponse} for a reverse read of one sstable leg, which the iterator path reads
+     * as stored with its reverse sstable iterator: the rows go from the leg to the sink in reverse
+     * clustering order, through {@link ReverseSlicedCursorIterator}.  Does not close the leg.
+     */
+    static boolean streamReversedResponse(PendingLeg leg, ColumnFilter columnFilter, ResponseSink sink,
+                                          ResponseSink.ResponseBuffer out) throws IOException
+    {
+        if (leg.deferred)
+            leg.doDeferredOpen();
+        DeletionTime partitionDeletion = leg.partitionLevelDeletion();
+        Row staticRow = leg.staticRow();
+        sink.partitionMetadataKnown(partitionDeletion, staticRow);
+        sink.beginPartition(out, leg.key, columnFilter, partitionDeletion, staticRow);
+        sink.inputAlreadySliced();
+        if (leg.cursor != null)
+        {
+            ReverseSlicedCursorIterator reversed = new ReverseSlicedCursorIterator(leg);
+            try
+            {
+                reversed.streamTo(sink);
+            }
+            finally
+            {
+                reversed.closeBlockCursor();
+            }
+        }
+        return sink.finishPartition();
+    }
+
     /** The single-leg setup of {@link #completeSingleLeg}, for {@link #streamResponse}. */
     private static MergeContext<ResponseSink> setUpSingleLeg(PendingLeg leg, ResponseSink sink) throws IOException
     {
@@ -2506,7 +2536,6 @@ public final class CursorReads
         // the unfiltered the last collectStep read, and — when it was a range-tombstone marker — the
         // marker itself (null for a row).  Reused per collect step; the collect pass never
         // materializes cells, so no per-row garbage beyond the clustering the compare needs.
-        private ClusteringPrefix<?> reverseClustering;
         private RangeTombstoneMarker reverseMarker;
 
         PartitionMaterializer(SSTableCursorReader cursor, SSTableReader sstable, TableMetadata metadata, DecoratedKey key, ColumnFilter columnFilter, ValueTransfer transfer)
@@ -2854,10 +2883,10 @@ public final class CursorReads
         }
 
         /**
-         * Reverse collect step.  Reads the header of the unfiltered at the cursor's current
-         * ROW_START/TOMBSTONE_START to expose its clustering (into {@link #reverseClustering}) and,
-         * when it is a range-tombstone marker, the marker itself (into {@link #reverseMarker}, else
-         * null), then advances the cursor PAST that unfiltered WITHOUT materializing its cells.
+         * Reverse collect step.  Reads the clustering of the unfiltered at the cursor's current
+         * ROW_START/TOMBSTONE_START into {@link #uDesc} and, when it is a range-tombstone marker,
+         * the marker itself (into {@link #reverseMarker}, else null), then advances the cursor PAST
+         * that unfiltered WITHOUT reading the rest of a row.
          * Returns the cursor state at the next unfiltered (or PARTITION_END/DONE).  Does not touch
          * {@code UNFILTEREDS_MATERIALIZED}: only the pop phase counts, so a limited reverse read that
          * pops only the tail is not charged for the header pass.  Mirrors the {@code skipNext()} /
@@ -2867,19 +2896,13 @@ public final class CursorReads
         {
             if (state == ROW_START)
             {
-                state = cursor.readRowHeader(uDesc);
-                reverseClustering = toClusteringPrefix();
+                state = cursor.readRowClusteringAndSkip(uDesc);
                 reverseMarker = null;
-                if (isState(state, CELL_HEADER_START | CELL_VALUE_START | CELL_END))
-                    state = cursor.skipRowCells(uDesc.dataStart(), uDesc.size(), true);
-                else if (state == UNFILTERED_END)
-                    state = cursor.continueReading();
             }
             else if (state == TOMBSTONE_START)
             {
                 state = cursor.readTombstoneMarker(uDesc);
                 reverseMarker = materializeMarker();
-                reverseClustering = reverseMarker.clustering();
                 if (state == UNFILTERED_END)
                     state = cursor.continueReading();
             }
@@ -2890,10 +2913,10 @@ public final class CursorReads
             return state;
         }
 
-        /** The clustering of the unfiltered the last {@link #collectStep} read. */
-        ClusteringPrefix<?> collectedClustering()
+        /** The clustering of the unfiltered the last {@link #collectStep} read, in its wire form. */
+        ClusteringDescriptor collectedClustering()
         {
-            return reverseClustering;
+            return uDesc;
         }
 
         /** The marker the last {@link #collectStep} read, or null if that unfiltered was a row. */
@@ -3078,6 +3101,14 @@ public final class CursorReads
 
         // ---- unfiltered walk (consumed by CursorReadMerger) ----
         int cursorState();
+
+        /** Skips the rows at or before {@code bound} without reading their cells, from a row
+         *  whose header is not read yet; returns the cursor state after them. */
+        default int skipRowsAtOrBefore(ClusteringDescriptor bound) throws IOException
+        {
+            return cursorState();
+        }
+
         UnfilteredDescriptor unfiltered();
         void readUnfilteredHeader() throws IOException;
         void continueReading() throws IOException;
@@ -3538,6 +3569,12 @@ public final class CursorReads
             {
                 hasOpenDeletion = false;
             }
+        }
+
+        @Override
+        public int skipRowsAtOrBefore(ClusteringDescriptor bound)
+        {
+            return cursor.skipRowsAtOrBefore(bound, materializer.uDesc);
         }
 
         @Override
@@ -4830,6 +4867,12 @@ public final class CursorReads
         // block traversal (indexed only)
         private BtiCursorSeekSupport.ReverseBlockCursor blockCursor;
         private long currentBlockStart;
+        private final CursorReadMerger.SliceBoundDescriptor startBound;
+        private final CursorReadMerger.SliceBoundDescriptor endBound;
+
+        // streaming (see streamTo): the sink, and the merge core that streams each row to it
+        private ResponseSink streamSink;
+        private CursorReadMerger streamMerger;
 
         private Unfiltered next;
         private boolean closed;
@@ -4856,6 +4899,9 @@ public final class CursorReads
             this.unindexedStartPos = (!idx && leg.cursor != null && isState(leg.openState, ROW_START | TOMBSTONE_START))
                                      ? materializer.unfilteredStart()
                                      : -1L;
+            AbstractType<?>[] clusteringTypes = leg.unfiltered().clusteringTypes();
+            this.startBound = new CursorReadMerger.SliceBoundDescriptor(clusteringTypes);
+            this.endBound = new CursorReadMerger.SliceBoundDescriptor(clusteringTypes);
         }
 
         @Override
@@ -4907,6 +4953,8 @@ public final class CursorReads
             {
                 while (next == null)
                 {
+                    if (streamSink != null && !streamSink.wantsMore())
+                        return false;
                     if (!sliceOpen)
                     {
                         if (slicesOpened >= slices.size())
@@ -5001,6 +5049,11 @@ public final class CursorReads
             filterEnd &= !slice.end().isTop();
             ClusteringBound<?> start = slice.start();
             ClusteringBound<?> end = slice.end();
+            // the bounds in the leg's wire form, so each unfiltered compares without a clustering object
+            if (filterStart)
+                startBound.load(start);
+            if (filterEnd)
+                endBound.load(end);
             foundLessThan = false;
 
             boolean beforeStart = filterStart;
@@ -5020,14 +5073,14 @@ public final class CursorReads
                 if (pos >= stopPosition)
                     break;
                 state = materializer.collectStep(state);
-                ClusteringPrefix<?> clustering = materializer.collectedClustering();
+                ClusteringDescriptor clustering = materializer.collectedClustering();
                 RangeTombstoneMarker marker = materializer.collectedMarker();
 
                 if (beforeStart)
                 {
                     // pre-slice: non-strict, so an RT bound equal to the slice start is skipped here
                     // and re-synthesized as the artificial open bound (see handlePreSliceData)
-                    if (comparator.compare(clustering, start) <= 0)
+                    if (ClusteringComparator.compare(clustering, startBound) <= 0)
                     {
                         if (marker != null)
                             updateOpenMarker(marker);
@@ -5043,7 +5096,7 @@ public final class CursorReads
                 }
 
                 // in-slice end cutoff: strict, like ForwardReader.computeNext
-                if (filterEnd && comparator.compare(clustering, end) >= 0)
+                if (filterEnd && ClusteringComparator.compare(clustering, endBound) >= 0)
                     break;
 
                 rowOffsets.push(pos);
@@ -5077,6 +5130,15 @@ public final class CursorReads
                 }
                 while (!rowOffsets.isEmpty())
                 {
+                    if (streamMerger != null)
+                    {
+                        if (!streamSink.wantsMore())
+                            return null;
+                        // the row or marker goes straight to the sink, read as stored
+                        materializer.seekUnfiltered(rowOffsets.pop());
+                        streamMerger.advance();
+                        continue;
+                    }
                     Unfiltered unfiltered = materializer.popUnfilteredAt(rowOffsets.pop());
                     if (unfiltered != null)
                         return unfiltered;
@@ -5094,11 +5156,40 @@ public final class CursorReads
             return null;
         }
 
+        /**
+         * Writes the read into {@code sink}, which must be past its partition header.  Each row and
+         * stored marker streams from the leg to the sink through a single-leg merge core, without a
+         * row object; the block-edge markers go to the sink as objects.  Stops when the sink wants
+         * no more.  Does not close this iterator.
+         */
+        void streamTo(ResponseSink sink) throws IOException
+        {
+            streamSink = sink;
+            if (leg.cursor != null && isState(leg.openState, ROW_START | TOMBSTONE_START))
+            {
+                streamMerger = CursorReadMerger.forSingleLeg(leg, sink, Slices.ALL);
+                // prepare reads the clustering types off the leg's descriptor, which the open loaded
+                streamMerger.prepare();
+            }
+            while (hasNext())
+                sink.addRangeTombstoneMarker((RangeTombstoneMarker) next());
+        }
+
         // AbstractSSTableIterator.updateOpenMarker: the forward-collect walk uses the non-reversed
         // open side
         private void updateOpenMarker(RangeTombstoneMarker marker)
         {
             openMarker = marker.isOpen(false) ? marker.openDeletionTime(false) : null;
+        }
+
+        /** Closes the row index walk; the leg stays open. */
+        void closeBlockCursor()
+        {
+            if (blockCursor != null)
+            {
+                blockCursor.close();
+                blockCursor = null;
+            }
         }
 
         @Override
@@ -5109,8 +5200,7 @@ public final class CursorReads
             closed = true;
             try
             {
-                if (blockCursor != null)
-                    blockCursor.close();
+                closeBlockCursor();
             }
             finally
             {

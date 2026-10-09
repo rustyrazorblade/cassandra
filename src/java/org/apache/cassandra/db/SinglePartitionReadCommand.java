@@ -597,11 +597,10 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         if (isDigestQuery())
             return null;
         // A names read takes executeLocally's timestamp-order driver, which stops at the newest
-        // sstables once they hold every requested row.
-        if (filter instanceof ClusteringIndexNamesFilter)
-            return null;
-        // The cursor merge reads forward; a reverse read merges per-leg reverse iterators.
-        if (filter.isReversed())
+        // sstables once they hold every requested row.  It is written here only when that driver
+        // would read one sstable as stored (checked below, once the memtables are known).
+        boolean names = filter instanceof ClusteringIndexNamesFilter;
+        if (names && filter.isReversed())
             return null;
         // These stages of executeLocally walk the row objects this path never builds.
         if (CursorReads.querySizeTrackingActive(this)
@@ -660,6 +659,16 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 
                 mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
                                                         iter.partitionLevelDeletion().markedForDeleteAt());
+            }
+
+            // A reverse read is written here only when it reads one sstable as stored; a reverse
+            // read that merges takes executeLocally, which merges per-leg reverse iterators.  A
+            // names read is written here only when it reads one sstable its names may be in.
+            if ((filter.isReversed() && (memtableIters != null || view.sstables.size() > 1 || tracking))
+                || (names && (memtableIters != null || view.sstables.size() != 1 || tracking || !intersects(view.sstables.get(0)))))
+            {
+                MergeLegOwner.closeAll(owned, null);
+                return null;
             }
 
             // queryMemtableAndDiskInternal's cursorMergedLegs: defer the legs that may merge
@@ -823,6 +832,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     partitionWritten = CursorReads.streamResponse(repaired, columnFilter(), sink, out);
                 else if (sources == 1 && memtableIters != null)
                     partitionWritten = CursorReads.streamResponse(memtableIters.get(0), columnFilter(), sink, out);
+                else if (filter.isReversed() && unrepairedLegs.size() == 1)
+                    partitionWritten = CursorReads.streamReversedResponse(unrepairedLegs.get(0), columnFilter(), sink, out);
                 else
                 {
                     List<CursorReads.MergeLeg> legs = new ArrayList<>(sources);

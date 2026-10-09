@@ -45,8 +45,12 @@ import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.ReadResponse;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
+import org.apache.cassandra.db.lifecycle.SSTableSet;
+import org.apache.cassandra.db.lifecycle.View;
+import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.filter.BloomFilterTracker;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
@@ -247,13 +251,16 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
     /** S2, S4, S5, S6 for the data read, its digest copy, and a repaired-status tracking copy. */
     protected void assertReplicaResponsesMatch(ReadCase c, ColumnFamilyStore cfs, LongFunction<SinglePartitionReadCommand> command)
     {
-        boolean eligible = c.transcode != null ? c.transcode : transcodeEligible(command.apply(c.nowInSec));
+        SinglePartitionReadCommand probe = command.apply(c.nowInSec);
+        boolean eligible = c.transcode != null ? c.transcode : transcodeEligible(probe, cfs);
         compare(c.named(c.label + " / data").expectTranscode(eligible), cfs, command, EnumSet.of(Surface.S2),
                 into -> replicaResponse(command.apply(c.nowInSec), false, into));
         compare(c.named(c.label + " / digest").expectTranscode(false), cfs, command, EnumSet.of(Surface.S2),
                 into -> replicaResponse(digestCopy(command.apply(c.nowInSec)), false, into));
-        compare(c.named(c.label + " / tracking repaired status").expectTranscode(eligible), cfs, command, EnumSet.of(Surface.S2),
-                into -> replicaResponse(command.apply(c.nowInSec), true, into));
+        // a reverse or names read that tracks repaired data is declined
+        boolean trackingEligible = eligible && !probe.isReversed() && !(probe.clusteringIndexFilter() instanceof ClusteringIndexNamesFilter);
+        compare(c.named(c.label + " / tracking repaired status").expectTranscode(trackingEligible), cfs, command,
+                EnumSet.of(Surface.S2), into -> replicaResponse(command.apply(c.nowInSec), true, into));
     }
 
     /** S1, S2, S4, S5, S6: both of the above. */
@@ -299,10 +306,31 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
     }
 
     /** Whether the transcode path serves {@code command} instead of declining it: a forward read
-     *  with a slice filter. */
-    protected static boolean transcodeEligible(SinglePartitionReadCommand command)
+     *  with a slice filter; a reverse read over at most one sstable and no memtable data; a forward
+     *  names read over exactly one sstable whose clusterings it may hit, and no memtable data. */
+    protected static boolean transcodeEligible(SinglePartitionReadCommand command, ColumnFamilyStore cfs)
     {
-        return !(command.clusteringIndexFilter() instanceof ClusteringIndexNamesFilter) && !command.isReversed();
+        boolean names = command.clusteringIndexFilter() instanceof ClusteringIndexNamesFilter;
+        if (names && command.isReversed())
+            return false;
+        if (!names && !command.isReversed())
+            return true;
+        ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, command.partitionKey()));
+        if (view.sstables.size() > 1)
+            return false;
+        if (names && (view.sstables.isEmpty()
+                      || !command.clusteringIndexFilter().intersects(cfs.metadata().comparator,
+                                                                     view.sstables.get(0).getSSTableMetadata().coveredClustering)))
+            return false;
+        for (Memtable memtable : view.memtables)
+        {
+            try (UnfilteredRowIterator partition = memtable.rowIterator(command.partitionKey()))
+            {
+                if (partition != null)
+                    return false;
+            }
+        }
+        return true;
     }
 
     /**
