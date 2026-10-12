@@ -571,7 +571,7 @@ public class MerkleTree
             addHash(entry.hash, entry.size);
         }
 
-        void addHash(byte[] hash, long partitionSize)
+        public void addHash(byte[] hash, long partitionSize)
         {
             assert tree != null : "Not intended for modification!";
 

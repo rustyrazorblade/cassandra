@@ -46,7 +46,6 @@ import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.MerkleTree;
-import org.apache.cassandra.utils.MerkleTree.RowHash;
 import org.apache.cassandra.utils.MerkleTrees;
 
 import static org.apache.cassandra.net.Verb.VALIDATION_RSP;
@@ -188,13 +187,7 @@ public class Validator implements Runnable
 
         assert range.contains(lastKey.getToken()) : "Token not in MerkleTree: " + lastKey.getToken();
         // case 3 must be true: mix in the hashed row
-        RowHash rowHash = rowHash(partition);
-        if (rowHash != null)
-        {
-            if(topPartitionCollector != null)
-                topPartitionCollector.trackPartitionSize(partition.partitionKey(), rowHash.size);
-            range.addHash(rowHash);
-        }
+        addRowHash(partition);
     }
 
     public boolean findCorrectRange(Token t)
@@ -207,16 +200,20 @@ public class Validator implements Runnable
         return range.contains(t);
     }
 
-    private MerkleTree.RowHash rowHash(UnfilteredRowIterator partition)
+    private void addRowHash(UnfilteredRowIterator partition)
     {
         validated++;
         // MerkleTree uses XOR internally, so we want lots of output bits here
         Digest digest = Digest.forValidator();
         UnfilteredRowIterators.digest(partition, digest, MessagingService.current_version);
-        // only return new hash for merkle tree in case digest was updated - see CASSANDRA-8979
-        return digest.inputBytes() > 0
-             ? new MerkleTree.RowHash(partition.partitionKey().getToken(), digest.digest(), digest.inputBytes())
-             : null;
+        // only add a new hash to the merkle tree in case digest was updated - see CASSANDRA-8979
+        long size = digest.inputBytes();
+        if (size == 0)
+            return;
+
+        if (topPartitionCollector != null)
+            topPartitionCollector.trackPartitionSize(partition.partitionKey(), size);
+        range.addHash(digest.digest(), size);
     }
 
     /**

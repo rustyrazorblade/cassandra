@@ -60,6 +60,9 @@ public class RepairJobDesc
     /** repairing range  */
     public final Collection<Range<Token>> ranges;
 
+    // cached on first use; this object is used as a map key and hashing walks the whole range collection
+    private int hashCode;
+
     public RepairJobDesc(TimeUUID parentSessionId, TimeUUID sessionId, String keyspace, String columnFamily, Collection<Range<Token>> ranges)
     {
         this.parentSessionId = parentSessionId;
@@ -121,7 +124,10 @@ public class RepairJobDesc
     @Override
     public int hashCode()
     {
-        return Objects.hash(parentSessionId, sessionId, keyspace, columnFamily, ranges);
+        int hash = hashCode;
+        if (hash == 0)
+            hashCode = hash = Objects.hash(parentSessionId, sessionId, keyspace, columnFamily, ranges);
+        return hash;
     }
 
     private static class RepairJobDescSerializer implements IVersionedSerializer<RepairJobDesc>
