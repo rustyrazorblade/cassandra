@@ -277,6 +277,66 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
         return true;
     }
 
+    /**
+     * Support gate for cursor-backed cleanup.  Like {@link #isSupported} but without the
+     * full-range-scanner requirement, since cleanup reads only the ranges this node still owns.
+     * It keeps the output-format and {@code tombstoneOption} gates and adds one cleanup-specific
+     * rejection: a table with live secondary indexes selects {@code CleanupStrategy.Full}, which
+     * notifies {@code cfs.indexManager} of every dropped partition.  The cursor merge loop has no
+     * such notification, so an indexed table stays on the legacy path.  The {@code indexManager}
+     * check below is the same condition {@code CleanupStrategy.get} branches on.
+     * <p>
+     * Materialized views are admitted here, like {@link #isSupported} and unlike
+     * {@link #isValidationSupported}.  All three face the same risk (a legacy view sstable with
+     * shadowable row deletions), but a mid-merge failure in cleanup only costs one sstable's
+     * rewrite, which the operator can rerun.  See {@code CursorCleanupSupportPostureTest}.
+     */
+    public static boolean isCleanupSupported(Collection<SSTableReader> sstables, AbstractCompactionController controller)
+    {
+        TableMetadata metadata = controller.cfs.metadata();
+        if (unsupportedMetadata(metadata)) return false;
+
+        if (controller.cfs.indexManager.hasIndexes())
+        {
+            LOGGER.debug("Cursor cleanup is not supported for {}.{}: it cannot notify secondary indexes of removed partitions",
+                         metadata.keyspace, metadata.name);
+            return false;
+        }
+
+        for (SSTableReader reader : sstables)
+        {
+            Version version = reader.descriptor.version;
+            if (!version.isLatestVersion())
+            {
+                LOGGER.debug("Cursor cleanup is not supported for {}.{}: sstable version {} is not the latest",
+                             metadata.keyspace, metadata.name, version);
+                return false;
+            }
+            // Cleanup writes through the same merge path as compaction, so it needs the same
+            // header gate; see isSupported and isValidationSupported.
+            if (unsupportedHeaderColumns(metadata, reader))
+                return false;
+        }
+
+        if (DatabaseDescriptor.getSelectedSSTableFormat().cursorIndexWriterFactory() == null)
+        {
+            LOGGER.debug("Cursor cleanup is not supported for {}.{}: the selected sstable output format {} does not support it",
+                         metadata.keyspace, metadata.name, DatabaseDescriptor.getSelectedSSTableFormat());
+            return false;
+        }
+
+        // TODO: Implement CompactionIterator.GarbageSkipper like functionality
+        if (controller.tombstoneOption != CompactionParams.TombstoneOption.NONE)
+        {
+            LOGGER.debug("Cursor cleanup is not supported for {}.{}: garbage skipping is not implemented, controller.tombstoneOption={}",
+                         metadata.keyspace, metadata.name, controller.tombstoneOption);
+            return false;
+        }
+
+        LOGGER.debug("Cursor cleanup compaction is supported for {}.{}", metadata.keyspace, metadata.name);
+        return true;
+    }
+
     public static boolean unsupportedMetadata(TableMetadata metadata)
     {
         String reason = unsupportedMetadataReason(metadata);
@@ -694,10 +754,13 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
     }
 
     /**
+     * Builds cursors over the given positions.  Used by the constructor above, and by cleanup,
+     * which reads the ranges this node still owns of one sstable and rewrites them (pair with
+     * {@link #writeNextPartition} after {@link #isCleanupSupported}).
+     *
      * @param positionsByScanner the positions each source of the iterator path's merge reads, by
      *                           sstable in read order, one map per source in merge order
      */
-    @VisibleForTesting
     CursorCompactor(OperationType type,
                     AbstractCompactionController controller,
                     List<Map<SSTableReader, List<PartitionPositionBounds>>> positionsByScanner,
@@ -790,7 +853,7 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
      * rolls over to a new sstable, so the merge loop closes out the previous one.  Null means keep
      * writing to the current one.
      * {@link org.apache.cassandra.db.compaction.writers.CompactionAwareWriter#prepareForPartition}
-     * implements this contract; anticompaction supplies its own implementation over a bare
+     * implements this contract; anticompaction and cleanup supply their own implementations over a bare
      * {@link org.apache.cassandra.io.sstable.SSTableRewriter}.
      */
     public interface OutputWriterProvider
