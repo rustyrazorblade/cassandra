@@ -361,6 +361,151 @@ public class DatabaseDescriptorTest
     }
 
     @Test
+    public void testStreamChunkSizeMustBePositive()
+    {
+        // a chunk size of zero leaves the writer's read loop with nothing to advance by, so it never ends
+        int original = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        try
+        {
+            try
+            {
+                DatabaseDescriptor.setStreamChunkSizeInBytes(0);
+                fail("Should have received an IllegalArgumentException for stream_chunk_size = 0");
+            }
+            catch (IllegalArgumentException ignored) { }
+            Assert.assertEquals(original, DatabaseDescriptor.getStreamChunkSizeInBytes());
+
+            try
+            {
+                DatabaseDescriptor.setStreamChunkSizeInBytes(-1);
+                fail("Should have received an IllegalArgumentException for stream_chunk_size = -1");
+            }
+            catch (IllegalArgumentException ignored) { }
+            Assert.assertEquals(original, DatabaseDescriptor.getStreamChunkSizeInBytes());
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamChunkSizeInBytes(original);
+        }
+    }
+
+    /**
+     * A bad value in cassandra.yaml goes straight into Config and never reaches the setter, so start-up
+     * validation is a separate path from the setter's guard.
+     */
+    @Test
+    public void testStreamChunkSizeIsValidatedAtStartup()
+    {
+        Config config = new Config();
+
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound("128KiB");
+        DatabaseDescriptor.validateStreamingConfig(config); // a good value passes
+
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound(0);
+        try
+        {
+            DatabaseDescriptor.validateStreamingConfig(config);
+            fail("a stream_chunk_size of zero must stop the node coming up");
+        }
+        catch (ConfigurationException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("stream_chunk_size must be positive"));
+        }
+    }
+
+    /**
+     * A chunk equal to the send window is allowed; a byte over is not.
+     */
+    @Test
+    public void testStreamChunkSizeMustFitTheSendWindow()
+    {
+        Config config = new Config();
+
+        config.stream_send_window = new DataStorageSpec.IntBytesBound("2MiB");
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound("2MiB");
+        DatabaseDescriptor.validateStreamingConfig(config); // exactly the window is allowed
+
+        config.stream_chunk_size = new DataStorageSpec.IntBytesBound((2 << 20) + 1);
+        try
+        {
+            DatabaseDescriptor.validateStreamingConfig(config);
+            fail("a chunk larger than the window must stop the node coming up");
+        }
+        catch (ConfigurationException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("must not exceed stream_send_window"));
+        }
+    }
+
+    @Test
+    public void testStreamDiskAccessModeAcceptsOnlyStandardOrDirect()
+    {
+        Config config = new Config();
+
+        config.stream_disk_access_mode = Config.DiskAccessMode.standard;
+        DatabaseDescriptor.validateStreamingConfig(config);
+
+        config.stream_disk_access_mode = Config.DiskAccessMode.direct;
+        DatabaseDescriptor.validateStreamingConfig(config);
+
+        config.stream_disk_access_mode = Config.DiskAccessMode.mmap;
+        try
+        {
+            DatabaseDescriptor.validateStreamingConfig(config);
+            fail("stream_disk_access_mode has only two meaningful values");
+        }
+        catch (ConfigurationException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("options: standard/direct"));
+        }
+    }
+
+    /** Either setter can break the chunk-to-window relation at runtime, so both guard it, not just start-up. */
+    @Test
+    public void testSettersRejectAChunkLargerThanTheWindow()
+    {
+        int originalChunk = DatabaseDescriptor.getStreamChunkSizeInBytes();
+        int originalWindow = DatabaseDescriptor.getStreamSendWindowInBytes();
+        try
+        {
+            DatabaseDescriptor.setStreamSendWindowInBytes(1 << 20);
+            DatabaseDescriptor.setStreamChunkSizeInBytes(1 << 20); // exactly the window is allowed
+
+            try
+            {
+                DatabaseDescriptor.setStreamChunkSizeInBytes((1 << 20) + 1);
+                fail("raising the chunk size past the window must be refused");
+            }
+            catch (ConfigurationException e)
+            {
+                assertEquals(1 << 20, DatabaseDescriptor.getStreamChunkSizeInBytes());
+            }
+
+            try
+            {
+                DatabaseDescriptor.setStreamSendWindowInBytes((1 << 20) - 1);
+                fail("lowering the window below the chunk size must be refused");
+            }
+            catch (ConfigurationException e)
+            {
+                assertEquals(1 << 20, DatabaseDescriptor.getStreamSendWindowInBytes());
+            }
+
+            // the guard asks for the chunk size to come down before the window
+            DatabaseDescriptor.setStreamChunkSizeInBytes(64 << 10);
+            DatabaseDescriptor.setStreamSendWindowInBytes(128 << 10);
+            assertEquals(64 << 10, DatabaseDescriptor.getStreamChunkSizeInBytes());
+            assertEquals(128 << 10, DatabaseDescriptor.getStreamSendWindowInBytes());
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamChunkSizeInBytes(Math.min(originalChunk, DatabaseDescriptor.getStreamSendWindowInBytes()));
+            DatabaseDescriptor.setStreamSendWindowInBytes(originalWindow);
+            DatabaseDescriptor.setStreamChunkSizeInBytes(originalChunk);
+        }
+    }
+
+    @Test
     public void testWidenToLongInBytes() throws ConfigurationException
     {
         Config conf = DatabaseDescriptor.getRawConfig();

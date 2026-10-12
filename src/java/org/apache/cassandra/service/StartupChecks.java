@@ -725,19 +725,21 @@ public class StartupChecks
             if (configuration.isDisabled(name()))
                 return;
 
-            boolean directReads = DatabaseDescriptor.getCompactionReadDiskAccessMode() == Config.DiskAccessMode.direct;
-            boolean directWrites = DatabaseDescriptor.getBackgroundWriteDiskAccessMode() == Config.DiskAccessMode.direct;
+            List<String> configuredModes = new ArrayList<>();
+            if (DatabaseDescriptor.getCompactionReadDiskAccessMode() == Config.DiskAccessMode.direct)
+                configuredModes.add("compaction reads");
+            if (DatabaseDescriptor.getBackgroundWriteDiskAccessMode() == Config.DiskAccessMode.direct)
+                configuredModes.add("background writes");
+            if (DatabaseDescriptor.getStreamDiskAccessMode() == Config.DiskAccessMode.direct)
+                configuredModes.add("streaming reads");
 
-            if (!directReads && !directWrites)
+            if (configuredModes.isEmpty())
                 return;
 
             List<String> unsupportedLocations = findDirectIOUnsupportedLocations(DatabaseDescriptor.getAllDataFileLocations());
 
             if (!unsupportedLocations.isEmpty())
             {
-                String configuredModes = directReads && directWrites
-                    ? "compaction reads and background writes"
-                    : directReads ? "compaction reads" : "background writes";
 
                 throw new StartupException(StartupException.ERR_WRONG_DISK_STATE,
                                            String.format("Direct I/O is configured for %s, " +
@@ -745,7 +747,7 @@ public class StartupChecks
                                                          "Either change the disk access mode to 'standard' in cassandra.yaml, " +
                                                          "or ensure all data directories are on filesystems that support Direct I/O. " +
                                                          "Network filesystems (NFS, CIFS) and some virtual filesystems do not support Direct I/O.",
-                                                         configuredModes, unsupportedLocations));
+                                                         String.join(" and ", configuredModes), unsupportedLocations));
             }
         }
     };
