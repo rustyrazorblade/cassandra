@@ -513,6 +513,15 @@ public class Mutation implements IMutation, Supplier<Mutation>
         }
 
         /**
+         * Whether this mutation's serialized form is cached for {@code version}. If it is, {@link #serializedSize}
+         * is exactly the number of bytes {@link #serialize} writes.
+         */
+        public boolean hasCachedSerialization(Mutation mutation, int version)
+        {
+            return serialization(mutation, version) instanceof CachedSerialization;
+        }
+
+        /**
          * Retrieve the cached serialization of this mutation, or compute and cache said serialization if it doesn't
          * exist yet. Note that this method is _not_ synchronized even though it may (and will often) be called
          * concurrently. Concurrent calls are still safe however, the only risk is that the value is not cached yet,
