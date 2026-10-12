@@ -55,7 +55,6 @@ public class SSTableCursorPipeUtil
             }
             readerState = copyPartition(reader, writer, pHeader, unfilteredDescriptor, readerState);
         }
-        writer.setLast(pHeader.keyBuffer());
     }
 
     public static int copyPartition(SSTableCursorReader reader, SSTableCursorWriter writer, PartitionDescriptor pHeader, UnfilteredDescriptor unfilteredDescriptor, int readerState) throws IOException

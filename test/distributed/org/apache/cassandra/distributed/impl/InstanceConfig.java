@@ -155,6 +155,8 @@ public class InstanceConfig implements IInstanceConfig
 
                 .set("cursor_compaction_enabled", "true")
 
+                .set("cursor_repair_enabled", "true")
+
                 .set("background_write_disk_access_mode", "direct")
 
                 .set("trickle_fsync", "true")

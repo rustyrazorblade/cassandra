@@ -62,7 +62,7 @@ import static org.apache.cassandra.db.rows.UnfilteredSerializer.HAS_TTL;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.IS_MARKER;
 import static org.apache.cassandra.db.rows.UnfilteredSerializer.isExtended;
 
-public class SSTableCursorWriter implements AutoCloseable
+public class SSTableCursorWriter implements AutoCloseable, CursorMergeSink
 {
     private static final UnfilteredSerializer SERIALIZER = UnfilteredSerializer.serializer;
     private static final ColumnMetadata[] EMPTY_COL_META = new ColumnMetadata[0];
@@ -934,12 +934,6 @@ public class SSTableCursorWriter implements AutoCloseable
             for (int i = 0; i < missingColumns.size(); i++)
                 out.writeUnsignedVInt32(missingColumns.getInt(i));
         }
-    }
-
-    public void setLast(ByteBuffer key)
-    {
-        IPartitioner partitioner = ssTableWriter.getPartitioner();
-        ssTableWriter.setLast(partitioner.decorateKey(ByteBufferUtil.clone(key)));
     }
 
     public void setFirst(ByteBuffer key)

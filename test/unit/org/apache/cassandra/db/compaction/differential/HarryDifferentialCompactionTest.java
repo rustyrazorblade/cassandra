@@ -58,7 +58,8 @@ public class HarryDifferentialCompactionTest extends DifferentialCompactionTeste
         // replay with -Dcassandra.test.differential.seed=N, through test-isolated.sh or -Dtest.jvm.args
         String seedProperty = CassandraRelevantProperties.TEST_DIFFERENTIAL_SEED.getKey();
         boolean pinned = CassandraRelevantProperties.TEST_DIFFERENTIAL_SEED.isPresent();
-        long seed = CassandraRelevantProperties.TEST_DIFFERENTIAL_SEED.getLong(System.currentTimeMillis());
+        // the run seed that the anticompaction ranges of the subclass also come from
+        long seed = DifferentialRunSeed.SEED;
         logger.info("harryTombstoneHistories seed={} ({}); replay with -D{}={}",
                     seed, pinned ? "from " + seedProperty : "from the clock", seedProperty, seed);
         withRandom(seed, rng -> {
