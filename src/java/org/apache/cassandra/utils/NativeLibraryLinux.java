@@ -76,6 +76,7 @@ public class NativeLibraryLinux implements NativeLibraryWrapper
     private static native int posix_fadvise(int fd, long offset, int len, int flag) throws LastErrorException;
     private static native int open(String path, int flags) throws LastErrorException;
     private static native int fsync(int fd) throws LastErrorException;
+    private static native int sync_file_range(int fd, long offset, long nbytes, int flags) throws LastErrorException;
     private static native int close(int fd) throws LastErrorException;
     private static native Pointer strerror(int errnum) throws LastErrorException;
     private static native long getpid() throws LastErrorException;
@@ -108,6 +109,11 @@ public class NativeLibraryLinux implements NativeLibraryWrapper
     public int callFsync(int fd) throws UnsatisfiedLinkError, RuntimeException
     {
         return fsync(fd);
+    }
+
+    public int callSyncFileRange(int fd, long offset, long nbytes, int flags) throws UnsatisfiedLinkError, RuntimeException
+    {
+        return sync_file_range(fd, offset, nbytes, flags);
     }
 
     public int callClose(int fd) throws UnsatisfiedLinkError, RuntimeException

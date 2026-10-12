@@ -39,6 +39,7 @@ public interface NativeLibraryWrapper
     int callPosixFadvise(int fd, long offset, int len, int flag) throws UnsatisfiedLinkError, RuntimeException;
     int callOpen(String path, int flags) throws UnsatisfiedLinkError, RuntimeException;
     int callFsync(int fd) throws UnsatisfiedLinkError, RuntimeException;
+    int callSyncFileRange(int fd, long offset, long nbytes, int flags) throws UnsatisfiedLinkError, RuntimeException;
     int callClose(int fd) throws UnsatisfiedLinkError, RuntimeException;
     Pointer callStrerror(int errnum) throws UnsatisfiedLinkError, RuntimeException;
     long callGetpid() throws UnsatisfiedLinkError, RuntimeException;
