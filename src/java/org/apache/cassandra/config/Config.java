@@ -719,6 +719,19 @@ public class Config
 
     public boolean cursor_compaction_enabled = CURSOR_COMPACTION_ENABLED.getBoolean();
 
+    /**
+     * Hands each filled chunk buffer to a pool of reusable slots so the compressed write path can be
+     * decoupled from the thread producing the data. Experimental; off by default.
+     */
+    public boolean async_compaction_writer_enabled = false;
+
+    /**
+     * Bytes the async compressed writer may keep in flight per open data file, before the producer
+     * stalls for the write thread to catch up. The number of chunk slots is derived from this and the
+     * table's chunk_length_in_kb, so the byte budget stays fixed regardless of the chunk size.
+     */
+    public DataStorageSpec.IntMebibytesBound async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound("4MiB");
+
     public volatile boolean use_statements_enabled = true;
 
     /**

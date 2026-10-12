@@ -107,6 +107,13 @@ public class DataComponent
         {
             CompressionParams compressionParams = buildCompressionParams(metadata, operationType, flushCompression);
 
+            // Independent of each other: direct IO decides how the bytes reach the disk, the async
+            // budget decides which thread compresses and checksums them. Compression is the same CPU
+            // cost either way, so both paths take the pipeline.
+            int asyncBufferBytes = DatabaseDescriptor.asyncCompactionWriterEnabled()
+                                   ? DatabaseDescriptor.getAsyncCompactionWriterBufferInBytes()
+                                   : 0;
+
             if (DatabaseDescriptor.getBackgroundWriteDiskAccessMode() == DiskAccessMode.direct
                 && isDirectWriteSupported(operationType))
             {
@@ -116,7 +123,8 @@ public class DataComponent
                                                             options,
                                                             compressionParams,
                                                             metadataCollector,
-                                                            compressionDictionaryManager);
+                                                            compressionDictionaryManager,
+                                                            asyncBufferBytes);
             }
             else
             {
@@ -126,7 +134,8 @@ public class DataComponent
                                                       options,
                                                       compressionParams,
                                                       metadataCollector,
-                                                      compressionDictionaryManager);
+                                                      compressionDictionaryManager,
+                                                      asyncBufferBytes);
             }
         }
         else
