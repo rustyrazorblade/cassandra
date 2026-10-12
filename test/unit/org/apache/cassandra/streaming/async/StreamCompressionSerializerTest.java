@@ -114,6 +114,80 @@ public class StreamCompressionSerializerTest
         validateResults();
     }
 
+    /**
+     * The deserializer keeps one staging byte[] for the compressed chunk and reuses it across
+     * calls, growing it when a chunk needs more room. Reuse is only safe if every read is bounded
+     * by the current chunk's compressed length: a buffer left long by an earlier, larger chunk
+     * still holds that chunk's bytes, and a smaller chunk that read the whole array, or wrapped
+     * it without a limit, would decompress trailing garbage.
+     */
+    @Test
+    public void reusedStagingBufferHandlesShrinkingChunks() throws IOException
+    {
+        StreamCompressionSerializer reused = new StreamCompressionSerializer(allocator);
+
+        roundTripThrough(reused, 1 << 15);
+        roundTripThrough(reused, 1 << 10);
+        roundTripThrough(reused, 64);
+    }
+
+    /** The other direction: the staging buffer has to grow, and stay correct while doing it. */
+    @Test
+    public void reusedStagingBufferHandlesGrowingChunks() throws IOException
+    {
+        StreamCompressionSerializer reused = new StreamCompressionSerializer(allocator);
+
+        roundTripThrough(reused, 64);
+        roundTripThrough(reused, 1 << 10);
+        roundTripThrough(reused, 1 << 15);
+    }
+
+    /** Sizes that alternate, so neither growth nor reuse is exercised in isolation. */
+    @Test
+    public void reusedStagingBufferHandlesAlternatingChunkSizes() throws IOException
+    {
+        StreamCompressionSerializer reused = new StreamCompressionSerializer(allocator);
+
+        for (int i = 0; i < 6; i++)
+            roundTripThrough(reused, (i % 2 == 0) ? 1 << 14 : 128);
+    }
+
+    /**
+     * One round trip of {@code size} random bytes through the non-{@link ReadableByteChannel}
+     * path, which is the one that stages into the reused array. Buffers are local so a failure
+     * points at the serializer's state rather than at the fixture's.
+     */
+    private void roundTripThrough(StreamCompressionSerializer serializer, int size) throws IOException
+    {
+        ByteBuffer source = ByteBuffer.allocateDirect(size);
+        while (source.remaining() >= 4)
+            source.putInt(random.nextInt());
+        while (source.hasRemaining())
+            source.put((byte) random.nextInt());
+        source.flip();
+
+        ByteBuffer[] holder = new ByteBuffer[1];
+        StreamCompressionSerializer.serialize(compressor, source, VERSION)
+                                   .write(bytes -> holder[0] = ByteBuffer.allocateDirect(bytes));
+        source.flip();
+
+        ByteBuf result = null;
+        try
+        {
+            result = serializer.deserialize(decompressor, new DataInputBuffer(holder[0], false), VERSION);
+            Assert.assertEquals("wrong length for a " + size + " byte chunk", size, result.readableBytes());
+            for (int i = 0; i < size; i++)
+                Assert.assertEquals("byte " + i + " of a " + size + " byte chunk", source.get(i), result.readByte());
+        }
+        finally
+        {
+            if (result != null && result.refCnt() > 0)
+                result.release(result.refCnt());
+            MemoryUtil.clean(source);
+            MemoryUtil.clean(holder[0]);
+        }
+    }
+
     private static class ByteBufRCH extends DataInputBuffer implements ReadableByteChannel
     {
         public ByteBufRCH(ByteBuf compressed)

@@ -39,6 +39,52 @@ public class DigestTest
 {
     private static final Logger logger = LoggerFactory.getLogger(DigestTest.class);
 
+    /**
+     * {@link Digest#forValidator} draws its hasher from one shared, static {@link HashFunction}
+     * rather than building a new concatenating function per call. Guava's HashFunction is
+     * stateless and its Hashers are not, so the risk of hoisting it is shared state leaking
+     * between concurrent validators. These pin both the value and the independence.
+     */
+    @Test
+    public void validatorDigestMatchesTheFunctionItHoisted()
+    {
+        byte[] input = "the quick brown fox".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        byte[] expected = Hashing.concatenating(Hashing.murmur3_128(1000), Hashing.murmur3_128(2000))
+                                 .newHasher()
+                                 .putBytes(input)
+                                 .hash()
+                                 .asBytes();
+
+        Assert.assertArrayEquals(expected, Digest.forValidator().update(input, 0, input.length).digest());
+    }
+
+    @Test
+    public void validatorDigestsAreIndependent()
+    {
+        byte[] a = "aaaa".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] b = "bbbb".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        Digest first = Digest.forValidator();
+        Digest second = Digest.forValidator();
+
+        // interleave, so a shared hasher would mix the two inputs together
+        first.update(a, 0, a.length);
+        second.update(b, 0, b.length);
+
+        Assert.assertArrayEquals(Digest.forValidator().update(a, 0, a.length).digest(), first.digest());
+        Assert.assertArrayEquals(Digest.forValidator().update(b, 0, b.length).digest(), second.digest());
+    }
+
+    @Test
+    public void validatorDigestIsRepeatableAcrossInstances()
+    {
+        byte[] input = "repeat me".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        Assert.assertArrayEquals(Digest.forValidator().update(input, 0, input.length).digest(),
+                                 Digest.forValidator().update(input, 0, input.length).digest());
+    }
+
     @Test
     public void hashEmptyBytes() throws Exception {
         Assert.assertArrayEquals(Hex.hexToBytes("d41d8cd98f00b204e9800998ecf8427e"),
