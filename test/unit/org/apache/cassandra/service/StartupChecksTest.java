@@ -63,6 +63,7 @@ import org.apache.cassandra.io.filesystem.ForwardingFileSystem;
 import org.apache.cassandra.io.filesystem.ForwardingFileSystemProvider;
 import org.apache.cassandra.io.filesystem.ForwardingPath;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.service.DataResurrectionCheck.Heartbeat;
 import org.apache.cassandra.utils.Clock;
@@ -643,5 +644,30 @@ public class StartupChecksTest
         List<String> unsupported = StartupChecks.findDirectIOUnsupportedLocations(
             new String[] { "/this/path/does/not/exist/for/testing" });
         assertThat(unsupported).isEmpty();
+    }
+
+    @Test
+    public void failStartupIfStreamingReadsUseDirectIOOnUnsupportedFilesystem()
+    {
+        DiskAccessMode savedStreamMode = DatabaseDescriptor.getStreamDiskAccessMode();
+        try
+        {
+            // Streaming reads ask for Direct I/O, but the data directory does not support it.
+            DatabaseDescriptor.setStreamDiskAccessMode(DiskAccessMode.direct);
+
+            try (MockedStatic<FileUtils> fileUtils = Mockito.mockStatic(FileUtils.class))
+            {
+                fileUtils.when(() -> FileUtils.isDirectIOSupported(Mockito.any())).thenReturn(false);
+
+                assertThatExceptionOfType(StartupException.class)
+                    .isThrownBy(() -> StartupChecks.checkDirectIOSupport.execute(options))
+                    .matches(e -> e.returnCode == StartupException.ERR_WRONG_DISK_STATE, "ERR_WRONG_DISK_STATE")
+                    .withMessageContaining("streaming reads");
+            }
+        }
+        finally
+        {
+            DatabaseDescriptor.setStreamDiskAccessMode(savedStreamMode);
+        }
     }
 }
