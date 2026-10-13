@@ -291,6 +291,15 @@ public abstract class SSTableWriter extends SSTable implements Transactional
         txnProxy.prepareToCommit();
     }
 
+    /**
+     * True if an index (such as SAI or SASI) builds its per-sstable files from the rows written to
+     * this writer.
+     */
+    public final boolean hasFlushObservers()
+    {
+        return !observers.isEmpty();
+    }
+
     // notify sstable flush observer about sstable writer switched
     public final void onSSTableWriterSwitched()
     {

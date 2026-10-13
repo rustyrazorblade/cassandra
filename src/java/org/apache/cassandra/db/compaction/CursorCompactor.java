@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.function.LongPredicate;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -741,10 +742,7 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
     {
         this.controller = controller;
         this.type = type;
-        TableMetadata tableMetadata = controller.cfs.metadata();
-        this.nowInSec = tableMetadata.isAccordEnabled() || tableMetadata.migratingFromAccord()
-                        ? controller.gcBefore
-                        : nowInSec;
+        this.nowInSec = purgeTimestamp(controller, nowInSec);
         this.compactionId = compactionId;
 
         long inputBytes = 0;
@@ -781,10 +779,7 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
         try
         {
             TableMetadata metadata = metadata();
-            boolean anyStaticColumns = false;
-            for (SSTableReader sstable : this.sstables)
-                anyStaticColumns |= sstable.header.hasStatic();
-            this.hasStaticColumns = anyStaticColumns;
+            this.hasStaticColumns = anyStaticColumns(this.sstables);
             this.schemaHasStaticColumns = !metadata.staticColumns().isEmpty();
 
             cursors = convertSSTablesToPartialRangeCursors(boundsBySSTable, DatabaseDescriptor.getCompactionReadDiskAccessMode());
@@ -2419,7 +2414,7 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
         {
             writerRollover();
 
-            ssTableCursorWriter = new SSTableCursorWriter((SortedTableWriter) newWriter);
+            ssTableCursorWriter = SSTableCursorWriter.forCompaction((SortedTableWriter) newWriter);
             ssTableCursorWriter.setFirst(partitionDescriptor.keyBuffer());
         }
         else
@@ -2983,10 +2978,8 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
         for (ISSTableScanner scanner : scanners)
             scanner.close();
 
-        StatefulCursor[] cursors = new StatefulCursor[sstables.size()];
-        int i = 0;
-        try
-        {
+        return buildCursorsOrCloseOnFailure(sstables.size(), cursors -> {
+            int i = 0;
             for (ISSTableScanner scanner : scanners)
             {
                 if (scanner instanceof SSTableSimpleScanner)
@@ -3001,26 +2994,31 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
                 }
             }
             assert i == cursors.length : "cursor count " + i + " differs from sstable count " + cursors.length;
-            return cursors;
-        }
-        catch (RuntimeException | Error e)
-        {
-            Throwables.closeNonNullAndAddSuppressed(e, cursors);
-            throw e;
-        }
+        });
     }
 
     private static StatefulCursor[] convertSSTablesToPartialRangeCursors(Map<SSTableReader, List<PartitionPositionBounds>> boundsBySSTable,
                                                                          DiskAccessMode diskAccessMode)
     {
-        StatefulCursor[] cursors = new StatefulCursor[boundsBySSTable.size()];
-        int i = 0;
-        try
-        {
+        return buildCursorsOrCloseOnFailure(boundsBySSTable.size(), cursors -> {
+            int i = 0;
             for (Map.Entry<SSTableReader, List<PartitionPositionBounds>> entry : boundsBySSTable.entrySet())
             {
                 cursors[i++] = new StatefulCursor(entry.getKey(), entry.getValue(), diskAccessMode);
             }
+        });
+    }
+
+    /**
+     * Allocates a {@code size}-element cursor array, lets {@code populate} fill it, and closes any
+     * cursors already opened if population throws, so a partial failure leaks no file handles.
+     */
+    private static StatefulCursor[] buildCursorsOrCloseOnFailure(int size, Consumer<StatefulCursor[]> populate)
+    {
+        StatefulCursor[] cursors = new StatefulCursor[size];
+        try
+        {
+            populate.accept(cursors);
             return cursors;
         }
         catch (RuntimeException | Error e)

@@ -4968,6 +4968,17 @@ public class DatabaseDescriptor
         conf.cursor_repair_enabled = cursor_repair_enabled;
     }
 
+    public static boolean cursorFlushEnabled()
+    {
+        return conf.cursor_flush_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setCursorFlushEnabled(boolean cursor_flush_enabled)
+    {
+        conf.cursor_flush_enabled = cursor_flush_enabled;
+    }
+
     public static boolean enableDropCompactStorage()
     {
         return conf.drop_compact_storage_enabled;

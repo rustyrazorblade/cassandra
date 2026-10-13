@@ -213,6 +213,8 @@ public enum CassandraRelevantProperties
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
     /** Experimental. */
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),
+    /** Experimental. */
+    CURSOR_FLUSH_ENABLED("cassandra.cursor_flush_enabled", "false"),
     /** Experimental.  Repair validation and anticompaction on the cursor path. */
     CURSOR_REPAIR_ENABLED("cassandra.cursor_repair_enabled", "false"),
     CUSTOM_DISK_ERROR_HANDLER("cassandra.custom_disk_error_handler"),
