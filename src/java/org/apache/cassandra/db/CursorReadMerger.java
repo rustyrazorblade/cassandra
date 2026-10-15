@@ -165,6 +165,16 @@ final class CursorReadMerger
         void addRangeTombstoneMarker(RangeTombstoneMarker marker);
 
         /**
+         * The descriptors the merge stages its slice bounds in, for clusterings of {@code types}.
+         * A sink that serves many partitions of one read may return the same ones each time, as
+         * one merge uses them at a time.  Default: new ones.
+         */
+        default SliceBounds sliceBounds(AbstractType<?>[] types)
+        {
+            return new SliceBounds(types);
+        }
+
+        /**
          * Consulted by {@link #mergeUnfiltereds} before each merge group.  {@code false} stops the
          * merge: remaining groups are never sorted, merged, validated or materialized.  Default
          * true.  A read through {@code CursorReads.mergeLegs} ignores this; its iterator calls
@@ -646,9 +656,9 @@ final class CursorReadMerger
         // descriptor-level comparator with no clustering materialization.  They are built with
         // the LEGS' clustering types, since ClusteringComparator.compare(ClusteringDescriptor,
         // ClusteringDescriptor) decodes both buffers with the first argument's (a leg's) types.
-        AbstractType<?>[] types = legs[0].unfiltered().clusteringTypes();
-        sliceStartDescriptor = new SliceBoundDescriptor(types);
-        sliceEndDescriptor = new SliceBoundDescriptor(types);
+        SliceBounds bounds = sink.sliceBounds(legs[0].unfiltered().clusteringTypes());
+        sliceStartDescriptor = bounds.start;
+        sliceEndDescriptor = bounds.end;
         stageSlice(0);
     }
 
@@ -2016,6 +2026,21 @@ final class CursorReadMerger
         {
             storeClustering((byte) bound.kind().ordinal(), bound.size(), bound);
             return this;
+        }
+    }
+
+    /** The two descriptors a merge stages the current slice's start and end in. */
+    static final class SliceBounds
+    {
+        final AbstractType<?>[] types;
+        final SliceBoundDescriptor start;
+        final SliceBoundDescriptor end;
+
+        SliceBounds(AbstractType<?>[] types)
+        {
+            this.types = types;
+            this.start = new SliceBoundDescriptor(types);
+            this.end = new SliceBoundDescriptor(types);
         }
     }
 

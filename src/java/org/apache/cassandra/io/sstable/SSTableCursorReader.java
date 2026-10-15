@@ -668,6 +668,15 @@ public class SSTableCursorReader implements AutoCloseable
     }
 
     /**
+     * {@link #forRead} for a range read over the whole data file: it reads nothing until the first
+     * {@link #seekToPartition}, which must come next, and then moves from partition to partition.
+     */
+    public static SSTableCursorReader forRangeRead(SSTableReader reader)
+    {
+        return new SSTableCursorReader(reader, reader.metadata(), null, null, null, false, false).moveToReadAheadOnLongReads();
+    }
+
+    /**
      * A long contiguous read of data that is not in the chunk cache, as a cold scan, reads faster
      * through the read-ahead reader: one large read per buffer and no chunk cache churn.  A read
      * starts on the chunk cache, so a short one never pays a read-ahead fill.  It moves once it
@@ -977,6 +986,38 @@ public class SSTableCursorReader implements AutoCloseable
         if (marker != UnfilteredSerializer.END_OF_PARTITION)
             throw new IOException("Seeking to a partition at: " + position + " did not land after an end-of-partition marker; found 0x"
                                   + Integer.toHexString(marker));
+    }
+
+    /**
+     * Moves to the start of the partition at {@code position}, in the cursor's segment, ready for
+     * {@link #readPartitionHeader}.  Reads nothing when the cursor is already there, at the end of
+     * the partition before it; otherwise it seeks, so a range read can leave a partition early.
+     * {@link #bytesRead()} counts the bytes walked before the seek, and none for the bytes skipped.
+     */
+    public int seekToPartition(long position)
+    {
+        if (isState(state, PARTITION_START | PARTITION_END) && dataReader.getFilePointer() == position)
+        {
+            resetOnPartitionStart();
+            return state = PARTITION_START;
+        }
+        if (position < segmentStart || position >= segmentEnd)
+            throw new IllegalArgumentException("partition position " + position + " outside the cursor's segment ["
+                                               + segmentStart + ", " + segmentEnd + ')');
+        bytesReadInPreviousSegments += dataReader.getFilePointer() - segmentStart;
+        segmentStart = position;
+        try
+        {
+            seekPartition(position);
+        }
+        catch (IOException e)
+        {
+            return corruptSSTable(e);
+        }
+        if (moveToReadAheadAfter > 0)
+            restartSequentialRead(position);
+        resetOnPartitionStart();
+        return state = PARTITION_START;
     }
 
     /**

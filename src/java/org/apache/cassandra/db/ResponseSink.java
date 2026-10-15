@@ -57,9 +57,9 @@ import io.netty.util.concurrent.FastThreadLocal;
 import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
 
 /**
- * Writes the replica data response of a forward single-partition cursor read straight from the
- * merge events to the response bytes, without building {@code Row} or {@code Cell} objects for
- * sstable data.  It applies what {@code ReadCommand.executeLocally} applies above the merge, to
+ * Writes the replica data response of a single-partition cursor read, or of each partition of a
+ * range read ({@link #startRangePartition}), straight from the merge events to the response bytes,
+ * without building {@code Row} or {@code Cell} objects for sstable data.  It applies what {@code ReadCommand.executeLocally} applies above the merge, to
  * each row and marker, in the same order:
  * <ol>
  *   <li>the slice bounds: elements at or before a slice start are dropped, and the range tombstone
@@ -89,7 +89,8 @@ import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
  */
 public final class ResponseSink implements CursorReadMerger.MergeSink
 {
-    private final ResponseWireWriter writer;
+    /** Changes per partition for a range read; see {@link #startRangePartition}. */
+    private ResponseWireWriter writer;
     private final DeletionPurger purger;
     private final long nowInSec;
     private final boolean purgeEnabled;
@@ -119,7 +120,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     private Runnable onNonEmptyPartition;
 
     // ---- slice state ----
-    private final Slices slices;
+    private Slices slices;
     private ClusteringBound<?> sliceStart; // null when the slice starts at BOTTOM
     private ClusteringBound<?> sliceEnd;
     /** Sticky within a slice: once true, every remaining element of the slice is in it. */
@@ -159,6 +160,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     private boolean hasStatic;
     private int partitionStart;
     private int headerStart;
+    /** A range read: the caller writes the envelope's first and last bytes, once for all partitions. */
+    private boolean rangeEnvelope;
 
     /** Test-only: purge as configured, no accounting, no filter, no limit.  {@code nowInSec == 0}
      *  disables purging, matching {@code ReadCommand}'s own gate. */
@@ -212,6 +215,43 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     }
 
     // ---------------------------------------------------------------- partition level
+
+    /**
+     * Readies the sink for the next partition of a range read, which writes many partitions into
+     * one response.  The caller writes the envelope's first byte before the first partition and its
+     * last byte after the last one; {@link #beginPartition} and {@link #finishPartition} then write
+     * only the partition.  The limit counter, filter and scan guard carry over from partition to
+     * partition, as they do over the iterator path's partitions.
+     *
+     * @param writer       the writer with this partition's serialization header
+     * @param slices       this partition's slices
+     * @param singleSource whether the iterator path reads this partition from one source
+     */
+    void startRangePartition(ResponseWireWriter writer, Slices slices, boolean singleSource)
+    {
+        this.rangeEnvelope = true;
+        this.writer = writer;
+        this.slices = slices;
+        this.singleSource = singleSource;
+        openMarker = null;
+        rowAdmitted = false;
+        dropEverything = false;
+        stopped = false;
+        anyPurgeSurvivor = false;
+        anyFilterSurvivor = false;
+        wroteUnfiltered = false;
+        lastRowWritten = false;
+        lastRowClustering = null;
+        openOutputMarker = null;
+        rowClusteringObject = null;
+        checkedTypes = null;
+        // as the constructor leaves them
+        sliceStart = null;
+        sliceEnd = null;
+        pastSliceStart = false;
+        if (!slices.isEmpty())
+            beginSlice(0);
+    }
 
     /** Runs {@code hook} once, when the merged partition is known to be non-empty. */
     void onNonEmptyPartition(Runnable hook)
@@ -291,7 +331,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         this.columnFilter = columnFilter;
         maybeCancel();
         // the isForThrift placeholder
-        out.writeBoolean(false);
+        if (!rangeEnvelope)
+            out.writeBoolean(false);
         partitionStart = out.getLength();
         partitionDeletion = purgePartitionDeletion(mergedDeletion);
         staticRow = purgeAndCountStaticRow(namesRead ? namesStaticRow(mergedStatic, mergedDeletion) : mergedStatic);
@@ -332,7 +373,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     {
         if (dropEverything)
         {
-            out.writeBoolean(false);
+            if (!rangeEnvelope)
+                out.writeBoolean(false);
             return false;
         }
         if (openOutputMarker != null)
@@ -351,7 +393,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         if ((emptyAfterPurge && purgeEnabled) || droppedByFilter)
         {
             out.truncate(partitionStart);
-            out.writeBoolean(false);
+            if (!rangeEnvelope)
+                out.writeBoolean(false);
             return false;
         }
         if (partitionDeletion.isLive() && staticRow.isEmpty() && !wroteUnfiltered)
@@ -363,8 +406,16 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         {
             writer.writeEndOfPartition();
         }
-        out.writeBoolean(false);
+        if (!rangeEnvelope)
+            out.writeBoolean(false);
         return true;
+    }
+
+    /** Whether the last partition is not empty after the purge, so the iterator path's scan
+     *  metrics stage above the purge sees it. */
+    boolean partitionSurvivedPurge()
+    {
+        return !purgeEnabled || !partitionDeletion.isLive() || !staticRow.isEmpty() || anyPurgeSurvivor;
     }
 
     // ---------------------------------------------------------------- slices
@@ -521,6 +572,17 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         return !stopped;
     }
 
+    /** The slice bound descriptors of the merges of this sink's partitions, one merge at a time. */
+    private CursorReadMerger.SliceBounds mergeSliceBounds;
+
+    @Override
+    public CursorReadMerger.SliceBounds sliceBounds(AbstractType<?>[] types)
+    {
+        if (mergeSliceBounds == null || !Arrays.equals(mergeSliceBounds.types, types))
+            mergeSliceBounds = new CursorReadMerger.SliceBounds(types);
+        return mergeSliceBounds;
+    }
+
     // ---- the open row's clustering: wire bytes, built on demand ----
     private byte[] rowClusteringBytes = new byte[64];
     private int rowClusteringLength;
@@ -529,7 +591,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     /** The clustering types of the descriptors last checked against the response's, and the verdict. */
     private AbstractType<?>[] checkedTypes;
     private boolean sameTypes;
-    private final DataOutputBuffer clusteringScratch = new DataOutputBuffer(64);
+    private DataOutputBuffer clusteringScratch; // made at the first clustering to re-encode
 
     /** Copies the descriptor's clustering bytes, which are the response's wire form when the leg
      *  serialized it with the same clustering types. */
@@ -555,6 +617,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         rowClusteringObject = (Clustering<?>) clustering.toClusteringPrefix(types);
         try
         {
+            if (clusteringScratch == null)
+                clusteringScratch = new DataOutputBuffer(64);
             clusteringScratch.clear();
             Clustering.serializer.serialize(rowClusteringObject, clusteringScratch, MessagingService.current_version, writer.clusteringTypes());
         }
@@ -699,7 +763,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
 
     /** A source over {@link #filterValue}, for a filtered cell whose value was read to evaluate it. */
     private final StagedValueSource stagedValueSource = new StagedValueSource();
-    private final CursorReadMerger.CellValueScratch filterValue = new CursorReadMerger.CellValueScratch();
+    private CursorReadMerger.CellValueScratch filterValue; // made at the first filtered cell
 
     /**
      * The streaming form of {@link #addCell}: the same purge outcome as {@code cell.purge}, decided
@@ -740,6 +804,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         if (filter != null && filter.filtersColumn(column))
         {
             // the value is needed twice: once to evaluate, once to write
+            if (filterValue == null)
+                filterValue = new CursorReadMerger.CellValueScratch();
             filterValue.clear();
             if (hasValue)
                 source.streamValue(filterValue);
@@ -1275,7 +1341,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         private boolean rowFailed;
         private int satisfiedColumns;
 
-        ResponseFilter(SinglePartitionReadCommand command)
+        ResponseFilter(ReadCommand command)
         {
             this.metadata = command.metadata();
             this.nowInSec = command.nowInSec();

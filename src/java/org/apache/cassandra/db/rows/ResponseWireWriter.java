@@ -115,13 +115,15 @@ public final class ResponseWireWriter
     }
 
     private final DataOutputPlus out;
-    private final SerializationHeader header;
-    private final SerializationHelper helper;
+    private SerializationHeader header;
+    private SerializationHelper helper;
     private final int version;
 
     // ---- row-local staging (reset per row by startRow; flushed to `out` only by endRow) ----
-    private final DataOutputBuffer rowHeaderBuffer = new DataOutputBuffer();
-    private final DataOutputBuffer rowBody = new DataOutputBuffer();
+    /** Made with {@link #rowBody}, or at the first in-place row that lacks some header column. */
+    private DataOutputBuffer rowHeaderBuffer;
+    /** Made only for a header whose rows are staged, not written in place. */
+    private DataOutputBuffer rowBody;
     /** The open row's clustering in its wire form, {@code Clustering.serializer}'s, valid until endRow. */
     private byte[] rowClustering;
     private int rowClusteringLength;
@@ -139,19 +141,22 @@ public final class ResponseWireWriter
     // merged deletion, so endRow can interleave the row-level-decided [deletion][count] header
     // immediately before the already-buffered cell bytes without a second staging copy.
     private static final int MARKER_GROWTH = 8;
+    private static final int[] NO_INTS = new int[0];
+    private static final long[] NO_LONGS = new long[0];
     private int complexMarkerCount;
-    private int[] markerStart = new int[MARKER_GROWTH];
-    private int[] markerEnd = new int[MARKER_GROWTH];
-    private int[] markerCellCount = new int[MARKER_GROWTH];
-    private long[] markerDeletionMfda = new long[MARKER_GROWTH];
-    private long[] markerDeletionLdt = new long[MARKER_GROWTH];
+    // empty until the first complex column, which most rows never have
+    private int[] markerStart = NO_INTS;
+    private int[] markerEnd = NO_INTS;
+    private int[] markerCellCount = NO_INTS;
+    private long[] markerDeletionMfda = NO_LONGS;
+    private long[] markerDeletionLdt = NO_LONGS;
     private final DeletionTime.ReusableDeletionTime reusableDeletion = DeletionTime.ReusableDeletionTime.live();
 
     /** Rows go straight to {@code out}: it is patchable and no complex column needs a prefix
      *  decided at the row's end.  Otherwise they are staged in {@link #rowBody}. */
-    private final PatchableOutput inPlace;
+    private PatchableOutput inPlace;
     /** Where the open row's cells go: {@code out} when written in place, else {@link #rowBody}. */
-    private final DataOutputPlus body;
+    private DataOutputPlus body;
     /** In place: where the open row starts, and where its cells start. */
     private int rowStart;
     private int rowCellsStart;
@@ -166,14 +171,30 @@ public final class ResponseWireWriter
      */
     public ResponseWireWriter(DataOutputPlus out, SerializationHeader header, int version, boolean tableHasDroppedColumns)
     {
-        assert !header.isForSSTable() : "ResponseWireWriter is the MESSAGING flavor only";
         this.out = out;
-        this.header = header;
         this.tableHasDroppedColumns = tableHasDroppedColumns;
+        this.version = version;
+        useHeader(header);
+    }
+
+    /**
+     * Writes the next partitions with {@code header}, keeping this writer's buffers.  A range read
+     * calls this when a partition's header differs from the one before.  No row may be open.
+     */
+    public void useHeader(SerializationHeader header)
+    {
+        assert !header.isForSSTable() : "ResponseWireWriter is the MESSAGING flavor only";
+        assert !rowOpen : "useHeader called while a row is open";
+        this.header = header;
         this.inPlace = out instanceof PatchableOutput && !header.columns(false).hasComplex() ? (PatchableOutput) out : null;
+        if (inPlace == null && rowBody == null)
+        {
+            rowBody = new DataOutputBuffer();
+            if (rowHeaderBuffer == null)
+                rowHeaderBuffer = new DataOutputBuffer();
+        }
         this.body = inPlace != null ? out : rowBody;
         this.helper = new SerializationHelper(header);
-        this.version = version;
     }
 
     /** The clustering types the response header serializes clusterings with. */
@@ -265,8 +286,10 @@ public final class ResponseWireWriter
         this.rowColumns.clear();
         this.openComplexColumn = null;
         this.complexMarkerCount = 0;
-        this.rowHeaderBuffer.clear();
-        this.rowBody.clear();
+        if (rowHeaderBuffer != null)
+            this.rowHeaderBuffer.clear();
+        if (rowBody != null)
+            this.rowBody.clear();
         this.rowOpen = true;
         if (inPlace != null)
         {
@@ -558,6 +581,8 @@ public final class ResponseWireWriter
             if (!hasAllColumns)
             {
                 // the column subset goes before the cells: rare, so the cells move to make room
+                if (rowHeaderBuffer == null)
+                    rowHeaderBuffer = new DataOutputBuffer();
                 Columns.serializer.serializeSubset(rowColumns, header.columns(false), rowHeaderBuffer);
                 inPlace.insert(rowCellsStart, rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
             }

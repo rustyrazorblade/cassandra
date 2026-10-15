@@ -106,10 +106,23 @@ public abstract class Sampler<T>
 
     private long endTimeNanos = -1;
 
+    /**
+     * Test only: samples are inserted on the thread that adds them, not queued.  The queue drops
+     * samples when it is full, so a test that compares the samples of a read of many partitions
+     * sets this.
+     */
+    @VisibleForTesting
+    public static volatile boolean insertOnCallerForTesting = false;
+
     public void addSample(final T item, final int value)
     {
         if (isEnabled())
-            samplerExecutor.submit(() -> insert(item, value));
+        {
+            if (insertOnCallerForTesting)
+                insert(item, value);
+            else
+                samplerExecutor.submit(() -> insert(item, value));
+        }
     }
 
     protected abstract void insert(T item, long value);
