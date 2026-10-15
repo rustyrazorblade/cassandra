@@ -78,6 +78,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Digest;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionIterator;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.ICompactionManager;
 import org.apache.cassandra.db.marshal.EmptyType;
 import org.apache.cassandra.db.repair.CassandraTableRepairManager;
@@ -381,6 +382,54 @@ public abstract class FuzzTestBase extends CQLTester.InMemory
                 }
             }
         });
+    }
+
+    /** Indexes into {@link #cursorCounts()}. */
+    static final int VALIDATIONS = 0, VALIDATION_FALLBACKS = 1, ANTICOMPACTIONS = 2, ANTICOMPACTION_FALLBACKS = 3;
+
+    /** The cursor counters now, for {@link #assertCursorPathsRan}, at the indexes above. */
+    static long[] cursorCounts()
+    {
+        return new long[]{ CassandraTableRepairManager.cursorValidationsRun.sum(), CassandraTableRepairManager.cursorValidationFallbacks.sum(),
+                           CompactionManager.cursorAnticompactionsRun.sum(), CompactionManager.cursorAnticompactionFallbacks.sum() };
+    }
+
+    /**
+     * Checks that no validation or anticompaction since {@code before} fell back to the legacy
+     * path, and that none took the cursor path while it is off.  An example can run no validation
+     * or anticompaction at all, so see {@link #assertSomeCursorWorkRan} for the check that the
+     * cursor paths ran.
+     *
+     * <p>The fuzz tables hold no data, so these checks catch only a fallback; they do not compare
+     * what the two paths build.  CursorIncrementalRepairBtiTest, CursorIncrementalRepairBigTest,
+     * the UnderLoad variants, CursorRepairMixedClusterTest, CursorRepairMultiDataCenterTest and
+     * CursorAntiCompactionDataDirectoriesTest prove cursor validation and cursor anticompaction
+     * with real data and ranges, as do BurnCursorIncrementalRepairTwoClustersTest,
+     * BurnIncrementalRepairCycleDifferentialTest and BurnAntiCompactionDifferentialTest.
+     */
+    static void assertCursorPathsRan(long[] before, int example)
+    {
+        long[] now = cursorCounts();
+        Assertions.assertThat(now[VALIDATION_FALLBACKS] - before[VALIDATION_FALLBACKS]).describedAs("cursor validation fell back to the legacy path; example %d", example).isZero();
+        Assertions.assertThat(now[ANTICOMPACTION_FALLBACKS] - before[ANTICOMPACTION_FALLBACKS]).describedAs("cursor anticompaction fell back to the legacy path; example %d", example).isZero();
+        if (!DatabaseDescriptor.cursorRepairEnabled())
+            Assertions.assertThat(now[VALIDATIONS] - before[VALIDATIONS]).describedAs("a validation took the cursor path with it off; example %d", example).isZero();
+        if (!DatabaseDescriptor.cursorRepairEnabled())
+            Assertions.assertThat(now[ANTICOMPACTIONS] - before[ANTICOMPACTIONS]).describedAs("an anticompaction took the cursor path with it off; example %d", example).isZero();
+    }
+
+    /**
+     * With cursor validation on, checks that some validation since {@code before} took the cursor
+     * path.  Anticompaction does not run here: the simulated nodes own no ranges in this process's
+     * {@code StorageService}, so the prepare step of an incremental repair selects no sstable.
+     * Tests call it after all examples, outside the seeded scope, because it does not depend on the
+     * seed: a failure here means no example of the run validated on the cursor path.
+     */
+    static void assertSomeCursorWorkRan(long[] before)
+    {
+        long[] now = cursorCounts();
+        if (DatabaseDescriptor.cursorRepairEnabled())
+            Assertions.assertThat(now[VALIDATIONS] - before[VALIDATIONS]).describedAs("no validation took the cursor path").isPositive();
     }
 
     static void runAndAssertSuccess(Cluster cluster, int example, boolean shouldSync, RepairCoordinator repair)

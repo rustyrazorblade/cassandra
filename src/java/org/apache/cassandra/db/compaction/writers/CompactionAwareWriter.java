@@ -33,6 +33,7 @@ import org.apache.cassandra.db.DiskBoundaries;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.compaction.CompactionTask;
+import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -49,7 +50,8 @@ import org.apache.cassandra.utils.concurrent.Transactional;
  * Class that abstracts away the actual writing of files to make it possible to use CompactionTask for more
  * use cases.
  */
-public abstract class CompactionAwareWriter extends Transactional.AbstractTransactional implements Transactional
+public abstract class CompactionAwareWriter extends Transactional.AbstractTransactional
+implements Transactional, CursorCompactor.OutputWriterProvider
 {
     protected static final Logger logger = LoggerFactory.getLogger(CompactionAwareWriter.class);
 
@@ -153,6 +155,7 @@ public abstract class CompactionAwareWriter extends Transactional.AbstractTransa
      *
      * @return the new writer, or null if the writer did not switch
      */
+    @Override
     public final SSTableWriter prepareForPartition(DecoratedKey key)
     {
         SSTableWriter newWriter = maybeSwitchWriter(key);

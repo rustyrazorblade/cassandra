@@ -35,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import com.google.common.util.concurrent.RateLimiter;
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -47,6 +48,7 @@ import org.junit.runners.Parameterized.Parameters;
 
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.Config.DiskAccessMode;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.Keyspace;
@@ -69,6 +71,7 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.ForwardingSSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.ChannelProxy;
+import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.repair.RepairParallelism;
 import org.apache.cassandra.repair.messages.RepairOption;
@@ -85,17 +88,23 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
     private final Verb messageType;
     private final RepairParallelism parallelism;
     private final boolean withTracing;
+    private final boolean cursorRepair;
     private final SerializableRunnable setup;
 
-    public FailingRepairTest(Verb messageType, RepairParallelism parallelism, boolean withTracing, SerializableRunnable setup)
+    private static final String CURSOR_LOG_LINE = "Performing cursor-backed validation compaction";
+    private static final String ITERATOR_LOG_LINE = "Performing validation compaction";
+    private static final String CURSOR_FALLBACK_LOG_LINE = "Cursor-backed validation not supported";
+
+    public FailingRepairTest(Verb messageType, RepairParallelism parallelism, boolean withTracing, boolean cursorRepair, SerializableRunnable setup)
     {
         this.messageType = messageType;
         this.parallelism = parallelism;
         this.withTracing = withTracing;
+        this.cursorRepair = cursorRepair;
         this.setup = setup;
     }
 
-    @Parameters(name = "{0}/{1}/{2}")
+    @Parameters(name = "{0}/{1}/{2}/cursor={3}")
     public static Collection<Object[]> messages()
     {
         List<Object[]> tests = new ArrayList<>();
@@ -103,16 +112,20 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
         {
             for (Boolean withTracing : Arrays.asList(Boolean.TRUE, Boolean.FALSE))
             {
-                tests.add(new Object[]{ Verb.VALIDATION_REQ, parallelism, withTracing, failingReaders(Verb.VALIDATION_REQ, parallelism, withTracing) });
+                for (Boolean cursorRepair : Arrays.asList(Boolean.TRUE, Boolean.FALSE))
+                {
+                    tests.add(new Object[]{ Verb.VALIDATION_REQ, parallelism, withTracing, cursorRepair,
+                                            failingReaders(Verb.VALIDATION_REQ, parallelism, withTracing, cursorRepair) });
+                }
             }
         }
         return tests;
     }
 
-    private static SerializableRunnable failingReaders(Verb type, RepairParallelism parallelism, boolean withTracing)
+    private static SerializableRunnable failingReaders(Verb type, RepairParallelism parallelism, boolean withTracing, boolean cursorRepair)
     {
         return () -> {
-            String cfName = getCfName(type, parallelism, withTracing);
+            String cfName = getCfName(type, parallelism, withTracing, cursorRepair);
             ColumnFamilyStore cf = Keyspace.open(KEYSPACE).getColumnFamilyStore(cfName);
             Util.flush(cf);
             Set<SSTableReader> remove = cf.getLiveSSTables();
@@ -131,9 +144,10 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
         };
     }
 
-    private static String getCfName(Verb type, RepairParallelism parallelism, boolean withTracing)
+    private static String getCfName(Verb type, RepairParallelism parallelism, boolean withTracing, boolean cursorRepair)
     {
-        return type.name().toLowerCase() + "_" + parallelism.name().toLowerCase() + "_" + withTracing;
+        return type.name().toLowerCase() + "_" + parallelism.name().toLowerCase() + "_" + withTracing +
+               (cursorRepair ? "_cursor" : "_iterator");
     }
 
     @BeforeClass
@@ -179,7 +193,7 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
     {
         final int replica = 1;
         final int coordinator = 2;
-        String tableName = getCfName(messageType, parallelism, withTracing);
+        String tableName = getCfName(messageType, parallelism, withTracing, cursorRepair);
         String fqtn = KEYSPACE + "." + tableName;
 
         CLUSTER.schemaChange("CREATE TABLE " + fqtn + " (k INT, PRIMARY KEY (k))");
@@ -213,8 +227,14 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
         Object[][] node2Actuals = toNaturalOrder(CLUSTER.get(coordinator).executeInternal("SELECT k FROM " + fqtn));
         Assert.assertArrayEquals(node2Records, node2Actuals);
 
+        // Choose the validation path on both nodes
+        boolean cursor = cursorRepair;
+        for (int i = 1; i <= CLUSTER.size(); i++)
+            CLUSTER.get(i).runOnInstance(() -> DatabaseDescriptor.setCursorRepairEnabled(cursor));
+
         // Inject the failure
         CLUSTER.get(replica).runOnInstance(() -> setup.run());
+        long mark = CLUSTER.get(replica).logs().mark();
 
         // run a repair which is expected to fail
         List<String> repairStatus = CLUSTER.get(coordinator).callOnInstance(() -> {
@@ -251,6 +271,20 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
         IInvokableInstance replicaInstance = CLUSTER.get(replica);
         Awaitility.await().atMost(Duration.ofSeconds(30)).until(replicaInstance::isShutdown);
         Assert.assertEquals("coordinator should not be killed", 0, CLUSTER.get(coordinator).killAttempts());
+
+        // The logs of a shut down instance cannot be read, so restart the replica first.  The log
+        // file is appended to, so the mark is still valid.
+        replicaInstance.startup();
+
+        // The replica must have failed on the path chosen above
+        Assert.assertEquals("cursor validation ran", cursorRepair,
+                            !CLUSTER.get(replica).logs().grep(mark, CURSOR_LOG_LINE).getResult().isEmpty());
+        Assert.assertEquals("iterator validation ran", !cursorRepair,
+                            !CLUSTER.get(replica).logs().grep(mark, ITERATOR_LOG_LINE).getResult().isEmpty());
+        Assert.assertTrue("cursor validation must not fall back to the iterator path",
+                          CLUSTER.get(replica).logs().grep(mark, CURSOR_FALLBACK_LOG_LINE).getResult().isEmpty());
+        Assert.assertFalse("the replica must log the validation failure",
+                           CLUSTER.get(replica).logs().grep(mark, "Validation failed").getResult().isEmpty());
     }
 
     private static Object[][] toNaturalOrder(Object[][] actuals)
@@ -281,37 +315,73 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
 
         public ISSTableScanner getScanner()
         {
-            return new FailingISSTableScanner();
+            return new FailingISSTableScanner(this);
         }
 
         public ISSTableScanner getScanner(Collection<Range<Token>> ranges)
         {
-            return new FailingISSTableScanner();
+            return new FailingISSTableScanner(this);
         }
 
         public ISSTableScanner getScanner(Iterator<AbstractBounds<PartitionPosition>> rangeIterator)
         {
-            return new FailingISSTableScanner();
+            return new FailingISSTableScanner(this);
         }
 
         public ISSTableScanner getScanner(ColumnFilter columns, DataRange dataRange, SSTableReadsListener listener)
         {
-            return new FailingISSTableScanner();
+            return new FailingISSTableScanner(this);
         }
 
         public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
         {
-            return new FailingISSTableScanner();
+            return new FailingISSTableScanner(this);
         }
 
         public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
         {
-            return new FailingISSTableScanner();
+            return new FailingISSTableScanner(this);
         }
 
         public ChannelProxy getDataChannel()
         {
             throw new RuntimeException();
+        }
+
+        // Cursor validation reads the data file through these instead of a scanner.
+        public RandomAccessReader openDataReader()
+        {
+            throw corrupt();
+        }
+
+        public RandomAccessReader openDataReader(RateLimiter limiter)
+        {
+            throw corrupt();
+        }
+
+        public RandomAccessReader openDataReader(DiskAccessMode diskAccessMode)
+        {
+            throw corrupt();
+        }
+
+        public RandomAccessReader openDataReaderForScan()
+        {
+            throw corrupt();
+        }
+
+        public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
+        {
+            throw corrupt();
+        }
+
+        public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, RateLimiter limiter)
+        {
+            throw corrupt();
+        }
+
+        private static CorruptSSTableException corrupt()
+        {
+            return new CorruptSSTableException(new IOException("Test commands it"), "mahahahaha!");
         }
 
         public String toString()
@@ -322,6 +392,13 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
 
     private static final class FailingISSTableScanner implements ISSTableScanner
     {
+        private final SSTableReader sstable;
+
+        private FailingISSTableScanner(SSTableReader sstable)
+        {
+            this.sstable = sstable;
+        }
+
         public long getLengthInBytes()
         {
             return 0;
@@ -342,9 +419,10 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
             return 0;
         }
 
+        // cursor validation reads the positions of the scanner's sstables, so name the failing one
         public Set<SSTableReader> getBackingSSTables()
         {
-            return Collections.emptySet();
+            return Collections.singleton(sstable);
         }
 
         @Override

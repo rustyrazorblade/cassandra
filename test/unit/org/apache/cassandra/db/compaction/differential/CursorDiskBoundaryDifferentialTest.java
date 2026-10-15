@@ -49,8 +49,8 @@ import static org.junit.Assert.assertTrue;
  */
 public class CursorDiskBoundaryDifferentialTest extends DifferentialCompactionTester
 {
-    private static final int DIRECTORIES = 3;
-    private static final int PARTITIONS = 600;
+    static final int DIRECTORIES = 3;
+    static final int PARTITIONS = 600;
 
     @Test
     public void diskBoundarySwitchMatchesIteratorOnBothPaths() throws Throwable
@@ -103,7 +103,7 @@ public class CursorDiskBoundaryDifferentialTest extends DifferentialCompactionTe
     }
 
     /** Boundaries that split the output into exactly {@link #DIRECTORIES} pieces. */
-    private static List<PartitionPosition> boundaryPositions(ColumnFamilyStore cfs)
+    static List<PartitionPosition> boundaryPositions(ColumnFamilyStore cfs)
     {
         List<DecoratedKey> keys = new ArrayList<>(PARTITIONS);
         for (int pk = 0; pk < PARTITIONS; pk++)
@@ -119,7 +119,7 @@ public class CursorDiskBoundaryDifferentialTest extends DifferentialCompactionTe
     }
 
     /** Builds a second view of the table with its own data directories and disk boundaries. */
-    private static ColumnFamilyStore withDirectories(ColumnFamilyStore real, List<PartitionPosition> positions)
+    static ColumnFamilyStore withDirectories(ColumnFamilyStore real, List<PartitionPosition> positions)
     {
         Directories.DataDirectory[] dirs = new Directories.DataDirectory[DIRECTORIES];
         for (int i = 0; i < DIRECTORIES; i++)

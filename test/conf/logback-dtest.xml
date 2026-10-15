@@ -52,6 +52,9 @@
 
   <logger name="org.apache.hadoop" level="WARN"/>
 
+  <!-- UCS calls localRangesWeighted() on every compaction check; its DEBUG "Got local ranges" line fills the captured test output -->
+  <logger name="org.apache.cassandra.db.DiskBoundaryManager" level="INFO"/>
+
   <root level="DEBUG">
     <appender-ref ref="INSTANCEFILE" /> <!-- use blocking to avoid race conditions with appending and searching -->
     <appender-ref ref="INSTANCESTDERR" />

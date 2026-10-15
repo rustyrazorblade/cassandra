@@ -53,6 +53,7 @@ public class FailingRepairFuzzTest extends FuzzTestBase
         // to avoid unlucky timing issues, retry until success; given enough retries we should eventually become success
         DatabaseDescriptor.getRepairRetrySpec().maxAttempts = new RetrySpec.MaxAttempt(Integer.MAX_VALUE);
         Gen<RepairJobStage> stageGen = Gens.enums().all(RepairJobStage.class);
+        long[] cursorCountsAtStart = cursorCounts();
         qt().withPure(false).withExamples(10).check(rs -> {
             Cluster cluster = new Cluster(rs);
             enableMessageFaults(cluster);
@@ -62,6 +63,7 @@ public class FailingRepairFuzzTest extends FuzzTestBase
             List<Closeable> closeables = new ArrayList<>();
             for (int example = 0; example < 100; example++)
             {
+                long[] cursorCountsBefore = cursorCounts();
                 Cluster.Node coordinator = coordinatorGen.next(rs);
 
                 RepairCoordinator repair = coordinator.repair(KEYSPACE, repairOption(rs, coordinator, KEYSPACE, TABLES), false);
@@ -115,6 +117,7 @@ public class FailingRepairFuzzTest extends FuzzTestBase
 
                 cluster.processAll();
                 Assertions.assertThat(repair.state.isComplete()).describedAs("Repair job did not complete, and no work is pending...").isTrue();
+                assertCursorPathsRan(cursorCountsBefore, example);
                 Assertions.assertThat(repair.state.getResult().kind).describedAs("Unexpected state: %s -> %s; example %d", repair.state, repair.state.getResult(), example).isEqualTo(Completable.Result.Kind.FAILURE);
                 switch (stage)
                 {
@@ -160,5 +163,6 @@ public class FailingRepairFuzzTest extends FuzzTestBase
                 closeables.clear();
             }
         });
+        assertSomeCursorWorkRan(cursorCountsAtStart);
     }
 }
