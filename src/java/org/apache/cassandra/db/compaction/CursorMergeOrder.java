@@ -116,18 +116,17 @@ final class CursorMergeOrder
     /** The complex column whose cells {@link #cellOrder} merges, or null if it needs no order. */
     private ColumnMetadata orderedCellColumn;
 
-    private CursorMergeOrder(List<ISSTableScanner> scanners, StatefulCursor[] cursorsInScannerOrder, boolean orderRows, boolean orderCells)
+    private CursorMergeOrder(int[] cursorsPerScanner, StatefulCursor[] cursorsInScannerOrder, boolean orderRows, boolean orderCells)
     {
         this.orderRows = orderRows;
         this.orderCells = orderCells;
         int cursorCount = cursorsInScannerOrder.length;
 
-        scannerSources = new ScannerSource[scanners.size()];
+        scannerSources = new ScannerSource[cursorsPerScanner.length];
         int from = 0;
         for (int i = 0; i < scannerSources.length; i++)
         {
-            ISSTableScanner scanner = scanners.get(i);
-            int count = scanner instanceof SSTableSimpleScanner ? 1 : scanner.getBackingSSTables().size();
+            int count = cursorsPerScanner[i];
             StatefulCursor[] cursors = new StatefulCursor[count];
             System.arraycopy(cursorsInScannerOrder, from, cursors, 0, count);
             scannerSources[i] = new ScannerSource(cursors);
@@ -157,6 +156,24 @@ final class CursorMergeOrder
     static CursorMergeOrder create(TableMetadata metadata, List<ISSTableScanner> scanners,
                                    Iterable<SSTableReader> sstables, StatefulCursor[] cursorsInScannerOrder)
     {
+        int[] cursorsPerScanner = new int[scanners.size()];
+        for (int i = 0; i < cursorsPerScanner.length; i++)
+        {
+            ISSTableScanner scanner = scanners.get(i);
+            cursorsPerScanner[i] = scanner instanceof SSTableSimpleScanner ? 1 : scanner.getBackingSSTables().size();
+        }
+        return create(metadata, cursorsPerScanner, sstables, cursorsInScannerOrder);
+    }
+
+    /**
+     * @param cursorsPerScanner how many of the cursors each scanner reads, in scanner order.  A
+     *                          scanner with none is still a source of the merge.
+     * @param cursorsInScannerOrder one cursor per sstable, grouped by scanner, in scanner order
+     * @return null if no order can change the output bytes of this compaction
+     */
+    static CursorMergeOrder create(TableMetadata metadata, int[] cursorsPerScanner,
+                                   Iterable<SSTableReader> sstables, StatefulCursor[] cursorsInScannerOrder)
+    {
         boolean orderRows = false;
         for (AbstractType<?> type : metadata.comparator.subtypes())
             orderRows |= !equalValuesHaveEqualBytes(type);
@@ -174,7 +191,7 @@ final class CursorMergeOrder
 
         if (!orderRows && !orderCells)
             return null;
-        return new CursorMergeOrder(scanners, cursorsInScannerOrder, orderRows, orderCells);
+        return new CursorMergeOrder(cursorsPerScanner, cursorsInScannerOrder, orderRows, orderCells);
     }
 
     private static boolean needsCellOrder(AbstractType<?> type)

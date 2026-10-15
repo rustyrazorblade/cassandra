@@ -29,14 +29,19 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.ByteStreams;
 
 import org.apache.commons.io.FileUtils;
@@ -51,7 +56,9 @@ import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.compaction.ActiveCompactionsTracker;
+import org.apache.cassandra.db.compaction.AntiCompactionAssertions;
 import org.apache.cassandra.db.compaction.CompactionController;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.CompactionPipelineCounts;
 import org.apache.cassandra.db.compaction.CompactionTask;
 import org.apache.cassandra.db.compaction.CursorCompactor;
@@ -62,6 +69,7 @@ import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
 import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -71,11 +79,16 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
+import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.ActiveRepairService;
+import org.apache.cassandra.streaming.PreviewKind;
 import org.apache.cassandra.tools.JsonTransformer;
 import org.apache.cassandra.tools.Util;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.OutputHandler;
+import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.concurrent.Refs;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -157,6 +170,25 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
         return sb.toString();
     }
 
+    /** Whether one compaction gives exactly one output.  Anticompaction splits its output by repair state. */
+    protected boolean expectSingleOutput()
+    {
+        return true;
+    }
+
+    /** Sum over the captured sstables of one numeric field of their stats summary, such as {@code totalRows}. */
+    protected static long sumOfStat(CapturedOutput out, String name)
+    {
+        long sum = 0;
+        for (CapturedSSTable s : out.sstables)
+        {
+            Matcher matcher = Pattern.compile("(^| )" + Pattern.quote(name) + "=(-?[0-9]+) ").matcher(s.statsSummary);
+            assertTrue("no " + name + " in stats summary: " + s.statsSummary, matcher.find());
+            sum += Long.parseLong(matcher.group(2));
+        }
+        return sum;
+    }
+
     /** Sum of the per-sstable row counts across a captured output. */
     protected static long outputRows(CapturedOutput out)
     {
@@ -202,6 +234,12 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
     public interface TaskFactory
     {
         CompactionTask create(ColumnFamilyStore cfs, LifecycleTransaction txn, long gcBefore);
+
+        /** The nowInSec the task uses, which an anticompaction run uses too. */
+        default long nowInSeconds()
+        {
+            return FBUtilities.nowInSeconds();
+        }
     }
 
     public static final TaskFactory DEFAULT_TASK = (cfs, txn, gcBefore) -> new CompactionTask(cfs, txn, gcBefore, true);
@@ -209,7 +247,26 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
     /** A TaskFactory that uses a fixed nowInSec for TTL expiry instead of the wall clock. */
     public static TaskFactory taskWithFixedNow(long nowInSeconds)
     {
-        return (cfs, txn, gcBefore) -> new CompactionTask(cfs, txn, gcBefore, true).setNowInSecondsSupplier(() -> nowInSeconds);
+        return taskWithNow(() -> nowInSeconds);
+    }
+
+    /** A TaskFactory that takes nowInSec for TTL expiry from {@code nowInSeconds} instead of the wall clock. */
+    private static TaskFactory taskWithNow(LongSupplier nowInSeconds)
+    {
+        return new TaskFactory()
+        {
+            @Override
+            public CompactionTask create(ColumnFamilyStore cfs, LifecycleTransaction txn, long gcBefore)
+            {
+                return new CompactionTask(cfs, txn, gcBefore, true).setNowInSecondsSupplier(nowInSeconds);
+            }
+
+            @Override
+            public long nowInSeconds()
+            {
+                return nowInSeconds.getAsLong();
+            }
+        };
     }
 
     /** The earliest local deletion time across the live set: below this, gcBefore purges nothing. */
@@ -301,7 +358,14 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
                                            cfs.getDefaultGcBefore(FBUtilities.nowInSeconds()));
     }
 
-    /** Variant with an explicit gcBefore, so scenarios can place purge decisions exactly at the boundary. */
+    /**
+     * Variant with an explicit gcBefore, so scenarios can place purge decisions exactly at the boundary.
+     * <p>
+     * This is the one compare method: every other assertCursorMatchesIterator variant, and the corpus
+     * and generation helpers, call it.  An anticompaction subclass of a differential class overrides
+     * only this method, to call {@link #assertAntiCompactionMatchesIterator}, and so runs every
+     * scenario of its parent through anticompaction.
+     */
     protected CapturedOutput assertCursorMatchesIterator(ColumnFamilyStore cfs,
                                                          Set<SSTableReader> inputs,
                                                          TaskFactory taskFactory,
@@ -330,24 +394,496 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
         }
         finally
         {
-            if (passed || !KEEP_SCRATCH_ON_FAILURE)
+            deleteScratch(scratch, passed);
+        }
+    }
+
+    private static void deleteScratch(Path scratch, boolean passed)
+    {
+        if (passed || !KEEP_SCRATCH_ON_FAILURE)
+        {
+            // never rethrown: an IOException here would replace the AssertionError carrying the
+            // divergence report with an unrelated one
+            try
             {
-                // never rethrown: an IOException here would replace the AssertionError carrying the
-                // divergence report with an unrelated one
-                try
-                {
-                    FileUtils.deleteDirectory(scratch.toFile());
-                }
-                catch (IOException e)
-                {
-                    logger.warn("could not delete differential scratch directory {}", scratch, e);
-                }
+                FileUtils.deleteDirectory(scratch.toFile());
             }
-            else
+            catch (IOException e)
             {
-                logger.error("differential comparison failed; both paths' captured sstables kept at {}", scratch);
+                logger.warn("could not delete differential scratch directory {}", scratch, e);
             }
         }
+        else
+        {
+            logger.error("differential comparison failed; both paths' captured sstables kept at {}", scratch);
+        }
+    }
+
+    /** The outputs of one anticompaction run, their repair metadata, and the count antiCompactGroup returned. */
+    public static final class AntiCompactionOutput
+    {
+        final CapturedOutput captured = new CapturedOutput();
+        final List<String> repairMetadata = new ArrayList<>();
+        int returned;
+        /** The uncompressed bytes of the inputs: what full-range scanners of them read. */
+        long inputDataBytes;
+        /** What this run passed to the compaction rate limiter, seen by a listener on the test thread. */
+        final RateLimiterCalls throttled = new RateLimiterCalls();
+        /** The compression ratio that antiCompactGroup passes to the rate limiter for these inputs. */
+        double compressionRatio;
+        /** How much the heap that stays live after garbage collection grew during this run. */
+        long retainedHeapGrowth;
+        /** On the legacy run that a comparison returns, the cursor run it was compared with. */
+        AntiCompactionOutput cursorRun;
+
+        public int sstableCount()
+        {
+            return captured.sstables.size();
+        }
+
+        /** The repair metadata of each output, in first-key order. */
+        public List<String> repairMetadata()
+        {
+            return repairMetadata;
+        }
+
+        public CapturedOutput captured()
+        {
+            return captured;
+        }
+    }
+
+    /** How the heap is watched while each path anticompacts; a burn that checks it counts only live objects. */
+    protected RetainedHeap watchHeapDuringAntiCompaction()
+    {
+        return RetainedHeap.watch();
+    }
+
+    /** Comparisons so far in this test method.  JUnit makes a new instance for each method, so it starts at 0. */
+    private int anticompactionRangesDrawn;
+
+    /**
+     * The seed of the ranges of one comparison: from the run seed, the test class and method, and
+     * the index of the comparison in the method, counted from 0.  So one failing method replays
+     * alone with the run seed.  A subclass whose comparisons belong to seeded examples derives it
+     * from the example's seed instead, so that an example replays alone.
+     */
+    protected long anticompactionRangesSeed(int comparison)
+    {
+        String test = getClass().getName() + '.' + testName.getMethodName();
+        return DifferentialRunSeed.SEED * 31 + test.hashCode() * 1_000_003L + comparison;
+    }
+
+    /** The seed that replays a failing comparison: the run seed, or the example's seed in a subclass with seeded examples. */
+    protected long replaySeed()
+    {
+        return DifferentialRunSeed.SEED;
+    }
+
+    /**
+     * What an anticompaction subclass calls from its override of
+     * {@link #assertCursorMatchesIterator(ColumnFamilyStore, Set, TaskFactory, long)}: the same
+     * inputs, time and gcBefore, anticompacted on both paths with random full, transient and
+     * unrepaired ranges.  The other live sstables stay in place.
+     */
+    protected CapturedOutput assertAntiCompactionMatchesIterator(ColumnFamilyStore cfs,
+                                                                 Set<SSTableReader> inputs,
+                                                                 TaskFactory taskFactory,
+                                                                 long gcBefore) throws Exception
+    {
+        int comparison = anticompactionRangesDrawn++;
+        long seed = anticompactionRangesSeed(comparison);
+        Random random = new Random(seed);
+        RangesAtEndpoint ranges = AntiCompactionRanges.randomRanges(random, AntiCompactionRanges.tokens(inputs), 1 + random.nextInt(32));
+        logger.info("anticompaction ranges seed={} (comparison {} of {}, counted from 0; {}): {}",
+                    seed, comparison, testName.getMethodName(), DifferentialRunSeed.replayAdvice(replaySeed()), ranges);
+        try
+        {
+            return assertCursorMatchesIteratorForAntiCompaction(cfs, inputs, ranges, taskFactory.nowInSeconds(), gcBefore).captured;
+        }
+        catch (Throwable t)
+        {
+            throw new AssertionError("anticompaction differential failed; " + DifferentialRunSeed.replayAdvice(replaySeed()) +
+                                     "; comparison " + comparison + " of " + testName.getMethodName() + " (counted from 0), ranges seed " +
+                                     seed + ", ranges " + ranges + ": " + t, t);
+        }
+    }
+
+    /**
+     * Anticompacts the whole live set on the legacy path and then on the cursor path, at the wall
+     * clock.  See {@link #assertCursorMatchesIteratorForAntiCompaction(ColumnFamilyStore, Set, RangesAtEndpoint, long, long)}.
+     */
+    protected AntiCompactionOutput assertCursorMatchesIteratorForAntiCompaction(ColumnFamilyStore cfs, RangesAtEndpoint ranges) throws Exception
+    {
+        long nowInSec = FBUtilities.nowInSeconds();
+        return assertCursorMatchesIteratorForAntiCompaction(cfs, cfs.getLiveSSTables(), ranges, nowInSec, cfs.getDefaultGcBefore(nowInSec));
+    }
+
+    /**
+     * Anticompacts {@code inputs} as one group on the legacy path and then on the cursor path, from
+     * identical sstables, and asserts that both give the same output sstables: bytes, logical
+     * content, stats, repair metadata, first and last keys, and count; and that the cursor path
+     * passes every byte of the inputs to the compaction rate limiter.  Live sstables outside {@code inputs} stay in place, so they can block purging.  The
+     * live set is the same afterwards, under new descriptors, so a test can run this again.
+     * Returns the legacy run.
+     */
+    protected AntiCompactionOutput assertCursorMatchesIteratorForAntiCompaction(ColumnFamilyStore cfs, Set<SSTableReader> inputs,
+                                                                                RangesAtEndpoint ranges, long nowInSec, long gcBefore) throws Exception
+    {
+        Path scratch = Files.createTempDirectory("differential-anticompaction");
+        TimeUUID pendingRepair = TimeUUID.Generator.nextTimeUUID();
+        boolean passed = false;
+        try
+        {
+            InputCopy copy = copyLiveSet(cfs, scratch.resolve("inputs"));
+            Set<Descriptor> inputDescriptors = new HashSet<>();
+            for (SSTableReader input : inputs)
+                inputDescriptors.add(input.descriptor);
+
+            AntiCompactionOutput iterator = antiCompactPath(cfs, live(cfs, inputDescriptors), ranges, pendingRepair, false, nowInSec, gcBefore, scratch.resolve("iterator"));
+            // same descriptors, so the strategy groups the inputs in the same hash set order and
+            // both paths merge the same scanners in the same order
+            Map<Descriptor, Descriptor> restored = restoreLiveSet(cfs, copy, true);
+            AntiCompactionOutput cursor = antiCompactPath(cfs, live(cfs, renamed(inputDescriptors, restored)), ranges, pendingRepair, true, nowInSec, gcBefore, scratch.resolve("cursor"));
+            restoreLiveSet(cfs, copy);
+
+            assertEquals("antiCompactGroup returned a different count on the two paths", iterator.returned, cursor.returned);
+            assertEquals("the repair metadata of the outputs differs between paths", iterator.repairMetadata, cursor.repairMetadata);
+            assertEquivalentOutputs(iterator.captured, cursor.captured);
+            assertSameThrottling(iterator, cursor);
+            iterator.cursorRun = cursor;
+            passed = true;
+            return iterator;
+        }
+        finally
+        {
+            deleteScratch(scratch, passed);
+        }
+    }
+
+    /**
+     * The calls that one operation on the test thread made to the compaction rate limiter.  Calls
+     * from other threads, such as background compactions, are not counted.
+     */
+    public static final class RateLimiterCalls implements CompactionManager.RateLimiterListener
+    {
+        private final Thread thread = Thread.currentThread();
+        /** The scanned bytes passed to the rate limiter. */
+        long scannedBytes;
+        /** The bytes acquired from the rate limiter. */
+        long permits;
+        long calls;
+
+        @Override
+        public void acquired(long scannedBytes, long permits)
+        {
+            if (Thread.currentThread() != thread)
+                return;
+            this.scannedBytes += scannedBytes;
+            this.permits += permits;
+            calls++;
+        }
+    }
+
+    /**
+     * The cursor path passes to the rate limiter exactly the bytes that full-range scanners of the
+     * inputs read.  The legacy path makes no call after its last written partition, so it can pass
+     * fewer, never more.
+     */
+    private static void assertSameThrottling(AntiCompactionOutput iterator, AntiCompactionOutput cursor)
+    {
+        assertEquals("the cursor path did not pass every scanned byte to the compaction rate limiter",
+                     cursor.inputDataBytes, cursor.throttled.scannedBytes);
+        assertTrue("the legacy path passed more bytes to the rate limiter than its scanners read: " + iterator.throttled.scannedBytes,
+                   iterator.throttled.scannedBytes <= iterator.inputDataBytes);
+    }
+
+    /** The live sstables with these descriptors; fails if one is not live. */
+    private static Set<SSTableReader> live(ColumnFamilyStore cfs, Set<Descriptor> descriptors)
+    {
+        Set<SSTableReader> found = new HashSet<>();
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            if (descriptors.contains(sstable.descriptor))
+                found.add(sstable);
+        assertEquals("an input is not live", descriptors.size(), found.size());
+        return found;
+    }
+
+    private static Set<Descriptor> renamed(Set<Descriptor> descriptors, Map<Descriptor, Descriptor> restored)
+    {
+        Set<Descriptor> renamed = new HashSet<>();
+        for (Descriptor descriptor : descriptors)
+            renamed.add(restored.get(descriptor));
+        return renamed;
+    }
+
+    /** Runs one anticompaction path over {@code inputs}, checks what it left, and captures its outputs. */
+    private AntiCompactionOutput antiCompactPath(ColumnFamilyStore cfs, Set<SSTableReader> inputs, RangesAtEndpoint ranges, TimeUUID pendingRepair,
+                                                 boolean cursor, long nowInSec, long gcBefore, Path scratch) throws Exception
+    {
+        Set<Descriptor> liveBefore = new HashSet<>();
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            liveBefore.add(sstable.descriptor);
+        long maxDataAge = -1;
+        long inputBytes = 0;
+        for (SSTableReader input : inputs)
+        {
+            maxDataAge = Math.max(maxDataAge, input.maxDataAge);
+            inputBytes += input.bytesOnDisk();
+        }
+        long liveDiskSpaceBefore = cfs.metric.liveDiskSpaceUsed.getCount();
+
+        AntiCompactionOutput result = new AntiCompactionOutput();
+        // As ScannerList.getCompressionRatio computes it for full-range scanners.
+        double compressedBytes = 0, uncompressedBytes = 0;
+        for (SSTableReader input : inputs)
+        {
+            compressedBytes += input.onDiskLength();
+            uncompressedBytes += input.uncompressedLength();
+        }
+        result.compressionRatio = compressedBytes == uncompressedBytes || uncompressedBytes == 0 ? 1.0 : compressedBytes / uncompressedBytes;
+        result.inputDataBytes = (long) uncompressedBytes;
+        AntiCompactionRun run;
+        CompactionManager.rateLimiterListener = result.throttled;
+        RetainedHeap heap = watchHeapDuringAntiCompaction();
+        try
+        {
+            run = antiCompactGroup(cfs, inputs, ranges, pendingRepair, cursor, () -> false, nowInSec, gcBefore);
+        }
+        finally
+        {
+            heap.stop();
+            CompactionManager.rateLimiterListener = null;
+        }
+        result.retainedHeapGrowth = heap.growth;
+        result.returned = run.returned;
+
+        List<SSTableReader> outputs = new ArrayList<>();
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            if (!liveBefore.contains(sstable.descriptor))
+                outputs.add(sstable);
+        outputs.sort(Comparator.comparing(SSTableReader::getFirst));
+        assertEquals("antiCompactGroup returned a count that is not the number of new live sstables", result.returned, outputs.size());
+        assertAntiCompactionLeftNoTrace(cfs, inputs, outputs);
+        long outputBytes = 0;
+        for (SSTableReader out : outputs)
+            outputBytes += out.bytesOnDisk();
+        assertEquals("live disk space used did not move from the inputs to the outputs",
+                     outputBytes - inputBytes, cfs.metric.liveDiskSpaceUsed.getCount() - liveDiskSpaceBefore);
+
+        long outputPartitions = 0;
+        int seq = 0;
+        for (SSTableReader out : outputs)
+        {
+            assertEquals("maxDataAge of " + out, maxDataAge, out.maxDataAge);
+            outputPartitions += assertOutputMatchesItsRanges(out, ranges, pendingRepair);
+            result.repairMetadata.add("pendingRepair=" + out.getPendingRepair() + " repairedAt=" + out.getRepairedAt() +
+                                      " transient=" + out.isTransient() + " first=" + out.getFirst() + " last=" + out.getLast());
+            result.captured.sstables.add(capture(cfs, out, scratch.resolve("sstable-" + seq++)));
+        }
+        assertEquals(cursor ? "the cursor path did not write every output partition" : "the cursor path wrote partitions on the legacy run",
+                     cursor ? outputPartitions : 0, run.cursorPartitionsWritten);
+        // One call for each written partition, and on the cursor path one more for the bytes read after the last one.
+        if (cursor)
+            assertTrue("the cursor path made " + result.throttled.calls + " rate limiter calls for " + outputPartitions + " partitions",
+                       result.throttled.calls == outputPartitions || result.throttled.calls == outputPartitions + 1);
+        else
+            assertEquals("legacy rate limiter calls", outputPartitions, result.throttled.calls);
+        return result;
+    }
+
+    /**
+     * After a successful anticompaction: every output is live with one reference, nothing is
+     * compacting, no anticompaction is still registered, the inputs' files are gone, and the files
+     * on disk match the live set.
+     */
+    protected static void assertAntiCompactionLeftNoTrace(ColumnFamilyStore cfs, Set<SSTableReader> inputs, List<SSTableReader> outputs)
+    {
+        LifecycleTransaction.waitForDeletions();
+        for (SSTableReader out : outputs)
+        {
+            assertFalse("an output is marked compacted: " + out, out.isMarkedCompacted());
+            assertEquals("references to " + out, 1, out.selfRef().globalCount());
+        }
+        assertTrue("sstables are still marked compacting: " + cfs.getTracker().getCompacting(), cfs.getTracker().getCompacting().isEmpty());
+        AntiCompactionAssertions.assertNoAntiCompactionRegistered();
+        for (SSTableReader input : inputs)
+            assertFalse("an input was not deleted: " + input, input.descriptor.fileFor(SSTableFormat.Components.DATA).exists());
+        org.apache.cassandra.Util.assertOnDiskState(cfs, cfs.getLiveSSTables().size());
+        AntiCompactionAssertions.assertEveryFileBelongsToALiveSSTable(cfs);
+    }
+
+    /** What one call of {@link #antiCompactGroup} returned and wrote. */
+    protected static final class AntiCompactionRun
+    {
+        public final int returned;
+        /** Partitions the cursor path wrote; 0 on the legacy path. */
+        public final long cursorPartitionsWritten;
+
+        AntiCompactionRun(int returned, long cursorPartitionsWritten)
+        {
+            this.returned = returned;
+            this.cursorPartitionsWritten = cursorPartitionsWritten;
+        }
+    }
+
+    /**
+     * Anticompacts {@code inputs} in one group, on the path asked for, and checks with the counters
+     * that this path ran and did not fall back.  The inputs are replaced by the outputs.
+     */
+    protected static AntiCompactionRun antiCompactGroup(ColumnFamilyStore cfs, Set<SSTableReader> inputs, RangesAtEndpoint ranges, TimeUUID pendingRepair,
+                                                        boolean cursor, BooleanSupplier isCancelled, long nowInSec, long gcBefore)
+    {
+        DatabaseDescriptor.setCursorRepairEnabled(cursor);
+        assertFalse("scenario produced no input sstables", inputs.isEmpty());
+        long runsBefore = CompactionManager.cursorAnticompactionsRun.sum();
+        long fallbacksBefore = CompactionManager.cursorAnticompactionFallbacks.sum();
+        long writtenBefore = CompactionManager.cursorAnticompactionPartitionsWritten.sum();
+        int returned;
+        try (LifecycleTransaction txn = cfs.getTracker().tryModify(inputs, OperationType.ANTICOMPACTION))
+        {
+            assertNotNull("unable to mark inputs compacting", txn);
+            returned = CompactionManager.instance.antiCompactGroup(cfs, ranges, txn, pendingRepair, isCancelled, nowInSec, gcBefore);
+        }
+        assertEquals("cursor anticompaction fell back to the legacy path", 0, CompactionManager.cursorAnticompactionFallbacks.sum() - fallbacksBefore);
+        assertEquals((cursor ? "the cursor path did not run" : "the cursor path ran with cursor_repair_enabled off") +
+                     "; this run would not compare the two paths",
+                     cursor ? 1 : 0, CompactionManager.cursorAnticompactionsRun.sum() - runsBefore);
+        return new AntiCompactionRun(returned, CompactionManager.cursorAnticompactionPartitionsWritten.sum() - writtenBefore);
+    }
+
+    /** {@link #antiCompactGroup} over the whole live set at the wall clock. */
+    protected static int antiCompactLiveSet(ColumnFamilyStore cfs, RangesAtEndpoint ranges, TimeUUID pendingRepair,
+                                            boolean cursor, BooleanSupplier isCancelled)
+    {
+        long nowInSec = FBUtilities.nowInSeconds();
+        return antiCompactGroup(cfs, cfs.getLiveSSTables(), ranges, pendingRepair, cursor, isCancelled, nowInSec, cfs.getDefaultGcBefore(nowInSec)).returned;
+    }
+
+    /**
+     * Checks, without the other path, that every partition of {@code out} belongs to the output it is in.
+     *
+     * @return the number of partitions in {@code out}
+     */
+    private static long assertOutputMatchesItsRanges(SSTableReader out, RangesAtEndpoint ranges, TimeUUID pendingRepair)
+    {
+        assertFalse("anticompaction output is marked repaired: " + out, out.isRepaired());
+        assertEquals("pending repair of " + out, out.isPendingRepair() ? pendingRepair : null, out.getPendingRepair());
+        assertFalse("an unrepaired output is marked transient: " + out, !out.isPendingRepair() && out.isTransient());
+        long partitions = 0;
+        try (ISSTableScanner scanner = out.getScanner())
+        {
+            while (scanner.hasNext())
+            {
+                try (UnfilteredRowIterator partition = scanner.next())
+                {
+                    partitions++;
+                    Token token = partition.partitionKey().getToken();
+                    boolean full = ranges.onlyFull().ranges().stream().anyMatch(r -> r.contains(token));
+                    boolean trans = !full && ranges.onlyTransient().ranges().stream().anyMatch(r -> r.contains(token));
+                    String where = partition.partitionKey() + " in " + out;
+                    if (!out.isPendingRepair())
+                        assertTrue("a key in a repaired range went to the unrepaired output: " + where, !full && !trans);
+                    else if (out.isTransient())
+                        assertTrue("a key outside the transient ranges went to the transient output: " + where, trans);
+                    else
+                        assertTrue("a key outside the full ranges went to the full output: " + where, full);
+                }
+            }
+        }
+        return partitions;
+    }
+
+    /** The unrepaired live sstables that intersect the session's ranges, as the repair prepare step picks them. */
+    protected static Set<SSTableReader> sessionSSTables(ColumnFamilyStore cfs, RangesAtEndpoint ranges)
+    {
+        Set<SSTableReader> picked = new HashSet<>();
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            if (!sstable.isRepaired() && !sstable.isPendingRepair() && sstable.intersects(ranges.ranges()))
+                picked.add(sstable);
+        return picked;
+    }
+
+    /**
+     * Runs {@code performAnticompaction} for an incremental repair session over {@code ranges}, as
+     * the repair prepare step does, on the path asked for, and checks with the counters that the
+     * cursor path never fell back and ran once for each of {@code expectedGroups} groups.  A
+     * negative {@code expectedGroups} skips the count check.
+     */
+    protected static void runAntiCompactionSession(ColumnFamilyStore cfs, RangesAtEndpoint ranges, TimeUUID session,
+                                                   boolean cursor, int expectedGroups) throws Exception
+    {
+        DatabaseDescriptor.setCursorRepairEnabled(cursor);
+        ActiveRepairService.instance().registerParentRepairSession(session, FBUtilities.getBroadcastAddressAndPort(), List.of(cfs),
+                                                                   ImmutableSet.copyOf(ranges.ranges()), true, ActiveRepairService.UNREPAIRED_SSTABLE,
+                                                                   true, PreviewKind.NONE);
+        long runsBefore = CompactionManager.cursorAnticompactionsRun.sum();
+        long fallbacksBefore = CompactionManager.cursorAnticompactionFallbacks.sum();
+        try
+        {
+            Set<SSTableReader> sstables = sessionSSTables(cfs, ranges);
+            LifecycleTransaction txn = cfs.getTracker().tryModify(sstables, OperationType.ANTICOMPACTION);
+            assertNotNull("unable to mark the session's sstables compacting", txn);
+            CompactionManager.instance.performAnticompaction(cfs, ranges, Refs.ref(sstables), txn, session, () -> false);
+        }
+        finally
+        {
+            ActiveRepairService.instance().removeParentRepairSession(session);
+        }
+        long runs = CompactionManager.cursorAnticompactionsRun.sum() - runsBefore;
+        assertEquals("cursor anticompaction fell back", 0, CompactionManager.cursorAnticompactionFallbacks.sum() - fallbacksBefore);
+        if (!cursor)
+            assertEquals("the cursor path ran with it off", 0, runs);
+        else if (expectedGroups >= 0)
+            assertEquals("the cursor path must run once for each group", expectedGroups, runs);
+        assertTrue("sstables are still marked compacting", cfs.getTracker().getCompacting().isEmpty());
+        AntiCompactionAssertions.assertNoAntiCompactionRegistered();
+        org.apache.cassandra.Util.assertOnDiskState(cfs, cfs.getLiveSSTables().size());
+        AntiCompactionAssertions.assertEveryFileBelongsToALiveSSTable(cfs);
+    }
+
+    /**
+     * Captures every live sstable, in an order set by its key bounds, repair metadata and content,
+     * so the sstables of two runs pair up even when several share their key bounds.
+     */
+    protected CapturedOutput captureLiveSet(ColumnFamilyStore cfs, Path scratch) throws IOException
+    {
+        List<String> order = new ArrayList<>();
+        List<CapturedSSTable> unordered = new ArrayList<>();
+        int seq = 0;
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+        {
+            CapturedSSTable c = capture(cfs, sstable, scratch.resolve("sstable-" + seq++));
+            unordered.add(c);
+            order.add(sstable.getFirst() + "|" + sstable.getLast() + "|" + sstable.getPendingRepair() + "|" + sstable.isTransient() + "|" +
+                      sstable.getRepairedAt() + "|" + c.statsSummary + "|" + c.json);
+        }
+        List<Integer> indexes = new ArrayList<>();
+        for (int i = 0; i < unordered.size(); i++)
+            indexes.add(i);
+        indexes.sort(Comparator.comparing(order::get));
+        CapturedOutput captured = new CapturedOutput();
+        for (int i : indexes)
+            captured.sstables.add(unordered.get(i));
+        return captured;
+    }
+
+    /** See {@link InputCopy#copyLiveSet}. */
+    protected static InputCopy copyLiveSet(ColumnFamilyStore cfs, Path dir) throws IOException
+    {
+        return InputCopy.copyLiveSet(cfs, dir);
+    }
+
+    /** See {@link InputCopy#restoreLiveSet(ColumnFamilyStore, InputCopy, boolean)}. */
+    protected static Map<Descriptor, Descriptor> restoreLiveSet(ColumnFamilyStore cfs, InputCopy copy) throws IOException
+    {
+        return InputCopy.restoreLiveSet(cfs, copy, false);
+    }
+
+    /** See {@link InputCopy#restoreLiveSet(ColumnFamilyStore, InputCopy, boolean)}. */
+    protected static Map<Descriptor, Descriptor> restoreLiveSet(ColumnFamilyStore cfs, InputCopy copy, boolean sameDescriptors) throws IOException
+    {
+        return InputCopy.restoreLiveSet(cfs, copy, sameDescriptors);
     }
 
     /**
@@ -363,7 +899,7 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
     protected CapturedOutput assertCursorMatchesIteratorAcrossGenerations(ColumnFamilyStore cfs,
                                                                           LongSupplier nowInSecondsSupplier) throws Exception
     {
-        TaskFactory taskFactory = (c, txn, gcBefore) -> new CompactionTask(c, txn, gcBefore, true).setNowInSecondsSupplier(nowInSecondsSupplier);
+        TaskFactory taskFactory = taskWithNow(nowInSecondsSupplier);
         CapturedOutput gen1 = assertCursorMatchesIterator(cfs, cfs.getLiveSSTables(), taskFactory);
 
         long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
@@ -803,7 +1339,7 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
                    lengthBoundHolds);
     }
 
-    private CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
+    protected CapturedSSTable capture(ColumnFamilyStore cfs, SSTableReader sstable, Path dir) throws IOException
     {
         // 1. copy components first: verification or the dump can fail and roll back the
         // transaction, deleting the live files; the copies are the only evidence left for

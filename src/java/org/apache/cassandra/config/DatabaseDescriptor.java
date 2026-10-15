@@ -4956,6 +4956,18 @@ public class DatabaseDescriptor
         conf.cursor_compaction_enabled = cursor_compaction_enabled;
     }
 
+    /** Whether repair validation and anticompaction use the cursor path, whatever cursor_compaction_enabled says. */
+    public static boolean cursorRepairEnabled()
+    {
+        return conf.cursor_repair_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setCursorRepairEnabled(boolean cursor_repair_enabled)
+    {
+        conf.cursor_repair_enabled = cursor_repair_enabled;
+    }
+
     public static boolean enableDropCompactStorage()
     {
         return conf.drop_compact_storage_enabled;
