@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.distributed.test.sai;
 
+import java.util.Map;
+
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
 import net.bytebuddy.implementation.MethodDelegation;
@@ -63,7 +65,9 @@ public class IndexHintsDistributedTest extends TestBaseImpl
     public void testIndexHintsWithAllOldVersion() throws Throwable
     {
         try (Cluster cluster = init(Cluster.build(NUM_REPLICAS)
-                                           .withConfig(config -> config.with(GOSSIP).with(NETWORK).set("storage_compatibility_mode", "CASSANDRA_4"))
+                                           .withConfig(config -> config.with(GOSSIP).with(NETWORK).set("storage_compatibility_mode", "CASSANDRA_4")
+                                                                       // CASSANDRA_4 cannot use BTI, which the latest config selects
+                                                                       .set("sstable", Map.of("selected_format", "big")))
                                            .start(), RF))
         {
             testSelectWithIndexHints(cluster, "Index hints are not supported in clusters below 14.");

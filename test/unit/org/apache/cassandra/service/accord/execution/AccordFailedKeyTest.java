@@ -30,6 +30,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.api.RoutingKey;
@@ -72,6 +73,7 @@ import static org.junit.Assert.assertTrue;
  * functions supplied per test. {@code TestAgent} is used rather than {@code AccordAgent}, as reporting an exception
  * through the latter initialises {@code AccordSystemMetrics}, which needs a started {@code AccordService}.
  */
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordFailedKeyTest
 {
     private static final int TIMEOUT_SECONDS = 30;

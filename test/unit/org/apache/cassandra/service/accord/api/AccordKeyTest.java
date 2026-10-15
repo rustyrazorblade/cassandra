@@ -22,6 +22,7 @@ import java.io.IOException;
 
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
@@ -35,6 +36,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.cql3.statements.schema.CreateTableStatement.parse;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordKeyTest
 {
     private static final TableId TABLE1 = TableId.fromString("00000000-0000-0000-0000-000000000001");

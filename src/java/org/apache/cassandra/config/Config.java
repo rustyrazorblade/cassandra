@@ -50,6 +50,7 @@ import org.apache.cassandra.utils.StorageCompatibilityMode;
 import static org.apache.cassandra.config.CassandraRelevantProperties.AUTOCOMPACTION_ON_STARTUP_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_AVAILABLE_PROCESSORS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_COMPACTION_ENABLED;
+import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_READS_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_REPAIR_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.FILE_CACHE_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.SKIP_PAXOS_REPAIR_ON_TOPOLOGY_CHANGE;
@@ -408,6 +409,12 @@ public class Config
     public DataStorageSpec.IntMebibytesBound min_free_space_per_drive = new DataStorageSpec.IntMebibytesBound("50MiB");
 
     public DataStorageSpec.IntKibibytesBound compressed_read_ahead_buffer_size = new DataStorageSpec.IntKibibytesBound("256KiB");
+    /**
+     * Upper bound on the memory of the read-ahead buffers that threads keep for reuse after a compressed scan.
+     * When not set: 2 x (concurrent_reads + concurrent_compactors + concurrent_validations) x
+     * compressed_read_ahead_buffer_size.
+     */
+    public volatile DataStorageSpec.LongMebibytesBound compressed_read_ahead_buffer_pool_size;
 
     // Direct IO for background SSTable writes (compaction, streaming, cleanup, etc.)
     // When 'direct' is set, background writes bypass the OS page cache using O_DIRECT.
@@ -721,6 +728,12 @@ public class Config
     public boolean cursor_compaction_enabled = CURSOR_COMPACTION_ENABLED.getBoolean();
 
     public boolean cursor_repair_enabled = CURSOR_REPAIR_ENABLED.getBoolean();
+    /**
+     * Experimental (spike): serve the sstable legs of supported single-partition reads through
+     * SSTableCursorReader (see org.apache.cassandra.db.CursorReads). Off by default; queries that
+     * do not pass the CursorReads.isReadSupported gate always use the iterator read path.
+     */
+    public volatile boolean cursor_reads_enabled = CURSOR_READS_ENABLED.getBoolean();
 
     public volatile boolean use_statements_enabled = true;
 

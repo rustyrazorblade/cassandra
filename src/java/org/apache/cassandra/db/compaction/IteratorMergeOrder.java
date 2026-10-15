@@ -18,12 +18,15 @@
 
 package org.apache.cassandra.db.compaction;
 
+import java.io.IOException;
+
 /**
  * The order {@link org.apache.cassandra.utils.MergeIterator}'s many-source merge gives equal items
  * in, for sources a cursor merge reads.  The iterator path keeps the clustering of the last row and
  * of the last range tombstone marker it is given, and the first of two cells that tie on
  * everything.  Values can compare equal and still differ in bytes (decimal 1.0 and 1.00), so the
- * order decides which source's bytes the output holds.
+ * order decides which source's bytes the output holds.  On a read it also decides which source's
+ * objects the merged row holds, and the read size guardrail counts their heap sizes.
  *
  * <p>This is {@code MergeIterator.ManyToOne} with each source's current item read through
  * {@link Sources} instead of stored: the same sorted section, binary heap, equal-parent flags and
@@ -31,12 +34,16 @@ package org.apache.cassandra.db.compaction;
  * data itself: the caller moves the sources, and {@link Sources#advance} only reports whether a
  * source has a current item.
  *
+ * <p>Built with {@link LowerBoundSources}, a source may first give a lower bound, which sorts before
+ * an equal item and is consumed without being reported, like {@code MergeIterator.Candidate}.
+ * {@link #nextWithLowerBounds} reports the sources of the next items that are not lower bounds.
+ *
  * <p>Allocates only when built.
  */
-final class IteratorMergeOrder<T>
+public final class IteratorMergeOrder<T>
 {
     /** What the order reads from the merge. */
-    interface Sources<T>
+    public interface Sources<T>
     {
         /** Compares the current items of two sources. */
         int compare(T a, T b);
@@ -50,18 +57,54 @@ final class IteratorMergeOrder<T>
         boolean advance(T source);
     }
 
+    /** What the order reads from a merge whose sources may first give a lower bound. */
+    public interface LowerBoundSources<T>
+    {
+        /**
+         * Compares the current items of two sources.  An item is the source's lower bound when its
+         * flag is set.
+         */
+        int compare(T a, boolean aIsLowerBound, T b, boolean bIsLowerBound);
+
+        /**
+         * Moves {@code source} to its next item, after the one the merge consumed, or to its first
+         * one.  {@code afterLowerBound} is set for the first item after its lower bound.
+         *
+         * @return false when the source has no item left
+         */
+        boolean advance(T source, boolean afterLowerBound) throws IOException;
+    }
+
     /** {@code MergeIterator.ManyToOne.SORTED_SECTION_SIZE}. */
     private static final int SORTED_SECTION_SIZE = 4;
 
     private static final class Candidate<T>
     {
         T source;
+        /** The source still gives its lower bound before its first item. */
+        boolean lowerBound;
+        /** The current item is the lower bound. */
+        boolean atLowerBound;
+        /** The source gave its lower bound, and its first item is next. */
+        boolean lowerBoundConsumed;
         /** The current item was consumed, or there is none yet: the source needs to advance. */
         boolean needsAdvance;
         boolean equalParent;
+
+        void reset(T source, boolean lowerBound)
+        {
+            this.source = source;
+            this.lowerBound = lowerBound;
+            this.atLowerBound = false;
+            this.lowerBoundConsumed = false;
+            this.needsAdvance = true;
+            this.equalParent = false;
+        }
     }
 
+    /** Set when built with {@link Sources}; exactly one of the two is set. */
     private final Sources<T> sources;
+    private final LowerBoundSources<T> lowerBoundSources;
     private final Candidate<T>[] heap;
     /** The candidates, for {@link #reset}; the heap moves them around. */
     private final Candidate<T>[] pool;
@@ -72,10 +115,30 @@ final class IteratorMergeOrder<T>
     private int outCount;
 
     /** An order for up to {@code capacity} sources, given by {@link #reset}. */
+    public IteratorMergeOrder(int capacity, Sources<T> sources)
+    {
+        this(capacity, sources, null);
+    }
+
+    /**
+     * An order of {@code inSourceOrder}, read with {@link #nextWithLowerBounds}.
+     *
+     * @param inSourceOrder the sources, in the order the iterator path gives them to its merge
+     * @param lowerBounds   which of them first give a lower bound
+     */
+    public IteratorMergeOrder(T[] inSourceOrder, boolean[] lowerBounds, LowerBoundSources<T> sources)
+    {
+        this(inSourceOrder.length, null, sources);
+        for (int i = 0; i < inSourceOrder.length; i++)
+            pool[i].reset(inSourceOrder[i], lowerBounds[i]);
+        restart(inSourceOrder.length);
+    }
+
     @SuppressWarnings("unchecked")
-    IteratorMergeOrder(int capacity, Sources<T> sources)
+    private IteratorMergeOrder(int capacity, Sources<T> sources, LowerBoundSources<T> lowerBoundSources)
     {
         this.sources = sources;
+        this.lowerBoundSources = lowerBoundSources;
         this.heap = new Candidate[capacity];
         this.pool = new Candidate[capacity];
         for (int i = 0; i < capacity; i++)
@@ -83,62 +146,123 @@ final class IteratorMergeOrder<T>
     }
 
     /** Starts a new merge of the first {@code count} of {@code inSourceOrder}, in that order. */
-    void reset(T[] inSourceOrder, int count)
+    public void reset(T[] inSourceOrder, int count)
     {
+        assert sources != null : "an order with lower bounds is not reset";
         for (int i = 0; i < count; i++)
-        {
-            Candidate<T> candidate = pool[i];
-            candidate.source = inSourceOrder[i];
-            candidate.needsAdvance = true;
-            candidate.equalParent = false;
-            heap[i] = candidate;
-        }
-        for (int i = count; i < heap.length; i++)
-            heap[i] = null;
+            pool[i].reset(inSourceOrder[i], false);
+        restart(count);
+    }
+
+    private void restart(int count)
+    {
+        for (int i = 0; i < heap.length; i++)
+            heap[i] = i < count ? pool[i] : null;
         this.size = count;
         this.needingAdvance = count;
     }
 
     /**
      * Advances the sources the last step consumed, then takes the next items.  Writes their sources
-     * to {@code into}, in the order the merge gives them.
+     * to {@code into}, in the order the merge gives them.  For an order built with {@link Sources}.
      *
      * @return how many sources it wrote; 0 once every source is exhausted
      */
-    int next(T[] into)
+    public int next(T[] into)
     {
-        advance();
-        if (size == 0)
-            return 0;
+        assert sources != null : "an order with lower bounds is read with nextWithLowerBounds";
+        try
+        {
+            return step(into);
+        }
+        catch (IOException e)
+        {
+            // only LowerBoundSources.advance throws
+            throw new AssertionError(e);
+        }
+    }
+
+    /**
+     * {@link #next}, for an order built with {@link LowerBoundSources}: steps that only consume lower
+     * bounds are skipped.
+     */
+    public int nextWithLowerBounds(T[] into) throws IOException
+    {
+        assert lowerBoundSources != null : "an order without lower bounds is read with next";
+        return step(into);
+    }
+
+    private int step(T[] into) throws IOException
+    {
         this.out = into;
-        outCount = 0;
-        consume();
-        this.out = null;
-        return outCount;
+        try
+        {
+            while (true)
+            {
+                advance();
+                if (size == 0)
+                    return 0;
+                outCount = 0;
+                consume();
+                if (outCount > 0)
+                    return outCount;
+            }
+        }
+        finally
+        {
+            this.out = null;
+        }
     }
 
     /** {@code MergeIterator.ManyToOne.advance}. */
-    private void advance()
+    private void advance() throws IOException
     {
         for (int i = needingAdvance - 1; i >= 0; --i)
         {
             Candidate<T> candidate = heap[i];
             if (candidate.needsAdvance)
-            {
-                candidate.needsAdvance = false;
-                replaceAndSink(sources.advance(candidate.source) ? candidate : null, i);
-            }
+                replaceAndSink(advance(candidate) ? candidate : null, i);
         }
     }
 
+    /** {@code MergeIterator.Candidate.advance}. */
+    private boolean advance(Candidate<T> candidate) throws IOException
+    {
+        candidate.needsAdvance = false;
+        if (sources != null)
+            return sources.advance(candidate.source);
+        if (candidate.lowerBound)
+        {
+            candidate.atLowerBound = true;
+            return true;
+        }
+        candidate.atLowerBound = false;
+        boolean afterLowerBound = candidate.lowerBoundConsumed;
+        candidate.lowerBoundConsumed = false;
+        return lowerBoundSources.advance(candidate.source, afterLowerBound);
+    }
+
+    /** {@code MergeIterator.Candidate.compareTo}: a lower bound sorts before an equal item. */
     private int compare(Candidate<T> a, Candidate<T> b)
     {
-        return sources.compare(a.source, b.source);
+        if (sources != null)
+            return sources.compare(a.source, b.source);
+        int cmp = lowerBoundSources.compare(a.source, a.atLowerBound, b.source, b.atLowerBound);
+        if (cmp == 0 && (a.atLowerBound ^ b.atLowerBound))
+            return a.atLowerBound ? -1 : 1;
+        return cmp;
     }
 
     private void consume(Candidate<T> candidate)
     {
         candidate.needsAdvance = true;
+        if (candidate.atLowerBound)
+        {
+            candidate.lowerBound = false;
+            candidate.atLowerBound = false;
+            candidate.lowerBoundConsumed = true;
+            return;
+        }
         out[outCount++] = candidate.source;
     }
 

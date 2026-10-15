@@ -44,6 +44,7 @@ import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.cache.CacheLoader;
 import com.google.common.collect.ImmutableList;
@@ -2721,6 +2722,14 @@ public class StorageProxy implements StorageProxyMBean
         return concatAndBlockOnRepair(results, repairs);
     }
 
+    /**
+     * Test only: serve a local read as a replica serves a remote one
+     * ({@code ReadCommand.createResponseLocally}), so a CQL test on one node reads through the
+     * replica response path.
+     */
+    @VisibleForTesting
+    public static volatile boolean localReadsAsReplicaResponses = false;
+
     public static class LocalReadRunnable extends DroppableRunnable implements RunnableDebuggableTask
     {
         private final ReadCommand command;
@@ -2752,19 +2761,10 @@ public class StorageProxy implements StorageProxyMBean
                 command.setMonitoringTime(requestTime.startedAtNanos(), false, deadline - requestTime.startedAtNanos(), DatabaseDescriptor.getSlowQueryTimeout(NANOSECONDS));
 
                 ReadResponse response;
-                try (ReadExecutionController controller = command.executionController(trackRepairedStatus);
-                     UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+                try (ReadExecutionController controller = command.executionController(trackRepairedStatus))
                 {
-                    if (command.isLimitedToOnePartition() && !command.isDigestQuery())
-                    {
-                        ConsistencyLevel cl = handler.consistencyLevel();
-                        boolean localReplicaOnly = cl == ConsistencyLevel.ONE || cl == ConsistencyLevel.LOCAL_ONE;
-                        response = command.createLocalObjectResponse(iterator, controller.getRepairedDataInfo(), localReplicaOnly);
-                    }
-                    else
-                    {
-                        response = command.createResponse(iterator, controller.getRepairedDataInfo());
-                    }
+                    response = localReadsAsReplicaResponses ? command.createResponseLocally(controller)
+                                                            : localResponse(controller);
                 }
                 catch (RejectException e)
                 {
@@ -2809,6 +2809,20 @@ public class StorageProxy implements StorageProxyMBean
                     handler.onFailure(FBUtilities.getBroadcastAddressAndPort(), RequestFailure.UNKNOWN);
                     throw t;
                 }
+            }
+        }
+
+        private ReadResponse localResponse(ReadExecutionController controller)
+        {
+            try (UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+            {
+                if (command.isLimitedToOnePartition() && !command.isDigestQuery())
+                {
+                    ConsistencyLevel cl = handler.consistencyLevel();
+                    boolean localReplicaOnly = cl == ConsistencyLevel.ONE || cl == ConsistencyLevel.LOCAL_ONE;
+                    return command.createLocalObjectResponse(iterator, controller.getRepairedDataInfo(), localReplicaOnly);
+                }
+                return command.createResponse(iterator, controller.getRepairedDataInfo());
             }
         }
 

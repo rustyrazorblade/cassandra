@@ -50,4 +50,7 @@ public interface ChunkReader extends RebuffererFactory
     BufferType preferredBufferType();
 
     default void releaseUnderlyingResources() {}
+
+    /** See {@link Rebufferer#limitReadAhead}. */
+    default void limitReadAhead(long position) {}
 }

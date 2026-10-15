@@ -30,6 +30,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.ServerTestUtils;
+import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
@@ -226,7 +227,7 @@ public class ReadCommandVerbHandlerOutOfRangeTest
                   RowFilter.none(),
                   DataLimits.NONE,
                   key(tmd, key),
-                  null,
+                  new ClusteringIndexSliceFilter(Slices.ALL, false),
                   null,
                   false,
                   null);

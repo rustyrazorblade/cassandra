@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.List;
 
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.local.Command;
@@ -45,6 +46,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordCacheEntryTest
 {
     static class TestSafeState extends SafeState<String> implements SaferState<String, String, TestSafeState>

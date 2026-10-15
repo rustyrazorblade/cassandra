@@ -25,6 +25,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.function.Consumer;
 
@@ -71,7 +72,12 @@ public abstract class AbstractClientSizeWarning extends TestBaseImpl
     public static void setupClass() throws IOException
     {
         Cluster.Builder builder = Cluster.build(3);
-        builder.withConfig(c -> c.with(Feature.NATIVE_PROTOCOL, Feature.GOSSIP));
+        // the thresholds sit close to the measured read sizes; the latest config (a trie memtable
+        // on offheap_objects) returns rows that measure larger, so the small rows of noWarnings
+        // cross 1 KiB
+        builder.withConfig(c -> c.with(Feature.NATIVE_PROTOCOL, Feature.GOSSIP)
+                                 .set("memtable", Map.of("configurations", Map.of("default", Map.of("class_name", "SkipListMemtable"))))
+                                 .set("memtable_allocation_type", "heap_buffers"));
         CLUSTER = builder.start();
         JAVA_DRIVER = JavaDriverUtils.create(CLUSTER);
         JAVA_DRIVER_SESSION = JAVA_DRIVER.connect();

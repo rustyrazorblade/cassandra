@@ -163,6 +163,54 @@ public class ReadAheadBufferTest implements WithQuickTheories
         }
     }
 
+    @Test
+    public void limitedFillStartsAtThePositionAndStopsAtTheLimit() throws CorruptBlockException
+    {
+        try (ChannelProxy channel = new ChannelProxy(files[0]);
+             ReadAheadBuffer buffer = new ReadAheadBuffer(channel, BUFFER_SIZE, BufferType.OFF_HEAP))
+        {
+            long position = Math.min(BUFFER_SIZE + 123, channel.size() / 2);
+            long limit = Math.min(position + 1000, channel.size());
+            buffer.limitTo(limit);
+            buffer.fill(position);
+            assertEquals("a limited fill reads from the position to the limit", limit - position, buffer.remaining());
+            assertSameBytes(channel, buffer, position, (int) (limit - position));
+
+            // a fill at the limit reads on, a whole buffer
+            if (limit < channel.size())
+            {
+                buffer.fill(limit);
+                assertEquals(Math.min(BUFFER_SIZE, channel.size() - limit), buffer.remaining());
+                assertSameBytes(channel, buffer, limit, (int) Math.min(100, channel.size() - limit));
+            }
+        }
+    }
+
+    @Test
+    public void testLimitedReadsLikeChannelProxy()
+    {
+        qt().withFixedSeed(seed).forAll(reads(), longs().between(1, Integer.MAX_VALUE)).checkAssert((inputs, limit) -> {
+            try (ChannelProxy channel = new ChannelProxy(inputs.file);
+                 ReadAheadBuffer rab = new ReadAheadBuffer(channel, BUFFER_SIZE, BufferType.OFF_HEAP))
+            {
+                rab.limitTo(limit);
+                for (Pair<Long, Integer> read : inputs.positionsAndLengths)
+                    testRead(read, channel, rab);
+            }
+        });
+    }
+
+    private static void assertSameBytes(ChannelProxy channel, ReadAheadBuffer buffer, long position, int length)
+    {
+        ByteBuffer expected = ByteBuffer.allocate(length);
+        channel.read(expected, position);
+        expected.flip();
+        ByteBuffer actual = ByteBuffer.allocate(length);
+        buffer.read(actual, length);
+        actual.flip();
+        assertEquals(expected, actual);
+    }
+
     protected void testReads(InputData propertyInputs)
     {
         try (ChannelProxy channel = new ChannelProxy(propertyInputs.file);

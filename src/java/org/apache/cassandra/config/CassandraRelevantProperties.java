@@ -213,6 +213,8 @@ public enum CassandraRelevantProperties
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
     /** Experimental. */
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),
+    /** Experimental: serve the sstable legs of supported single-partition reads through SSTableCursorReader. Off by default. */
+    CURSOR_READS_ENABLED("cassandra.cursor_reads_enabled", "false"),
     /** Experimental.  Repair validation and anticompaction on the cursor path. */
     CURSOR_REPAIR_ENABLED("cassandra.cursor_repair_enabled", "false"),
     CUSTOM_DISK_ERROR_HANDLER("cassandra.custom_disk_error_handler"),

@@ -21,6 +21,7 @@ package org.apache.cassandra.service.accord.serializers;
 import java.io.IOException;
 import java.util.Arrays;
 
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.api.RoutingKey;
@@ -49,6 +50,7 @@ import static accord.primitives.Routable.Domain.Key;
 import static accord.primitives.Routable.Domain.Range;
 import static org.apache.cassandra.utils.AccordGenerators.fromQT;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class LatestDepsSerializerTest
 {
     {

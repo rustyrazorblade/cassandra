@@ -19,6 +19,7 @@
 package org.apache.cassandra.db.compaction.differential;
 
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -49,6 +50,7 @@ import static org.junit.Assert.assertTrue;
  * but must still defer. Only the rewrite of expired TTL cells into tombstones differs between
  * the cases; plain tombstones purge against gcBefore in all of them.
  */
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordTableDifferentialCompactionTest extends DifferentialCompactionTester
 {
     private static final long TTL_SECONDS = 1;

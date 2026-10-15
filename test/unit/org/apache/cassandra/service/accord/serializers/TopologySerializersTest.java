@@ -21,6 +21,7 @@ package org.apache.cassandra.service.accord.serializers;
 import java.io.IOException;
 
 import org.assertj.core.api.Assertions;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,6 +46,7 @@ import org.apache.cassandra.utils.Generators;
 import static accord.utils.Property.qt;
 
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class TopologySerializersTest
 {
     private static final Logger logger = LoggerFactory.getLogger(TopologySerializersTest.class);

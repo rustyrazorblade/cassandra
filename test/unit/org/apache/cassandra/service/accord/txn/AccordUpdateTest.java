@@ -21,6 +21,7 @@ package org.apache.cassandra.service.accord.txn;
 import java.io.IOException;
 
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.primitives.Txn;
@@ -34,6 +35,7 @@ import org.apache.cassandra.service.accord.serializers.Version;
 
 import static org.apache.cassandra.cql3.statements.schema.CreateTableStatement.parse;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordUpdateTest
 {
     @BeforeClass

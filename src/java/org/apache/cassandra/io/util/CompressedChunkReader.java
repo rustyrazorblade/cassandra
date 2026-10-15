@@ -249,11 +249,35 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
             return compressed;
         }
 
+        /** Fills stop at the compressed {@code offset}. */
+        void limitTo(long offset)
+        {
+            readAheadBuffer.limitTo(offset);
+        }
+
         @Override
         public void close()
         {
             readAheadBuffer.close();
         }
+    }
+
+    /** The scan reader stops its read-ahead after the chunk that holds the uncompressed {@code position} - 1. */
+    static void limitReadAhead(CompressedReader scanReader, CompressionMetadata metadata, long position)
+    {
+        if (!(scanReader instanceof ScanCompressedReader))
+            return;
+        if (position <= 0)
+            return;
+        if (position >= metadata.dataLength)
+        {
+            // nothing to stop before, but fills still start where the read is
+            ((ScanCompressedReader) scanReader).limitTo(Long.MAX_VALUE - 1);
+            return;
+        }
+        CompressionMetadata.Chunk last = metadata.chunkFor(position - 1);
+        // the chunk and its checksum
+        ((ScanCompressedReader) scanReader).limitTo(last.offset + last.length + Integer.BYTES);
     }
 
     public static class Direct extends CompressedChunkReader
@@ -343,6 +367,12 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         }
 
         @Override
+        public void limitReadAhead(long position)
+        {
+            CompressedChunkReader.limitReadAhead(scanReader, metadata, position);
+        }
+
+        @Override
         public void close()
         {
             reader.close();
@@ -391,6 +421,12 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         {
             if (scanReader != null)
                 scanReader.close();
+        }
+
+        @Override
+        public void limitReadAhead(long position)
+        {
+            CompressedChunkReader.limitReadAhead(scanReader, metadata, position);
         }
 
         @Override

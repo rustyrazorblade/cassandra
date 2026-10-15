@@ -26,6 +26,8 @@ import java.util.Random;
 
 import org.junit.Test;
 
+import org.apache.cassandra.utils.AbstractIterator;
+import org.apache.cassandra.utils.IteratorWithLowerBound;
 import org.apache.cassandra.utils.MergeIterator;
 
 import static org.junit.Assert.assertEquals;
@@ -34,7 +36,8 @@ import static org.junit.Assert.assertEquals;
  * {@link IteratorMergeOrder} must give equal items in the order {@link MergeIterator} gives them
  * to its reducer.  Each source is a sorted list of ints, and many sources hold the same ints, so
  * most steps merge several sources.  Source counts go past the sorted section into the binary
- * heap, and empty or short sources exercise the removal of an exhausted source.
+ * heap, and empty or short sources exercise the removal of an exhausted source.  With lower bounds,
+ * the bounds are equal to or below the first item, and empty sources come with and without one.
  */
 public class IteratorMergeOrderTest
 {
@@ -143,6 +146,147 @@ public class IteratorMergeOrderTest
         });
         while (merge.hasNext())
             steps.add(merge.next());
+        return steps;
+    }
+
+    private static final class BoundedSource extends AbstractIterator<Integer> implements IteratorWithLowerBound<Integer>
+    {
+        final int index;
+        final List<Integer> items;
+        final Integer lowerBound;
+        int position = -1;
+
+        BoundedSource(int index, List<Integer> items, Integer lowerBound)
+        {
+            this.index = index;
+            this.items = items;
+            this.lowerBound = lowerBound;
+        }
+
+        protected Integer computeNext()
+        {
+            return ++position < items.size() ? items.get(position) : endOfData();
+        }
+
+        public Integer lowerBound()
+        {
+            return lowerBound;
+        }
+    }
+
+    /** A source as the order reads it: its position in its list, moved by {@link IteratorMergeOrder.LowerBoundSources#advance}. */
+    private static final class BoundedCursor
+    {
+        final BoundedSource source;
+        int position = -1;
+
+        BoundedCursor(BoundedSource source)
+        {
+            this.source = source;
+        }
+
+        int item(boolean lowerBound)
+        {
+            return lowerBound ? source.lowerBound : source.items.get(position);
+        }
+    }
+
+    @Test
+    public void sameOrderAsMergeIteratorWithLowerBounds() throws Exception
+    {
+        long seed = System.nanoTime();
+        Random random = new Random(seed);
+        for (int trial = 0; trial < 20_000; trial++)
+        {
+            int count = 2 + random.nextInt(11);
+            int range = 1 + random.nextInt(12);
+            List<BoundedSource> sources = new ArrayList<>();
+            for (int i = 0; i < count; i++)
+            {
+                List<Integer> items = new ArrayList<>();
+                for (int key = 0; key < range; key++)
+                {
+                    if (random.nextInt(3) == 0)
+                        items.add(key);
+                }
+                Integer lowerBound = null;
+                if (random.nextBoolean())
+                {
+                    int first = items.isEmpty() ? range : items.get(0);
+                    lowerBound = first - random.nextInt(3);
+                }
+                sources.add(new BoundedSource(i, items, lowerBound));
+            }
+            String label = "seed " + seed + " trial " + trial;
+            assertEquals(label, mergeIteratorStepsWithLowerBounds(sources), orderStepsWithLowerBounds(sources));
+        }
+    }
+
+    private static List<List<Integer>> mergeIteratorStepsWithLowerBounds(List<BoundedSource> sources)
+    {
+        List<BoundedSource> fresh = new ArrayList<>();
+        for (BoundedSource s : sources)
+            fresh.add(new BoundedSource(s.index, s.items, s.lowerBound));
+        List<List<Integer>> steps = new ArrayList<>();
+        Iterator<List<Integer>> merge = MergeIterator.get(fresh, Integer::compare, new MergeIterator.Reducer<Integer, List<Integer>>()
+        {
+            List<Integer> step = new ArrayList<>();
+
+            public void reduce(int idx, Integer current)
+            {
+                step.add(idx);
+            }
+
+            protected List<Integer> getReduced()
+            {
+                return step;
+            }
+
+            protected void onKeyChange()
+            {
+                step = new ArrayList<>();
+            }
+        });
+        while (merge.hasNext())
+        {
+            List<Integer> step = merge.next();
+            if (!step.isEmpty())
+                steps.add(step);
+        }
+        return steps;
+    }
+
+    private static List<List<Integer>> orderStepsWithLowerBounds(List<BoundedSource> sources) throws Exception
+    {
+        BoundedCursor[] cursors = new BoundedCursor[sources.size()];
+        boolean[] lowerBounds = new boolean[sources.size()];
+        for (int i = 0; i < cursors.length; i++)
+        {
+            cursors[i] = new BoundedCursor(sources.get(i));
+            lowerBounds[i] = sources.get(i).lowerBound != null;
+        }
+        IteratorMergeOrder<BoundedCursor> order = new IteratorMergeOrder<>(cursors, lowerBounds, new IteratorMergeOrder.LowerBoundSources<BoundedCursor>()
+        {
+            public int compare(BoundedCursor a, boolean aIsLowerBound, BoundedCursor b, boolean bIsLowerBound)
+            {
+                return Integer.compare(a.item(aIsLowerBound), b.item(bIsLowerBound));
+            }
+
+            public boolean advance(BoundedCursor source, boolean afterLowerBound)
+            {
+                return ++source.position < source.source.items.size();
+            }
+        });
+        List<List<Integer>> steps = new ArrayList<>();
+        BoundedCursor[] into = new BoundedCursor[cursors.length];
+        int k;
+        while ((k = order.nextWithLowerBounds(into)) > 0)
+        {
+            List<Integer> step = new ArrayList<>();
+            for (int i = 0; i < k; i++)
+                step.add(into[i].source.index);
+            steps.add(step);
+        }
         return steps;
     }
 }
