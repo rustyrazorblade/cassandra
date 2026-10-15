@@ -394,7 +394,7 @@ public class DroppedColumnDifferentialCompactionTest extends DifferentialCompact
     /**
      * Drop and re-add of a SET column. Every existing scenario here uses {@code text},
      * {@code bigint} or {@code map<text, bigint>}, so the complex arm of
-     * {@code CursorCompactor.isDroppedMultiCellOrCounterColumn} was only ever reached with a map.
+     * {@code CursorCompactor.isDroppedMultiCellColumn} was only ever reached with a map.
      */
     @Test
     public void droppedThenReaddedSetColumn() throws Exception
@@ -462,7 +462,7 @@ public class DroppedColumnDifferentialCompactionTest extends DifferentialCompact
      * There is no drop-and-re-add scenario for a non-frozen UDT column: ALTER TABLE ... DROP
      * rejects one outright, "Cannot drop non-frozen column %s of user type %s"
      * (AlterTableStatement.DropColumns.dropColumn). The UDT arm of
-     * CursorCompactor.isDroppedMultiCellOrCounterColumn is therefore only reachable through a
+     * CursorCompactor.isDroppedMultiCellColumn is therefore only reachable through a
      * dropped non-frozen COLLECTION, which the two scenarios above cover.
      */
 }
