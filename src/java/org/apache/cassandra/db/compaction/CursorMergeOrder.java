@@ -57,14 +57,17 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  *   <li>a complex cell: the path of the first cell, of the cells that tie on everything, that
  *       {@code Cells.reconcile} is given.</li>
  * </ul>
+ * Counter cells need the order for another reason: {@code Cells.reconcile} merges their contexts,
+ * and {@code CounterContext.merge} can give a different result when its two sides swap.  The
+ * iterator path folds the cells of a counter column in column merge order.
  * The order comes from four nested {@code MergeIterator}s: partitions over the scanners, rows over
  * the partition's sources in partition merge order, columns over the row's sources in partition
  * merge order, and the cells of a complex column over that column's sources in column merge
  * order.  This class runs one {@link IteratorMergeOrder} for each, beside the cursor sorts, which
  * still decide the groups.
  *
- * <p>A table whose clustering types and cell path types all compare equal only for equal bytes
- * gets no instance: every order writes the same bytes there.  See {@link #equalValuesHaveEqualBytes}.
+ * <p>A table with no counter column, whose clustering types and cell path types all compare equal
+ * only for equal bytes, gets no instance: every order writes the same bytes there.  See {@link #equalValuesHaveEqualBytes}.
  */
 final class CursorMergeOrder
 {
@@ -87,6 +90,7 @@ final class CursorMergeOrder
     }
 
     private final boolean orderRows;
+    /** True if a complex column's cell paths or a counter column's cells need the merge order. */
     private final boolean orderCells;
 
     private final IteratorMergeOrder<ScannerSource> partitionOrder;
@@ -159,18 +163,23 @@ final class CursorMergeOrder
 
         boolean orderCells = false;
         for (ColumnMetadata column : metadata.regularAndStaticColumns())
-            orderCells |= pathBytesMayDiffer(column.type);
+            orderCells |= needsCellOrder(column.type);
         for (SSTableReader sstable : sstables)
         {
             for (AbstractType<?> type : sstable.header.clusteringTypes())
                 orderRows |= !equalValuesHaveEqualBytes(type);
             for (ColumnMetadata column : sstable.header.columns())
-                orderCells |= pathBytesMayDiffer(sstable.header.getType(column)) || pathBytesMayDiffer(column.type);
+                orderCells |= needsCellOrder(sstable.header.getType(column)) || needsCellOrder(column.type);
         }
 
         if (!orderRows && !orderCells)
             return null;
         return new CursorMergeOrder(scanners, cursorsInScannerOrder, orderRows, orderCells);
+    }
+
+    private static boolean needsCellOrder(AbstractType<?> type)
+    {
+        return type != null && (type.isCounter() || pathBytesMayDiffer(type));
     }
 
     private static boolean pathBytesMayDiffer(AbstractType<?> type)
@@ -266,7 +275,8 @@ final class CursorMergeOrder
 
     /**
      * Steps the column merge at each new column, and the cell merge at each cell of a complex
-     * column that needs it, and puts the cell group in cell merge order.  Call once per cell
+     * column that needs it, and puts the cell group in cell merge order.  The cells of a counter
+     * column go in column merge order, the order {@code Row.Merger} folds them in.  Call once per cell
      * group, after the cursor sort, before the winner is picked.
      */
     void orderCellGroup(StatefulCursor[] sstableCursors, boolean[] equalsNext, int cellMergeLimit)
@@ -280,6 +290,14 @@ final class CursorMergeOrder
             int n = columnOrder.next(columnGroup);
             assert n > 0 && ColumnMetadata.sameName(columnGroup[0].cellCursor().cellColumn, currentColumn)
                  : "column merge order is not at column " + currentColumn;
+            if (currentColumn.isCounterColumn())
+            {
+                // a simple column has one cell per source, so the column group is the cell group
+                assert n == cellMergeLimit : "column merge order found " + n + " sources, the cursor sort " + cellMergeLimit;
+                System.arraycopy(columnGroup, 0, sstableCursors, 0, n);
+                orderedCellColumn = null;
+                return;
+            }
             orderedCellColumn = pathBytesMayDiffer(currentColumn.type) ? currentColumn : null;
             if (orderedCellColumn != null)
                 cellOrder.reset(columnGroup, n);

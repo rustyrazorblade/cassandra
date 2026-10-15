@@ -226,11 +226,24 @@ public class CursorSupportMatrixTest extends CQLTester
         return cfs;
     }
 
-    /** Counter columns are unsupported. */
+    /** Nested types (collections of frozen collections, UDTs holding frozen collections,
+     *  UDT-in-UDT) are inside the supported surface. */
     @Test
-    public void countersUnsupported()
+    public void nestedTypesSupported()
     {
-        assertUnsupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        String inner = createType("CREATE TYPE %s (xs frozen<list<int>>, name text)");
+        String outer = createType("CREATE TYPE %s (i frozen<" + inner + ">, tag text)");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, " +
+                        "m map<text, frozen<list<int>>>, u " + inner + ", o " + outer + ", " +
+                        "PRIMARY KEY (pk, ck))");
+    }
+
+    /** Counter tables compact through the cursor. */
+    @Test
+    public void countersSupported()
+    {
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        assertSupported("CREATE TABLE %s (pk bigint, ck bigint, c counter, s counter static, PRIMARY KEY (pk, ck))");
     }
 
     /** An indexed table keeps the iterator path. */
@@ -390,13 +403,13 @@ public class CursorSupportMatrixTest extends CQLTester
                    isSupportedNow(plain));
     }
 
-    /** A dropped counter column stays gated: the cursor path has no counter merge. */
+    /** A dropped counter column that a header still lists compacts through the cursor. */
     @Test
-    public void droppedCounterUnsupportedFromHeaders() throws Exception
+    public void droppedCounterSupportedFromHeaders() throws Exception
     {
         Assume.assumeTrue("requires the BIG sstable format", BigFormat.isSelected());
 
-        // one counter only, so the drop leaves no counter in the schema for unsupportedSchema to catch
+        // one counter only, so the drop leaves no counter in the schema
         createTable("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
@@ -408,8 +421,7 @@ public class CursorSupportMatrixTest extends CQLTester
 
         execute("ALTER TABLE %s DROP c");
 
-        assertFalse("the dropped counter must leave the metadata check satisfied, which is exactly " +
-                    "why the header check is needed",
+        assertFalse("the dropped counter must leave the metadata check satisfied",
                     CursorCompactor.unsupportedMetadata(cfs.metadata()));
 
         boolean anyHeaderStillHasIt = false;
@@ -419,9 +431,9 @@ public class CursorSupportMatrixTest extends CQLTester
         assertTrue("expected a pre-drop sstable header to still list the dropped counter",
                    anyHeaderStillHasIt);
 
-        assertFalse("cursor compaction must refuse a table whose input headers still carry a " +
-                    "counter column; the cursor has no counter merge",
-                    isSupportedNow(cfs));
+        assertTrue("cursor compaction must accept a table whose input headers still carry a " +
+                   "dropped counter column",
+                   isSupportedNow(cfs));
     }
 
     private boolean isSupportedNow(ColumnFamilyStore cfs) throws Exception
