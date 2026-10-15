@@ -41,7 +41,9 @@ public class CompactionStrategyOverrideTest extends TestBaseImpl
     {
         try (Cluster cluster = init(builder().withNodes(1)
                                              .withConfig(config -> config.with(Feature.NETWORK, Feature.GOSSIP)
-                                                                         .set(Constants.KEY_DTEST_FULL_STARTUP, true))
+                                                                         .set(Constants.KEY_DTEST_FULL_STARTUP, true)
+                                                                         // the test checks the STCS default; the latest config defaults to UCS
+                                                                         .set("default_compaction", Map.of("class_name", "SizeTieredCompactionStrategy", "parameters", Map.of())))
                                              .start()))
         {
             cluster.coordinator(1).execute("CREATE KEYSPACE ks1 WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}", ConsistencyLevel.ALL);

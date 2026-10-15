@@ -257,6 +257,13 @@ public class ChunkCache implements CacheLoader<ChunkCache.Key, ChunkCache.Buffer
             cache.invalidate(new Key(source, pageAlignedPos));
         }
 
+        /** Looks the chunk up without loading it: it records no hit or miss and leaves the eviction order as is. */
+        @Override
+        public boolean isChunkCached(long position)
+        {
+            return cache.asMap().containsKey(new Key(source, position & alignmentMask));
+        }
+
         @Override
         public Rebufferer instantiateRebufferer(boolean isScan)
         {

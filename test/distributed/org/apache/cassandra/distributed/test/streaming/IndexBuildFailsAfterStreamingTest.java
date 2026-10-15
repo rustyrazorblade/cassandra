@@ -52,7 +52,9 @@ public class IndexBuildFailsAfterStreamingTest extends TestBaseImpl
                                            .withInstanceInitializer(BBHelper::install)
                                            .withConfig(c -> c.with(Feature.values())
                                                              .set("stream_entire_sstables", false)
-                                                             .set("disk_failure_policy", "die"))
+                                                             .set("disk_failure_policy", "die")
+                                                             // the failure is injected into the legacy index build; the latest config defaults to SAI
+                                                             .set("default_secondary_index", "legacy_local_table"))
                                            .start()))
         {
             cluster.setUncaughtExceptionsFilter(t -> t.getMessage().equals("On purpose fail 2i build"));

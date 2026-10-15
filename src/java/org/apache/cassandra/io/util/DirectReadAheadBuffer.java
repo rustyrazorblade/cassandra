@@ -39,6 +39,13 @@ public final class DirectReadAheadBuffer extends ReadAheadBuffer
         this.blockSize = blockSize;
     }
 
+    /** Direct reads start on a block boundary. */
+    @Override
+    protected long windowStartFor(long position)
+    {
+        return position & -blockSize;
+    }
+
     @Override
     protected void loadBlock(ByteBuffer blockBuffer, long blockPosition, int sizeToRead)
     {

@@ -27,6 +27,7 @@ import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.io.util.DataInputBuffer;
+import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.ResizableByteBuffer;
 
@@ -53,6 +54,10 @@ public class ClusteringDescriptor extends ResizableByteBuffer
     protected byte clusteringKindEncoded;
     protected int clusteringColumnsBound;
 
+    // Write-path scratch, reused across rows and markers, grow-only; created at the first write,
+    // since most descriptors only ever read
+    private DataOutputBuffer clusteringWriteScratch;
+
     public ClusteringDescriptor(AbstractType<?>[] clusteringTypes)
     {
         this.clusteringTypes = clusteringTypes;
@@ -65,6 +70,30 @@ public class ClusteringDescriptor extends ResizableByteBuffer
             readUnfilteredClustering(dataReader, clusteringTypes, this.clusteringColumnsBound, this);
         else
             resetBuffer();
+    }
+
+    /**
+     * Inverse of {@link #loadClustering}: serializes a live {@link ClusteringPrefix} into this
+     * descriptor's buffer, using the same
+     * {@link ClusteringPrefix.Serializer#serializeValuesWithoutSize} wire format the reader
+     * parses, so a buffer built here reads back identically via {@link #toClusteringPrefix}.
+     */
+    protected void storeClustering(byte clusteringKind, int clusteringColumnsBound, ClusteringPrefix<?> prefix)
+    {
+        // Never called with STATIC_CLUSTERING_KIND; a static row has no clustering to serialize.
+        set(clusteringKind, clusteringColumnsBound);
+        try
+        {
+            if (clusteringWriteScratch == null)
+                clusteringWriteScratch = new DataOutputBuffer(64);
+            clusteringWriteScratch.clear();
+            ClusteringPrefix.serializer.serializeValuesWithoutSize(prefix, clusteringWriteScratch, 0, clusteringTypes);
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException("Writing to an in-memory buffer shouldn't trigger an IOException", e);
+        }
+        overwrite(clusteringWriteScratch.getData(), clusteringWriteScratch.getLength());
     }
 
     public final ClusteringDescriptor resetMinEnd() {

@@ -1,0 +1,724 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.cassandra.db.cursorreads;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+
+import org.junit.After;
+
+import org.apache.cassandra.cache.KeyCacheKey;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.CQLTester;
+import org.apache.cassandra.db.ClusteringPrefix;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.CursorReads;
+import org.apache.cassandra.db.ReadCommandVerbHandler;
+import org.apache.cassandra.db.ReadExecutionController;
+import org.apache.cassandra.db.ReadResponse;
+import org.apache.cassandra.db.SinglePartitionReadCommand;
+import org.apache.cassandra.db.lifecycle.SSTableSet;
+import org.apache.cassandra.db.lifecycle.View;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
+import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.ComplexColumnData;
+import org.apache.cassandra.db.rows.RangeTombstoneMarker;
+import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.Rows;
+import org.apache.cassandra.db.rows.Unfiltered;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.io.sstable.AbstractRowIndexEntry;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.metrics.ClearableHistogram;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.CacheService;
+import org.apache.cassandra.service.pager.PagingState;
+import org.apache.cassandra.service.pager.SinglePartitionPager;
+import org.apache.cassandra.transport.ProtocolVersion;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.ObjectSizes;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+/**
+ * Differential test harness for the cursor read path, modeled on
+ * {@code DifferentialCompactionTester} but comparing READ results instead of compaction output.
+ *
+ * For each scenario the SAME {@link SinglePartitionReadCommand} shape (rebuilt fresh per execution,
+ * with a pinned nowInSeconds so TTL/liveness evaluation cannot flip between runs) is executed through:
+ *   1. the iterator path (cursor_reads_enabled = false), and
+ *   2. the cursor path (cursor_reads_enabled = true),
+ * and the results are compared at these levels:
+ *   - LOGICAL: a canonical record stream of every partition/static row/row/marker/cell, including
+ *     liveness, deletion, complex deletion, cell path, ttl/localDeletionTime, value bytes, and the
+ *     heap sizes the read size guardrail adds up;
+ *   - BYTES: the intra-node {@code ReadResponse} serialization (the exact
+ *     {@code ReadResponse.LocalDataResponse.build} encoding), the replica response to the read and
+ *     the replica response to its digest copy must be byte-identical;
+ *   - METRICS: each of those reads records the same scan metrics ({@link ScanMetricsCapture}), and
+ *     both paths start from the same key cache and change it alike.
+ *
+ * Silent-fallback guard: before the cursor run the
+ * scenario asserts {@link CursorReads#isReadSupported} holds for the command, and after it, that
+ * {@link CursorReads#sstableLegsServed()} actually advanced — a scenario whose cursor run silently
+ * fell back to the iterator path fails loudly rather than proving nothing.
+ */
+public abstract class CursorReadDifferentialTester extends CQLTester
+{
+    @After
+    public void resetCursorReadState()
+    {
+        DatabaseDescriptor.setCursorReadsEnabled(false);
+        CursorReads.TEST_CORRUPT_CELL_TIMESTAMPS = false;
+        CursorReads.TEST_CORRUPT_MERGE_DECISIONS = false;
+        CursorReads.TEST_SKEW_MEMTABLE_LEG_TIMESTAMPS = false;
+        CursorReads.TEST_FORCE_MEMTABLE_ROW_REUSE = false;
+        CursorReads.TEST_SKEW_DROPPED_ROW_ACCOUNTING = false;
+        CursorReads.TEST_DROP_MERGE_SEEK_OPEN_MARKER = false;
+        CursorReads.TEST_SKEW_MERGE_SEEK_OPEN_MARKER = false;
+        CursorReads.TEST_TRANSCODE_SKEW_TIMESTAMP = false;
+        CursorReads.TEST_TRANSCODE_WRONG_FLAGS = false;
+        CursorReads.TEST_CORRUPT_STREAMED_CELL_VALUE = false;
+    }
+
+    protected static List<SSTableReader> liveSSTablesFor(ColumnFamilyStore cfs, SinglePartitionReadCommand command)
+    {
+        return cfs.select(View.select(SSTableSet.LIVE, command.partitionKey())).sstables;
+    }
+
+    /** Full differential: gate must be open, cursor must actually serve sstable legs, results identical. */
+    protected void assertCursorReadMatchesIterator(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command)
+    {
+        assertCursorReadMatchesIterator(cfs, command, true);
+    }
+
+    /**
+     * @param expectCursorServedLegs pass false only for scenarios where no candidate sstable
+     *        contains the queried partition (the cursor is then never opened; the leg is counted in
+     *        {@link CursorReads#sstableLegsWithoutPartition()} instead)
+     */
+    protected void assertCursorReadMatchesIterator(ColumnFamilyStore cfs,
+                                                   Supplier<SinglePartitionReadCommand> command,
+                                                   boolean expectCursorServedLegs)
+    {
+        assertCursorReadMatchesIterator(cfs, command, expectCursorServedLegs ? LegCheck.SERVED : LegCheck.CONSULTED);
+    }
+
+    /**
+     * The full differential for a read the iterator path serves without reading any sstable (a
+     * names read the memtable completes, so the timestamp-order read stops before the sstables):
+     * the cursor path must read none either, and the results must be identical.
+     */
+    protected void assertCursorReadMatchesIteratorReadingNoSSTable(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command)
+    {
+        assertEquals("the iterator read touched an sstable", 0, sstablesRead(cfs, command, false));
+        assertEquals("the cursor read touched an sstable the iterator read did not", 0, sstablesRead(cfs, command, true));
+        assertCursorReadMatchesIterator(cfs, command, LegCheck.NONE);
+    }
+
+    /** The most sstables one read of {@code command} touched, from the table's sstables-per-read histogram. */
+    protected static long sstablesRead(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command, boolean cursorReads)
+    {
+        ClearableHistogram sstablesPerRead = (ClearableHistogram) cfs.metric.sstablesPerReadHistogram.cf;
+        DatabaseDescriptor.setCursorReadsEnabled(cursorReads);
+        try
+        {
+            sstablesPerRead.clear();
+            canonicalRecords(command.get());
+            return sstablesPerRead.getCount() == 0 ? 0 : sstablesPerRead.getSnapshot().getMax();
+        }
+        finally
+        {
+            DatabaseDescriptor.setCursorReadsEnabled(false);
+        }
+    }
+
+    /** What the cursor run must show it did with the sstable legs. */
+    private enum LegCheck
+    {
+        /** served at least one leg */
+        SERVED,
+        /** opened at least one leg, served or without the partition */
+        CONSULTED,
+        /** nothing: the read touches no sstable on either path */
+        NONE
+    }
+
+    /** The production counters of {@link CursorReads}, which the cursor path moves. */
+    private static final List<AtomicLong> CURSOR_COUNTERS = cursorCounters();
+
+    private static List<AtomicLong> cursorCounters()
+    {
+        List<AtomicLong> counters = new ArrayList<>();
+        try
+        {
+            for (Field field : CursorReads.class.getDeclaredFields())
+            {
+                if (Modifier.isStatic(field.getModifiers()) && field.getType() == AtomicLong.class)
+                {
+                    field.setAccessible(true);
+                    counters.add((AtomicLong) field.get(null));
+                }
+            }
+        }
+        catch (IllegalAccessException e)
+        {
+            throw new AssertionError(e);
+        }
+        return counters;
+    }
+
+    private static long[] counterValues()
+    {
+        long[] values = new long[CURSOR_COUNTERS.size()];
+        for (int i = 0; i < values.length; i++)
+            values[i] = CURSOR_COUNTERS.get(i).get();
+        return values;
+    }
+
+    private static void setCounterValues(long[] values)
+    {
+        for (int i = 0; i < values.length; i++)
+            CURSOR_COUNTERS.get(i).set(values[i]);
+    }
+
+    /** What one path's run of {@link #assertCursorReadMatchesIterator} produced. */
+    private static final class PathRun
+    {
+        List<String> records;
+        byte[] bytes, replicaBytes, digestBytes;
+        final List<ScanMetricsCapture.Snapshot> metrics = new ArrayList<>();
+        List<String> keyCacheChanges;
+        /** the transcode path wrote the replica response to the data read */
+        boolean transcodeServed;
+    }
+
+    /**
+     * Each read of a comparison, with its scan metrics: the records, the intra-node bytes, and the
+     * replica response to the data read and to its digest copy.  The replica runs leave the
+     * {@link CursorReads} counters where the two {@code executeLocally} runs left them, so a suite
+     * can count what those two runs did around the comparison.
+     */
+    private static PathRun runPath(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command)
+    {
+        PathRun run = new PathRun();
+        Map<KeyCacheKey, AbstractRowIndexEntry> keyCacheAtStart = keyCacheEntries();
+        run.metrics.add(ScanMetricsCapture.capture(cfs, () -> run.records = canonicalRecords(command.get())));
+        run.metrics.add(ScanMetricsCapture.capture(cfs, () -> run.bytes = responseBytes(command.get())));
+        long[] counters = counterValues();
+        long transcodeBefore = CursorReads.transcodeResponsesServed();
+        try
+        {
+            run.metrics.add(ScanMetricsCapture.capture(cfs, () -> run.replicaBytes = replicaResponseBytes(command.get())));
+            run.transcodeServed = CursorReads.transcodeResponsesServed() > transcodeBefore;
+            run.metrics.add(ScanMetricsCapture.capture(cfs, () -> run.digestBytes = replicaResponseBytes(CursorReadOracle.digestCopy(command.get()))));
+        }
+        finally
+        {
+            setCounterValues(counters);
+        }
+        run.keyCacheChanges = keyCacheChangesSince(keyCacheAtStart, cfs);
+        // a read aborted by the tombstone threshold leaves its output empty; the abort is in its metrics
+        if (run.records == null)
+            run.records = Collections.emptyList();
+        run.bytes = orEmpty(run.bytes);
+        run.replicaBytes = orEmpty(run.replicaBytes);
+        run.digestBytes = orEmpty(run.digestBytes);
+        return run;
+    }
+
+    private static byte[] orEmpty(byte[] bytes)
+    {
+        return bytes == null ? new byte[0] : bytes;
+    }
+
+    private static final String[] RUN_READS = { "records", "intra-node bytes", "replica response", "digest response" };
+
+    /** Fails unless the two runs recorded the same scan metrics for each read, and changed the key cache alike. */
+    private static void assertSameMetrics(PathRun iterator, PathRun cursor)
+    {
+        for (int i = 0; i < iterator.metrics.size(); i++)
+            ScanMetricsCapture.assertParity("iterator vs cursor, " + RUN_READS[i], iterator.metrics.get(i), cursor.metrics.get(i));
+        assertEquals("key cache changes diverged between paths", iterator.keyCacheChanges, cursor.keyCacheChanges);
+    }
+
+    private void assertCursorReadMatchesIterator(ColumnFamilyStore cfs,
+                                                 Supplier<SinglePartitionReadCommand> command,
+                                                 LegCheck legCheck)
+    {
+        // both paths start from the same key cache
+        Map<KeyCacheKey, AbstractRowIndexEntry> keyCacheBefore = keyCacheEntries();
+        DatabaseDescriptor.setCursorReadsEnabled(false);
+        PathRun iterator = runPath(cfs, command);
+        restoreKeyCache(keyCacheBefore);
+
+        DatabaseDescriptor.setCursorReadsEnabled(true);
+        try
+        {
+            SinglePartitionReadCommand probe = command.get();
+            assertTrue("scenario is not supported by the cursor read gate; this harness run would " +
+                       "silently compare iterator vs iterator. If unsupported-ness is intended, use " +
+                       "assertFallsBackUnchanged instead.",
+                       CursorReads.isReadSupported(probe, cfs, liveSSTablesFor(cfs, probe)));
+
+            long servedBefore = CursorReads.sstableLegsServed();
+            long missBefore = CursorReads.sstableLegsWithoutPartition();
+            PathRun cursor = runPath(cfs, command);
+            long servedDelta = CursorReads.sstableLegsServed() - servedBefore;
+            long missDelta = CursorReads.sstableLegsWithoutPartition() - missBefore;
+            if (legCheck == LegCheck.SERVED)
+                assertTrue("cursor path did not actually serve any sstable leg (silent fallback?); " +
+                           "served=" + servedDelta + " missed=" + missDelta,
+                           servedDelta > 0);
+            else if (legCheck == LegCheck.CONSULTED)
+                assertTrue("cursor path was not consulted at all (silent fallback?); " +
+                           "served=" + servedDelta + " missed=" + missDelta,
+                           servedDelta + missDelta > 0);
+
+            compareRecords(iterator.records, cursor.records);
+            assertResponseBytesEqual(iterator.bytes, cursor.bytes);
+            // the replica response, which the transcode path writes when it serves the read
+            if (CursorReadOracle.transcodeEligible(probe, cfs))
+                assertTrue("the transcode path did not write the replica response", cursor.transcodeServed);
+            assertResponseBytesEqual(iterator.replicaBytes, cursor.replicaBytes);
+            assertResponseBytesEqual(iterator.digestBytes, cursor.digestBytes);
+            assertSameMetrics(iterator, cursor);
+        }
+        finally
+        {
+            DatabaseDescriptor.setCursorReadsEnabled(false);
+        }
+    }
+
+    // ---------------------------------------------------------------- key cache
+
+    protected static Map<KeyCacheKey, AbstractRowIndexEntry> keyCacheEntries()
+    {
+        Map<KeyCacheKey, AbstractRowIndexEntry> entries = new HashMap<>();
+        CacheService.instance.keyCache.keyIterator().forEachRemaining(key -> {
+            AbstractRowIndexEntry entry = CacheService.instance.keyCache.getInternal(key);
+            if (entry != null)
+                entries.put(key, entry);
+        });
+        return entries;
+    }
+
+    /** Puts the key cache back to {@code before}: removes the entries added since, and puts back
+     *  the ones removed or replaced. */
+    protected static void restoreKeyCache(Map<KeyCacheKey, AbstractRowIndexEntry> before)
+    {
+        for (KeyCacheKey key : keyCacheEntries().keySet())
+        {
+            if (!before.containsKey(key))
+                CacheService.instance.keyCache.remove(key);
+        }
+        before.forEach((key, entry) -> {
+            if (CacheService.instance.keyCache.getInternal(key) != entry)
+                CacheService.instance.keyCache.put(key, entry);
+        });
+    }
+
+    /** The entries of {@code cfs}'s sstables added, replaced or removed in the key cache since
+     *  {@code before}, sorted, with each entry's cache serialization. */
+    protected static List<String> keyCacheChangesSince(Map<KeyCacheKey, AbstractRowIndexEntry> before, ColumnFamilyStore cfs)
+    {
+        Map<KeyCacheKey, AbstractRowIndexEntry> after = keyCacheEntries();
+        List<String> changes = new ArrayList<>();
+        after.forEach((key, entry) -> {
+            if (key.tableId.equals(cfs.metadata().id) && before.get(key) != entry)
+                changes.add((before.containsKey(key) ? "replaced " : "added ") + key + " -> " + describe(entry));
+        });
+        before.forEach((key, entry) -> {
+            if (key.tableId.equals(cfs.metadata().id) && !after.containsKey(key))
+                changes.add("removed " + key);
+        });
+        Collections.sort(changes);
+        return changes;
+    }
+
+    private static String describe(AbstractRowIndexEntry entry)
+    {
+        try (DataOutputBuffer buffer = new DataOutputBuffer())
+        {
+            entry.serializeForCache(buffer);
+            return entry.getClass().getSimpleName() + " " + ByteBufferUtil.bytesToHex(buffer.asNewBuffer());
+        }
+        catch (IOException e)
+        {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * For shapes the cursor read gate does not support: with the flag ON, the gate must reject the
+     * command, the cursor must never run, and the results must be identical to the flag-OFF run
+     * (the fallback is a true no-op).
+     */
+    protected void assertFallsBackUnchanged(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command)
+    {
+        Map<KeyCacheKey, AbstractRowIndexEntry> keyCacheBefore = keyCacheEntries();
+        DatabaseDescriptor.setCursorReadsEnabled(false);
+        PathRun iterator = runPath(cfs, command);
+        restoreKeyCache(keyCacheBefore);
+
+        DatabaseDescriptor.setCursorReadsEnabled(true);
+        try
+        {
+            SinglePartitionReadCommand probe = command.get();
+            assertFalse("scenario unexpectedly PASSES the cursor read gate; use " +
+                        "assertCursorReadMatchesIterator for supported shapes",
+                        CursorReads.isReadSupported(probe, cfs, liveSSTablesFor(cfs, probe)));
+
+            long servedBefore = CursorReads.sstableLegsServed();
+            long missBefore = CursorReads.sstableLegsWithoutPartition();
+            PathRun fallback = runPath(cfs, command);
+            assertEquals("cursor path ran for a gated-out command", servedBefore, CursorReads.sstableLegsServed());
+            assertEquals("cursor path was consulted for a gated-out command", missBefore, CursorReads.sstableLegsWithoutPartition());
+
+            compareRecords(iterator.records, fallback.records);
+            assertResponseBytesEqual(iterator.bytes, fallback.bytes);
+            assertResponseBytesEqual(iterator.replicaBytes, fallback.replicaBytes);
+            assertResponseBytesEqual(iterator.digestBytes, fallback.digestBytes);
+            assertSameMetrics(iterator, fallback);
+        }
+        finally
+        {
+            DatabaseDescriptor.setCursorReadsEnabled(false);
+        }
+    }
+
+    // ---------------------------------------------------------------- paged differential
+
+    /** One full paging sequence: per-page canonical records plus the serialized paging state
+     *  observed AFTER each page (the state a client would resume from). */
+    protected static final class PagedRun
+    {
+        final List<List<String>> pageRecords = new ArrayList<>();
+        final List<String> pagingStates = new ArrayList<>();
+        ScanMetricsCapture.Snapshot metrics;
+        List<String> keyCacheChanges;
+    }
+
+    /**
+     * Paged differential: drives the ENTIRE paging sequence through the real
+     * {@link org.apache.cassandra.service.pager.SinglePartitionPager}
+     * machinery ({@code fetchPageUnfiltered}, which routes each page's forPaging command through
+     * {@code executeLocally} exactly like internal paging does) under both paths, and asserts
+     * per-page canonical records AND per-page serialized {@link PagingState} equality — so a
+     * production change that bounds row production can never silently shift a page boundary or a
+     * resume point. Same silent-fallback guards as {@link #assertCursorReadMatchesIterator}: the
+     * gate must accept the base command, the cursor sequence must actually serve sstable legs, and
+     * the iterator sequence must never consult the cursor path.
+     */
+    protected void assertPagedReadMatchesIterator(ColumnFamilyStore cfs,
+                                                  Supplier<SinglePartitionReadCommand> command,
+                                                  int pageSize,
+                                                  int expectedPages)
+    {
+        Map<KeyCacheKey, AbstractRowIndexEntry> keyCacheBefore = keyCacheEntries();
+        DatabaseDescriptor.setCursorReadsEnabled(false);
+        long servedBeforeIterator = CursorReads.sstableLegsServed();
+        long missBeforeIterator = CursorReads.sstableLegsWithoutPartition();
+        PagedRun iteratorRun = runPagedSequence(cfs, command.get(), pageSize);
+        restoreKeyCache(keyCacheBefore);
+        assertEquals("iterator-path paging unexpectedly ran the cursor path",
+                     servedBeforeIterator, CursorReads.sstableLegsServed());
+        assertEquals("iterator-path paging unexpectedly consulted the cursor path",
+                     missBeforeIterator, CursorReads.sstableLegsWithoutPartition());
+
+        DatabaseDescriptor.setCursorReadsEnabled(true);
+        try
+        {
+            SinglePartitionReadCommand probe = command.get();
+            assertTrue("paged scenario is not supported by the cursor read gate; this run would " +
+                       "silently compare iterator vs iterator",
+                       CursorReads.isReadSupported(probe, cfs, liveSSTablesFor(cfs, probe)));
+
+            long servedBefore = CursorReads.sstableLegsServed();
+            PagedRun cursorRun = runPagedSequence(cfs, command.get(), pageSize);
+            assertTrue("cursor path did not serve any sstable leg during the paged sequence (silent fallback?)",
+                       CursorReads.sstableLegsServed() - servedBefore > 0);
+
+            assertEquals("page count diverged between paths", iteratorRun.pageRecords.size(), cursorRun.pageRecords.size());
+            assertEquals("paged workload did not produce the expected number of pages (workload shape drifted)",
+                         expectedPages, iteratorRun.pageRecords.size());
+            for (int page = 0; page < iteratorRun.pageRecords.size(); page++)
+            {
+                compareRecords(iteratorRun.pageRecords.get(page), cursorRun.pageRecords.get(page));
+                assertEquals("paging state after page " + page + " diverged between paths",
+                             iteratorRun.pagingStates.get(page), cursorRun.pagingStates.get(page));
+            }
+            ScanMetricsCapture.assertParity("iterator vs cursor, paged sequence", iteratorRun.metrics, cursorRun.metrics);
+            assertEquals("key cache changes diverged between paths", iteratorRun.keyCacheChanges, cursorRun.keyCacheChanges);
+        }
+        finally
+        {
+            DatabaseDescriptor.setCursorReadsEnabled(false);
+        }
+    }
+
+    private PagedRun runPagedSequence(ColumnFamilyStore cfs, SinglePartitionReadCommand command, int pageSize)
+    {
+        PagedRun run = new PagedRun();
+        Map<KeyCacheKey, AbstractRowIndexEntry> keyCacheAtStart = keyCacheEntries();
+        SinglePartitionPager pager = (SinglePartitionPager) command.getPager(null, ProtocolVersion.CURRENT);
+        run.metrics = ScanMetricsCapture.capture(cfs, () -> {
+            int guard = 0;
+            while (!pager.isExhausted())
+            {
+                assertTrue("paging sequence did not terminate", guard++ < 10_000);
+                try (ReadExecutionController controller = pager.executionController();
+                     UnfilteredPartitionIterator page = pager.fetchPageUnfiltered(cfs.metadata(), pageSize, controller))
+                {
+                    run.pageRecords.add(canonicalRecords(page));
+                }
+                PagingState state = pager.state();
+                run.pagingStates.add(state == null ? "null" : ByteBufferUtil.bytesToHex(state.serialize(ProtocolVersion.CURRENT)));
+            }
+        });
+        run.keyCacheChanges = keyCacheChangesSince(keyCacheAtStart, cfs);
+        return run;
+    }
+
+    // ---------------------------------------------------------------- capture
+
+    protected static List<String> canonicalRecords(SinglePartitionReadCommand command)
+    {
+        try (ReadExecutionController controller = command.executionController();
+             UnfilteredPartitionIterator partitions = command.executeLocally(controller))
+        {
+            return canonicalRecords(partitions);
+        }
+    }
+
+    /** Canonical record stream of an already-open partition iterator (consumes it). Used directly by
+     *  scenarios whose iterator does not come from a plain {@code executeLocally} (paged reads, the
+     *  response round-trip harness). */
+    protected static List<String> canonicalRecords(UnfilteredPartitionIterator partitions)
+    {
+        List<String> out = new ArrayList<>();
+        canonicalRecordsInto(partitions, out);
+        return out;
+    }
+
+    /** Appends records to {@code out} as they are read, so a read that throws keeps what it emitted. */
+    protected static void canonicalRecordsInto(UnfilteredPartitionIterator partitions, List<String> out)
+    {
+        while (partitions.hasNext())
+        {
+            try (UnfilteredRowIterator partition = partitions.next())
+            {
+                TableMetadata metadata = partition.metadata();
+                out.add("PARTITION key=" + ByteBufferUtil.bytesToHex(partition.partitionKey().getKey())
+                        + " deletion=" + dt(partition.partitionLevelDeletion().markedForDeleteAt(),
+                                            partition.partitionLevelDeletion().localDeletionTime())
+                        + " columns=" + partition.columns()
+                        // the serializers write a static row unless it is the EMPTY_STATIC_ROW singleton
+                        + (partition.staticRow() == Rows.EMPTY_STATIC_ROW ? "" : " static-row-written")
+                        // the heap sizes the read size guardrail adds up (ReadCommand.withQuerySizeTracking)
+                        + " keyHeap=" + ObjectSizes.sizeOnHeapOf(partition.partitionKey().getKey())
+                        + " deletionHeap=" + partition.partitionLevelDeletion().unsharedHeapSize()
+                        + (partition.staticRow() == Rows.EMPTY_STATIC_ROW ? "" : " staticHeap=" + partition.staticRow().unsharedHeapSize()));
+                if (!partition.staticRow().isEmpty())
+                    rowRecords("STATIC", partition.staticRow(), out);
+                while (partition.hasNext())
+                {
+                    Unfiltered unfiltered = partition.next();
+                    if (unfiltered.isRow())
+                        rowRecords("ROW", (Row) unfiltered, out);
+                    else
+                        markerRecord((RangeTombstoneMarker) unfiltered, partition.isReverseOrder(), out);
+                }
+            }
+        }
+    }
+
+    /** The replica response to {@code command}, serialized as a replica sends it. */
+    protected static byte[] replicaResponseBytes(SinglePartitionReadCommand command)
+    {
+        ReadResponse response = ReadCommandVerbHandler.instance.doRead(command, false);
+        try (DataOutputBuffer buffer = new DataOutputBuffer())
+        {
+            ReadResponse.serializer.serialize(response, buffer, MessagingService.current_version);
+            return buffer.toByteArray();
+        }
+        catch (Exception e)
+        {
+            throw new AssertionError("failed to serialize replica response", e);
+        }
+    }
+
+    protected static byte[] responseBytes(SinglePartitionReadCommand command)
+    {
+        // the exact encoding ReadResponse.LocalDataResponse.build produces for a replica-serving read
+        try (ReadExecutionController controller = command.executionController();
+             UnfilteredPartitionIterator partitions = command.executeLocally(controller);
+             DataOutputBuffer buffer = new DataOutputBuffer())
+        {
+            UnfilteredPartitionIterators.serializerForIntraNode()
+                                        .serialize(partitions, command.columnFilter(), buffer, MessagingService.current_version);
+            return buffer.toByteArray();
+        }
+        catch (Exception e)
+        {
+            throw new AssertionError("failed to serialize read response", e);
+        }
+    }
+
+    private static void rowRecords(String label, Row row, List<String> out)
+    {
+        out.add(label + " clustering=" + clusteringString(row.clustering())
+                + " liveness=" + row.primaryKeyLivenessInfo().timestamp()
+                + "," + row.primaryKeyLivenessInfo().ttl()
+                + "," + row.primaryKeyLivenessInfo().localExpirationTime()
+                + " deletion=" + dt(row.deletion().time().markedForDeleteAt(), row.deletion().time().localDeletionTime())
+                + (row.deletion().isShadowable() ? ",shadowable" : "")
+                + " heap=" + row.unsharedHeapSize() + " clusteringHeap=" + row.clustering().unsharedHeapSize());
+        for (ColumnData cd : row)
+        {
+            if (cd.column().isComplex())
+            {
+                ComplexColumnData complex = (ComplexColumnData) cd;
+                out.add("  CPLX " + cd.column().name
+                        + " del=" + dt(complex.complexDeletion().markedForDeleteAt(),
+                                       complex.complexDeletion().localDeletionTime())
+                        + " n=" + complex.cellsCount()
+                        + " heap=" + complex.unsharedHeapSize());
+                for (Cell<?> cell : complex)
+                    out.add(cellRecord(cell));
+            }
+            else
+            {
+                out.add(cellRecord((Cell<?>) cd));
+            }
+        }
+    }
+
+    private static String cellRecord(Cell<?> cell)
+    {
+        String path = cell.path() == null ? "-" : ByteBufferUtil.bytesToHex(cell.path().get(0));
+        return "  CELL " + cell.column().name
+               + " path=" + path
+               + " ts=" + cell.timestamp()
+               + " ttl=" + cell.ttl()
+               + " ldt=" + cell.localDeletionTime()
+               + " v=" + ByteBufferUtil.bytesToHex(cell.buffer())
+               + " heap=" + cell.unsharedHeapSize();
+    }
+
+    /** Renders a marker in the order it was read: a reversed iterator flips which side opens. */
+    private static void markerRecord(RangeTombstoneMarker marker, boolean reversed, List<String> out)
+    {
+        StringBuilder sb = new StringBuilder("MARKER clustering=").append(clusteringString(marker.clustering()));
+        if (marker.isClose(reversed))
+            sb.append(" close=").append(dt(marker.closeDeletionTime(reversed).markedForDeleteAt(),
+                                           marker.closeDeletionTime(reversed).localDeletionTime()))
+              .append(marker.closeIsInclusive(reversed) ? ",incl" : ",excl");
+        if (marker.isOpen(reversed))
+            sb.append(" open=").append(dt(marker.openDeletionTime(reversed).markedForDeleteAt(),
+                                          marker.openDeletionTime(reversed).localDeletionTime()))
+              .append(marker.openIsInclusive(reversed) ? ",incl" : ",excl");
+        out.add(sb.append(" heap=").append(marker.unsharedHeapSize()).toString());
+    }
+
+    private static String clusteringString(ClusteringPrefix<?> prefix)
+    {
+        StringBuilder sb = new StringBuilder(prefix.kind().toString());
+        for (int i = 0; i < prefix.size(); i++)
+        {
+            ByteBuffer value = prefix.bufferAt(i);
+            sb.append(':').append(value == null ? "null" : ByteBufferUtil.bytesToHex(value));
+        }
+        return sb.toString();
+    }
+
+    private static String dt(long markedForDeleteAt, long localDeletionTime)
+    {
+        return markedForDeleteAt + "/" + localDeletionTime;
+    }
+
+    // ---------------------------------------------------------------- comparison
+
+    protected static void compareRecords(List<String> iterator, List<String> cursor)
+    {
+        int max = Math.max(iterator.size(), cursor.size());
+        for (int i = 0; i < max; i++)
+        {
+            String expected = i < iterator.size() ? iterator.get(i) : "<missing>";
+            String actual = i < cursor.size() ? cursor.get(i) : "<missing>";
+            if (!expected.equals(actual))
+                fail(String.format("LOGICAL divergence at record %d (iterator vs cursor):%n  iterator: %s%n  cursor:   %s%n  context:%s",
+                                   i, expected, actual, context(iterator, cursor, i)));
+        }
+    }
+
+    private static String context(List<String> iterator, List<String> cursor, int index)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int j = Math.max(0, index - 3); j < Math.min(iterator.size(), index + 4); j++)
+            sb.append(String.format("%n    it[%d]=%s", j, iterator.get(j)));
+        for (int j = Math.max(0, index - 3); j < Math.min(cursor.size(), index + 4); j++)
+            sb.append(String.format("%n    cu[%d]=%s", j, cursor.get(j)));
+        return sb.toString();
+    }
+
+    protected static void assertResponseBytesEqual(byte[] iterator, byte[] cursor)
+    {
+        int mismatch = java.util.Arrays.mismatch(iterator, cursor);
+        if (mismatch >= 0)
+            fail(String.format("BYTE divergence in intra-node ReadResponse serialization: lengths %d vs %d, " +
+                               "first divergence at offset %d%n  iterator: %s%n  cursor:   %s",
+                               iterator.length, cursor.length, mismatch,
+                               hexContext(iterator, mismatch), hexContext(cursor, mismatch)));
+    }
+
+    private static String hexContext(byte[] bytes, int offset)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (int i = Math.max(0, offset - 8); i < Math.min(bytes.length, offset + 24); i++)
+        {
+            if (i == offset)
+                sb.append('[');
+            sb.append(String.format("%02x", bytes[i]));
+            if (i == offset)
+                sb.append(']');
+            sb.append(' ');
+        }
+        if (offset + 24 < bytes.length)
+            sb.append("...");
+        return sb.toString();
+    }
+}

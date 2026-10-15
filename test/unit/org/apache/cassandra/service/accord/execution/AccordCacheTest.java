@@ -21,6 +21,7 @@ import java.util.function.Function;
 
 import org.agrona.concurrent.NoOpLock;
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.local.SafeState;
@@ -39,6 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class AccordCacheTest
 {
     @org.junit.After

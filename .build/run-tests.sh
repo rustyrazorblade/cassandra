@@ -29,7 +29,7 @@ set -o pipefail
 [ "x${DIST_DIR}" != "x" ] || DIST_DIR="${CASSANDRA_DIR}/build"
 
 # target types
-TARGET_TYPES="build_dtest_jars stress-test fqltool-test sstableloader-test microbench microbench-test test-burn long-test cqlsh-test simulator-dtest test test-cdc test-compression test-oa test-system-keyspace-directory test-latest jvm-dtest jvm-dtest-upgrade jvm-dtest-novnode jvm-dtest-upgrade-novnode"
+TARGET_TYPES="build_dtest_jars stress-test fqltool-test sstableloader-test microbench microbench-test test-burn long-test cqlsh-test simulator-dtest test test-cdc test-compression test-oa test-system-keyspace-directory test-latest jvm-dtest jvm-dtest-latest jvm-dtest-upgrade jvm-dtest-novnode jvm-dtest-upgrade-novnode"
 
 error() {
   echo >&2 $2;
@@ -492,8 +492,9 @@ _main() {
     "simulator-dtest")
       _run_testlist "simulator" "testclasslist-simulator" "${test_name_regexp}" "${split_chunk}" "$(_timeout_for 'test.simulation.timeout')" "${repeat_count}"
       ;;
-    "jvm-dtest" | "jvm-dtest-novnode")
+    "jvm-dtest" | "jvm-dtest-novnode" | "jvm-dtest-latest")
       [ "jvm-dtest-novnode" == "${target}" ] || ANT_TEST_OPTS="${ANT_TEST_OPTS} -Dcassandra.dtest.num_tokens=16"
+      [ "jvm-dtest-latest" != "${target}" ] || ANT_TEST_OPTS="${ANT_TEST_OPTS} -Dtest.jvm.args=-Djvm_dtests.latest=true"
       if [[ -z "${test_name_regexp}" ]] ; then
         test_name_regexp=$( _list_tests "distributed" | grep -v "upgrade" | _split_tests "${split_chunk}")
         if [[ -z "${test_name_regexp}" ]]; then

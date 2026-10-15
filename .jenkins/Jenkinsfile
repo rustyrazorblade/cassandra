@@ -165,9 +165,9 @@ def pipelineProfiles() {
   return [
     'packaging': ['artifacts', 'lint', 'debian', 'redhat'],
     'skinny': ['lint', 'cqlsh-test', 'test', 'jvm-dtest', 'simulator-dtest', 'dtest'],
-    'pre-commit': ['artifacts', 'lint', 'debian', 'redhat', 'fqltool-test', 'sstableloader-test', 'cqlsh-test', 'test', 'test-latest', 'stress-test', 'test-burn', 'jvm-dtest', 'simulator-dtest', 'dtest', 'dtest-latest', 'microbench-test'],
-    'pre-commit w/ upgrades': ['artifacts', 'lint', 'debian', 'redhat', 'fqltool-test', 'sstableloader-test', 'cqlsh-test', 'test', 'test-latest', 'stress-test', 'test-burn', 'jvm-dtest', 'jvm-dtest-upgrade', 'simulator-dtest', 'dtest', 'dtest-novnode', 'dtest-latest', 'dtest-upgrade', 'microbench-test'],
-    'post-commit': ['artifacts', 'lint', 'debian', 'redhat', 'fqltool-test', 'sstableloader-test', 'cqlsh-test', 'test-cdc', 'test', 'test-latest', 'test-compression', 'stress-test', 'test-burn', 'long-test', 'test-oa', 'test-system-keyspace-directory', 'jvm-dtest', 'jvm-dtest-upgrade', 'simulator-dtest', 'dtest', 'dtest-novnode', 'dtest-latest', 'dtest-large', 'dtest-large-novnode', 'dtest-large-latest', 'dtest-upgrade', 'dtest-upgrade-novnode', 'dtest-upgrade-large', 'dtest-upgrade-large-novnode', 'microbench-test'],
+    'pre-commit': ['artifacts', 'lint', 'debian', 'redhat', 'fqltool-test', 'sstableloader-test', 'cqlsh-test', 'test', 'test-latest', 'stress-test', 'test-burn', 'jvm-dtest', 'jvm-dtest-latest', 'simulator-dtest', 'dtest', 'dtest-latest', 'microbench-test'],
+    'pre-commit w/ upgrades': ['artifacts', 'lint', 'debian', 'redhat', 'fqltool-test', 'sstableloader-test', 'cqlsh-test', 'test', 'test-latest', 'stress-test', 'test-burn', 'jvm-dtest', 'jvm-dtest-latest', 'jvm-dtest-upgrade', 'simulator-dtest', 'dtest', 'dtest-novnode', 'dtest-latest', 'dtest-upgrade', 'microbench-test'],
+    'post-commit': ['artifacts', 'lint', 'debian', 'redhat', 'fqltool-test', 'sstableloader-test', 'cqlsh-test', 'test-cdc', 'test', 'test-latest', 'test-compression', 'stress-test', 'test-burn', 'long-test', 'test-oa', 'test-system-keyspace-directory', 'jvm-dtest', 'jvm-dtest-latest', 'jvm-dtest-upgrade', 'simulator-dtest', 'dtest', 'dtest-novnode', 'dtest-latest', 'dtest-large', 'dtest-large-novnode', 'dtest-large-latest', 'dtest-upgrade', 'dtest-upgrade-novnode', 'dtest-upgrade-large', 'dtest-upgrade-large-novnode', 'microbench-test'],
     'performance': ['microbench'],
     'custom': []
   ]
@@ -228,6 +228,7 @@ def tasks() {
     'test-oa': [splits: 20],
     'test-system-keyspace-directory': [splits: 20],
     'jvm-dtest': [splits: 16],
+    'jvm-dtest-latest': [splits: 16],
     'jvm-dtest-upgrade': [splits: 6],
     'simulator-dtest': [splits: 2, size: 'large'],
     'dtest': [splits: 64, size: 'large'],

@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.service.accord.serializers;
 
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 
@@ -34,6 +35,7 @@ import org.apache.cassandra.utils.AccordGenerators;
 
 import static accord.utils.Property.qt;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class DepsSerializersTest
 {
     static

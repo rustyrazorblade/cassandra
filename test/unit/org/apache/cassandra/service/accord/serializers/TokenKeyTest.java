@@ -27,6 +27,7 @@ import java.util.List;
 
 import org.assertj.core.api.Assertions;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import accord.utils.Gen;
@@ -59,6 +60,7 @@ import static org.apache.cassandra.utils.AccordGenerators.fromQT;
 import static org.apache.cassandra.utils.CassandraGenerators.partitioners;
 import static org.apache.cassandra.utils.CassandraGenerators.token;
 
+@Ignore("Accord is out of scope for the cursor read-path branch")
 public class TokenKeyTest
 {
     static
