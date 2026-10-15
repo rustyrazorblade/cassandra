@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.apache.commons.io.FileUtils;
 import org.junit.After;
 import org.junit.Assume;
 import org.junit.Before;
@@ -41,11 +42,15 @@ import org.apache.cassandra.db.compaction.ActiveCompactionsTracker;
 import org.apache.cassandra.db.compaction.CompactionTask;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.ThreadStats;
+import org.apache.cassandra.utils.TimeUUID;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_COMPACTION_ALLOCATION_PROFILE;
 import static org.junit.Assert.assertNotNull;
@@ -120,12 +125,13 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         void run() throws Exception;
     }
 
-    /** Runs {@code body} with preemptive open disabled, then restores it and cursorCompactionEnabled. */
+    /** Runs {@code body} with preemptive open disabled, then restores it, cursor_compaction_enabled and cursor_repair_enabled. */
     private void withMeasurementEnv(ThrowingRunnable body) throws Exception
     {
         int originalPreemptiveOpen = DatabaseDescriptor.getSSTablePreemptiveOpenIntervalInMiB();
         DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(-1);
         boolean originalCursorEnabled = DatabaseDescriptor.cursorCompactionEnabled();
+        boolean originalCursorRepairEnabled = DatabaseDescriptor.cursorRepairEnabled();
         try
         {
             body.run();
@@ -134,6 +140,7 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
         {
             DatabaseDescriptor.setSSTablePreemptiveOpenIntervalInMiB(originalPreemptiveOpen);
             DatabaseDescriptor.setCursorCompactionEnabled(originalCursorEnabled);
+            DatabaseDescriptor.setCursorRepairEnabled(originalCursorRepairEnabled);
         }
     }
 
@@ -233,6 +240,20 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
                                               int rounds, String valuePadding, int warmup, int measured) throws Exception
     {
         DatabaseDescriptor.setCursorCompactionEnabled(cursor);
+        ColumnFamilyStore cfs = writeSteadyStateTable(partitions, rounds, valuePadding);
+
+        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
+        // fail if the cursor run silently fell back to the iterator path
+        if (cursor)
+            assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+
+        captureLastInputBytes(cfs);
+        return measureBest(cfs, gcBefore, warmup, measured);
+    }
+
+    /** One sstable per round, each holding every partition. */
+    private ColumnFamilyStore writeSteadyStateTable(int partitions, int rounds, String valuePadding)
+    {
         createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, PRIMARY KEY (pk, ck)) " +
                     "WITH compression = {'enabled': 'false'}");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
@@ -245,14 +266,74 @@ public class CursorCompactionAllocationGateTest extends DifferentialCompactionTe
                     execute("INSERT INTO %s (pk, ck, v1, v2) VALUES (?, ?, ?, ?)", pk, ck, ck, valuePadding + ck);
             flush();
         }
+        return cfs;
+    }
 
-        long gcBefore = cfs.getDefaultGcBefore(FBUtilities.nowInSeconds());
-        // fail if the cursor run silently fell back to the iterator path
-        if (cursor)
-            assertCursorPathWillRun(cfs, cfs.getLiveSSTables(), gcBefore);
+    /**
+     * Cursor anticompaction must not allocate per row or cell either.  Each partition goes to a
+     * different output than the one before, so the merge moves between all three outputs.
+     */
+    @Test
+    public void anticompactionAllocationDoesNotScaleWithRows() throws Exception
+    {
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM",
+                          ThreadStats.isThreadAllocatedMemorySupported());
 
-        captureLastInputBytes(cfs);
-        return measureBest(cfs, gcBefore, warmup, measured);
+        withMeasurementEnv(() -> {
+            long smallAlloc = measureAntiCompactionAllocation(SMALL_PARTITIONS);
+            long bigAlloc = measureAntiCompactionAllocation(SMALL_PARTITIONS * SCALE);
+            long delta = bigAlloc - smallAlloc;
+            logger.info("cursor anticompaction allocation: small={}B big={}B delta={}B ceiling={}B",
+                        smallAlloc, bigAlloc, delta, ceilings.deltaBytes);
+            assertTrue(String.format("cursor anticompaction allocation scales with data: " +
+                                     "%,dB (small) -> %,dB (big), delta %,dB exceeds ceiling %,dB. " +
+                                     "A per-row/cell allocation has been introduced on the cursor hot path.",
+                                     smallAlloc, bigAlloc, delta, ceilings.deltaBytes),
+                       delta <= ceilings.deltaBytes);
+        });
+    }
+
+    /** Warms up, then returns the least allocated over the measured cursor anticompactions of the whole live set. */
+    private long measureAntiCompactionAllocation(int partitions) throws Exception
+    {
+        ColumnFamilyStore cfs = writeSteadyStateTable(partitions, 2, "val");
+        List<Long> tokens = AntiCompactionRanges.liveTokens(cfs);
+        List<Range<Token>> full = new ArrayList<>();
+        List<Range<Token>> trans = new ArrayList<>();
+        // partition i is full, transient or unrepaired by i % 3
+        for (int i = 0; i < tokens.size(); i++)
+        {
+            Range<Token> range = AntiCompactionRanges.range(tokens.get(i) - 1, tokens.get(i));
+            if (i % 3 == 0)
+                full.add(range);
+            else if (i % 3 == 1)
+                trans.add(range);
+        }
+        RangesAtEndpoint ranges = AntiCompactionRanges.ranges(full, trans);
+
+        Path scratch = Files.createTempDirectory("anticompaction-allocation");
+        try
+        {
+            InputCopy inputs = copyLiveSet(cfs, scratch);
+            long best = Long.MAX_VALUE;
+            for (int i = 0; i < WARMUP_ITERATIONS + MEASURED_ITERATIONS; i++)
+            {
+                long before = ThreadStats.getCurrentThreadAllocatedBytes();
+                antiCompactLiveSet(cfs, ranges, TimeUUID.Generator.nextTimeUUID(), true, () -> false);
+                long after = ThreadStats.getCurrentThreadAllocatedBytes();
+                assertTrue("thread allocation measurement returned no reading (before=" + before +
+                           " after=" + after + "); the allocation gate cannot measure and must not report a pass",
+                           before >= 0 && after >= 0);
+                if (i >= WARMUP_ITERATIONS)
+                    best = Math.min(best, after - before);
+                restoreLiveSet(cfs, inputs);
+            }
+            return best;
+        }
+        finally
+        {
+            FileUtils.deleteDirectory(scratch.toFile());
+        }
     }
 
     /** Total on-disk input bytes recorded by the most recent {@link #captureLastInputBytes} call. */

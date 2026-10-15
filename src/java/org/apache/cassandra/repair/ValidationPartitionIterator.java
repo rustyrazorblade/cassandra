@@ -21,6 +21,7 @@ package org.apache.cassandra.repair;
 import java.util.Map;
 
 import org.apache.cassandra.db.partitions.AbstractUnfilteredPartitionIterator;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 
@@ -30,4 +31,17 @@ public abstract class ValidationPartitionIterator extends AbstractUnfilteredPart
     public abstract long estimatedPartitions();
     public abstract long getBytesRead();
     public abstract Map<Range<Token>, Long> getRangePartitionCounts();
+
+    /**
+     * Feeds one partition produced by {@link #next()} into {@code validator}. The default simply
+     * digests the partition and calls {@link Validator#add}; a subclass whose partitions aren't
+     * real row/cell content (e.g. one that produces a digest directly from a lower-level source)
+     * overrides this to call {@link Validator#addDigest} instead, so the driving loop in
+     * {@code ValidationManager#doValidation} never needs to know which strategy produced the
+     * partition it's holding.
+     */
+    public void feed(Validator validator, UnfilteredRowIterator partition)
+    {
+        validator.add(partition);
+    }
 }

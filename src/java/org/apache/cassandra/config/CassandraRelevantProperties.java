@@ -213,6 +213,8 @@ public enum CassandraRelevantProperties
     CRYPTO_PROVIDER_CLASS_NAME("cassandra.crypto_provider_class_name"),
     /** Experimental. */
     CURSOR_COMPACTION_ENABLED("cassandra.cursor_compaction_enabled", "false"),
+    /** Experimental.  Repair validation and anticompaction on the cursor path. */
+    CURSOR_REPAIR_ENABLED("cassandra.cursor_repair_enabled", "false"),
     CUSTOM_DISK_ERROR_HANDLER("cassandra.custom_disk_error_handler"),
     CUSTOM_GUARDRAILS_CONFIG_PROVIDER_CLASS("cassandra.custom_guardrails_config_provider_class"),
     CUSTOM_QUERY_HANDLER_CLASS("cassandra.custom_query_handler_class"),
@@ -645,6 +647,10 @@ public enum CassandraRelevantProperties
     TCM_USE_ATOMIC_LONG_PROCESSOR("cassandra.test.use_atomic_long_processor", "false"),
     TCM_USE_TEST_NO_OP_REPLICATOR("cassandra.test.use_no_op_replicator", "false"),
     TEST_ACCORD_STORE_THREAD_CHECKS_ENABLED("cassandra.test.accord.store.thread_checks_enabled", "true"),
+    TEST_ANTICOMPACTION_BURN_LARGE_PARTITION_BYTES("cassandra.test.anticompaction_burn_large_partition_bytes", "0"),
+    TEST_ANTICOMPACTION_BURN_RANGES("cassandra.test.anticompaction_burn_ranges", "256"),
+    TEST_ANTICOMPACTION_BURN_ROWS("cassandra.test.anticompaction_burn_rows", "100000"),
+    TEST_ANTICOMPACTION_BURN_SSTABLES("cassandra.test.anticompaction_burn_sstables", "4"),
     TEST_BBFAILHELPER_ENABLED("test.bbfailhelper.enabled"),
     TEST_BLOB_SHARED_SEED("cassandra.test.blob.shared.seed", "42"),
     TEST_BYTEMAN_TRANSFORMATIONS_DEBUG("cassandra.test.byteman.transformations.debug"),
@@ -681,6 +687,8 @@ public enum CassandraRelevantProperties
     TEST_DIFFERENTIAL_BLOCK_BOUNDARY_SWEEP("cassandra.test.differential.block_boundary.sweep", "160"),
     /** Number of generated examples the randomized differential soak runs; must be > 0. */
     TEST_DIFFERENTIAL_EXAMPLES("cassandra.test.differential.examples"),
+    /** Runs only this example index of a seeded fuzz run, so one failing example replays alone. */
+    TEST_DIFFERENTIAL_EXAMPLE_INDEX("cassandra.test.differential.example_index"),
     /**
      * Preserves a failed differential comparison's captured sstables for post-mortem instead of deleting
      * them. Off by default: the burn scenarios' captures are multi-GB and would fill a CI disk.
@@ -720,6 +728,12 @@ public enum CassandraRelevantProperties
     TEST_HARRY_SWITCH_AFTER("cassandra.test.harry.progression.switch-after", "1"),
     TEST_HISTORY_VALIDATOR_LOGGING_ENABLED("cassandra.test.history_validator.logging.enabled", "false"),
     TEST_IGNORE_SIGAR("cassandra.test.ignore_sigar"),
+    TEST_INCREMENTAL_REPAIR_BURN_CYCLES("cassandra.test.incremental_repair_burn_cycles", "20"),
+    TEST_INCREMENTAL_REPAIR_BURN_LARGE_PARTITION_BYTES("cassandra.test.incremental_repair_burn_large_partition_bytes", "0"),
+    TEST_INCREMENTAL_REPAIR_BURN_RANGES("cassandra.test.incremental_repair_burn_ranges", "32"),
+    TEST_INCREMENTAL_REPAIR_BURN_ROWS("cassandra.test.incremental_repair_burn_rows", "100000"),
+    TEST_INCREMENTAL_REPAIR_BURN_SSTABLES("cassandra.test.incremental_repair_burn_sstables", "3"),
+    TEST_INCREMENTAL_REPAIR_TWO_CLUSTER_BURN_ROWS("cassandra.test.incremental_repair_two_cluster_burn_rows", "100000"),
     TEST_INTERVAL_TREE_EXPENSIVE_CHECKS("cassandra.test.interval_tree_expensive_checks"),
     TEST_INVALID_LEGACY_SSTABLE_ROOT("invalid-legacy-sstable-root"),
     TEST_JVM_DTEST_DISABLE_SSL("cassandra.test.disable_ssl"),
