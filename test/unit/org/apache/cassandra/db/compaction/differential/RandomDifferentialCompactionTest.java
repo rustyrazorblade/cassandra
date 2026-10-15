@@ -109,6 +109,9 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
     /** Redraws allowed before a wide clustering that will not fit the key limit is treated as a failure. */
     private static final int CLUSTERING_REDRAWS = 32;
 
+    /** The seed of the running example, so a subclass can derive the rest of a comparison from it. */
+    protected long exampleSeed;
+
     /** Run-level index-block coverage; asserted at the end of {@link #randomizedDifferential}. */
     private int examplesWithRowIndex;
     private int rowIndexPartitions;
@@ -157,6 +160,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
 
     private void runOneExample(long seed) throws Throwable
     {
+        exampleSeed = seed;
         JavaRandom qtRandom = new JavaRandom(seed);
         Random workload = new Random(seed);
 
@@ -865,7 +869,7 @@ public class RandomDifferentialCompactionTest extends DifferentialCompactionTest
         private static final long addend = 0xBL;
         private static final long mask = (1L << 48) - 1;
 
-        private long seed = CassandraRelevantProperties.TEST_DIFFERENTIAL_SEED.getLong(System.currentTimeMillis());
+        private long seed = DifferentialRunSeed.SEED;
         /** The seed of example 0, which replays the whole run. */
         private long startSeed;
         private final int examples;

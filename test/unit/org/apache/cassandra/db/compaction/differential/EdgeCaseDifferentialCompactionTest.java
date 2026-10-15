@@ -88,13 +88,15 @@ public class EdgeCaseDifferentialCompactionTest extends DifferentialCompactionTe
         CapturedOutput out = assertCursorMatchesIteratorAcrossGenerations(cfs);
 
         // totalRows must be 20: 16 regular rows plus 4 non-empty static rows, no empty static rows.
-        assertEquals("expected a single compaction output", 1, out.sstables.size());
-        assertTrue("an absent static row was counted: expected totalRows=20 (16 regular + 4 " +
-                   "non-empty static), got: " + out.sstables.get(0).statsSummary,
-                   out.sstables.get(0).statsSummary.contains("totalRows=20 "));
+        // Summed over the outputs, as anticompaction can split them.
+        if (expectSingleOutput())
+            assertEquals("expected a single compaction output", 1, out.sstables.size());
+        else
+            assertFalse("expected a compaction output", out.sstables.isEmpty());
+        assertEquals("an absent static row was counted: expected totalRows=20 (16 regular + 4 non-empty static)",
+                     20, sumOfStat(out, "totalRows"));
         // totalColumnsSet must be 20: 16 regular v cells and 4 static s1 cells.
-        assertTrue("expected totalColumnsSet=20, got: " + out.sstables.get(0).statsSummary,
-                   out.sstables.get(0).statsSummary.contains("totalColumnsSet=20 "));
+        assertEquals("expected totalColumnsSet=20", 20, sumOfStat(out, "totalColumnsSet"));
 
         // pk 0's oversized static must not open an index block, so it gets no row index.
         assertEquals("the cross-generation rung should leave one cursor-produced output",

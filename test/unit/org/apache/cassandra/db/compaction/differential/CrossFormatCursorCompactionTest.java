@@ -128,7 +128,10 @@ public class CrossFormatCursorCompactionTest extends DifferentialCompactionTeste
         DatabaseDescriptor.setSelectedSSTableFormat("big");
 
         CapturedOutput out = assertCursorMatchesIterator(cfs);
-        assertEquals("expected a single merged output", 1, out.sstables.size());
+        if (expectSingleOutput())
+            assertEquals("expected a single merged output", 1, out.sstables.size());
+        else
+            assertFalse("expected a merged output", out.sstables.isEmpty());
         assertCursorOutputReadsBack(cfs, "big");
     }
 
@@ -144,7 +147,10 @@ public class CrossFormatCursorCompactionTest extends DifferentialCompactionTeste
         DatabaseDescriptor.setSelectedSSTableFormat("bti");
 
         CapturedOutput out = assertCursorMatchesIterator(cfs);
-        assertEquals("expected a single merged output", 1, out.sstables.size());
+        if (expectSingleOutput())
+            assertEquals("expected a single merged output", 1, out.sstables.size());
+        else
+            assertFalse("expected a merged output", out.sstables.isEmpty());
         assertCursorOutputReadsBack(cfs, "bti");
     }
 

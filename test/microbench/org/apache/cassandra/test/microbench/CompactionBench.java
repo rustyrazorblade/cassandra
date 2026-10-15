@@ -29,8 +29,18 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.OperationType;
+import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
+import org.apache.cassandra.dht.Murmur3Partitioner;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.locator.RangesAtEndpoint;
+import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.TimeUUID;
 import org.openjdk.jmh.annotations.*;
 
 @BenchmarkMode(Mode.AverageTime)
@@ -60,11 +70,16 @@ public class CompactionBench extends CQLTester
     @Param("true")
     protected boolean isCursor = true;
 
+    @Param({ "BIG", "BTI" })
+    protected String format = "BTI";
+
     @Setup(Level.Trial)
     public void setup() throws Throwable
     {
         CQLTester.setUpClass();
         DatabaseDescriptor.setCursorCompactionEnabled(isCursor);
+        DatabaseDescriptor.setCursorRepairEnabled(isCursor);
+        DatabaseDescriptor.setSelectedSSTableFormat(format.toLowerCase());
         DatabaseDescriptor.setCompactionThroughputMebibytesPerSec(10*1024); // no rate limiting
         createSStables();
         takeSnapshot();
@@ -156,5 +171,18 @@ public class CompactionBench extends CQLTester
     public void compactTest() throws Throwable
     {
         cfs.forceMajorCompaction();
+    }
+
+    /** Anticompaction of all sstables in one group: the first half of the ring is repaired, the rest stays unrepaired. */
+    @Benchmark
+    public int antiCompactTest() throws Throwable
+    {
+        RangesAtEndpoint ranges = RangesAtEndpoint.of(Replica.fullReplica(FBUtilities.getBroadcastAddressAndPort(),
+                                                                          new Range<>(new Murmur3Partitioner.LongToken(Long.MIN_VALUE),
+                                                                                      new Murmur3Partitioner.LongToken(0))));
+        try (LifecycleTransaction txn = cfs.getTracker().tryModify(cfs.getLiveSSTables(), OperationType.ANTICOMPACTION))
+        {
+            return CompactionManager.instance.antiCompactGroup(cfs, ranges, txn, TimeUUID.Generator.nextTimeUUID(), () -> false);
+        }
     }
 }

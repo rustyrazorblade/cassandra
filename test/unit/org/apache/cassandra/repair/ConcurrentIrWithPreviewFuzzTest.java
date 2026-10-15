@@ -44,6 +44,7 @@ public class ConcurrentIrWithPreviewFuzzTest extends FuzzTestBase
     {
         // to avoid unlucky timing issues, retry until success; given enough retries we should eventually become success
         DatabaseDescriptor.getRepairRetrySpec().maxAttempts = new RetrySpec.MaxAttempt(Integer.MAX_VALUE);
+        long[] cursorCountsAtStart = cursorCounts();
         qt().withPure(false).withExamples(1).check(rs -> {
             Cluster cluster = new Cluster(rs);
             enableMessageFaults(cluster);
@@ -53,6 +54,7 @@ public class ConcurrentIrWithPreviewFuzzTest extends FuzzTestBase
             List<Closeable> closeables = new ArrayList<>();
             for (int example = 0; example < 100; example++)
             {
+                long[] cursorCountsBefore = cursorCounts();
                 Cluster.Node irCoordinator = coordinatorGen.next(rs);
                 Cluster.Node previewCoordinator = coordinatorGen.next(rs);
                 RepairCoordinator ir = irCoordinator.repair(KEYSPACE, irOption(rs, irCoordinator, KEYSPACE, ignore -> TABLES));
@@ -74,6 +76,7 @@ public class ConcurrentIrWithPreviewFuzzTest extends FuzzTestBase
 
                 // IR will always pass, but preview is what may fail (if the coordinator is the same)
                 Assertions.assertThat(ir.state.getResult()).describedAs("Unexpected state: %s -> %s; example %d", ir.state, ir.state.getResult(), example).isEqualTo(Completable.Result.success(repairSuccessMessage(ir)));
+                assertCursorPathsRan(cursorCountsBefore, example);
 
                 Assertions.assertThat(preview.state.getResult()).describedAs("Unexpected state: %s; example %d", preview.state, example).isNotNull();
 
@@ -89,6 +92,7 @@ public class ConcurrentIrWithPreviewFuzzTest extends FuzzTestBase
                 closeables.clear();
             }
         });
+        assertSomeCursorWorkRan(cursorCountsAtStart);
     }
 
     private void delayValidation(Cluster cluster, RepairCoordinator ir, FailingBiConsumer<ColumnFamilyStore, Validator> next, ColumnFamilyStore cfs, Validator validator)

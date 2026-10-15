@@ -38,6 +38,7 @@ public class HappyPathFuzzTest extends FuzzTestBase
     {
         // disable all retries, no delays/drops are possible
         DatabaseDescriptor.getRepairRetrySpec().maxAttempts = RetrySpec.MaxAttempt.DISABLED;
+        long[] cursorCountsAtStart = cursorCounts();
         qt().withPure(false).withExamples(10).check(rs -> {
             Cluster cluster = new Cluster(rs);
             Gen<Cluster.Node> coordinatorGen = Gens.pick(cluster.nodes.keySet()).map(cluster.nodes::get);
@@ -45,6 +46,7 @@ public class HappyPathFuzzTest extends FuzzTestBase
             List<Closeable> closeables = new ArrayList<>();
             for (int example = 0; example < 100; example++)
             {
+                long[] cursorCountsBefore = cursorCounts();
                 Cluster.Node coordinator = coordinatorGen.next(rs);
 
                 RepairCoordinator repair = coordinator.repair(KEYSPACE, repairOption(rs, coordinator, KEYSPACE, TABLES));
@@ -54,9 +56,11 @@ public class HappyPathFuzzTest extends FuzzTestBase
                     closeables.add(cluster.nodes.get(pickParticipant(rs, coordinator, repair)).doValidation((cfs, validator) -> addMismatch(rs, cfs, validator)));
 
                 runAndAssertSuccess(cluster, example, shouldSync, repair);
+                assertCursorPathsRan(cursorCountsBefore, example);
                 closeables.forEach(Closeable::close);
                 closeables.clear();
             }
         });
+        assertSomeCursorWorkRan(cursorCountsAtStart);
     }
 }
