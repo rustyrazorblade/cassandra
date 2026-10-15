@@ -131,7 +131,12 @@ public class ValidationManager implements IValidationManager
             {
                 try (UnfilteredRowIterator partition = vi.next())
                 {
-                    validator.add(partition);
+                    // vi.feed() dispatches on the iterator implementation, not the partition's
+                    // runtime type: CursorValidationIterator overrides it to read a precomputed
+                    // digest (see PrecomputedDigestPartition) instead of calling validator.add(),
+                    // which would re-walk the partition via UnfilteredRowIterators.digest() and
+                    // defeat the entire point of that allocation-avoidance path.
+                    vi.feed(validator, partition);
                     state.partitionsProcessed++;
                     state.bytesRead = vi.getBytesRead();
                     if (state.partitionsProcessed % 1024 == 0) // update every so often

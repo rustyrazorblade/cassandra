@@ -47,6 +47,7 @@ public class HappyPathFuzzTest extends FuzzTestBase
         DatabaseDescriptor.getRepairRetrySpec().maxAttempts = RetrySpec.MaxAttempt.DISABLED;
         Map<String, LongArrayList> repairTypeRuntimes = new HashMap<>();
         long realStartNanos = System.nanoTime();
+        long[] cursorCountsAtStart = cursorCounts();
         qt().withPure(false).withExamples(10).check(rs -> {
             Cluster cluster = new Cluster(rs);
             Gen<Cluster.Node> coordinatorGen = Gens.pick(cluster.nodes.keySet()).map(cluster.nodes::get);
@@ -54,6 +55,7 @@ public class HappyPathFuzzTest extends FuzzTestBase
             List<Closeable> closeables = new ArrayList<>();
             for (int example = 0; example < 100; example++)
             {
+                long[] cursorCountsBefore = cursorCounts();
                 Cluster.Node coordinator = coordinatorGen.next(rs);
 
                 long nowNanos = System.nanoTime();
@@ -64,11 +66,13 @@ public class HappyPathFuzzTest extends FuzzTestBase
                     closeables.add(cluster.nodes.get(pickParticipant(rs, coordinator, repair)).doValidation((cfs, validator) -> addMismatch(rs, cfs, validator)));
 
                 runAndAssertSuccess(cluster, example, shouldSync, repair);
+                assertCursorPathsRan(cursorCountsBefore, example);
                 repairTypeRuntimes.computeIfAbsent(repair.state.getType(), ignore -> new LongArrayList()).addLong(System.nanoTime() - nowNanos);
                 closeables.forEach(Closeable::close);
                 closeables.clear();
             }
         });
+        assertSomeCursorWorkRan(cursorCountsAtStart);
         long realDurationNanos = System.nanoTime() - realStartNanos;
         long repairDurationsNanos = 0;
         StringBuilder sb = new StringBuilder();

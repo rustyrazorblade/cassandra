@@ -38,6 +38,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.AbstractCompactionController;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.repair.ValidationCompactionController;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -106,13 +107,13 @@ public class CursorCompactorConstructorFailureTest extends CQLTester
     @Test
     public void cursorsClosedWhenConstructorFailsBig() throws Throwable
     {
-        assertCursorsClosedOnConstructorFailure("big");
+        assertCursorsClosedOnConstructorFailure("big", false);
     }
 
     @Test
     public void cursorsClosedWhenConstructorFailsBti() throws Throwable
     {
-        assertCursorsClosedOnConstructorFailure("bti");
+        assertCursorsClosedOnConstructorFailure("bti", false);
     }
 
     @Test
@@ -127,7 +128,20 @@ public class CursorCompactorConstructorFailureTest extends CQLTester
         assertCompactionFinishedOnCursorOpenFailure("bti");
     }
 
-    private void assertCursorsClosedOnConstructorFailure(String format) throws Throwable
+    /** The partial-range constructor that validation uses. */
+    @Test
+    public void cursorsClosedWhenPartialRangeConstructorFailsBig() throws Throwable
+    {
+        assertCursorsClosedOnConstructorFailure("big", true);
+    }
+
+    @Test
+    public void cursorsClosedWhenPartialRangeConstructorFailsBti() throws Throwable
+    {
+        assertCursorsClosedOnConstructorFailure("bti", true);
+    }
+
+    private void assertCursorsClosedOnConstructorFailure(String format, boolean partialRange) throws Throwable
     {
         ColumnFamilyStore cfs = createTableWithThreeSSTables(format);
         Set<SSTableReader> inputs = cfs.getLiveSSTables();
@@ -135,12 +149,12 @@ public class CursorCompactorConstructorFailureTest extends CQLTester
         opened.set(0);
         closed.set(0);
         failConstruction = true;
-        try (CompactionController controller = new CompactionController(cfs, inputs, FBUtilities.nowInSeconds());
-             AbstractCompactionStrategy.ScannerList scanners =
-                 cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs), null))
+        try
         {
-            new CursorCompactor(OperationType.COMPACTION, scanners.scanners, controller,
-                                FBUtilities.nowInSeconds(), TimeUUID.Generator.nextTimeUUID());
+            if (partialRange)
+                constructPartialRange(cfs, inputs);
+            else
+                constructFromScanners(cfs, inputs);
             fail("the injected failure did not reach the constructor");
         }
         catch (RuntimeException e)
@@ -247,6 +261,29 @@ public class CursorCompactorConstructorFailureTest extends CQLTester
         public void finishCompaction(CompactionInfo.Holder ci)
         {
             finished++;
+        }
+    }
+
+    private static void constructFromScanners(ColumnFamilyStore cfs, Set<SSTableReader> inputs)
+    {
+        try (CompactionController controller = new CompactionController(cfs, inputs, FBUtilities.nowInSeconds());
+             AbstractCompactionStrategy.ScannerList scanners =
+                 cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs), null))
+        {
+            new CursorCompactor(OperationType.COMPACTION, scanners.scanners, controller,
+                                FBUtilities.nowInSeconds(), TimeUUID.Generator.nextTimeUUID());
+        }
+    }
+
+    private static void constructPartialRange(ColumnFamilyStore cfs, Set<SSTableReader> inputs)
+    {
+        long nowInSec = FBUtilities.nowInSeconds();
+        // the scanners the iterator path merges; the compactor closes them
+        List<ISSTableScanner> scanners = cfs.getCompactionStrategyManager().getScanners(new ArrayList<>(inputs)).scanners;
+        try (ValidationCompactionController controller = new ValidationCompactionController(cfs, cfs.getDefaultGcBefore(nowInSec)))
+        {
+            new CursorCompactor(OperationType.VALIDATION, scanners, null, controller, nowInSec,
+                                TimeUUID.Generator.nextTimeUUID());
         }
     }
 }

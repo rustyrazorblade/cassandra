@@ -35,6 +35,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -93,6 +94,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.index.SecondaryIndexBuilder;
 import org.apache.cassandra.index.sai.StorageAttachedIndexGroup;
+import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.IScrubber;
@@ -160,6 +162,41 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
 
     @VisibleForTesting
     public final AtomicInteger currentlyBackgroundUpgrading = new AtomicInteger(0);
+
+    /**
+     * Counts anticompactions of a group that ran on the cursor path instead of the legacy one.
+     * Tests read it to check which path ran.  It is incremented once the {@link CursorCompactor} is
+     * constructed, before the merge runs, so it is not a success count.
+     */
+    @VisibleForTesting
+    public static final LongAdder cursorAnticompactionsRun = new LongAdder();
+
+    /** Counts anticompactions of a group that fell back to the legacy path with cursor_repair_enabled on. */
+    @VisibleForTesting
+    public static final LongAdder cursorAnticompactionFallbacks = new LongAdder();
+
+    /** Counts the partitions that cursor anticompaction wrote, so tests can check that the cursor wrote the outputs. */
+    @VisibleForTesting
+    public static final LongAdder cursorAnticompactionPartitionsWritten = new LongAdder();
+
+    /** Sees each call to the compaction rate limiter. */
+    @VisibleForTesting
+    public interface RateLimiterListener
+    {
+        /**
+         * @param scannedBytes the scanned bytes that this call covers
+         * @param permits the bytes it acquires from the rate limiter and marks on the throughput meter
+         */
+        void acquired(long scannedBytes, long permits);
+    }
+
+    /**
+     * Set by tests to see what is passed to the compaction rate limiter; null otherwise.  Not
+     * volatile: a test sets it on the thread that then runs the operation.  It sees the calls of
+     * every compaction thread, so a test listener counts only the calls from its own thread.
+     */
+    @VisibleForTesting
+    public static RateLimiterListener rateLimiterListener;
 
     public static final int NO_GC = Integer.MIN_VALUE;
 
@@ -1699,6 +1736,9 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     protected void compactionRateLimiterAcquire(RateLimiter limiter, long bytesScanned, long lastBytesScanned, double compressionRatio)
     {
         long lengthRead = (long) ((bytesScanned - lastBytesScanned) * compressionRatio) + 1;
+        RateLimiterListener listener = rateLimiterListener;
+        if (listener != null)
+            listener.acquired(bytesScanned - lastBytesScanned, lengthRead);
         metrics.bytesCompactedThroughput.mark(lengthRead);
         while (lengthRead >= Integer.MAX_VALUE)
         {
@@ -1924,11 +1964,25 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     }
 
     @VisibleForTesting
-    int antiCompactGroup(ColumnFamilyStore cfs,
-                         RangesAtEndpoint ranges,
-                         LifecycleTransaction txn,
-                         TimeUUID pendingRepair,
-                         BooleanSupplier isCancelled)
+    public int antiCompactGroup(ColumnFamilyStore cfs,
+                                RangesAtEndpoint ranges,
+                                LifecycleTransaction txn,
+                                TimeUUID pendingRepair,
+                                BooleanSupplier isCancelled)
+    {
+        long nowInSec = FBUtilities.nowInSeconds();
+        return antiCompactGroup(cfs, ranges, txn, pendingRepair, isCancelled, nowInSec, cfs.getDefaultGcBefore(nowInSec));
+    }
+
+    /** As above, with the time and the gcBefore given, so tests can fix the purge decisions of both paths. */
+    @VisibleForTesting
+    public int antiCompactGroup(ColumnFamilyStore cfs,
+                                RangesAtEndpoint ranges,
+                                LifecycleTransaction txn,
+                                TimeUUID pendingRepair,
+                                BooleanSupplier isCancelled,
+                                long nowInSec,
+                                long gcBefore)
     {
         Preconditions.checkArgument(!ranges.isEmpty(), "need at least one full or transient range");
         long groupMaxDataAge = -1;
@@ -1950,7 +2004,6 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         Set<SSTableReader> sstableAsSet = txn.originals();
 
         File destination = cfs.getDirectories().getWriteableLocationAsFile(cfs.getExpectedCompactedFileSize(sstableAsSet, OperationType.ANTICOMPACTION));
-        long nowInSec = FBUtilities.nowInSeconds();
         RateLimiter limiter = getRateLimiter();
 
         /**
@@ -1994,8 +2047,11 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
              SSTableRewriter unrepairedWriter = SSTableRewriter.constructWithoutEarlyOpening(sharedTxn, false, groupMaxDataAge);
 
              AbstractCompactionStrategy.ScannerList scanners = strategy.getScanners(txn.originals());
-             CompactionController controller = new CompactionController(cfs, sstableAsSet, cfs.getDefaultGcBefore(nowInSec));
-             CompactionIterator ci = getAntiCompactionIterator(scanners.scanners, controller, nowInSec, nextTimeUUID(), active, isCancelled))
+             CompactionController controller = new CompactionController(cfs, sstableAsSet, gcBefore);
+             CursorCompactor compactor = maybeGetAntiCompactionCursor(cfs, scanners, controller, nowInSec, isCancelled);
+             CompactionIterator ci = compactor == null
+                                     ? getAntiCompactionIterator(scanners.scanners, controller, nowInSec, nextTimeUUID(), active, isCancelled)
+                                     : null)
         {
             int expectedBloomFilterSize = Math.max(cfs.metadata().params.minIndexInterval, (int)(SSTableReader.getApproximateKeyCount(sstableAsSet)));
 
@@ -2009,9 +2065,15 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             if (compressionRatio == MetadataCollector.NO_COMPRESSION_RATIO)
                 compressionRatio = 1.0;
 
+            if (compactor != null)
+            {
+                assert ci == null : "both the cursor and the legacy merge were built";
+                cursorAntiCompactGroup(compactor, fullWriter, transWriter, unrepairedWriter, fullChecker, transChecker, limiter, compressionRatio);
+            }
+
             long lastBytesScanned = 0;
 
-            while (ci.hasNext())
+            while (ci != null && ci.hasNext())
             {
                 try (UnfilteredRowIterator partition = ci.next())
                 {
@@ -2085,6 +2147,123 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             }
             throw e;
         }
+    }
+
+    /**
+     * The cursor counterpart of the legacy merge loop in {@link #antiCompactGroup}.  One merge
+     * writes to all three writers, and each partition goes to the writer the legacy loop picks.
+     */
+    private void cursorAntiCompactGroup(CursorCompactor compactor,
+                                        SSTableRewriter fullWriter,
+                                        SSTableRewriter transWriter,
+                                        SSTableRewriter unrepairedWriter,
+                                        Predicate<Token> fullChecker,
+                                        Predicate<Token> transChecker,
+                                        RateLimiter limiter,
+                                        double compressionRatio)
+    {
+        CursorCompactor.OutputWriterProvider[] outputs = { antiCompactionOutput(compactor, fullWriter),
+                                                           antiCompactionOutput(compactor, transWriter),
+                                                           antiCompactionOutput(compactor, unrepairedWriter) };
+        // Full before transient, as in the legacy loop.  Both checkers see every key, unlike the legacy
+        // loop: a checker keeps the last token it was given, and the cursor reuses that token object
+        // after the next call.  The answers are the same, because a checker's answer for a token does
+        // not depend on which smaller tokens it saw before.
+        SSTableRewriter[] writers = { fullWriter, transWriter, unrepairedWriter };
+        // The output of the partition being written, to name its file in a write error.
+        int[] currentOutput = { 0 };
+        CursorCompactor.OutputRouter router = key -> {
+            Token token = key.getToken();
+            boolean full = fullChecker.test(token);
+            boolean trans = transChecker.test(token);
+            return currentOutput[0] = full ? 0 : trans ? 1 : 2;
+        };
+
+        try
+        {
+            long lastBytesScanned = 0;
+            long partitionsWritten = 0;
+            while (compactor.writeNextPartition(outputs, router))
+            {
+                partitionsWritten++;
+                long bytesScanned = compactor.getTotalBytesScanned();
+                compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+                lastBytesScanned = bytesScanned;
+            }
+            // The last call, which returned false, counted the bytes read after the last partition.
+            if (compactor.getTotalBytesScanned() != lastBytesScanned)
+                compactionRateLimiterAcquire(limiter, compactor.getTotalBytesScanned(), lastBytesScanned, compressionRatio);
+            cursorAnticompactionPartitionsWritten.add(partitionsWritten);
+        }
+        catch (IOException e)
+        {
+            // The cursor reader turns its I/O errors into CorruptSSTableException, so this one comes
+            // from the writer.  Throw what the legacy writer throws, for disk_failure_policy, naming
+            // the output sstable, as any of its component writers may have failed.
+            throw new FSWriteError(e, writers[currentOutput[0]].currentWriter().descriptor.baseFile().toString());
+        }
+    }
+
+    /** An output over a rewriter that already has its sstable writer. */
+    private static CursorCompactor.OutputWriterProvider antiCompactionOutput(CursorCompactor compactor, SSTableRewriter writer)
+    {
+        String targetDirectory = writer.currentWriter().getFilename();
+        return new CursorCompactor.OutputWriterProvider()
+        {
+            private boolean started;
+
+            @Override
+            public SSTableWriter prepareForPartition(DecoratedKey key)
+            {
+                // The legacy loop sets this for every partition.
+                compactor.setTargetDirectory(targetDirectory);
+                if (started)
+                {
+                    // The legacy path gets this from SSTableRewriter.append.
+                    writer.maybeReopenEarly(key);
+                    return null;
+                }
+                started = true;
+                return writer.currentWriter();
+            }
+        };
+    }
+
+    /**
+     * The cursor merge for one anticompaction group, or null if cursor anticompaction is off or does
+     * not support this group.  A group that it does not support is counted and logged with the reason.
+     */
+    private CursorCompactor maybeGetAntiCompactionCursor(ColumnFamilyStore cfs,
+                                                         AbstractCompactionStrategy.ScannerList scanners,
+                                                         CompactionController controller,
+                                                         long nowInSec,
+                                                         BooleanSupplier isCancelled)
+    {
+        if (!DatabaseDescriptor.cursorRepairEnabled())
+            return null;
+        String reason = CursorCompactor.unsupportedReason(scanners, controller);
+        if (reason != null)
+        {
+            cursorAnticompactionFallbacks.increment();
+            logger.info("Cursor anticompaction is not supported for {}.{}, so the legacy path runs: {}",
+                        cfs.getKeyspaceName(), cfs.getTableName(), reason);
+            return null;
+        }
+        return getAntiCompactionCursor(scanners.scanners, controller, nowInSec, nextTimeUUID(), active, isCancelled);
+    }
+
+    private static CursorCompactor getAntiCompactionCursor(List<ISSTableScanner> scanners, CompactionController controller, long nowInSec, TimeUUID timeUUID, ActiveCompactionsTracker activeCompactions, BooleanSupplier isCancelled)
+    {
+        CursorCompactor compactor = new CursorCompactor(OperationType.ANTICOMPACTION, scanners, controller, nowInSec, timeUUID, activeCompactions)
+        {
+            @Override
+            public boolean isStopRequested()
+            {
+                return super.isStopRequested() || isCancelled.getAsBoolean();
+            }
+        };
+        cursorAnticompactionsRun.increment();
+        return compactor;
     }
 
     @VisibleForTesting

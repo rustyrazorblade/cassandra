@@ -22,8 +22,15 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Predicate;
 
+import com.google.common.annotations.VisibleForTesting;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.dht.Bounds;
@@ -43,6 +50,16 @@ import org.apache.cassandra.utils.TimeUUID;
 
 public class CassandraTableRepairManager implements TableRepairManager
 {
+    private static final Logger logger = LoggerFactory.getLogger(CassandraTableRepairManager.class);
+
+    /** Counts validations that run on the cursor path.  Incremented once the cursor iterator is built. */
+    @VisibleForTesting
+    public static final LongAdder cursorValidationsRun = new LongAdder();
+
+    /** Counts validations that tried the cursor path and fell back to the legacy path. */
+    @VisibleForTesting
+    public static final LongAdder cursorValidationFallbacks = new LongAdder();
+
     private final ColumnFamilyStore cfs;
     private final SharedContext ctx;
 
@@ -57,9 +74,34 @@ public class CassandraTableRepairManager implements TableRepairManager
         this.ctx = ctx;
     }
 
+    /**
+     * Tries the cursor-backed path first when {@code cursor_repair_enabled} is on, falling back to
+     * {@link CassandraValidationIterator} when it is off or when
+     * {@link CursorValidationIterator} determines, against the real sstable set it acquires, that
+     * {@link org.apache.cassandra.db.compaction.CursorCompactor#isValidationSupported} rejects it.
+     * It does not pre-check support here: the real sstable set is only known after acquiring it
+     * (snapshot lookup / {@code getSSTablesToValidate}), and an approximation can diverge from it.
+     * Catching {@link CursorValidationUnsupportedException} specifically ensures only that signal
+     * triggers the fallback; any other failure still propagates as a real error.
+     */
     @Override
     public ValidationPartitionIterator getValidationIterator(Collection<Range<Token>> ranges, TimeUUID parentId, TimeUUID sessionID, boolean isIncremental, long nowInSec, boolean dontPurgeTombstones, TopPartitionTracker.Collector topPartitionCollector) throws IOException, NoSuchRepairSessionException
     {
+        if (DatabaseDescriptor.cursorRepairEnabled())
+        {
+            try
+            {
+                CursorValidationIterator iterator = new CursorValidationIterator(cfs, ctx, ranges, parentId, sessionID, isIncremental, nowInSec, dontPurgeTombstones, topPartitionCollector);
+                cursorValidationsRun.increment();
+                return iterator;
+            }
+            catch (CursorValidationUnsupportedException e)
+            {
+                cursorValidationFallbacks.increment();
+                logger.debug("Cursor-backed validation not supported for {}.{}, falling back to the legacy path: {}",
+                            cfs.getKeyspaceName(), cfs.getTableName(), e.getMessage());
+            }
+        }
         return new CassandraValidationIterator(cfs, ctx, ranges, parentId, sessionID, isIncremental, nowInSec, dontPurgeTombstones, topPartitionCollector);
     }
 

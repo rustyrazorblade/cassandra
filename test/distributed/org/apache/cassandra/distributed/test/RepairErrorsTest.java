@@ -31,12 +31,14 @@ import net.bytebuddy.implementation.bind.annotation.SuperCall;
 import org.assertj.core.api.Assertions;
 import org.junit.Test;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionInterruptedException;
 import org.apache.cassandra.db.compaction.CompactionIterator;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.db.streaming.CassandraIncomingFile;
 import org.apache.cassandra.distributed.Cluster;
@@ -62,6 +64,17 @@ public class RepairErrorsTest extends TestBaseImpl
     @Test
     public void testRemoteValidationFailure() throws IOException
     {
+        testRemoteValidationFailure(true);
+    }
+
+    @Test
+    public void testRemoteValidationFailureIteratorPath() throws IOException
+    {
+        testRemoteValidationFailure(false);
+    }
+
+    private void testRemoteValidationFailure(boolean cursorRepair) throws IOException
+    {
         Cluster.Builder builder = Cluster.build(2)
                                          .withConfig(config -> config.with(GOSSIP).with(NETWORK))
                                          .withInstanceInitializer(ByteBuddyHelper::install);
@@ -75,14 +88,21 @@ public class RepairErrorsTest extends TestBaseImpl
 
             cluster.startup();
             init(cluster);
+            cluster.forEach(i -> i.runOnInstance(() -> DatabaseDescriptor.setCursorRepairEnabled(cursorRepair)));
 
             cluster.schemaChange("create table "+KEYSPACE+".tbl (id int primary key, x int)");
             for (int i = 0; i < 10; i++)
                 cluster.coordinator(1).execute("insert into "+KEYSPACE+".tbl (id, x) VALUES (?,?)", ConsistencyLevel.ALL, i, i);
             cluster.forEach(i -> i.flush(KEYSPACE));
             long mark = cluster.get(1).logs().mark();
+            long mark2 = cluster.get(2).logs().mark();
             cluster.forEach(i -> i.nodetoolResult("repair", "--full").asserts().failure());
             Assertions.assertThat(cluster.get(1).logs().grep(mark, "^ERROR").getResult()).isEmpty();
+
+            // node2 must have failed on the path chosen above
+            boolean cursorRan = !cluster.get(2).logs().grep(mark2, "Performing cursor-backed validation compaction").getResult().isEmpty();
+            assertEquals("cursor validation ran", cursorRepair, cursorRan);
+            Assertions.assertThat(cluster.get(2).logs().grep(mark2, "Validation failed").getResult()).isNotEmpty();
         }
     }
 
@@ -224,6 +244,12 @@ public class RepairErrorsTest extends TestBaseImpl
                                .intercept(MethodDelegation.to(ByteBuddyHelper.class))
                                .make()
                                .load(cl, ClassLoadingStrategy.Default.INJECTION);
+                // Cursor validation merges through this method instead of CompactionIterator.next.
+                new ByteBuddy().redefine(CursorCompactor.class)
+                               .method(named("mergeNextPartition"))
+                               .intercept(MethodDelegation.to(ByteBuddyHelper.class))
+                               .make()
+                               .load(cl, ClassLoadingStrategy.Default.INJECTION);
             }
         }
 
@@ -261,6 +287,12 @@ public class RepairErrorsTest extends TestBaseImpl
         }
 
         public static UnfilteredRowIterator next()
+        {
+            throw new RuntimeException("IGNORE");
+        }
+
+        @SuppressWarnings("unused")
+        public static boolean mergeNextPartition()
         {
             throw new RuntimeException("IGNORE");
         }
