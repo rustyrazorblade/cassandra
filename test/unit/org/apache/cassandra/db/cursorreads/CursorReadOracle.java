@@ -583,6 +583,9 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
     {
         Observation into = new Observation(cursor);
         DatabaseDescriptor.setCursorReadsEnabled(cursor);
+        // this oracle compares single-partition reads: a range read takes the iterator range path in both runs
+        boolean rangeReads = DatabaseDescriptor.cursorRangeReadsEnabled();
+        DatabaseDescriptor.setCursorRangeReadsEnabled(false);
         try
         {
             if (gateProbe != null)
@@ -634,6 +637,7 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
         finally
         {
             DatabaseDescriptor.setCursorReadsEnabled(false);
+            DatabaseDescriptor.setCursorRangeReadsEnabled(rangeReads);
         }
     }
 

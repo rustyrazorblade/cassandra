@@ -159,6 +159,8 @@ public class InstanceConfig implements IInstanceConfig
 
                 .set("cursor_reads_enabled", "true")
 
+                .set("cursor_range_reads_enabled", "true")
+
                 .set("background_write_disk_access_mode", "direct")
 
                 .set("trickle_fsync", "true")

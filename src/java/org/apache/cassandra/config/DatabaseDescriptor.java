@@ -4999,6 +4999,17 @@ public class DatabaseDescriptor
         conf.cursor_reads_enabled = cursor_reads_enabled;
     }
 
+    public static boolean cursorRangeReadsEnabled()
+    {
+        return conf.cursor_range_reads_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setCursorRangeReadsEnabled(boolean cursor_range_reads_enabled)
+    {
+        conf.cursor_range_reads_enabled = cursor_range_reads_enabled;
+    }
+
     public static boolean enableDropCompactStorage()
     {
         return conf.drop_compact_storage_enabled;

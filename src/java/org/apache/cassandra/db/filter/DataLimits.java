@@ -357,6 +357,16 @@ public abstract class DataLimits
         protected abstract boolean applyToRow(Clustering<?> clustering, boolean isLive);
 
         /**
+         * Ends the partition started by {@link #countPartition}, as closing it does for an attached
+         * counter: a partition with only a live static row counts as one row.  For a read of several
+         * partitions on a detached counter.
+         */
+        public void endPartition()
+        {
+            onPartitionClose();
+        }
+
+        /**
          * CASSANDRA-20428 (cursor reads): whether counting has signalled the end of the current
          * partition since {@link #countPartition}, the signal an attached counter gives its
          * iterator.  A detached counter has no iterator to stop, so its caller checks this.
