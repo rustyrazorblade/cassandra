@@ -91,6 +91,12 @@ public class BtiTableReader extends SSTableReaderWithFilter
         return rowIndexFile;
     }
 
+    /** The partition index, for {@link BtiCursorRangeSupport}, which takes its own shared copy. */
+    PartitionIndex partitionIndex()
+    {
+        return partitionIndex;
+    }
+
     protected final Builder unbuildTo(Builder builder, boolean sharedCopy)
     {
         Builder b = super.unbuildTo(builder, sharedCopy);

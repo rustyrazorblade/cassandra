@@ -50,6 +50,7 @@ import org.apache.cassandra.utils.StorageCompatibilityMode;
 import static org.apache.cassandra.config.CassandraRelevantProperties.AUTOCOMPACTION_ON_STARTUP_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_AVAILABLE_PROCESSORS;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_COMPACTION_ENABLED;
+import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_RANGE_READS_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_READS_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.CURSOR_REPAIR_ENABLED;
 import static org.apache.cassandra.config.CassandraRelevantProperties.FILE_CACHE_ENABLED;
@@ -734,6 +735,13 @@ public class Config
      * do not pass the CursorReads.isReadSupported gate always use the iterator read path.
      */
     public volatile boolean cursor_reads_enabled = CURSOR_READS_ENABLED.getBoolean();
+
+    /**
+     * Experimental: serve range reads through the cursor path (see org.apache.cassandra.db.CursorRangeReads),
+     * independently of cursor_reads_enabled. Off by default; a read the CursorRangeReads gate does not
+     * support takes the iterator path and is counted.
+     */
+    public volatile boolean cursor_range_reads_enabled = CURSOR_RANGE_READS_ENABLED.getBoolean();
 
     public volatile boolean use_statements_enabled = true;
 

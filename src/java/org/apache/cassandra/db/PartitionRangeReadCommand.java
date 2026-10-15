@@ -18,6 +18,7 @@
 package org.apache.cassandra.db;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -403,6 +404,11 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
         ColumnFamilyStore.ViewFragment view = cfs.select(View.selectLive(dataRange().keyRange()));
         Tracing.trace("Executing seq scan across {} sstables for {}", view.sstables.size(), dataRange().keyRange().getString(metadata().partitionKeyType));
 
+        // cursor range reads, when on and the gate accepts the read; every other read takes the
+        // iterator path below, unchanged
+        if (DatabaseDescriptor.cursorRangeReadsEnabled() && CursorRangeReads.servedByCursor(this, cfs, controller, view.sstables))
+            return queryStorageWithCursor(cfs, controller, view);
+
         // fetch data from current memtable, historical memtables, and SSTables in the correct order.
         InputCollector<UnfilteredPartitionIterator> inputCollector = iteratorsForRange(view, controller);
         try
@@ -465,6 +471,159 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
             {
                 e.addSuppressed(e1);
             }
+            throw e;
+        }
+    }
+
+    /**
+     * Writes the replica data response of a range read straight from the cursor merge when
+     * cursor_range_reads_enabled is on ({@link CursorRangeReads#responseBytes}).  A read that path
+     * does not write takes the default, {@code executeLocally} then {@code createResponse}.
+     */
+    @Override
+    public ReadResponse createResponseLocally(ReadExecutionController controller)
+    {
+        if (DatabaseDescriptor.cursorRangeReadsEnabled() && !metadata().isVirtual() && indexQueryPlan() == null)
+        {
+            ReadResponse response;
+            // the current command, for the checks that look it up while reading, like executeLocally
+            COMMAND.set(this);
+            try
+            {
+                response = CursorRangeReads.responseBytes(this, controller);
+            }
+            finally
+            {
+                COMMAND.set(null);
+            }
+            if (response != null)
+                return response;
+        }
+        return super.createResponseLocally(controller);
+    }
+
+    /**
+     * The cursor-served counterpart of {@link #queryStorage}: the same memtable iterators and the
+     * same sstables as the iterator path ({@link #cursorRangeInputs}), merged by
+     * {@link CursorRangeReads#rangeIterator} instead of {@code InputCollector.finalizeIterators} and
+     * {@code UnfilteredPartitionIterators.mergeLazily}.  The wrapping after the merge (the
+     * sstable-iterated count and {@link #checkCacheFilter}) is the iterator path's.  The merged
+     * partitions are not purged, like the {@code mergeLazily} output, so {@code executeLocally}'s
+     * stages above are unchanged.  Only reached when {@link CursorRangeReads#unsupported} accepts the read.
+     */
+    private UnfilteredPartitionIterator queryStorageWithCursor(final ColumnFamilyStore cfs,
+                                                               ReadExecutionController controller,
+                                                               ColumnFamilyStore.ViewFragment view)
+    {
+        CursorRangeInputs inputs = cursorRangeInputs(controller, view);
+        // iterators can be empty for offline tools
+        if (inputs.memtables.isEmpty() && inputs.sstables.isEmpty())
+            return EmptyIterators.unfilteredPartition(metadata());
+
+        List<SSTableReader> sstables = inputs.sstables;
+        UnfilteredPartitionIterator repaired = null;
+        if (controller.isTrackingRepairedStatus())
+        {
+            // The repaired sstables merge on their own, with the repaired data digest, and join the
+            // read as its last input, as InputCollector.finalizeIterators hands them to mergeLazily.
+            InputCollector<UnfilteredPartitionIterator> collector = iteratorsForRange(view, controller);
+            List<SSTableReader> unrepairedSSTables = new ArrayList<>(sstables.size());
+            List<SSTableReader> repairedSSTables = new ArrayList<>(sstables.size());
+            for (SSTableReader sstable : sstables)
+                (collector.isRepairedForTracking(sstable) ? repairedSSTables : unrepairedSSTables).add(sstable);
+            if (!repairedSSTables.isEmpty())
+            {
+                List<UnfilteredPartitionIterator> none = new ArrayList<>(0);
+                collector.addSSTableIterator(repairedSSTables.get(0),
+                                             CursorRangeReads.rangeIterator(this, cfs, repairedSSTables, none, null, inputs.listener));
+                List<UnfilteredPartitionIterator> finalized;
+                try
+                {
+                    finalized = collector.finalizeIterators(cfs, nowInSec(), controller.oldestUnrepairedTombstone());
+                }
+                catch (RuntimeException | Error e)
+                {
+                    CursorReads.closeAll(inputs.memtables, e);
+                    CursorReads.closeAll(collector.repairedIters, e);
+                    throw e;
+                }
+                repaired = finalized.get(finalized.size() - 1);
+                sstables = unrepairedSSTables;
+            }
+        }
+
+        // from here on the merge owns the memtable and repaired iterators
+        UnfilteredPartitionIterator merged = CursorRangeReads.rangeIterator(this, cfs, sstables, inputs.memtables, repaired, inputs.listener);
+        final int selectedSSTables = inputs.sstables.size();
+        return checkCacheFilter(Transformation.apply(merged, new Transformation<UnfilteredRowIterator>()
+        {
+            @Override
+            protected void onClose()
+            {
+                super.onClose();
+                cfs.metric.updateSSTableIteratedInRangeRead(selectedSSTables);
+            }
+        }), cfs);
+    }
+
+    /** What a cursor range read reads: see {@link #cursorRangeInputs}. */
+    static final class CursorRangeInputs
+    {
+        /** Each memtable's partitions over the range, in the iterator path's order; the caller closes them. */
+        final List<UnfilteredPartitionIterator> memtables;
+        /** The sstables the iterator path scans, in its order. */
+        final List<SSTableReader> sstables;
+        /** Counts each sstable read once, when its scan starts. */
+        final SSTableReadsListener listener;
+
+        CursorRangeInputs(List<UnfilteredPartitionIterator> memtables, List<SSTableReader> sstables, SSTableReadsListener listener)
+        {
+            this.memtables = memtables;
+            this.sstables = sstables;
+            this.listener = listener;
+        }
+    }
+
+    /**
+     * The memtable iterators and the sstables {@link #queryStorage} reads, chosen as it chooses them,
+     * with its updates of the oldest unrepaired tombstone and its log line for a read of many sstables.
+     */
+    CursorRangeInputs cursorRangeInputs(ReadExecutionController controller, ColumnFamilyStore.ViewFragment view)
+    {
+        List<UnfilteredPartitionIterator> memtableIterators = new ArrayList<>();
+        SSTableReadsListener readCountUpdater = newReadCountUpdater();
+        try
+        {
+            for (Memtable memtable : view.memtables)
+            {
+                UnfilteredPartitionIterator iter = memtable.partitionIterator(columnFilter(), dataRange(), readCountUpdater);
+                controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
+                memtableIterators.add(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false));
+            }
+
+            List<SSTableReader> selectedSSTables = new ArrayList<>(view.sstables.size());
+            for (SSTableReader sstable : view.sstables)
+            {
+                boolean intersects = intersects(sstable);
+                boolean hasPartitionLevelDeletions = hasPartitionLevelDeletions(sstable);
+                boolean hasRequiredStatics = hasRequiredStatics(sstable);
+
+                if (!intersects && !hasPartitionLevelDeletions && !hasRequiredStatics)
+                    continue;
+
+                selectedSSTables.add(sstable);
+
+                if (!sstable.isRepaired())
+                    controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
+            }
+
+            if (selectedSSTables.size() > DatabaseDescriptor.getSSTablesPerReadLogThreshold())
+                noSpamLogger.info("The following query '{}' has read {} SSTables.", this.toCQLString(), selectedSSTables.size());
+            return new CursorRangeInputs(memtableIterators, selectedSSTables, readCountUpdater);
+        }
+        catch (RuntimeException | Error e)
+        {
+            CursorReads.closeAll(memtableIterators, e);
             throw e;
         }
     }
