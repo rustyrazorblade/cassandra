@@ -40,6 +40,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -134,6 +135,10 @@ import org.apache.cassandra.metrics.Sampler.Sample;
 import org.apache.cassandra.metrics.Sampler.SamplerType;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.metrics.TopPartitionTracker;
+import org.apache.cassandra.notifications.INotification;
+import org.apache.cassandra.notifications.InitialSSTableAddedNotification;
+import org.apache.cassandra.notifications.SSTableAddedNotification;
+import org.apache.cassandra.notifications.SSTableListChangedNotification;
 import org.apache.cassandra.repair.TableRepairManager;
 import org.apache.cassandra.repair.consistent.admin.CleanupSummary;
 import org.apache.cassandra.repair.consistent.admin.PendingStat;
@@ -337,6 +342,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
     final DiskBoundaryManager diskBoundaryManager = new DiskBoundaryManager();
     private volatile ShardBoundaries cachedShardBoundaries = null;
 
+    /** Bumped each time the tracker reports a change to the sstables, to tell when the cached key count is stale. */
+    private final AtomicLong sstablesVersion = new AtomicLong();
+    private final AtomicReference<ApproximateKeyCount> cachedApproximateKeyCount = new AtomicReference<>();
+
     private volatile boolean neverPurgeTombstones = false;
 
     private class PaxosRepairHistoryLoader
@@ -536,6 +545,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         // be notified on the initial loading.
         data.subscribe(StorageService.instance.sstablesTracker);
         data.subscribe(SnapshotManager.instance);
+        data.subscribe(this::maybeBumpSSTablesVersion);
 
         // Created here, ahead of the `if (data.loadsstables)` block below, because the SSTableReader.openAll()
         // call in it reads back owner.compressionDictionaryManager() for every dictionary-compressed sstable it
@@ -3008,6 +3018,66 @@ public <T> T withAllSSTables(final OperationType operationType, Function<Lifecyc
     }
 
     // End JMX get/set.
+
+    /**
+     * The approximate number of distinct partitions across this table's sstables.
+     * <p>
+     * Computing this reads the Statistics.db of every sstable, so the result is cached until the tracker
+     * reports that the sstables changed.
+     *
+     * @return the merged cardinality estimate, the summed index summary estimate if an estimator fails to
+     *         load, or -1 if there are no sstables
+     */
+    public long getApproximateSSTableKeyCount()
+    {
+        // Read the version before the sstables, so a change during the compute leaves a value that is never used.
+        long version = sstablesVersion.get();
+        ApproximateKeyCount cached = cachedApproximateKeyCount.get();
+        if (cached != null && cached.version == version)
+            return cached.count;
+
+        long count;
+        boolean cacheable = true;
+        try (RefViewFragment refViewFragment = selectAndReference(View.selectFunction(SSTableSet.CANONICAL)))
+        {
+            count = SSTableReader.getApproximateKeyCount(refViewFragment.sstables);
+            // A committed compaction keeps its obsolete sstables in this set until it unmarks them, and unmarking
+            // sends no notification. Do not cache a count that includes them.
+            for (SSTableReader sstable : refViewFragment.sstables)
+            {
+                if (sstable.isMarkedCompacted())
+                {
+                    cacheable = false;
+                    break;
+                }
+            }
+        }
+
+        if (cacheable && sstablesVersion.get() == version)
+            cachedApproximateKeyCount.compareAndSet(cached, new ApproximateKeyCount(version, count));
+
+        return count;
+    }
+
+    private void maybeBumpSSTablesVersion(INotification notification, Object sender)
+    {
+        if (notification instanceof SSTableAddedNotification
+            || notification instanceof InitialSSTableAddedNotification
+            || notification instanceof SSTableListChangedNotification)
+            sstablesVersion.incrementAndGet();
+    }
+
+    private static class ApproximateKeyCount
+    {
+        final long version;
+        final long count;
+
+        ApproximateKeyCount(long version, long count)
+        {
+            this.version = version;
+            this.count = count;
+        }
+    }
 
     public int getMeanEstimatedCellPerPartitionCount()
     {

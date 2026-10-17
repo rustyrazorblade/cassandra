@@ -41,7 +41,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import javax.annotation.Nullable;
 
 import com.clearspring.analytics.stream.cardinality.CardinalityMergeException;
-import com.clearspring.analytics.stream.cardinality.ICardinality;
+import com.clearspring.analytics.stream.cardinality.HyperLogLogPlus;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
@@ -87,6 +87,7 @@ import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.metadata.CompactionMetadata;
+import org.apache.cassandra.io.sstable.metadata.MetadataType;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.ChannelProxy;
 import org.apache.cassandra.io.util.CheckedFunction;
@@ -313,7 +314,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
             return count;
 
         boolean failed = false;
-        ICardinality cardinality = null;
+        HyperLogLogPlus cardinality = null;
         for (SSTableReader sstable : sstables)
         {
             if (sstable.openReason == OpenReason.EARLY)
@@ -321,7 +322,8 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
             try
             {
-                CompactionMetadata metadata = StatsComponent.load(sstable.descriptor).compactionMetadata();
+                // Only the compaction metadata holds the estimator, so skip deserializing the other components.
+                CompactionMetadata metadata = StatsComponent.load(sstable.descriptor, MetadataType.COMPACTION).compactionMetadata();
                 // If we can't load the CompactionMetadata, we are forced to estimate the keys using the index
                 // summary. (CASSANDRA-10676)
                 if (metadata == null)
@@ -331,10 +333,13 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
                     break;
                 }
 
+                // The deserializer always builds a HyperLogLogPlus. Accumulate in place: merge() allocates a whole
+                // estimator per sstable and copies this one into it.
+                HyperLogLogPlus estimator = (HyperLogLogPlus) metadata.cardinalityEstimator;
                 if (cardinality == null)
-                    cardinality = metadata.cardinalityEstimator;
+                    cardinality = estimator;
                 else
-                    cardinality = cardinality.merge(metadata.cardinalityEstimator);
+                    cardinality.addAll(estimator);
             }
             catch (IOException e)
             {
