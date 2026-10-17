@@ -25,17 +25,26 @@ import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.db.context.CounterContext;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.ByteBufferAccessor;
+import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.db.marshal.CompositeType;
+import org.apache.cassandra.db.marshal.LongType;
+import org.apache.cassandra.db.marshal.MapType;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.CellValueSource;
+import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
@@ -50,7 +59,7 @@ import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.utils.ByteArrayUtil;
+import org.apache.cassandra.schema.TableMetadata;
 
 import io.netty.util.concurrent.FastThreadLocal;
 
@@ -77,10 +86,8 @@ import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
  * The merge runs only while {@link #wantsMore()} is true, so a read that reaches its limit merges
  * nothing past it.
  *
- * <p>The row filter is evaluated on the streamed cells when every row-level expression compares a
- * clustering column or a simple regular column value (the expressions the filter pushdown also
- * accepts).  For any other expression this sink builds each row, purges it with the real
- * {@code Row.purge} and evaluates the real {@code RowFilter.Expression.isSatisfiedBy} on it.
+ * <p>The row filter is evaluated on the streamed cells ({@link ResponseFilter}), with no row
+ * built: simple, counter, frozen and non-frozen collection columns, and clustering columns.
  *
  * <p>Purging reuses the production primitives: {@link DeletionPurger#shouldPurge} for liveness and
  * deletions, the decision tree of {@code AbstractCell.purge} for streamed cells, and
@@ -105,8 +112,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     private final boolean countByClustering;
     /** Null when the read has no row filter. */
     private final ResponseFilter filter;
-    /** Builds rows for a filter this sink cannot evaluate on streamed cells; null otherwise. */
-    private final CursorReads.MaterializingMergeSink rowBuilder;
     /** Checked for cancellation; null in the test-only constructor. */
     private final ReadCommand command;
     private long lastCancellationCheck;
@@ -135,6 +140,9 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     private boolean rowLive;
     /** The row holds a complex column with no cells. */
     private boolean rowHasColumnWithNoCells;
+    /** The purged row has a deletion, {@code Row.hasDeletion}: a row, complex or cell tombstone,
+     *  or expired liveness. */
+    private boolean rowHasDeletion;
 
     // ---- partition state ----
     private boolean dropEverything;  // a partition-level filter failed: count the first element only
@@ -201,7 +209,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         this.counter = counter;
         this.countByClustering = countByClustering;
         this.filter = filter;
-        this.rowBuilder = filter != null && !filter.streamable ? new CursorReads.MaterializingMergeSink() : null;
         this.command = command;
         this.slices = slices;
         if (scanGuard != null)
@@ -476,21 +483,12 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             return;
         maybeCancel();
         loadRowClustering(clustering);
-        if (rowBuilder != null)
-        {
-            // the built row keeps what it is given, so it gets stable copies
-            LivenessInfo liveness = mergedLiveness.isEmpty()
-                                    ? LivenessInfo.EMPTY
-                                    : LivenessInfo.withExpirationTime(mergedLiveness.timestamp(), mergedLiveness.ttl(),
-                                                                      mergedLiveness.localExpirationTime());
-            rowBuilder.startRow(rowClustering(), liveness, CursorReads.copyOf(mergedRowDeletion));
-            return;
-        }
         LivenessInfo liveness = purger.shouldPurge(mergedLiveness, nowInSec) ? LivenessInfo.EMPTY : mergedLiveness;
         DeletionTime deletion = purger.shouldPurge(mergedRowDeletion) ? DeletionTime.LIVE : mergedRowDeletion;
         rowHasContent = !liveness.isEmpty() || !deletion.isLive();
         rowLive = liveness.isLive(nowInSec);
         rowHasColumnWithNoCells = false;
+        rowHasDeletion = !deletion.isLive() || (liveness.isExpiring() && nowInSec >= liveness.localExpirationTime());
         if (scanGuard != null)
             scanGuard.startRow(null, liveness, deletion);
         if (filter != null)
@@ -591,11 +589,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     {
         if (!rowAdmitted)
             return;
-        if (rowBuilder != null)
-        {
-            rowBuilder.addComplexDeletion(column, mergedComplexDeletion);
-            return;
-        }
         if (mergedComplexDeletion.isLive())
         {
             // the merge announces a live deletion only for a column the row keeps with no cells;
@@ -604,6 +597,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             rowHasColumnWithNoCells = true;
             if (scanGuard != null)
                 scanGuard.columnWithNoCells();
+            if (filter != null)
+                filter.complexColumnWritten(column);
             writeComplexDeletion(column, DeletionTime.LIVE);
             return;
         }
@@ -613,8 +608,11 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             // the column is opened lazily by its first surviving cell instead
             return;
         rowHasContent = true;
+        rowHasDeletion = true;
         if (scanGuard != null)
             scanGuard.complexDeletion();
+        if (filter != null)
+            filter.complexColumnWritten(column);
         writeComplexDeletion(column, deletion);
     }
 
@@ -635,11 +633,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     {
         if (!rowAdmitted)
             return;
-        if (rowBuilder != null)
-        {
-            rowBuilder.addCell(cell);
-            return;
-        }
         Cell<?> purged = cell.purge(purger, nowInSec);
         if (purged == null)
             // fully purged: dropped from the response entirely
@@ -647,10 +640,11 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         rowHasContent = true;
         boolean live = purged.isLive(nowInSec);
         rowLive |= live && !enforceStrictLiveness;
+        rowHasDeletion |= !live;
         if (scanGuard != null)
             scanGuard.cell(purged.timestamp(), purged.ttl(), purged.localDeletionTime());
-        if (filter != null && filter.filtersColumn(purged.column()))
-            filter.cellValue(purged.column(), live && !purged.isTombstone() ? purged.buffer() : null);
+        if (filter != null)
+            filter.cell(purged.column(), purged.path(), purged.buffer(), live);
         try
         {
             writer.addCell(purged);
@@ -712,13 +706,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     {
         if (!rowAdmitted)
             return;
-        if (rowBuilder != null)
-        {
-            byte[] value = source.hasValue() ? source.materialize() : ByteArrayUtil.EMPTY_BYTE_ARRAY;
-            rowBuilder.addCell(org.apache.cassandra.db.marshal.ByteArrayAccessor.instance.factory()
-                                                                                    .cell(column, timestamp, ttl, localDeletionTime, value, path));
-            return;
-        }
         CellPurgeOutcome outcome = purgeCellLiveness(timestamp, ttl, localDeletionTime);
         if (outcome == CellPurgeOutcome.DROP)
             return;
@@ -734,6 +721,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         boolean live = !converted && (localDeletionTime == Cell.NO_DELETION_TIME
                                       || (ttl != Cell.NO_TTL && nowInSec < localDeletionTime));
         rowLive |= live && !enforceStrictLiveness;
+        rowHasDeletion |= !live;
         if (scanGuard != null)
             scanGuard.cell(timestamp, ttl, localDeletionTime);
         boolean hasValue = !converted && source.hasValue();
@@ -743,8 +731,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             filterValue.clear();
             if (hasValue)
                 source.streamValue(filterValue);
-            boolean tombstone = localDeletionTime != Cell.NO_DELETION_TIME && ttl == Cell.NO_TTL;
-            filter.cellValue(column, live && !tombstone ? filterValue.valueWindow() : null);
+            filter.cell(column, path, filterValue.valueWindow(), live);
             source = stagedValueSource;
         }
         writer.addCellFromWire(column, timestamp, ttl, localDeletionTime, path, hasValue, source);
@@ -756,14 +743,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         if (!rowAdmitted)
             return;
         rowAdmitted = false;
-        if (rowBuilder != null)
-        {
-            rowBuilder.endRow();
-            Row built = (Row) rowBuilder.take();
-            if (built != null)
-                acceptRow(built);
-            return;
-        }
         if (!rowHasContent)
         {
             // purged to nothing: PurgeFunction drops it before anything else sees it
@@ -781,7 +760,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             stopped = true;
             return;
         }
-        if (filter != null && !filter.streamedRowMatches(rowLive))
+        if (filter != null && !filter.streamedRowMatches(survivesPurgeAll(), !rowHasDeletion))
         {
             writer.abandonRow();
             return;
@@ -812,6 +791,16 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             throw new RuntimeException("response write failed", e);
         }
         stopIfCounted();
+    }
+
+    /**
+     * Whether {@code row.purge(DeletionPurger.PURGE_ALL, ...)}, which {@code RowFilter.filter}
+     * runs before its expressions unless the filter needs reconciliation, leaves a row: a row with
+     * no deletion is returned as is, any other keeps only its live liveness and live cells.
+     */
+    private boolean survivesPurgeAll()
+    {
+        return !rowHasDeletion || rowLive;
     }
 
     /**
@@ -855,7 +844,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             stopped = true;
             return;
         }
-        if (filter != null && !filter.rowMatches(purged))
+        if (filter != null && !filter.rowObjectMatches(purged))
             return;
         anyFilterSurvivor = true;
         if (counter != null && !counter.countRow(purged.clustering(), purged.hasLiveData(nowInSec, enforceStrictLiveness)))
@@ -1249,31 +1238,32 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     }
 
     /**
-     * {@code RowFilter.filter} for one partition.  Partition-level expressions (static and
-     * partition key columns) are evaluated on the purged static row.  Row-level expressions are
-     * evaluated on the streamed cells when they are all {@code SimpleExpression}s comparing a
-     * clustering column or a simple, non-counter regular column ({@link #streamable}); otherwise
-     * on each built row with the real {@code isSatisfiedBy}.  With any expression, a row without
-     * live data is dropped, unless the filter needs reconciliation (then the row is not purged
-     * first).
+     * {@code RowFilter.filter} for one partition, evaluated on the streamed cells, with no row
+     * built.  Partition-level expressions (static and partition key columns) are evaluated on the
+     * purged static row with the real {@code isSatisfiedBy}.  Each row-level expression is a
+     * {@link StreamedExpression}: an evaluator that is given the cells of its column as the row
+     * streams, and gives the verdict {@code isSatisfiedBy} gives on the row object.
+     * <p>
+     * Unless the filter needs reconciliation, {@code RowFilter.filter} evaluates the row purged of
+     * every tombstone ({@code DeletionPurger.PURGE_ALL}): a row with no deletion is unchanged, any
+     * other keeps only its live liveness and live cells, and a row left with nothing fails.  With
+     * reconciliation the expressions see every cell of the response row, tombstones included,
+     * with their empty values.
      */
     static final class ResponseFilter
     {
-        private final org.apache.cassandra.schema.TableMetadata metadata;
+        private final TableMetadata metadata;
         private final long nowInSec;
         private final boolean needsReconciliation;
         private final RowFilter.Expression[] partitionLevel;
-        private final RowFilter.Expression[] rowLevel;
-        final boolean streamable;
-        // streamable form: the clustering expressions, and the regular ones by distinct column
-        private final RowFilter.Expression[] clusteringExpressions;
-        private final ColumnMetadata[] regularColumns;
-        private final RowFilter.Expression[][] regularExpressionsByColumn;
+        private final boolean hasRowLevel;
+        private final StreamedExpression[] clusteringExpressions;
+        /** The filtered regular columns, each with its expressions. */
+        private final FilteredColumn[] columns;
         private DecoratedKey key;
 
-        // per-row state of the streamable form
+        // per-row state
         private boolean rowFailed;
-        private int satisfiedColumns;
 
         ResponseFilter(SinglePartitionReadCommand command)
         {
@@ -1282,58 +1272,56 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             RowFilter rowFilter = command.rowFilter();
             this.needsReconciliation = rowFilter.needsReconciliation();
             List<RowFilter.Expression> partition = new ArrayList<>();
-            List<RowFilter.Expression> row = new ArrayList<>();
+            List<StreamedExpression> clustering = new ArrayList<>();
+            List<ColumnMetadata> regularColumns = new ArrayList<>();
+            List<List<StreamedExpression>> regularExpressions = new ArrayList<>();
             for (RowFilter.Expression e : rowFilter.getExpressions())
             {
-                if (e.column().isStatic() || e.column().isPartitionKey())
+                ColumnMetadata column = e.column();
+                if (column.isStatic() || column.isPartitionKey())
+                {
                     partition.add(e);
-                else
-                    row.add(e);
+                    continue;
+                }
+                StreamedExpression streamed = StreamedExpression.of(e);
+                if (column.kind == ColumnMetadata.Kind.CLUSTERING)
+                {
+                    clustering.add(streamed);
+                    continue;
+                }
+                int index = indexOf(regularColumns, column);
+                if (index < 0)
+                {
+                    regularColumns.add(column);
+                    regularExpressions.add(new ArrayList<>());
+                    index = regularColumns.size() - 1;
+                }
+                regularExpressions.get(index).add(streamed);
             }
             this.partitionLevel = partition.toArray(new RowFilter.Expression[0]);
-            this.rowLevel = row.toArray(new RowFilter.Expression[0]);
-
-            boolean canStream = true;
-            List<RowFilter.Expression> clustering = new ArrayList<>();
-            List<ColumnMetadata> columns = new ArrayList<>();
-            for (RowFilter.Expression e : rowLevel)
-            {
-                canStream &= streamable(e);
-                if (e.column().kind == ColumnMetadata.Kind.CLUSTERING)
-                    clustering.add(e);
-                else if (indexOf(columns, e.column()) < 0)
-                    columns.add(e.column());
-            }
-            this.streamable = canStream;
-            this.clusteringExpressions = clustering.toArray(new RowFilter.Expression[0]);
-            this.regularColumns = columns.toArray(new ColumnMetadata[0]);
-            this.regularExpressionsByColumn = new RowFilter.Expression[regularColumns.length][];
-            for (int i = 0; i < regularColumns.length; i++)
-            {
-                List<RowFilter.Expression> onColumn = new ArrayList<>();
-                for (RowFilter.Expression e : rowLevel)
-                {
-                    if (e.column().kind != ColumnMetadata.Kind.CLUSTERING && CursorReads.sameColumn(e.column(), regularColumns[i]))
-                        onColumn.add(e);
-                }
-                regularExpressionsByColumn[i] = onColumn.toArray(new RowFilter.Expression[0]);
-            }
+            this.clusteringExpressions = clustering.toArray(new StreamedExpression[0]);
+            this.columns = new FilteredColumn[regularColumns.size()];
+            for (int i = 0; i < columns.length; i++)
+                columns[i] = new FilteredColumn(regularColumns.get(i), regularExpressions.get(i).toArray(new StreamedExpression[0]));
+            this.hasRowLevel = clusteringExpressions.length > 0 || columns.length > 0;
         }
 
-        /** A simple comparison of a clustering column, or of a simple non-counter regular column,
-         *  that reduces to {@code operator.isSatisfiedBy(type, value, expressionValue)}. */
-        private static boolean streamable(RowFilter.Expression e)
+        /**
+         * Whether every row-level expression of the filter has a {@link StreamedExpression}.  A
+         * user expression ({@code RowFilter.UserExpression}) is checked on a row object, so the
+         * response is not written by this sink for it.
+         */
+        static boolean streamable(RowFilter rowFilter)
         {
-            if (e.getClass() != RowFilter.SimpleExpression.class)
-                return false;
-            ColumnMetadata column = e.column();
-            if (column.isComplex() || column.type.isCounter())
-                return false;
-            if (column.kind != ColumnMetadata.Kind.CLUSTERING && column.kind != ColumnMetadata.Kind.REGULAR)
-                return false;
-            return e.operator().appliesToColumnValues()
-                   || e.operator().appliesToCollectionElements()
-                   || e.operator().appliesToMapKeys();
+            for (RowFilter.Expression e : rowFilter.getExpressions())
+            {
+                ColumnMetadata column = e.column();
+                if (column.isStatic() || column.isPartitionKey())
+                    continue;
+                if (!StreamedExpression.supports(e))
+                    return false;
+            }
+            return true;
         }
 
         private static int indexOf(List<ColumnMetadata> columns, ColumnMetadata column)
@@ -1348,7 +1336,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
 
         boolean hasRowLevelExpressions()
         {
-            return rowLevel.length > 0;
+            return hasRowLevel;
         }
 
         /** Whether the streamed form needs each row's clustering. */
@@ -1369,31 +1357,17 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             return true;
         }
 
-        /** {@code RowFilter.filter}'s row check on a purged row object. */
-        boolean rowMatches(Row row)
-        {
-            Row purged = needsReconciliation ? row : row.purge(DeletionPurger.PURGE_ALL, nowInSec, metadata.enforceStrictLiveness());
-            if (purged == null)
-                return false;
-            for (RowFilter.Expression e : rowLevel)
-            {
-                if (!e.isSatisfiedBy(metadata, key, purged, nowInSec))
-                    return false;
-            }
-            return true;
-        }
-
-        // ---- streamable form ----
-
         /** @param clustering the row's clustering, or null when {@link #filtersClustering()} is false */
         void startRow(Clustering<?> clustering)
         {
             rowFailed = false;
-            satisfiedColumns = 0;
-            for (RowFilter.Expression e : clusteringExpressions)
+            for (FilteredColumn column : columns)
+                column.startRow();
+            for (StreamedExpression e : clusteringExpressions)
             {
-                ByteBuffer value = clustering.bufferAt(e.column().position());
-                if (value == null || !e.operator().isSatisfiedBy(e.column().type, value, e.getIndexValue()))
+                // getValue on a clustering column: the clustering value, which may be null
+                ByteBuffer value = clustering.bufferAt(e.column.position());
+                if (value == null || !e.test(value))
                 {
                     rowFailed = true;
                     return;
@@ -1401,52 +1375,402 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             }
         }
 
-        boolean filtersColumn(ColumnMetadata column)
+        private FilteredColumn filtered(ColumnMetadata column)
         {
-            for (ColumnMetadata c : regularColumns)
+            for (FilteredColumn c : columns)
             {
-                if (CursorReads.sameColumn(c, column))
-                    return true;
+                if (CursorReads.sameColumn(c.column, column))
+                    return c;
             }
-            return false;
+            return null;
         }
 
-        /** The purged cell of a filtered simple column.  {@code value} is null when the cell is not
-         *  live, which fails its expressions like {@code getValue} returning null.  The value is a
-         *  view over reusable storage, used only during this call. */
-        void cellValue(ColumnMetadata column, ByteBuffer value)
+        boolean filtersColumn(ColumnMetadata column)
+        {
+            return filtered(column) != null;
+        }
+
+        /**
+         * A cell of the purged response row.  {@code value} is the value written, empty for a
+         * tombstone, and is a view over reusable storage, used only during this call.
+         */
+        void cell(ColumnMetadata column, CellPath path, ByteBuffer value, boolean live)
         {
             if (rowFailed)
                 return;
-            if (value == null)
-            {
-                rowFailed = true;
+            FilteredColumn filtered = filtered(column);
+            if (filtered == null)
                 return;
-            }
-            for (int i = 0; i < regularColumns.length; i++)
+            if (!filtered.complex)
             {
-                if (!CursorReads.sameColumn(regularColumns[i], column))
-                    continue;
-                for (RowFilter.Expression e : regularExpressionsByColumn[i])
+                // getValue: null for a cell that is not live, which fails every expression
+                if (!live)
                 {
-                    if (!e.operator().isSatisfiedBy(e.column().type, value, e.getIndexValue()))
+                    rowFailed = true;
+                    return;
+                }
+                for (StreamedExpression e : filtered.expressions)
+                {
+                    if (!e.test(value))
                     {
                         rowFailed = true;
                         return;
                     }
                 }
-                satisfiedColumns++;
+                filtered.inRow = true;
                 return;
+            }
+            filtered.inRow = true;
+            filtered.anyLiveCell |= live;
+            // without reconciliation the expressions see the row purged of every tombstone
+            if (live || needsReconciliation)
+            {
+                for (StreamedExpression e : filtered.expressions)
+                    e.cell(path, value);
             }
         }
 
-        /** The streamed row's verdict: it has live data (unless the filter needs reconciliation),
-         *  and every expression passed, each filtered column having a live cell. */
-        boolean streamedRowMatches(boolean rowHasLiveData)
+        /** The response row holds this complex column with a complex deletion, or with no cells. */
+        void complexColumnWritten(ColumnMetadata column)
         {
-            if (!needsReconciliation && !rowHasLiveData)
+            FilteredColumn filtered = filtered(column);
+            if (filtered != null)
+                filtered.inRow = true;
+        }
+
+        /**
+         * The streamed row's verdict.
+         *
+         * @param survivesPurgeAll whether {@code PURGE_ALL} leaves a row, see {@link ResponseFilter}
+         * @param noDeletion       the response row has no deletion, so {@code PURGE_ALL} leaves it unchanged
+         */
+        boolean streamedRowMatches(boolean survivesPurgeAll, boolean noDeletion)
+        {
+            if (!needsReconciliation && !survivesPurgeAll)
                 return false;
-            return !rowFailed && satisfiedColumns == regularColumns.length;
+            if (rowFailed)
+                return false;
+            for (FilteredColumn column : columns)
+            {
+                if (!column.complex)
+                {
+                    // getValue returned null: no live cell for the column
+                    if (!column.inRow)
+                        return false;
+                    continue;
+                }
+                // whether the row the expressions see holds the column (getComplexColumnData != null)
+                boolean present = needsReconciliation || noDeletion ? column.inRow : column.anyLiveCell;
+                for (StreamedExpression e : column.expressions)
+                {
+                    if (!e.verdict(present))
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * {@code RowFilter.filter}'s row check on a row object the sink already purged (a memtable
+         * row standing as the merged row, or a row of a lone object-backed source): its cells go
+         * through the same evaluators, with no {@code Row.purge}.
+         */
+        boolean rowObjectMatches(Row purged)
+        {
+            startRow(clusteringExpressions.length > 0 ? purged.clustering() : null);
+            boolean noDeletion = !purged.hasDeletion(nowInSec);
+            for (FilteredColumn filtered : columns)
+            {
+                if (!filtered.complex)
+                {
+                    Cell<?> cell = purged.getCell(filtered.column);
+                    if (cell != null)
+                        cell(filtered.column, null, cell.buffer(), cell.isLive(nowInSec));
+                    continue;
+                }
+                ComplexColumnData data = purged.getComplexColumnData(filtered.column);
+                if (data == null)
+                    continue;
+                complexColumnWritten(filtered.column);
+                for (int i = 0; i < data.cellsCount(); i++)
+                {
+                    Cell<?> cell = data.getCellByIndex(i);
+                    cell(filtered.column, cell.path(), cell.buffer(), cell.isLive(nowInSec));
+                }
+            }
+            boolean survivesPurgeAll = noDeletion || purged.hasLiveData(nowInSec, metadata.enforceStrictLiveness());
+            return streamedRowMatches(survivesPurgeAll, noDeletion);
+        }
+    }
+
+    /** A filtered regular column, its expressions, and what the current row holds for it. */
+    private static final class FilteredColumn
+    {
+        final ColumnMetadata column;
+        final boolean complex;
+        final StreamedExpression[] expressions;
+        /** Simple: the column has a live cell that satisfied every expression.  Complex: the
+         *  response row holds the column. */
+        boolean inRow;
+        /** Complex: the column has a live cell. */
+        boolean anyLiveCell;
+
+        FilteredColumn(ColumnMetadata column, StreamedExpression[] expressions)
+        {
+            this.column = column;
+            this.complex = column.isComplex();
+            this.expressions = expressions;
+        }
+
+        void startRow()
+        {
+            inRow = false;
+            anyLiveCell = false;
+            for (StreamedExpression e : expressions)
+                e.startRow();
+        }
+    }
+
+    /**
+     * One row-level {@code RowFilter.Expression}, evaluated on the cells of its column as they
+     * stream instead of on a row object.  For a clustering or simple column it tests the live
+     * value; for a complex column it is given each cell the expression sees and gives its verdict
+     * at the end of the row.
+     */
+    abstract static class StreamedExpression
+    {
+        final ColumnMetadata column;
+
+        StreamedExpression(ColumnMetadata column)
+        {
+            this.column = column;
+        }
+
+        /** Whether {@link #of} has an evaluator for {@code e}, a clustering or regular column expression. */
+        static boolean supports(RowFilter.Expression e)
+        {
+            ColumnMetadata column = e.column();
+            if (e.isMapElementExpression())
+                return true;
+            if (e.getClass() != RowFilter.SimpleExpression.class)
+                return false;
+            Operator op = e.operator();
+            if (!column.isComplex())
+                return op.appliesToColumnValues() || op.appliesToCollectionElements() || op.appliesToMapKeys();
+            // a non-frozen collection takes only the element and key operators
+            return column.type.isCollection() && !op.appliesToColumnValues()
+                   && (op.appliesToCollectionElements() || op.appliesToMapKeys());
+        }
+
+        static StreamedExpression of(RowFilter.Expression e)
+        {
+            if (!supports(e))
+                throw new IllegalArgumentException("no streamed form for " + e);
+            ColumnMetadata column = e.column();
+            Operator op = e.operator();
+            if (e.isMapElementExpression())
+            {
+                // getIndexValue is the composite (key, value)
+                ByteBuffer key = CompositeType.extractComponent(e.getIndexValue(), 0);
+                ByteBuffer value = CompositeType.extractComponent(e.getIndexValue(), 1);
+                return column.isComplex() ? new MapElement(column, key, op, value) : new FrozenMapElement(column, key, op, value);
+            }
+            ByteBuffer value = e.getIndexValue();
+            if (column.isComplex())
+            {
+                CollectionType<?> type = (CollectionType<?>) column.type;
+                boolean negated = op == Operator.NOT_CONTAINS || op == Operator.NOT_CONTAINS_KEY;
+                // SetType.contains and CONTAINS KEY find the element by its cell path
+                // (ComplexColumnData.getCell); ListType and MapType compare each cell value
+                boolean byPath = op.appliesToMapKeys() || type.kind == CollectionType.Kind.SET;
+                return new CollectionContains(column, byPath, negated, value);
+            }
+            if (column.type.isCounter() && op.appliesToColumnValues())
+                return new CounterTotal(column, op, value);
+            return new ValueComparison(column, op, value);
+        }
+
+        /** Clustering or simple column: whether the live value satisfies the expression. */
+        boolean test(ByteBuffer value)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        void startRow()
+        {
+        }
+
+        /** Complex column: a cell the expression sees. */
+        void cell(CellPath path, ByteBuffer value)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        /** Complex column: the verdict once the row's cells are in.  {@code present}: the row the
+         *  expression sees holds the column. */
+        boolean verdict(boolean present)
+        {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    /** {@code operator.isSatisfiedBy(column.type, value, expressionValue)}: a simple column,
+     *  including a frozen collection, or a clustering column. */
+    private static final class ValueComparison extends StreamedExpression
+    {
+        private final Operator operator;
+        private final ByteBuffer value;
+
+        ValueComparison(ColumnMetadata column, Operator operator, ByteBuffer value)
+        {
+            super(column);
+            this.operator = operator;
+            this.value = value;
+        }
+
+        @Override
+        boolean test(ByteBuffer found)
+        {
+            return operator.isSatisfiedBy(column.type, found, value);
+        }
+    }
+
+    /** A counter is compared by the total of its context, as a {@code bigint} (CASSANDRA-11629). */
+    private static final class CounterTotal extends StreamedExpression
+    {
+        private final Operator operator;
+        private final ByteBuffer value;
+        private final ByteBuffer total = ByteBuffer.allocate(Long.BYTES);
+
+        CounterTotal(ColumnMetadata column, Operator operator, ByteBuffer value)
+        {
+            super(column);
+            this.operator = operator;
+            this.value = value;
+        }
+
+        @Override
+        boolean test(ByteBuffer found)
+        {
+            total.putLong(0, CounterContext.instance().total(found, ByteBufferAccessor.instance));
+            return operator.isSatisfiedBy(LongType.instance, total, value);
+        }
+    }
+
+    /** {@code m[k] = v} on a frozen map: the value of {@code k} in the serialized map. */
+    private static final class FrozenMapElement extends StreamedExpression
+    {
+        private final MapType<?, ?> type;
+        private final ByteBuffer key;
+        private final Operator operator;
+        private final ByteBuffer value;
+
+        FrozenMapElement(ColumnMetadata column, ByteBuffer key, Operator operator, ByteBuffer value)
+        {
+            super(column);
+            this.type = (MapType<?, ?>) column.type;
+            this.key = key;
+            this.operator = operator;
+            this.value = value;
+        }
+
+        @Override
+        boolean test(ByteBuffer serializedMap)
+        {
+            ByteBuffer found = type.getSerializer().getSerializedValue(serializedMap, key, type.getKeysType());
+            return found != null && operator.isSatisfiedBy(type.getValuesType(), found, value);
+        }
+    }
+
+    /** CONTAINS, NOT CONTAINS, CONTAINS KEY and NOT CONTAINS KEY on a non-frozen collection. */
+    private static final class CollectionContains extends StreamedExpression
+    {
+        private final boolean byPath;
+        private final boolean negated;
+        private final Comparator<CellPath> pathComparator;
+        private final CellPath path;
+        private final AbstractType<?> valueComparator;
+        private final ByteBuffer value;
+        private boolean found;
+
+        CollectionContains(ColumnMetadata column, boolean byPath, boolean negated, ByteBuffer value)
+        {
+            super(column);
+            this.byPath = byPath;
+            this.negated = negated;
+            this.pathComparator = column.cellPathComparator();
+            this.path = CellPath.create(value);
+            this.valueComparator = ((CollectionType<?>) column.type).valueComparator();
+            this.value = value;
+        }
+
+        @Override
+        void startRow()
+        {
+            found = false;
+        }
+
+        @Override
+        void cell(CellPath cellPath, ByteBuffer cellValue)
+        {
+            if (!found)
+                found = byPath ? pathComparator.compare(cellPath, path) == 0 : valueComparator.compare(cellValue, value) == 0;
+        }
+
+        @Override
+        boolean verdict(boolean present)
+        {
+            // complexData != null && operator.isSatisfiedBy(type, complexData, value)
+            return present && found != negated;
+        }
+    }
+
+    /**
+     * {@code m[k] = v} on a non-frozen map: {@code row.getCell(column, CellPath.create(k))}, with
+     * no liveness check, so a deleted element is found, with its empty value, when the row is not
+     * purged first.
+     */
+    private static final class MapElement extends StreamedExpression
+    {
+        private final Comparator<CellPath> pathComparator;
+        private final CellPath path;
+        private final AbstractType<?> valuesType;
+        private final Operator operator;
+        private final ByteBuffer value;
+        private boolean found;
+        private boolean satisfied;
+
+        MapElement(ColumnMetadata column, ByteBuffer key, Operator operator, ByteBuffer value)
+        {
+            super(column);
+            this.pathComparator = column.cellPathComparator();
+            this.path = CellPath.create(key);
+            this.valuesType = ((MapType<?, ?>) column.type).getValuesType();
+            this.operator = operator;
+            this.value = value;
+        }
+
+        @Override
+        void startRow()
+        {
+            found = false;
+            satisfied = false;
+        }
+
+        @Override
+        void cell(CellPath cellPath, ByteBuffer cellValue)
+        {
+            if (!found && pathComparator.compare(cellPath, path) == 0)
+            {
+                found = true;
+                satisfied = operator.isSatisfiedBy(valuesType, cellValue, value);
+            }
+        }
+
+        @Override
+        boolean verdict(boolean present)
+        {
+            return found && satisfied;
         }
     }
 }

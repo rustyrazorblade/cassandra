@@ -185,6 +185,16 @@ public final class CursorReads
      *  per sstable-won cell. */
     private static final AtomicLong SSTABLE_CELL_VALUES_MATERIALIZED = new AtomicLong();
 
+    /** Rows a {@link MaterializingMergeSink} built from merge events.  A read that streams its
+     *  response ({@link ResponseSink}) builds none. */
+    private static final AtomicLong MERGE_SINK_ROWS_BUILT = new AtomicLong();
+
+    @VisibleForTesting
+    public static long mergeSinkRowsBuilt()
+    {
+        return MERGE_SINK_ROWS_BUILT.get();
+    }
+
     static void countSstableCellValueMaterialized()
     {
         SSTABLE_CELL_VALUES_MATERIALIZED.incrementAndGet();
@@ -4661,6 +4671,7 @@ public final class CursorReads
         private final Row.Builder rowBuilder = BTreeRow.sortedBuilder();
         private Unfiltered slot;
         private long materializedCount;
+        private long rowsBuilt;
 
         @Override
         public void startRow(Clustering<?> clustering, LivenessInfo mergedLiveness, DeletionTime mergedDeletion)
@@ -4688,6 +4699,7 @@ public final class CursorReads
         public void endRow()
         {
             Row row = rowBuilder.build();
+            rowsBuilt++;
             // mirrors Row.Merger.merge returning null for a row that merged to nothing
             if (!row.isEmpty())
                 put(row);
@@ -4736,6 +4748,12 @@ public final class CursorReads
             Unfiltered unfiltered = slot;
             slot = null;
             return unfiltered;
+        }
+
+        /** Rows built from merge events, empty ones included. */
+        long rowsBuilt()
+        {
+            return rowsBuilt;
         }
 
         long materializedCount()
@@ -5322,6 +5340,7 @@ public final class CursorReads
                 return;
             closed = true;
             UNFILTEREDS_MATERIALIZED.addAndGet(sink.materializedCount());
+            MERGE_SINK_ROWS_BUILT.addAndGet(sink.rowsBuilt());
             if (countsAsMerge() && !failed)
                 countServedMerge();
             RuntimeException failure = null;

@@ -616,6 +616,9 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         boolean names = filter instanceof ClusteringIndexNamesFilter;
         if (names && filter.isReversed())
             return null;
+        // A user expression is checked on a row object, which this path never builds.
+        if (!ResponseSink.ResponseFilter.streamable(rowFilter()))
+            return null;
         // These stages of executeLocally walk the row objects this path never builds.
         if (CursorReads.querySizeTrackingActive(this)
             || DatabaseDescriptor.getPurgeableTobmstonesMetricGranularity() != Config.TombstonesMetricGranularity.disabled
