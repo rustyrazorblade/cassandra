@@ -195,11 +195,24 @@ public final class CursorReads
     /** Rows a {@link MaterializingMergeSink} built from merge events.  A read that streams its
      *  response ({@link ResponseSink}) builds none. */
     private static final AtomicLong MERGE_SINK_ROWS_BUILT = new AtomicLong();
+    /** Memtable rows the response's row filter dropped before the merge read their cells. */
+    private static final AtomicLong MEMTABLE_ROWS_FILTERED_BEFORE_CELLS = new AtomicLong();
 
     @VisibleForTesting
     public static long mergeSinkRowsBuilt()
     {
         return MERGE_SINK_ROWS_BUILT.get();
+    }
+
+    static void countMemtableRowFilteredBeforeCells()
+    {
+        MEMTABLE_ROWS_FILTERED_BEFORE_CELLS.incrementAndGet();
+    }
+
+    @VisibleForTesting
+    public static long memtableRowsFilteredBeforeCells()
+    {
+        return MEMTABLE_ROWS_FILTERED_BEFORE_CELLS.get();
     }
 
     static void countSstableCellValueMaterialized()
@@ -3599,6 +3612,16 @@ public final class CursorReads
          * legs, which always take the general cell-walk path.
          */
         Row consumeExistingRow();
+
+        /**
+         * The current row as the leg holds it in memory, when the leg gives that row unchanged
+         * (it filters out no column and shadows nothing in it), else null.  The leg does not move:
+         * the caller still merges the row, or skips it with {@link #skipRow}.
+         */
+        default Row unchangedRow()
+        {
+            return null;
+        }
 
         // ---- cell walk ----
         boolean parkedAtCellPosition();

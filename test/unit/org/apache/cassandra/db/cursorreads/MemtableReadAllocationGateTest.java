@@ -28,12 +28,14 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.memtable.AbstractAllocatorMemtable;
 import org.apache.cassandra.utils.FBUtilities;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -65,6 +67,72 @@ public class MemtableReadAllocationGateTest extends CursorReadDifferentialTester
     public void skipListMemtable() throws Throwable
     {
         run("skiplist");
+    }
+
+    @Test
+    public void filteredTrieMemtable() throws Throwable
+    {
+        runFiltered("trie");
+    }
+
+    @Test
+    public void filteredSkipListMemtable() throws Throwable
+    {
+        runFiltered("skiplist");
+    }
+
+    /**
+     * A row the row filter rejects, on a partition only the memtable holds, is dropped before the
+     * merge reads its cells.  The filter is on {@code v2}, and {@code v1} sorts before it, so a row
+     * that streamed its cells would write {@code v1} before {@code v2} rejects it.  One row
+     * matches.  The replica response is the iterator path's, and allocates per row no more than
+     * the same read of one sstable.
+     */
+    private void runFiltered(String memtable) throws Throwable
+    {
+        com.sun.management.ThreadMXBean bean = threadMXBean();
+        Assume.assumeTrue("thread allocation measurement unsupported on this JVM", bean != null);
+
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, m map<int, int>, PRIMARY KEY (pk, ck)) " +
+                    "WITH memtable = '" + memtable + "'");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        // pk 2: one sstable.  pk 1: the memtable only.
+        write(2, 0);
+        flush();
+        write(1, 0);
+
+        long now = FBUtilities.nowInSeconds();
+        for (long pk : new long[]{ 1, 2 })
+        {
+            byte[] iterator = replicaResponseBytes(filteredRead(cfs, now, pk).get());
+            DatabaseDescriptor.setCursorReadsEnabled(true);
+            try
+            {
+                assertArrayEquals("replica response of pk " + pk, iterator, replicaResponseBytes(filteredRead(cfs, now, pk).get()));
+            }
+            finally
+            {
+                DatabaseDescriptor.setCursorReadsEnabled(false);
+            }
+        }
+        long before = CursorReads.memtableRowsFilteredBeforeCells();
+        long memtableOnly = bytesPerRow(bean, cfs, filteredRead(cfs, now, 1L), true);
+        assertEquals("memtable rows the filter dropped before their cells were read",
+                     (long) (WARMUP_PASSES + MEASURED_PASSES) * (ROWS - 1), CursorReads.memtableRowsFilteredBeforeCells() - before);
+        long sstableOnly = bytesPerRow(bean, cfs, filteredRead(cfs, now, 2L), false);
+        logger.info("filtered replica response bytes/row ({}, {}): memtable only {}, one sstable {}",
+                    memtable, AbstractAllocatorMemtable.MEMORY_POOL.getClass().getSimpleName(), memtableOnly, sstableOnly);
+        assertTrue("filtered memtable-only read allocates " + memtableOnly + " B/row, one sstable " + sstableOnly,
+                   memtableOnly <= sstableOnly);
+    }
+
+    /** The read of {@code pk} filtered to the one row {@link #write} gives {@code ck = 3}. */
+    private static Supplier<SinglePartitionReadCommand> filteredRead(ColumnFamilyStore cfs, long now, long pk)
+    {
+        return () -> (SinglePartitionReadCommand) Util.cmd(cfs, pk)
+                                                      .filterOn("v2", Operator.EQ, "value-3-0")
+                                                      .withNowInSeconds(now).build();
     }
 
     private void run(String memtable) throws Throwable

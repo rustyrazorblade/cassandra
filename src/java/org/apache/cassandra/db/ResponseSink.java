@@ -22,6 +22,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -45,6 +46,7 @@ import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.CellValueSource;
 import org.apache.cassandra.db.rows.ComplexColumnData;
+import org.apache.cassandra.db.rows.NativeCell;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
@@ -60,6 +62,7 @@ import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import io.netty.util.concurrent.FastThreadLocal;
 
@@ -829,6 +832,31 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         acceptRow(row);
     }
 
+    /**
+     * The row filter's verdict on a merged row the merge reads as stored, before its cells are
+     * read: {@link #acceptRow} up to the filter.  A row the filter keeps, or that the purge leaves
+     * empty, is left to the merge, which gives it cell by cell.
+     */
+    @Override
+    public boolean dropsRowByFilter(Row row)
+    {
+        if (filter == null || !filter.hasRowLevelExpressions())
+            return false;
+        Row purged = row.purge(purger, nowInSec, false);
+        if (purged == null || purged.isEmpty() || filter.rowObjectMatches(purged))
+            return false;
+        // what startRow and endRow do for a row the filter then rejects
+        if (!enterSlice())
+            return true;
+        maybeCancel();
+        anyPurgeSurvivor = true;
+        if (scanGuard != null)
+            scanGuard.wholeRow(purged);
+        if (dropEverything)
+            stopped = true;
+        return true;
+    }
+
     /** Purge, scan metrics, row filter, limit and write for a row object, with the real
      *  {@code Row.purge} and {@code Row.hasLiveData}. */
     private void acceptRow(Row row)
@@ -1264,6 +1292,10 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
 
         // per-row state
         private boolean rowFailed;
+        /** Direct buffers re-pointed at the value and path of a cell in native memory. */
+        private final ByteBuffer nativeValue = MemoryUtil.getHollowDirectByteBuffer(ByteOrder.BIG_ENDIAN);
+        private final ByteBuffer nativePath = MemoryUtil.getHollowDirectByteBuffer(ByteOrder.BIG_ENDIAN);
+        private final CellPath nativePathCellPath = CellPath.create(nativePath);
 
         ResponseFilter(SinglePartitionReadCommand command)
         {
@@ -1485,7 +1517,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
                 {
                     Cell<?> cell = purged.getCell(filtered.column);
                     if (cell != null)
-                        cell(filtered.column, null, cell.buffer(), cell.isLive(nowInSec));
+                        cell(filtered.column, null, valueOf(cell), cell.isLive(nowInSec));
                     continue;
                 }
                 ComplexColumnData data = purged.getComplexColumnData(filtered.column);
@@ -1495,11 +1527,29 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
                 for (int i = 0; i < data.cellsCount(); i++)
                 {
                     Cell<?> cell = data.getCellByIndex(i);
-                    cell(filtered.column, cell.path(), cell.buffer(), cell.isLive(nowInSec));
+                    cell(filtered.column, pathOf(cell), valueOf(cell), cell.isLive(nowInSec));
                 }
             }
             boolean survivesPurgeAll = noDeletion || purged.hasLiveData(nowInSec, metadata.enforceStrictLiveness());
             return streamedRowMatches(survivesPurgeAll, noDeletion);
+        }
+
+        /** The cell's value; for a cell in native memory a view, valid until the next call. */
+        private ByteBuffer valueOf(Cell<?> cell)
+        {
+            if (!(cell instanceof NativeCell))
+                return cell.buffer();
+            ((NativeCell) cell).pointAtValue(nativeValue);
+            return nativeValue;
+        }
+
+        /** The cell's path; for a cell in native memory a view, valid until the next call. */
+        private CellPath pathOf(Cell<?> cell)
+        {
+            if (!(cell instanceof NativeCell))
+                return cell.path();
+            ((NativeCell) cell).pointAtPath(nativePath);
+            return nativePathCellPath;
         }
     }
 
