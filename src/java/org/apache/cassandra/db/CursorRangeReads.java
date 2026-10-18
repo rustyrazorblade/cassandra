@@ -900,9 +900,21 @@ public final class CursorRangeReads
         {
             if (sources == null)
                 openSources();
+            if (sources.length == 1)
+            {
+                // one source: its partitions in its order, as UnfilteredPartitionIterators.mergeLazily
+                // returns a lone iterator
+                onKeyCount = !oneSourceDone && sources[0].advance() ? 1 : 0;
+                oneSourceDone = onKeyCount == 0;
+                onKey[0] = sources[0];
+                return onKeyCount > 0;
+            }
             onKeyCount = order.next(onKey);
             return onKeyCount > 0;
         }
+
+        /** A merge of one source has read all its partitions. */
+        private boolean oneSourceDone;
 
         private void openSources()
         {
