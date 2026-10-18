@@ -169,8 +169,7 @@ public class TranscodeRoutingDifferentialTest extends SSTableFormatParameterized
         assertEngagesTranscodePath(() -> (SinglePartitionReadCommand) Util.cmd(cfs, 1L).build());
     }
 
-    /** The memtable alone, no sstable at all: one memtable leg, wrapped as a MemtableMergeLeg,
-     *  is enough to serve the transcode path. */
+    /** The memtable alone, no sstable at all: one memtable leg is enough to serve the transcode path. */
     @Test
     public void memtableOnlyReadEngagesTranscodePath() throws Throwable
     {

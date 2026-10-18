@@ -50,6 +50,7 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
@@ -98,12 +99,14 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.isState;
  * one of its cells was filtered out per leg.
  *
  * The legs are {@code CursorReads.MergeLeg}s: byte-backed sstable legs
- * ({@code CursorReads.PendingLeg}) and the object-backed memtable adapter ({@code MemtableMergeLeg})
- * join the same merge, so a memtable+sstable read needs no second, object-level merge above this
- * one.  Memtable-won data is emitted through the {@code existingCell()}/{@code consumeExistingRow()}
- * escape hatches as already-live objects; without that, memtable-hot reads would allocate more than
- * the object path they replace.  A memtable leg never seeks and is never validated, and participates
- * in the open-marker set as a normal, always-current source.
+ * ({@code CursorReads.PendingLeg}), memtable legs ({@code NativeMemtableMergeLeg}) and the
+ * object-backed adapter of an iterator source ({@code MemtableMergeLeg}) join the same merge, so a
+ * memtable+sstable read needs no second, object-level merge above this one.  For a sink that keeps
+ * row objects, memtable-won data is emitted through the {@code existingCell()}/{@code
+ * consumeExistingRow()} escape hatches as the iterator path's own objects; for a sink that streams
+ * cells, a memtable leg gives its cells from the memtable's storage like an sstable leg.  A
+ * memtable leg never seeks and is never validated, and participates in the open-marker set as a
+ * normal, always-current source.
  *
  * For indexed BTI legs, the eager whole-partition walk is gone: each leg enters the merge already
  * seeked to its row-index floor block for the first slice start
@@ -1684,9 +1687,9 @@ final class CursorReadMerger
             input.clear();
             leg.stageCellValue(input);
             boolean inputTombstone = liveness.isTombstone();
-            if (!inputTombstone && input.length() > 0 && leg.existingCell() == null)
+            if (!inputTombstone && input.length() > 0 && leg.sstableOrNull() != null)
             {
-                // the deserialization-time marked-local clear (Flag.LOCAL)
+                // the deserialization-time marked-local clear (Flag.LOCAL), of an sstable's context only
                 int cleared = counterContexts.clearMarkedLocal(input.buffer, 0, input.length());
                 if (cleared >= 0)
                 {
@@ -2132,6 +2135,15 @@ final class CursorReadMerger
         {
             ensureCapacity(length + valueLength);
             in.readFully(buffer, length, valueLength);
+            length += valueLength;
+        }
+
+        /** The value bytes of a memtable cell in native memory. */
+        @Override
+        public void writeMemory(long address, int valueLength)
+        {
+            ensureCapacity(length + valueLength);
+            MemoryUtil.getBytes(address, buffer, length, valueLength);
             length += valueLength;
         }
 

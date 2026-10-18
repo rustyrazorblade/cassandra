@@ -219,6 +219,16 @@ public class NativeCell extends AbstractCell<NativeData> implements NativeData
         return CellPath.create(MemoryUtil.getByteBuffer(offset + 4, size, ByteOrder.BIG_ENDIAN));
     }
 
+    /**
+     * Points {@code view}, a direct buffer made with {@code MemoryUtil.getHollowDirectByteBuffer}, at
+     * this cell's path value, so the path is read with no allocation.  The cell must have a path.
+     */
+    public void pointAtPath(ByteBuffer view)
+    {
+        long offset = getAddress() + valueSize();
+        MemoryUtil.setDirectByteBuffer(view, offset + 4, NativeEndianMemoryUtil.getInt(offset));
+    }
+
     private int pathDataSize()
     {
         long offset = getAddress() + valueSize();

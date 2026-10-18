@@ -51,6 +51,7 @@ import org.apache.cassandra.db.filter.TombstoneOverwhelmingException;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.db.memtable.MemtablePartitionData;
 import org.apache.cassandra.db.partitions.CachedBTreePartition;
 import org.apache.cassandra.db.partitions.CachedPartition;
 import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
@@ -645,14 +646,14 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         // the sstable count the names gate below needs: decline before any other work
         if (names && view.sstables.size() != 1)
             return null;
-        if (!CursorReads.isReadSupported(this, cfs, view.sstables))
+        if (!CursorReads.isReadSupported(this, cfs, view.sstables) || !CursorReads.memtablesGivePartitionData(view.memtables))
             return null;
 
         view.sstables.sort(SSTableReader.maxTimestampDescending);
         Slices slices = filter.getSlices(metadata());
         long mostRecentPartitionTombstone = Long.MIN_VALUE;
 
-        List<UnfilteredRowIterator> memtableIters = null;
+        List<MemtablePartitionData> memtables = null;
         List<CursorReads.PendingLeg> sstableLegs = null;
         // sstables without the partition: the iterator path still merges an empty source for each
         List<SSTableReader> absent = null;
@@ -668,34 +669,46 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         {
             for (Memtable memtable : view.memtables)
             {
-                UnfilteredRowIterator iter = memtable.rowIterator(partitionKey(), slices, columnFilter(), filter.isReversed(), metricsCollector);
-                if (iter == null)
+                // the partition as the memtable holds it now, read once
+                MemtablePartitionData partition = memtable.partitionData(partitionKey());
+                if (partition == null)
                     continue;
 
                 // Memtable data is always considered unrepaired
                 controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
-                UnfilteredRowIterator validated = RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false);
-                if (memtableIters == null)
-                    memtableIters = new ArrayList<>();
-                memtableIters.add(validated);
-                owned.add(new MergeLegOwner(validated));
+                if (memtables == null)
+                    memtables = new ArrayList<>();
+                memtables.add(partition);
 
                 mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
-                                                        iter.partitionLevelDeletion().markedForDeleteAt());
+                                                        partition.data.deletionInfo().getPartitionDeletion().markedForDeleteAt());
             }
 
             // A reverse read that tracks repaired data takes executeLocally, which merges per-leg
             // reverse iterators.  A names read is written here only when it reads one sstable its
             // names may be in.
             if ((filter.isReversed() && tracking)
-                || (names && (memtableIters != null || view.sstables.size() != 1 || tracking || !intersects(view.sstables.get(0)))))
+                || (names && (memtables != null || view.sstables.size() != 1 || tracking || !intersects(view.sstables.get(0)))))
             {
                 MergeLegOwner.closeAll(owned, null);
                 return null;
             }
 
+            // the memtable legs, which give their cells from the memtable's own storage
+            List<NativeMemtableMergeLeg> memtableLegs = null;
+            if (memtables != null)
+            {
+                memtableLegs = new ArrayList<>(memtables.size());
+                for (MemtablePartitionData partition : memtables)
+                {
+                    NativeMemtableMergeLeg leg = new NativeMemtableMergeLeg(metadata(), partition, columnFilter(), slices, filter.isReversed(), false);
+                    owned.add(new MergeLegOwner(leg));
+                    memtableLegs.add(leg);
+                }
+            }
+
             // defer the legs that may merge, as queryMemtableAndDiskInternal does
-            boolean deferLegs = view.sstables.size() > 1 || memtableIters != null;
+            boolean deferLegs = view.sstables.size() > 1 || memtables != null;
             CursorLegSelection selection = selectCursorLegs(view, slices, mostRecentPartitionTombstone, deferLegs,
                                                             controller, metricsCollector, collector);
             sstableLegs = selection.legs;
@@ -718,12 +731,13 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             List<EncodingStats> stats = new ArrayList<>();
             RegularAndStaticColumns columns = null;
             int sources = 0;
-            if (memtableIters != null)
+            if (memtableLegs != null)
             {
-                for (UnfilteredRowIterator memtableIter : memtableIters)
+                for (NativeMemtableMergeLeg leg : memtableLegs)
                 {
-                    stats.add(memtableIter.stats());
-                    columns = columns == null ? memtableIter.columns() : columns.mergeTo(memtableIter.columns());
+                    // the stats and columns the memtable's row iterator reports
+                    stats.add(leg.legStats());
+                    columns = columns == null ? leg.legColumns() : columns.mergeTo(leg.legColumns());
                     sources++;
                 }
             }
@@ -828,25 +842,25 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 // a lone object-backed source is serialized as is on the iterator path
                 if (sources == 1 && repaired != null)
                     partitionWritten = CursorReads.streamResponse(repaired, columnFilter(), sink, out);
-                else if (sources == 1 && memtableIters != null)
-                    partitionWritten = CursorReads.streamResponse(memtableIters.get(0), columnFilter(), sink, out);
                 else if (filter.isReversed() && sources == 1 && unrepairedLegs.size() == 1)
                     partitionWritten = CursorReads.streamReversedResponse(unrepairedLegs.get(0), columnFilter(), sink, out);
-                else if (filter.isReversed() && (memtableIters != null || !unrepairedLegs.isEmpty()))
+                else if (filter.isReversed() && (memtables != null || !unrepairedLegs.isEmpty()))
                 {
                     // no repaired data here: the gate above sends a reverse read that tracks it elsewhere
-                    List<CursorReads.MergeLeg> legs = cursorMergeLegs(unrepairedLegs, memtableIters, slices, true);
+                    List<CursorReads.MergeLeg> legs = responseMergeLegs(memtableLegs, unrepairedLegs, true);
                     partitionWritten = CursorReads.streamReversedResponse(legs, metadata(), partitionKey(), slices, columnFilter(), sink, out);
                 }
                 else
                 {
-                    List<CursorReads.MergeLeg> legs = cursorMergeLegs(unrepairedLegs, memtableIters, slices, false);
+                    // the memtable legs give their cells from the memtable's own storage, a lone
+                    // memtable too: the merge of one leg gives what its row iterator gives
+                    List<CursorReads.MergeLeg> legs = responseMergeLegs(memtableLegs, unrepairedLegs, false);
                     // pulled only as far as the merge reads it, since every pull feeds the digest
                     if (repaired != null)
-                        legs.add(new MemtableMergeLeg(repaired, slices, true));
+                        legs.add(new MemtableMergeLeg(repaired, slices));
                     // the same partition-level skip as executeLocally's cursor merge (buildCursorMerge):
                     // an sstable leg merged with a memtable or another leg, without repaired-status tracking
-                    boolean cursorMerge = !unrepairedLegs.isEmpty() && (memtableIters != null || unrepairedLegs.size() >= 2);
+                    boolean cursorMerge = !unrepairedLegs.isEmpty() && (memtables != null || unrepairedLegs.size() >= 2);
                     CursorReads.FilterPushdown partitionFilter = !tracking && cursorMerge ? CursorReads.filterPushdownFor(this) : null;
                     partitionWritten = CursorReads.streamResponse(legs, metadata(), partitionKey(), slices, columnFilter(),
                                                                   partitionFilter, sink, out);
@@ -1055,10 +1069,10 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     /** Something {@link #queryStorageToResponseBytes} opened and must close: a leg or an iterator. */
     private static final class MergeLegOwner
     {
-        final CursorReads.PendingLeg leg;
+        final CursorReads.MergeLeg leg;
         final UnfilteredRowIterator iterator;
 
-        MergeLegOwner(CursorReads.PendingLeg leg)
+        MergeLegOwner(CursorReads.MergeLeg leg)
         {
             this.leg = leg;
             this.iterator = null;
@@ -1377,13 +1391,15 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         // path for now (out of the verified surface).
         // a supported read that still takes the iterator path counts each sstable leg as fallen back
         boolean supported = CursorReads.isReadSupported(this, cfs, view.sstables);
-        boolean cursorReads = rowTransformer == null && supported;
+        // a memtable that cannot give its partition data takes the iterator path, and its sstable
+        // legs count as fallen back
+        boolean cursorReads = rowTransformer == null && supported && CursorReads.memtablesGivePartitionData(view.memtables);
         // Memtable legs of a gate-supported read join the SAME cursor-level merge as the
-        // sstable legs (via the object-backed MemtableMergeLeg adapter), so their iterators are
-        // COLLECTED here instead of being handed to the object merge — unless no sstable leg
-        // survives the elimination loop below, in which case they fall back to the object path
-        // (the gate requires at least one sstable leg).
-        List<UnfilteredRowIterator> cursorMemtableIters = null;
+        // sstable legs (NativeMemtableMergeLeg over the partition data read here), so the
+        // partitions are COLLECTED here instead of being handed to the object merge as iterators,
+        // unless no sstable leg survives the elimination loop below: then their row iterators,
+        // over the same partition data, take the object path, like the iterator path.
+        List<MemtablePartitionData> cursorMemtables = null;
         // With more than one candidate sstable, cursor-served legs are OPENED (cursor +
         // partition header + static row — enough for the mostRecentPartitionTombstone elimination
         // below) but their rows deferred, so that all surviving legs can be merged at the CURSOR
@@ -1402,6 +1418,24 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 
             for (Memtable memtable : view.memtables)
             {
+                if (cursorReads)
+                {
+                    // the partition as the memtable holds it now, read once
+                    MemtablePartitionData partition = memtable.partitionData(partitionKey());
+                    if (partition == null)
+                        continue;
+                    if (memtable.getMinTimestamp() != Memtable.NO_MIN_TIMESTAMP)
+                        minTimestamp = Math.min(minTimestamp, memtable.getMinTimestamp());
+                    // Memtable data is always considered unrepaired
+                    controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
+                    if (cursorMemtables == null)
+                        cursorMemtables = new ArrayList<>();
+                    cursorMemtables.add(partition);
+                    mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                            partition.data.deletionInfo().getPartitionDeletion().markedForDeleteAt());
+                    continue;
+                }
+
                 UnfilteredRowIterator iter = memtable.rowIterator(partitionKey(), filter.getSlices(metadata()), columnFilter(), filter.isReversed(), metricsCollector);
                 if (iter == null)
                     continue;
@@ -1414,20 +1448,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
 
                 // Memtable data is always considered unrepaired
                 controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
-                // The Stage.MEMTABLE RT-bound validation wraps the iterator on BOTH routes — on
-                // the cursor route the adapter consumes the validated stream, preserving the
-                // same coverage the object merge had.
-                UnfilteredRowIterator validated = RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false);
-                if (cursorReads)
-                {
-                    if (cursorMemtableIters == null)
-                        cursorMemtableIters = new ArrayList<>();
-                    cursorMemtableIters.add(validated);
-                }
-                else
-                {
-                    inputCollector.addMemtableIterator(validated);
-                }
+                inputCollector.addMemtableIterator(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false));
 
                 mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
                                                         iter.partitionLevelDeletion().markedForDeleteAt());
@@ -1435,7 +1456,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             // With memtable data present, even a single-candidate sstable read defers its
             // leg so the memtable leg(s) can join one cursor-level merge with it.  A reverse read
             // merges its legs in reverse (CursorReads.mergeLegsReversed).
-            cursorMergedLegs = cursorReads && (view.sstables.size() > 1 || cursorMemtableIters != null);
+            cursorMergedLegs = cursorReads && (view.sstables.size() > 1 || cursorMemtables != null);
 
             /*
              * We can't eliminate full sstables based on the timestamp of what we've already read like
@@ -1605,13 +1626,13 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 cursorLegs = unrepairedLegs;
                 Slices trackingSlices = filter.getSlices(metadata());
 
-                if (unrepairedLegs == null && cursorMemtableIters != null)
+                if (unrepairedLegs == null && cursorMemtables != null)
                 {
                     // No unrepaired sstable leg: the always-unrepaired memtable iterators take the
                     // object path, exactly as in the non-tracking memtable-only case below.
-                    for (UnfilteredRowIterator memtableIter : cursorMemtableIters)
-                        inputCollector.addMemtableIterator(memtableIter);
-                    cursorMemtableIters = null;
+                    for (MemtablePartitionData partition : cursorMemtables)
+                        inputCollector.addMemtableIterator(memtableIterator(partition));
+                    cursorMemtables = null;
                 }
 
                 if (repairedLegs != null && !repairedLegs.isEmpty())
@@ -1648,20 +1669,20 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 // had flowed through it. Only the merged paths activate it: a single-leg read never
                 // attaches the context (the completeSingleLeg scope choice), so it must not carry an
                 // accumulator either.
-                if (filterPushdown != null && (cursorMemtableIters != null || legs.size() >= 2))
+                if (filterPushdown != null && (cursorMemtables != null || legs.size() >= 2))
                     filterPushdown.activateScanAccounting(controller, cfs, this);
-                List<UnfilteredRowIterator> memtableIters = cursorMemtableIters;
-                cursorMemtableIters = null; // ownership passes to the merge, which closes its legs
-                UnfilteredRowIterator merged = buildCursorMerge(legs, memtableIters, filter.getSlices(metadata()), filterPushdown);
+                List<MemtablePartitionData> memtables = cursorMemtables;
+                cursorMemtables = null; // the merge's memtable legs read them, and it closes its legs
+                UnfilteredRowIterator merged = buildCursorMerge(legs, memtables, filter.getSlices(metadata()), filterPushdown);
                 inputCollector.addSSTableIterator(attribution, merged);
             }
-            else if (cursorMemtableIters != null)
+            else if (cursorMemtables != null)
             {
                 // No surviving sstable leg (all eliminated, or none contained the partition):
                 // the memtable iterators take the object path, as on the iterator path.
-                for (UnfilteredRowIterator memtableIter : cursorMemtableIters)
-                    inputCollector.addMemtableIterator(memtableIter);
-                cursorMemtableIters = null;
+                for (MemtablePartitionData partition : cursorMemtables)
+                    inputCollector.addMemtableIterator(memtableIterator(partition));
+                cursorMemtables = null;
             }
 
             // The sstables without the partition: keep parity with the iterator path, which still
@@ -1686,9 +1707,9 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             CursorReads.ScanStatsAccumulator filterInMerge = controller.scanStats();
             // first, as the memtables it holds come first on the iterator path
             if (cursorLegs != null)
-                iterators.add(0, mergeUnrepairedWithRepaired(cursorLegs, cursorMemtableIters, iterators, hasRepaired));
+                iterators.add(0, mergeUnrepairedWithRepaired(cursorLegs, cursorMemtables, iterators, hasRepaired));
             cursorLegs = null;
-            cursorMemtableIters = null;
+            cursorMemtables = null;
 
             UnfilteredRowIterator result = withSSTablesIterated(iterators, cfs.metric, metricsCollector, filterInMerge);
 
@@ -1700,7 +1721,6 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         catch (RuntimeException | Error e)
         {
             CursorReads.closeAll(cursorLegs, e);
-            CursorReads.closeAll(cursorMemtableIters, e);
             try
             {
                 inputCollector.close();
@@ -1859,8 +1879,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     /**
      * Builds one cursor-merged iterator over {@code legs}, which must not be empty: all the
      * surviving legs, or one side of the repaired-status tracking split.  Optional memtable
-     * iterators (always unrepaired) join the merge through the object-backed adapter, memtables
-     * first, mirroring the object merge's input order.  A single sstable leg with no memtable data
+     * partitions (always unrepaired) join the merge as {@link NativeMemtableMergeLeg}s giving the
+     * iterator path's row objects, memtables first, mirroring the object merge's input order.  A single sstable leg with no memtable data
      * completes on the per-leg path; anything else runs the cursor-level merge.  The returned
      * iterator is lazy: it merges only as far as its reader pulls (the repaired-data digest, the
      * response, or the tracking over-read), and closes the legs on close.
@@ -1869,15 +1889,15 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      *                       pushes it
      */
     private UnfilteredRowIterator buildCursorMerge(List<CursorReads.PendingLeg> legs,
-                                                   List<UnfilteredRowIterator> memtableIters,
+                                                   List<MemtablePartitionData> memtables,
                                                    Slices slices,
                                                    CursorReads.FilterPushdown filterPushdown)
     {
         if (clusteringIndexFilter().isReversed())
-            return buildReversedCursorMerge(legs, memtableIters, slices);
-        if (memtableIters == null && legs.size() == 1)
+            return buildReversedCursorMerge(legs, memtables, slices);
+        if (memtables == null && legs.size() == 1)
             return CursorReads.completeSingleLeg(legs.get(0));
-        return CursorReads.mergeLegs(cursorMergeLegs(legs, memtableIters, slices, false), metadata(), mergedPartitionKey(memtableIters),
+        return CursorReads.mergeLegs(cursorMergeLegs(legs, memtables, slices, false), metadata(), mergedPartitionKey(memtables),
                                      slices, columnFilter(), filterPushdown);
     }
 
@@ -1886,9 +1906,17 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * memtable that holds the partition, else this read's key (an sstable iterator reports the key
      * it was asked for).  The read size guardrail counts the heap size of this object.
      */
-    private DecoratedKey mergedPartitionKey(List<UnfilteredRowIterator> memtableIters)
+    private DecoratedKey mergedPartitionKey(List<MemtablePartitionData> memtables)
     {
-        return memtableIters == null || memtableIters.isEmpty() ? partitionKey() : memtableIters.get(0).partitionKey();
+        return memtables == null || memtables.isEmpty() ? partitionKey() : memtables.get(0).key;
+    }
+
+    /** The memtable's row iterator over {@code partition}, validated like any memtable iterator. */
+    private UnfilteredRowIterator memtableIterator(MemtablePartitionData partition)
+    {
+        ClusteringIndexFilter filter = clusteringIndexFilter();
+        return RTBoundValidator.validate(partition.unfilteredIterator(columnFilter(), filter.getSlices(metadata()), filter.isReversed()),
+                                         RTBoundValidator.Stage.MEMTABLE, false);
     }
 
     /**
@@ -1899,17 +1927,17 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      * of {@code iterators}.  The returned iterator owns all its legs.
      */
     private UnfilteredRowIterator mergeUnrepairedWithRepaired(List<CursorReads.PendingLeg> unrepairedLegs,
-                                                              List<UnfilteredRowIterator> memtableIters,
+                                                              List<MemtablePartitionData> memtables,
                                                               List<UnfilteredRowIterator> iterators,
                                                               boolean hasRepaired)
     {
         Slices slices = clusteringIndexFilter().getSlices(metadata());
         if (!hasRepaired)
-            return buildCursorMerge(unrepairedLegs, memtableIters, slices, null);
+            return buildCursorMerge(unrepairedLegs, memtables, slices, null);
         boolean reversed = clusteringIndexFilter().isReversed();
-        List<CursorReads.MergeLeg> legs = cursorMergeLegs(unrepairedLegs, memtableIters, slices, reversed);
-        legs.add(new MemtableMergeLeg(iterators.remove(iterators.size() - 1), slices, true));
-        DecoratedKey key = mergedPartitionKey(memtableIters);
+        List<CursorReads.MergeLeg> legs = cursorMergeLegs(unrepairedLegs, memtables, slices, reversed);
+        legs.add(new MemtableMergeLeg(iterators.remove(iterators.size() - 1), slices));
+        DecoratedKey key = mergedPartitionKey(memtables);
         return reversed ? CursorReads.mergeLegsReversed(legs, metadata(), key, slices, columnFilter())
                         : CursorReads.mergeLegs(legs, metadata(), key, slices, columnFilter(), null);
     }
@@ -1931,34 +1959,51 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         }
     }
 
-    /** The legs of a cursor merge: the memtable iterators first, through the object-backed
-     *  adapter, then the sstable legs, wrapped for a reverse merge when {@code reversed}. */
-    private static List<CursorReads.MergeLeg> cursorMergeLegs(List<CursorReads.PendingLeg> legs,
-                                                              List<UnfilteredRowIterator> memtableIters,
-                                                              Slices slices,
-                                                              boolean reversed)
+    /** The legs of the replica response's merge: the memtable legs first, then the sstable legs,
+     *  wrapped for a reverse merge when {@code reversed}. */
+    private static List<CursorReads.MergeLeg> responseMergeLegs(List<NativeMemtableMergeLeg> memtableLegs,
+                                                                List<CursorReads.PendingLeg> legs,
+                                                                boolean reversed)
     {
-        int memtableCount = memtableIters == null ? 0 : memtableIters.size();
+        List<CursorReads.MergeLeg> allLegs = new ArrayList<>((memtableLegs == null ? 0 : memtableLegs.size()) + legs.size() + 1);
+        if (memtableLegs != null)
+            allLegs.addAll(memtableLegs);
+        for (CursorReads.PendingLeg leg : legs)
+            allLegs.add(reversed ? new CursorReads.ReverseMergeLeg(leg) : leg);
+        return allLegs;
+    }
+
+    /**
+     * The legs of an {@code executeLocally} cursor merge: the memtable partitions first, as
+     * {@link NativeMemtableMergeLeg}s giving the iterator path's row objects, then the sstable legs,
+     * wrapped for a reverse merge when {@code reversed}.  The merge closes them.
+     */
+    private List<CursorReads.MergeLeg> cursorMergeLegs(List<CursorReads.PendingLeg> legs,
+                                                       List<MemtablePartitionData> memtables,
+                                                       Slices slices,
+                                                       boolean reversed)
+    {
+        int memtableCount = memtables == null ? 0 : memtables.size();
         List<CursorReads.MergeLeg> allLegs = new ArrayList<>(memtableCount + legs.size() + 1);
-        if (memtableIters != null)
+        if (memtables != null)
         {
-            for (UnfilteredRowIterator memtableIter : memtableIters)
-                allLegs.add(new MemtableMergeLeg(memtableIter, slices));
+            for (MemtablePartitionData partition : memtables)
+                allLegs.add(new NativeMemtableMergeLeg(metadata(), partition, columnFilter(), slices, reversed, true));
         }
         for (CursorReads.PendingLeg leg : legs)
             allLegs.add(reversed ? new CursorReads.ReverseMergeLeg(leg) : leg);
         return allLegs;
     }
 
-    /** The reverse read's merge of {@code legs} and {@code memtableIters}, memtables first; a lone
+    /** The reverse read's merge of {@code legs} and {@code memtables}, memtables first; a lone
      *  sstable leg is read as stored. */
     private UnfilteredRowIterator buildReversedCursorMerge(List<CursorReads.PendingLeg> legs,
-                                                           List<UnfilteredRowIterator> memtableIters,
+                                                           List<MemtablePartitionData> memtables,
                                                            Slices slices)
     {
-        if (memtableIters == null && legs.size() == 1)
+        if (memtables == null && legs.size() == 1)
             return CursorReads.completeSingleLegReversed(legs.get(0));
-        return CursorReads.mergeLegsReversed(cursorMergeLegs(legs, memtableIters, slices, true), metadata(), mergedPartitionKey(memtableIters),
+        return CursorReads.mergeLegsReversed(cursorMergeLegs(legs, memtables, slices, true), metadata(), mergedPartitionKey(memtables),
                                              slices, columnFilter());
     }
 

@@ -266,6 +266,22 @@ public class ShardedSkipListMemtable extends AbstractShardedMemtable
     }
 
     @Override
+    public boolean readsPartitionData()
+    {
+        return true;
+    }
+
+    @Override
+    public MemtablePartitionData partitionData(DecoratedKey key)
+    {
+        int shardIndex = boundaries.getShardForKey(key);
+        AtomicBTreePartition partition = shards[shardIndex].partitions.get(key);
+        if (partition == null)
+            return null;
+        return new MemtablePartitionData(partition.partitionKey(), partition.currentData(), allocator.ensureOnHeap(), partition);
+    }
+
+    @Override
     public UnfilteredRowIterator rowIterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
     {
         Partition p = getPartition(key);

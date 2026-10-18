@@ -106,6 +106,13 @@ public final class AtomicBTreePartition extends AbstractBTreePartition
         return ref;
     }
 
+    /** The partition's content as it stands now.  An update replaces it as a whole, so what is
+     *  read from it stays consistent. */
+    public BTreePartitionData currentData()
+    {
+        return ref;
+    }
+
     public TableMetadata metadata()
     {
         return metadata.get();

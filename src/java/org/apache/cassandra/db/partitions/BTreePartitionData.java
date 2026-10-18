@@ -64,6 +64,30 @@ public final class BTreePartitionData
         this.stats = stats;
     }
 
+    /** The columns of the partition. */
+    public RegularAndStaticColumns columns()
+    {
+        return columns;
+    }
+
+    /** The partition deletion and range tombstones. */
+    public DeletionInfo deletionInfo()
+    {
+        return deletionInfo;
+    }
+
+    /** The rows, as a {@link BTree} in clustering order. */
+    public Object[] tree()
+    {
+        return tree;
+    }
+
+    /** The static row, {@code Rows.EMPTY_STATIC_ROW} when there is none. */
+    public Row staticRow()
+    {
+        return staticRow;
+    }
+
     BTreePartitionData withColumns(RegularAndStaticColumns columns)
     {
         return new BTreePartitionData(columns, this.tree, this.deletionInfo, this.staticRow, this.stats);
