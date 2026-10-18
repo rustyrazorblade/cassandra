@@ -4953,7 +4953,42 @@ public final class CursorReads
          *  real predicates directly instead of the per-event formulas above. */
         void wholeRow(Row row)
         {
-            ReadCommand.countScannedRow(row, nowInSec, enforceStrictLiveness, this);
+            if (!(row instanceof BTreeRow))
+            {
+                ReadCommand.countScannedRow(row, nowInSec, enforceStrictLiveness, this);
+                return;
+            }
+            // ReadCommand.countScannedRow, with the cells read by index rather than by an iterator
+            boolean hasTombstones = false;
+            boolean rowHasDeletion = row.hasDeletion(nowInSec);
+            if (rowHasDeletion)
+            {
+                BTreeRow btreeRow = (BTreeRow) row;
+                for (int i = 0, count = btreeRow.columnCount(); i < count; i++)
+                {
+                    ColumnData data = btreeRow.columnDataByIndex(i);
+                    if (!data.column().isComplex())
+                    {
+                        hasTombstones |= countIfTombstone(row, (Cell<?>) data);
+                        continue;
+                    }
+                    ComplexColumnData complex = (ComplexColumnData) data;
+                    for (int j = 0; j < complex.cellsCount(); j++)
+                        hasTombstones |= countIfTombstone(row, complex.getCellByIndex(j));
+                }
+            }
+            if (row.hasLiveData(nowInSec, enforceStrictLiveness))
+                countLiveRow();
+            else if (!row.primaryKeyLivenessInfo().isLive(nowInSec) && rowHasDeletion && !hasTombstones)
+                countTombstone(row.clustering());
+        }
+
+        private boolean countIfTombstone(Row row, Cell<?> cell)
+        {
+            if (cell.isLive(nowInSec))
+                return false;
+            countTombstone(row.clustering());
+            return true;
         }
 
         @Override
