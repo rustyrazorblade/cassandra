@@ -101,8 +101,72 @@ import static org.apache.cassandra.utils.MonotonicClock.Global.approxTime;
  */
 public final class ResponseSink implements CursorReadMerger.MergeSink
 {
+    /**
+     * Where the sink writes what survives: the response bytes ({@link ResponseWireWriter}), or a
+     * {@link RangeReadSink} ({@link RangeReadSinkOutput}).  The sink decides what is written (purge,
+     * scan metrics, row filter, limits, the range tombstone the limit leaves open); the output only
+     * writes it.  A row is started, given its columns, then ended or abandoned.
+     */
+    public interface Output
+    {
+        /** The clustering types the clusterings handed to {@link #startRow} are serialized with. */
+        AbstractType<?>[] clusteringTypes();
+
+        /**
+         * Starts a partition: its key, deletion and static row.  {@link #removePartition} may
+         * still drop it, and {@link #closeEmptyPartition} may still write it as an empty one.
+         *
+         * @param staticRow the purged static row, or null when the partition has none to write
+         */
+        void openPartition(DecoratedKey key, boolean reversed, DeletionTime partitionDeletion, Row staticRow,
+                           ColumnFilter columnFilter) throws IOException;
+
+        /** Drops the partition {@link #openPartition} started: nothing of it is written. */
+        void removePartition() throws IOException;
+
+        /** Ends the partition {@link #openPartition} started, which has no deletion, no static row
+         *  and no row: the response's single-byte empty form. */
+        void closeEmptyPartition(boolean reversed, DeletionTime partitionDeletion, ColumnFilter columnFilter) throws IOException;
+
+        /** Ends the partition {@link #openPartition} started. */
+        void closePartition() throws IOException;
+
+        /** See {@link ResponseWireWriter#startRow}. */
+        void startRow(byte[] clustering, int clusteringLength, LivenessInfo liveness, DeletionTime rowDeletion) throws IOException;
+
+        void addComplexDeletion(ColumnMetadata column, DeletionTime complexDeletion) throws IOException;
+
+        void addCell(Cell<?> cell) throws IOException;
+
+        void addCellFromWire(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime,
+                             CellPath path, boolean hasValue, CellValueSource source) throws IOException;
+
+        /** The open row's liveness, as given to {@link #startRow}. */
+        LivenessInfo rowLiveness();
+
+        /** The open row's deletion, as given to {@link #startRow}. */
+        DeletionTime rowDeletion();
+
+        /** The number of columns in the open row so far. */
+        int rowColumnCount();
+
+        /** The number of complex columns in the open row with a live deletion and no cells. */
+        int rowColumnsWithNoCells();
+
+        /** Drops the open row. */
+        void abandonRow();
+
+        /** Ends the open row; false, writing nothing, when it is empty. */
+        boolean endRow() throws IOException;
+
+        /** A whole row object. */
+        void writeRow(Row row) throws IOException;
+
+        void writeMarker(RangeTombstoneMarker marker) throws IOException;
+    }
+
     /** Changes per partition for a range read; see {@link #startRangePartition}. */
-    private ResponseWireWriter writer;
+    private Output writer;
     private final DeletionPurger purger;
     private final long nowInSec;
     private final boolean purgeEnabled;
@@ -117,7 +181,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     /** The counter needs each row's clustering: a GROUP BY limit. */
     private final boolean countByClustering;
     /** Null when the read has no row filter. */
-    private final ResponseFilter filter;
+    /** The read's row filter, ANDed with a caller's filter; null for none. */
+    private final ReconciledRowFilter filter;
     /** Checked for cancellation; null in the test-only constructor. */
     private final ReadCommand command;
     private long lastCancellationCheck;
@@ -149,6 +214,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     /** The purged row has a deletion, {@code Row.hasDeletion}: a row, complex or cell tombstone,
      *  or expired liveness. */
     private boolean rowHasDeletion;
+    /** The output has the row open: false once the row filter rejects it at its clustering. */
+    private boolean rowOutputOpen;
 
     // ---- partition state ----
     private boolean dropEverything;  // a partition-level filter failed: count the first element only
@@ -171,14 +238,12 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
     private DeletionTime partitionDeletion;
     private Row staticRow;
     private boolean hasStatic;
-    private int partitionStart;
-    private int headerStart;
     /** A range read: the caller writes the envelope's first and last bytes, once for all partitions. */
     private boolean rangeEnvelope;
 
     /** Test-only: purge as configured, no accounting, no filter, no limit.  {@code nowInSec == 0}
      *  disables purging, matching {@code ReadCommand}'s own gate. */
-    public ResponseSink(ResponseWireWriter writer, ClusteringComparator comparator, Slice slice,
+    public ResponseSink(Output writer, ClusteringComparator comparator, Slice slice,
                         long nowInSec, long gcBefore, boolean onlyPurgeRepairedTombstones,
                         long oldestUnrepairedTombstone)
     {
@@ -186,7 +251,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
              oldestUnrepairedTombstone, null, null, false, null, null);
     }
 
-    ResponseSink(ResponseWireWriter writer,
+    ResponseSink(Output writer,
                  ClusteringComparator comparator,
                  Slices slices,
                  boolean reversed,
@@ -198,7 +263,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
                  CursorReads.TombstoneScanGuard scanGuard,
                  DataLimits.Counter counter,
                  boolean countByClustering,
-                 ResponseFilter filter,
+                 ReconciledRowFilter filter,
                  ReadCommand command)
     {
         this.writer = writer;
@@ -239,7 +304,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
      * @param slices       this partition's slices
      * @param singleSource whether the iterator path reads this partition from one source
      */
-    void startRangePartition(ResponseWireWriter writer, Slices slices, boolean singleSource)
+    void startRangePartition(Output writer, Slices slices, boolean singleSource)
     {
         this.rangeEnvelope = true;
         this.writer = writer;
@@ -345,7 +410,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         // the isForThrift placeholder
         if (!rangeEnvelope)
             out.writeBoolean(false);
-        partitionStart = out.getLength();
         partitionDeletion = purgePartitionDeletion(mergedDeletion);
         staticRow = purgeAndCountStaticRow(namesRead ? namesStaticRow(mergedStatic, mergedDeletion) : mergedStatic);
         // like UnfilteredRowIteratorSerializer: written unless it is the singleton, even when empty
@@ -364,13 +428,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         if (counter != null)
             counter.countPartition(key, staticRow);
 
-        // "has next partition"
-        out.writeBoolean(true);
-        writer.writeKey(key.getKey());
-        headerStart = out.getLength();
-        writer.writeHeader(false, reversed, partitionDeletion, hasStatic, columnFilter);
-        if (hasStatic)
-            writer.writeStaticRow(staticRow);
+        writer.openPartition(key, reversed, partitionDeletion, hasStatic ? staticRow : null, columnFilter);
     }
 
     /**
@@ -404,20 +462,15 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         boolean droppedByFilter = filter != null && filter.hasRowLevelExpressions() && !anyFilterSurvivor;
         if ((emptyAfterPurge && purgeEnabled) || droppedByFilter)
         {
-            out.truncate(partitionStart);
+            writer.removePartition();
             if (!rangeEnvelope)
                 out.writeBoolean(false);
             return false;
         }
         if (partitionDeletion.isLive() && staticRow.isEmpty() && !wroteUnfiltered)
-        {
-            out.truncate(headerStart);
-            writer.writeHeader(true, reversed, partitionDeletion, false, columnFilter);
-        }
+            writer.closeEmptyPartition(reversed, partitionDeletion, columnFilter);
         else
-        {
-            writer.writeEndOfPartition();
-        }
+            writer.closePartition();
         if (!rangeEnvelope)
             out.writeBoolean(false);
         return true;
@@ -553,6 +606,11 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             liveness = LivenessInfo.withExpirationTime(liveness.timestamp() + 1, liveness.ttl(), liveness.localExpirationTime());
         if (CursorReads.TEST_TRANSCODE_WRONG_FLAGS && !deletion.isLive())
             deletion = DeletionTime.LIVE;
+        // a row the filter rejects at its clustering is not written at all; its scan metrics are
+        // still counted below, as the iterator path counts every row before RowFilter
+        rowOutputOpen = filter == null || !filter.rowFailed();
+        if (!rowOutputOpen)
+            return;
         try
         {
             writer.startRow(rowClusteringBytes, rowClusteringLength, liveness, deletion);
@@ -687,6 +745,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
 
     private void writeComplexDeletion(ColumnMetadata column, DeletionTime deletion)
     {
+        if (!writesRowContent())
+            return;
         try
         {
             writer.addComplexDeletion(column, deletion);
@@ -714,6 +774,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             scanGuard.cell(purged.timestamp(), purged.ttl(), purged.localDeletionTime());
         if (filter != null)
             filter.cell(purged.column(), purged.path(), purged.buffer(), live);
+        if (!writesRowContent())
+            return;
         try
         {
             writer.addCell(purged);
@@ -805,7 +867,25 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             filter.cell(column, path, filterValue.valueWindow(), live);
             source = stagedValueSource;
         }
+        // the row has failed the filter: the merge discards the value the sink does not read
+        if (!writesRowContent())
+            return;
         writer.addCellFromWire(column, timestamp, ttl, localDeletionTime, path, hasValue, source);
+    }
+
+    /** Whether the open row's content is still written: it is open in the output and has not
+     *  failed the row filter, which then drops it at its end whatever follows. */
+    private boolean writesRowContent()
+    {
+        return rowOutputOpen && (filter == null || !filter.rowFailed());
+    }
+
+    /** Drops the open row from the output, if it is open there. */
+    private void abandonOutputRow()
+    {
+        if (rowOutputOpen)
+            writer.abandonRow();
+        rowOutputOpen = false;
     }
 
     @Override
@@ -817,32 +897,35 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         if (!rowHasContent)
         {
             // purged to nothing: PurgeFunction drops it before anything else sees it
-            writer.abandonRow();
+            abandonOutputRow();
             return;
         }
         anyPurgeSurvivor = true;
-        if (rowHasColumnWithNoCells && !rowLive)
+        // a row the filter rejected is dropped below whatever its liveness: the output does not
+        // hold all of it
+        if (rowHasColumnWithNoCells && !rowLive && writesRowContent())
             rowLive = liveByColumnWithNoCells();
         if (scanGuard != null)
             scanGuard.endRow();
         if (dropEverything)
         {
-            writer.abandonRow();
+            abandonOutputRow();
             stopped = true;
             return;
         }
-        if (filter != null && !filter.streamedRowMatches(survivesPurgeAll(), !rowHasDeletion))
+        if (filter != null && !filter.rowMatches(survivesPurgeAll(), !rowHasDeletion))
         {
-            writer.abandonRow();
+            abandonOutputRow();
             return;
         }
         anyFilterSurvivor = true;
         if (counter != null && !counter.countRow(countByClustering ? rowClustering() : null, rowLive))
         {
-            writer.abandonRow();
+            abandonOutputRow();
             stopIfCounted();
             return;
         }
+        rowOutputOpen = false;
         try
         {
             if (writer.endRow())
@@ -913,7 +996,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         // the row is its own purge, so no purged copy is made
         if (row.hasDeletion(nowInSec) && !purgeKeepsRow((BTreeRow) row))
             return false;
-        if (filter.rowObjectMatches(row))
+        if (rowObjectMatches(row))
             return false;
         // what startRow and endRow do for a row the filter then rejects
         if (!enterSlice())
@@ -975,7 +1058,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             stopped = true;
             return;
         }
-        if (filter != null && !filter.rowObjectMatches(purged))
+        if (filter != null && !rowObjectMatches(purged))
             return;
         anyFilterSurvivor = true;
         if (counter != null && !counter.countRow(purged.clustering(), purged.hasLiveData(nowInSec, enforceStrictLiveness)))
@@ -995,6 +1078,75 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         lastRowClustering = purged.clustering();
         lastRowWritten = true;
         stopIfCounted();
+    }
+
+    /**
+     * {@code RowFilter.filter}'s row check on a row object the sink already purged (a memtable row
+     * standing as the merged row, or a row of a lone object-backed source): its cells go through
+     * the same filter calls as streamed cells, with no {@code Row.purge}.
+     */
+    private boolean rowObjectMatches(Row purged)
+    {
+        filter.startRow(filter.filtersClustering() ? purged.clustering() : null);
+        boolean noDeletion = !purged.hasDeletion(nowInSec);
+        if (purged instanceof BTreeRow)
+        {
+            // by index, with no column iterator
+            BTreeRow btreeRow = (BTreeRow) purged;
+            for (int i = 0, count = btreeRow.columnCount(); i < count; i++)
+                filterColumnData(btreeRow.columnDataByIndex(i));
+        }
+        else
+        {
+            for (ColumnData data : purged)
+                filterColumnData(data);
+        }
+        boolean survivesPurgeAll = noDeletion || purged.hasLiveData(nowInSec, enforceStrictLiveness);
+        return filter.rowMatches(survivesPurgeAll, noDeletion);
+    }
+
+    /** {@link #rowObjectMatches} for one column of the row. */
+    private void filterColumnData(ColumnData data)
+    {
+        ColumnMetadata column = data.column();
+        if (!filter.filtersColumn(column))
+            return;
+        if (!column.isComplex())
+        {
+            Cell<?> cell = (Cell<?>) data;
+            filter.cell(column, null, valueOf(cell), cell.isLive(nowInSec));
+            return;
+        }
+        ComplexColumnData complex = (ComplexColumnData) data;
+        filter.complexColumnWritten(column);
+        for (int i = 0; i < complex.cellsCount(); i++)
+        {
+            Cell<?> cell = complex.getCellByIndex(i);
+            filter.cell(column, pathOf(cell), valueOf(cell), cell.isLive(nowInSec));
+        }
+    }
+
+    /** Direct buffers re-pointed at the value and path of a cell in native memory. */
+    private final ByteBuffer nativeValue = MemoryUtil.getHollowDirectByteBuffer(ByteOrder.BIG_ENDIAN);
+    private final ByteBuffer nativePath = MemoryUtil.getHollowDirectByteBuffer(ByteOrder.BIG_ENDIAN);
+    private final CellPath nativePathCellPath = CellPath.create(nativePath);
+
+    /** The cell's value; for a cell in native memory a view, valid until the next call. */
+    private ByteBuffer valueOf(Cell<?> cell)
+    {
+        if (!(cell instanceof NativeCell))
+            return cell.buffer();
+        ((NativeCell) cell).pointAtValue(nativeValue);
+        return nativeValue;
+    }
+
+    /** The cell's path; for a cell in native memory a view, valid until the next call. */
+    private CellPath pathOf(Cell<?> cell)
+    {
+        if (!(cell instanceof NativeCell))
+            return cell.path();
+        ((NativeCell) cell).pointAtPath(nativePath);
+        return nativePathCellPath;
     }
 
     /** The counter has signalled the end of the partition: the iterator path pulls nothing more. */
@@ -1381,7 +1533,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
      * reconciliation the expressions see every cell of the response row, tombstones included,
      * with their empty values.
      */
-    static final class ResponseFilter
+    static final class ResponseFilter implements ReconciledRowFilter
     {
         private final TableMetadata metadata;
         private final long nowInSec;
@@ -1395,10 +1547,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
 
         // per-row state
         private boolean rowFailed;
-        /** Direct buffers re-pointed at the value and path of a cell in native memory. */
-        private final ByteBuffer nativeValue = MemoryUtil.getHollowDirectByteBuffer(ByteOrder.BIG_ENDIAN);
-        private final ByteBuffer nativePath = MemoryUtil.getHollowDirectByteBuffer(ByteOrder.BIG_ENDIAN);
-        private final CellPath nativePathCellPath = CellPath.create(nativePath);
 
         ResponseFilter(ReadCommand command)
         {
@@ -1469,19 +1617,22 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             return -1;
         }
 
-        boolean hasRowLevelExpressions()
+        @Override
+        public boolean hasRowLevelExpressions()
         {
             return hasRowLevel;
         }
 
         /** Whether the streamed form needs each row's clustering. */
-        boolean filtersClustering()
+        @Override
+        public boolean filtersClustering()
         {
             return clusteringExpressions.length > 0;
         }
 
         /** {@code RowFilter.filter}'s partition check, on the purged static row. */
-        boolean partitionMatches(DecoratedKey key, Row staticRow)
+        @Override
+        public boolean partitionMatches(DecoratedKey key, Row staticRow)
         {
             this.key = key;
             for (RowFilter.Expression e : partitionLevel)
@@ -1493,7 +1644,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         }
 
         /** @param clustering the row's clustering, or null when {@link #filtersClustering()} is false */
-        void startRow(Clustering<?> clustering)
+        @Override
+        public void startRow(Clustering<?> clustering)
         {
             rowFailed = false;
             for (FilteredColumn column : columns)
@@ -1520,16 +1672,24 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             return null;
         }
 
-        boolean filtersColumn(ColumnMetadata column)
+        @Override
+        public boolean filtersColumn(ColumnMetadata column)
         {
             return filtered(column) != null;
+        }
+
+        @Override
+        public boolean rowFailed()
+        {
+            return rowFailed;
         }
 
         /**
          * A cell of the purged response row.  {@code value} is the value written, empty for a
          * tombstone, and is a view over reusable storage, used only during this call.
          */
-        void cell(ColumnMetadata column, CellPath path, ByteBuffer value, boolean live)
+        @Override
+        public void cell(ColumnMetadata column, CellPath path, ByteBuffer value, boolean live)
         {
             if (rowFailed)
                 return;
@@ -1566,7 +1726,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         }
 
         /** The response row holds this complex column with a complex deletion, or with no cells. */
-        void complexColumnWritten(ColumnMetadata column)
+        @Override
+        public void complexColumnWritten(ColumnMetadata column)
         {
             FilteredColumn filtered = filtered(column);
             if (filtered != null)
@@ -1579,7 +1740,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
          * @param survivesPurgeAll whether {@code PURGE_ALL} leaves a row, see {@link ResponseFilter}
          * @param noDeletion       the response row has no deletion, so {@code PURGE_ALL} leaves it unchanged
          */
-        boolean streamedRowMatches(boolean survivesPurgeAll, boolean noDeletion)
+        @Override
+        public boolean rowMatches(boolean survivesPurgeAll, boolean noDeletion)
         {
             if (!needsReconciliation && !survivesPurgeAll)
                 return false;
@@ -1603,56 +1765,6 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
                 }
             }
             return true;
-        }
-
-        /**
-         * {@code RowFilter.filter}'s row check on a row object the sink already purged (a memtable
-         * row standing as the merged row, or a row of a lone object-backed source): its cells go
-         * through the same evaluators, with no {@code Row.purge}.
-         */
-        boolean rowObjectMatches(Row purged)
-        {
-            startRow(clusteringExpressions.length > 0 ? purged.clustering() : null);
-            boolean noDeletion = !purged.hasDeletion(nowInSec);
-            for (FilteredColumn filtered : columns)
-            {
-                if (!filtered.complex)
-                {
-                    Cell<?> cell = purged.getCell(filtered.column);
-                    if (cell != null)
-                        cell(filtered.column, null, valueOf(cell), cell.isLive(nowInSec));
-                    continue;
-                }
-                ComplexColumnData data = purged.getComplexColumnData(filtered.column);
-                if (data == null)
-                    continue;
-                complexColumnWritten(filtered.column);
-                for (int i = 0; i < data.cellsCount(); i++)
-                {
-                    Cell<?> cell = data.getCellByIndex(i);
-                    cell(filtered.column, pathOf(cell), valueOf(cell), cell.isLive(nowInSec));
-                }
-            }
-            boolean survivesPurgeAll = noDeletion || purged.hasLiveData(nowInSec, metadata.enforceStrictLiveness());
-            return streamedRowMatches(survivesPurgeAll, noDeletion);
-        }
-
-        /** The cell's value; for a cell in native memory a view, valid until the next call. */
-        private ByteBuffer valueOf(Cell<?> cell)
-        {
-            if (!(cell instanceof NativeCell))
-                return cell.buffer();
-            ((NativeCell) cell).pointAtValue(nativeValue);
-            return nativeValue;
-        }
-
-        /** The cell's path; for a cell in native memory a view, valid until the next call. */
-        private CellPath pathOf(Cell<?> cell)
-        {
-            if (!(cell instanceof NativeCell))
-                return cell.path();
-            ((NativeCell) cell).pointAtPath(nativePath);
-            return nativePathCellPath;
         }
     }
 

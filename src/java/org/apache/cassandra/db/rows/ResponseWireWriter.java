@@ -23,8 +23,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.cassandra.db.Columns;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
+import org.apache.cassandra.db.ResponseSink;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -93,7 +95,7 @@ import static org.apache.cassandra.db.SerializationHeader.MessagingHeaderSeriali
  * assumed ALREADY PURGED by the caller ({@code org.apache.cassandra.db.ResponseSink}) — this class only
  * ever encodes what it is handed.
  */
-public final class ResponseWireWriter
+public final class ResponseWireWriter implements ResponseSink.Output
 {
     /**
      * An output whose written bytes can be changed or dropped, so a row is written in place before
@@ -198,6 +200,7 @@ public final class ResponseWireWriter
     }
 
     /** The clustering types the response header serializes clusterings with. */
+    @Override
     public AbstractType<?>[] clusteringTypes()
     {
         return header.clusteringTypes();
@@ -211,6 +214,45 @@ public final class ResponseWireWriter
     public void writeKey(ByteBuffer key) throws IOException
     {
         ByteBufferUtil.writeWithVIntLength(key, out);
+    }
+
+    // where the open partition starts, and where its header starts, in a patchable output
+    private int partitionStart;
+    private int headerStart;
+
+    /** The "has next partition" flag, the key, the header and the static row.  Needs a
+     *  {@link PatchableOutput}, which can drop or rewrite them. */
+    @Override
+    public void openPartition(DecoratedKey key, boolean reversed, DeletionTime partitionDeletion, Row staticRow,
+                              ColumnFilter selection) throws IOException
+    {
+        PatchableOutput patchable = (PatchableOutput) out;
+        partitionStart = patchable.getLength();
+        out.writeBoolean(true);
+        writeKey(key.getKey());
+        headerStart = patchable.getLength();
+        writeHeader(false, reversed, partitionDeletion, staticRow != null, selection);
+        if (staticRow != null)
+            writeStaticRow(staticRow);
+    }
+
+    @Override
+    public void removePartition()
+    {
+        ((PatchableOutput) out).truncate(partitionStart);
+    }
+
+    @Override
+    public void closeEmptyPartition(boolean reversed, DeletionTime partitionDeletion, ColumnFilter selection) throws IOException
+    {
+        ((PatchableOutput) out).truncate(headerStart);
+        writeHeader(true, reversed, partitionDeletion, false, selection);
+    }
+
+    @Override
+    public void closePartition() throws IOException
+    {
+        writeEndOfPartition();
     }
 
     /** {@code isEmpty} short-circuits to the single-byte IS_EMPTY form — the caller (which drives
@@ -245,6 +287,7 @@ public final class ResponseWireWriter
 
     /** Whole-row escape hatch passthrough: the merged row IS this already-live object (see
      *  {@code CursorReadMerger.MergeSink#addRow}) — nothing to transcode. */
+    @Override
     public void writeRow(Row row) throws IOException
     {
         UnfilteredSerializer.serializer.serialize(row, helper, out, version);
@@ -253,6 +296,7 @@ public final class ResponseWireWriter
     /** Range tombstone marker passthrough: {@code CursorReadMerger.mergeMarkerGroup} always builds
      *  a real {@code RangeTombstoneBoundMarker}/{@code RangeTombstoneBoundaryMarker} before calling
      *  the sink — nothing to transcode. */
+    @Override
     public void writeMarker(RangeTombstoneMarker marker) throws IOException
     {
         UnfilteredSerializer.serializer.serialize(marker, helper, out, version);
@@ -276,6 +320,7 @@ public final class ResponseWireWriter
      *                   with this writer's header clustering types, in its first
      *                   {@code clusteringLength} bytes
      */
+    @Override
     public void startRow(byte[] clustering, int clusteringLength, LivenessInfo liveness, DeletionTime rowDeletion) throws IOException
     {
         assert !rowOpen : "startRow called while a row is already open";
@@ -342,11 +387,13 @@ public final class ResponseWireWriter
      *  cells.  Any other live-deletion complex column is announced only by its first
      *  {@link #addCell}, exactly like the {@code MergeSink} grammar it mirrors — see
      *  {@code ResponseSink}. */
+    @Override
     public void addComplexDeletion(ColumnMetadata column, DeletionTime complexDeletion) throws IOException
     {
         openComplexColumn(column, complexDeletion);
     }
 
+    @Override
     public void addCell(Cell<?> cell) throws IOException
     {
         ColumnMetadata column = cell.column();
@@ -381,6 +428,7 @@ public final class ResponseWireWriter
      *                 passes false here even when {@code source} still has bytes)
      * @param source   the winner's raw value bytes, streamed only when {@code hasValue} is true
      */
+    @Override
     public void addCellFromWire(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime,
                                 CellPath path, boolean hasValue, CellValueSource source) throws IOException
     {
@@ -480,24 +528,28 @@ public final class ResponseWireWriter
     }
 
     /** The open row's liveness, as given to {@link #startRow}. */
+    @Override
     public LivenessInfo rowLiveness()
     {
         return rowLiveness;
     }
 
     /** The open row's deletion, as given to {@link #startRow}. */
+    @Override
     public DeletionTime rowDeletion()
     {
         return rowDeletion;
     }
 
     /** The number of columns in the open row so far. */
+    @Override
     public int rowColumnCount()
     {
         return rowColumns.size();
     }
 
     /** The number of complex columns in the open row with a live deletion and no cells. */
+    @Override
     public int rowColumnsWithNoCells()
     {
         int count = 0;
@@ -512,6 +564,7 @@ public final class ResponseWireWriter
     }
 
     /** Discards the open row: nothing staged for it reaches {@code out}. */
+    @Override
     public void abandonRow()
     {
         assert rowOpen : "abandonRow called with no open row";
@@ -527,6 +580,7 @@ public final class ResponseWireWriter
      *
      * @return true if the row was flushed, false if it was empty and discarded (nothing written)
      */
+    @Override
     public boolean endRow() throws IOException
     {
         assert rowOpen : "endRow called with no open row";
