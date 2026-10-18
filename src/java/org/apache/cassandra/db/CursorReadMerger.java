@@ -393,6 +393,14 @@ final class CursorReadMerger
     // deletion folds over.
     private final IteratorMergeOrder<CursorReads.MergeLeg> columnOrder;
     private final IteratorMergeOrder<CursorReads.MergeLeg> cellOrder;
+    /**
+     * The only leg of a merge of one leg with no lower bound, read in order without {@link #order}:
+     * each group is the leg's next unfiltered, as {@code MergeIterator} gives a lone source.  Null
+     * otherwise.
+     */
+    private final OrderedLeg oneLeg;
+    private final OrderSources oneLegSources;
+    private boolean oneLegFinished;
     private final CursorReads.MergeLeg[] rowLegs;
     private final CursorReads.MergeLeg[] columnLegs;
     private ColumnMetadata complexColumn;
@@ -592,9 +600,11 @@ final class CursorReadMerger
         this.groupOrder = new CursorReads.MergeLeg[legs.length];
         this.rowLegs = new CursorReads.MergeLeg[legs.length];
         this.columnLegs = new CursorReads.MergeLeg[legs.length];
-        this.columnOrder = new IteratorMergeOrder<>(legs.length, new ColumnSources());
-        this.cellOrder = new IteratorMergeOrder<>(legs.length, new CellSources());
+        // the column and cell merges of a row group are of several legs only
+        this.columnOrder = legs.length > 1 ? new IteratorMergeOrder<>(legs.length, new ColumnSources()) : null;
+        this.cellOrder = legs.length > 1 ? new IteratorMergeOrder<>(legs.length, new CellSources()) : null;
         this.reversed = reversed;
+        OrderedLeg lone = null;
         if (singleLeg == null)
         {
             OrderedLeg[] ordered = new OrderedLeg[legs.length];
@@ -604,7 +614,15 @@ final class CursorReadMerger
                 ordered[i] = new OrderedLeg(legs[i]);
                 lowerBounds[i] = ordered[i].lowerBound != null;
             }
-            this.order = new IteratorMergeOrder<>(ordered, lowerBounds, new OrderSources());
+            if (legs.length == 1 && !lowerBounds[0])
+            {
+                lone = ordered[0];
+                this.order = null;
+            }
+            else
+            {
+                this.order = new IteratorMergeOrder<>(ordered, lowerBounds, new OrderSources());
+            }
             this.orderedGroup = new OrderedLeg[legs.length];
         }
         else
@@ -612,6 +630,8 @@ final class CursorReadMerger
             this.order = null;
             this.orderedGroup = null;
         }
+        this.oneLeg = lone;
+        this.oneLegSources = lone == null ? null : new OrderSources();
         this.legsAlreadySliced = legsAlreadySliced;
         this.singleLeg = singleLeg;
         this.readAsStored = singleLeg != null || (legs.length == 1 && legs[0].sstableOrNull() == null);
@@ -820,7 +840,7 @@ final class CursorReadMerger
      */
     private boolean advanceInOrder() throws IOException
     {
-        int mergeLimit = order.nextWithLowerBounds(orderedGroup);
+        int mergeLimit = oneLeg != null ? nextOfOneLeg() : order.nextWithLowerBounds(orderedGroup);
         if (mergeLimit == 0)
         {
             finished = true;
@@ -845,6 +865,21 @@ final class CursorReadMerger
         }
         continueReadingAfterMerge(mergeLimit);
         return true;
+    }
+
+    /** {@code IteratorMergeOrder.nextWithLowerBounds} for {@link #oneLeg}: the leg advances, as the
+     *  order advances a source after each group, and is the group while it has an unfiltered. */
+    private int nextOfOneLeg() throws IOException
+    {
+        if (oneLegFinished)
+            return 0;
+        if (!oneLegSources.advance(oneLeg, false))
+        {
+            oneLegFinished = true;
+            return 0;
+        }
+        orderedGroup[0] = oneLeg;
+        return 1;
     }
 
     /** What {@link #order} reads from the legs. */
