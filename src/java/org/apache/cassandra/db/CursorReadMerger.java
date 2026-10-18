@@ -1093,9 +1093,11 @@ final class CursorReadMerger
                 legs[i].validateRowHeader();
         }
 
-        if (readAsStored)
+        if (rowReadAsStored(rowMergeLimit))
         {
-            // a single leg is read as stored: its row deletion is kept and shadows nothing
+            // a single leg is read as stored, and so is a row only one leg holds with no deletion
+            // active (Row.Merger returns that one version unchanged): its row deletion is kept and
+            // shadows nothing
             groupDeletionSurvives = !mergedDeletion.isLive();
             return DeletionTime.LIVE;
         }
@@ -1369,8 +1371,8 @@ final class CursorReadMerger
                 mergedComplexDeletion.resetLive();
             complexDeletionNeedsReport = !mergedComplexDeletion.isLive();
         }
-        // a single leg is read as stored: its complex deletion is kept and shadows nothing
-        if (readAsStored)
+        // a row read as stored keeps its complex deletion, which shadows nothing
+        if (rowReadAsStored(rowMergeLimit))
             return rowActiveDeletion;
         if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(rowActiveDeletion))
             return mergedComplexDeletion;
