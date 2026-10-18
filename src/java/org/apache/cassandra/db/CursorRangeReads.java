@@ -350,7 +350,7 @@ public final class CursorRangeReads
 
     /** What closing the iterator path's read does: the merge closes, the scan metrics and the
      *  sstables-per-range-read count are recorded.  Returns {@code failure} with any failure added. */
-    private static Throwable finishRead(ColumnFamilyStore cfs, RangeMerge merge, PartitionRangeReadCommand.CursorRangeInputs inputs,
+    static Throwable finishRead(ColumnFamilyStore cfs, RangeMerge merge, PartitionRangeReadCommand.CursorRangeInputs inputs,
                                         CursorReads.TombstoneScanGuard scanGuard, Throwable failure)
     {
         if (merge != null)
@@ -778,7 +778,7 @@ public final class CursorRangeReads
      * The merge of the sources, partition by partition, in token order.  Lazy: the sources open
      * at the first {@code hasNext}, and each partition is read as its consumer pulls it.
      */
-    private static final class RangeMerge extends AbstractUnfilteredPartitionIterator
+    static final class RangeMerge extends AbstractUnfilteredPartitionIterator
     {
         private final PartitionRangeReadCommand command;
         private final ColumnFamilyStore cfs;
@@ -1010,6 +1010,7 @@ public final class CursorRangeReads
                     {
                         repairedPartition = ((RepairedSource) source).take();
                         ITERATOR_LEGS_OPENED.increment();
+                        iteratorLegs++;
                     }
                     else
                     {
@@ -1050,6 +1051,33 @@ public final class CursorRangeReads
         void writeTo(ResponseSink sink, ResponseSink.ResponseBuffer out, DataLimits.Counter counter,
                      CursorReads.TombstoneScanGuard scanGuard) throws IOException
         {
+            writePartitions(sink, out, null, null, counter, scanGuard);
+        }
+
+        /**
+         * {@link #writeTo} for a {@link CursorRangeScan}: writes the partitions to {@code output},
+         * while {@code scanSink} wants more, until it asks to yield after a partition.  The row cache
+         * is not read: the sources hold what it holds.
+         */
+        CursorRangeScan.ScanEnd scanTo(ResponseSink sink, RangeReadSinkOutput output, RangeReadSink scanSink,
+                                       DataLimits.Counter counter, CursorReads.TombstoneScanGuard scanGuard) throws IOException
+        {
+            return writePartitions(sink, null, output, scanSink, counter, scanGuard);
+        }
+
+        /** The key of the last partition {@link #writePartitions} finished, whether or not it was written. */
+        DecoratedKey lastPartitionKey;
+        /** {@link #iteratorLegsOpened}, of this merge. */
+        long iteratorLegs;
+
+        /**
+         * @param out       the response bytes, or null when writing to {@code scanOutput}
+         * @param scanSink  the sink of a {@link CursorRangeScan} behind {@code scanOutput}, or null
+         */
+        private CursorRangeScan.ScanEnd writePartitions(ResponseSink sink, ResponseSink.ResponseBuffer out,
+                                                        RangeReadSinkOutput scanOutput, RangeReadSink scanSink,
+                                                        DataLimits.Counter counter, CursorReads.TombstoneScanGuard scanGuard) throws IOException
+        {
             // the response path never reads repaired data for its digest
             assert repaired == null : "a range response does not track repaired data";
             // a partition has at most one leg per source
@@ -1057,9 +1085,13 @@ public final class CursorRangeReads
             List<CursorReads.PendingLeg> legs = new ArrayList<>(sourceCount);
             List<NativeMemtableMergeLeg> memtableLegs = new ArrayList<>(sourceCount);
             List<CursorReads.MergeLeg> mergeLegs = new ArrayList<>(sourceCount);
-            boolean rowCache = cfs.isRowCacheEnabled();
-            while ((counter == null || !counter.isDone()) && nextKey())
+            boolean rowCache = scanSink == null && cfs.isRowCacheEnabled();
+            while (counter == null || !counter.isDone())
             {
+                if (scanSink != null && !scanSink.wantsMore())
+                    return CursorRangeScan.ScanEnd.STOPPED;
+                if (!nextKey())
+                    break;
                 DecoratedKey key = stableKey();
                 ClusteringIndexFilter filter = command.clusteringIndexFilter(key);
                 Slices slices = filter.getSlices(metadata);
@@ -1081,7 +1113,7 @@ public final class CursorRangeReads
                     }
                     else
                     {
-                        sink.startRangePartition(writerFor(out, legs, memtableLegs), slices, onKeyCount == 1);
+                        sink.startRangePartition(scanOutput != null ? scanOutput : writerFor(out, legs, memtableLegs), slices, onKeyCount == 1);
                         written = writePartition(key, slices, legs, mergeLegs, sink, out);
                     }
                 }
@@ -1102,7 +1134,11 @@ public final class CursorRangeReads
                 // the iterator path's counter sees only the partitions the purge and the row filter keep
                 if (written && counter != null)
                     counter.endPartition();
+                lastPartitionKey = key;
+                if (scanSink != null && scanSink.yieldAfterPartition())
+                    return CursorRangeScan.ScanEnd.YIELDED;
             }
+            return CursorRangeScan.ScanEnd.DONE;
         }
 
         /**
@@ -1117,6 +1153,7 @@ public final class CursorRangeReads
             if (cached == null || !cfs.isFilterFullyCoveredBy(filter, command.limits(), cached, command.nowInSec(), metadata.enforceStrictLiveness()))
                 return null;
             ITERATOR_LEGS_OPENED.increment();
+            iteratorLegs++;
             return filter.getUnfilteredRowIterator(columnFilter, cached);
         }
 
