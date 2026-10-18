@@ -168,6 +168,27 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
         assertReplicaResponseBuildsNothing(cfs, now -> rangeCommand("SELECT * FROM %s", now));
     }
 
+    /**
+     * A row the filter rejects costs no more than on the iterator path: the merge does not read its
+     * cells.  {@code p} sorts before {@code v}, so a row that streamed its cells would write {@code p}
+     * before {@code v} rejects it.  One row in {@value #ROWS_PER_SMALL_PARTITION} matches.
+     */
+    @Test
+    public void filteredReplicaResponseOfMemtableOnlyPartitionsReadsNoCellOfARejectedRow() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(0);
+        long rejected = (long) SMALL_PARTITIONS * (ROWS_PER_SMALL_PARTITION - 1);
+        assertReplicaResponseBuildsNothing(cfs, now -> rangeCommand("SELECT * FROM %s WHERE v = 3 ALLOW FILTERING", now), rejected);
+    }
+
+    @Test
+    public void reverseFilteredReplicaResponseOfMemtableOnlyPartitionsReadsNoCellOfARejectedRow() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(0);
+        long rejected = (long) SMALL_PARTITIONS * (ROWS_PER_SMALL_PARTITION - 1);
+        assertReplicaResponseBuildsNothing(cfs, now -> reversed(rangeCommand("SELECT * FROM %s WHERE v = 3 ALLOW FILTERING", now)), rejected);
+    }
+
     @Test
     public void replicaResponseOfSSTablesAndAMemtableBuildsNoRows() throws Throwable
     {
@@ -212,6 +233,13 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
      */
     private void assertReplicaResponseBuildsNothing(ColumnFamilyStore cfs, LongFunction<PartitionRangeReadCommand> command)
     {
+        assertReplicaResponseBuildsNothing(cfs, command, 0);
+    }
+
+    /** {@link #assertReplicaResponseBuildsNothing}, and the row filter drops {@code rejectedRows}
+     *  memtable rows before the merge reads their cells. */
+    private void assertReplicaResponseBuildsNothing(ColumnFamilyStore cfs, LongFunction<PartitionRangeReadCommand> command, long rejectedRows)
+    {
         long now = FBUtilities.nowInSeconds();
         setRangePath(false);
         serialize(ReadCommandVerbHandler.instance.doRead(command.apply(now), false));
@@ -231,6 +259,7 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
             long rowsReused = CursorReads.memtableRowsReused();
             long cellsReused = CursorReads.memtableCellsReused();
             long iteratorLegs = CursorRangeReads.iteratorLegsOpened();
+            long filteredBeforeCells = CursorReads.memtableRowsFilteredBeforeCells();
             allocated = threadAllocatedBytes();
             byte[] cursor = serialize(ReadCommandVerbHandler.instance.doRead(command.apply(now), false));
             long cursorAllocated = threadAllocatedBytes() - allocated;
@@ -247,6 +276,8 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
             assertEquals("memtable rows cloned", 0, CursorReads.memtableRowsCloned() - cloned);
             assertEquals("memtable rows reused", 0, CursorReads.memtableRowsReused() - rowsReused);
             assertEquals("memtable cells reused", 0, CursorReads.memtableCellsReused() - cellsReused);
+            assertEquals("memtable rows the filter dropped before their cells were read",
+                         rejectedRows, CursorReads.memtableRowsFilteredBeforeCells() - filteredBeforeCells);
             // The iterator path reads the rows of a heap memtable without a copy, and the cursor path
             // builds a merge per partition, so a heap memtable alone is not bounded here
             boolean heapMemtableOnly = cfs.getLiveSSTables().isEmpty()
@@ -268,6 +299,14 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
         TableMetadata metadata = cfs.metadata();
         DataRange range = new DataRange(DataRange.allData(metadata.partitioner).keyRange(), new ClusteringIndexSliceFilter(Slices.ALL, true));
         return PartitionRangeReadCommand.create(metadata, nowInSec, ColumnFilter.all(metadata), RowFilter.none(), DataLimits.NONE, range);
+    }
+
+    /** {@code command} in reverse clustering order, as no CQL range read can ask for. */
+    private static PartitionRangeReadCommand reversed(PartitionRangeReadCommand command)
+    {
+        TableMetadata metadata = command.metadata();
+        DataRange range = new DataRange(command.dataRange().keyRange(), new ClusteringIndexSliceFilter(Slices.ALL, true));
+        return PartitionRangeReadCommand.create(metadata, command.nowInSec(), command.columnFilter(), command.rowFilter(), DataLimits.NONE, range);
     }
 
     /** Newer rows in every tenth partition, with a row deletion, left in the memtable. */
