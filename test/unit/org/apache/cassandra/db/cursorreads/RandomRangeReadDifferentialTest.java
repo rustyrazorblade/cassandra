@@ -135,6 +135,9 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
         // iterator path's partition merge gives first, not the memtable's
         -9208867235617653717L,
         7650556690056646382L,
+        // a reverse read that tracks repaired data: after the limit, the repaired data is read on
+        // from a partition the merge has closed, which the iterator path's partition still gives
+        -6415543600784843954L,
     };
 
     /** Seeds of trials that failed with the memtable layout and implementation their seed picks.  Never remove one. */

@@ -535,9 +535,8 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
                 (collector.isRepairedForTracking(sstable) ? repairedSSTables : unrepairedSSTables).add(sstable);
             if (!repairedSSTables.isEmpty())
             {
-                List<Iterator<MemtablePartitionData>> none = new ArrayList<>(0);
                 collector.addSSTableIterator(repairedSSTables.get(0),
-                                             CursorRangeReads.rangeIterator(this, cfs, repairedSSTables, none, null, inputs.listener));
+                                             CursorRangeReads.repairedRangeIterator(this, cfs, repairedSSTables, inputs.listener));
                 List<UnfilteredPartitionIterator> finalized;
                 try
                 {
