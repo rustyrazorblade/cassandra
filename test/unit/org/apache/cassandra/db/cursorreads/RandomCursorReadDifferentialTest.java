@@ -51,6 +51,12 @@ import org.apache.cassandra.utils.FBUtilities;
  * {@code gc_grace_seconds} is high, so nothing expires or is purged during a trial.  The value
  * column type is randomized per trial, so trials write varied cell shapes.
  * <p>
+ * <p>Each trial also picks, from its own stream of the seed, where the memtable stands: a small
+ * unflushed overlay, a large one (half the operations, partition deletes included), or the whole
+ * partition in the memtable with no sstable; and the memtable implementation ({@code trie},
+ * {@code skiplist} or {@code skiplist_sharded}).  The regression seeds keep the small overlay
+ * and the default memtable they were found with.
+ * <p>
  * Each trial is fully determined by one {@code trialSeed}, so a single logged seed replays one trial
  * in isolation.  When a trial fails, a hand-rolled greedy shrinker binary-searches each numeric knob
  * down to the smallest value that still reproduces the failure (QuickTheories shrinking is disabled
@@ -63,6 +69,7 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
     private static final long BASE_TS = 3_000_000_000_000L;
     private static final int LARGE_TTL = 1_000_000; // long enough that no cell expires during a trial
     private static final long FILTER_SALT = 0x9E3779B97F4A7C15L; // separates the filter RNG stream from the data one
+    private static final long MEMTABLE_SALT = 0xC2B2AE3D27D4EB4FL; // the stream that picks the memtable layout
 
     /**
      * Seeds of trials that previously failed, replayed on every run before fresh random exploration.
@@ -72,6 +79,12 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
         -4715507501933830118L, // cursor NAMES row wrapped in an RT whose exclusive upper bound misses it
         -1984932914407227821L, // a names read the memtable completes reads no sstable on either path
     };
+
+    /**
+     * Seeds of trials that failed with the memtable layout and implementation their seed picks,
+     * replayed with them.  Add an entry when a genuine bug is found and fixed; never remove one.
+     */
+    private static final long[] KNOWN_LAYOUT_REGRESSION_SEEDS = {};
 
     private static final class ValueType
     {
@@ -99,6 +112,20 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
 
     private enum FilterKind { FULL, SLICE, NAMES }
 
+    /** Where the memtable stands in the trial's data. */
+    private enum MemtableLayout
+    {
+        /** a few operations stay unflushed, no partition delete among them */
+        OVERLAY,
+        /** half the operations stay unflushed, partition deletes included */
+        LARGE_OVERLAY,
+        /** nothing is flushed */
+        MEMTABLE_ONLY
+    }
+
+    /** null for the default memtable of the configuration */
+    private static final String[] MEMTABLES = { null, "trie", "skiplist", "skiplist_sharded" };
+
     /** Every parameter a trial needs, all derived from one {@code trialSeed}. */
     private static final class TrialParams
     {
@@ -107,46 +134,55 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
         final int operations;
         final int flushRounds;
         final ValueType valueType;
+        final MemtableLayout layout;
+        final String memtable;
 
-        TrialParams(long trialSeed, int maxClustering, int operations, int flushRounds, ValueType valueType)
+        TrialParams(long trialSeed, int maxClustering, int operations, int flushRounds, ValueType valueType,
+                    MemtableLayout layout, String memtable)
         {
             this.trialSeed = trialSeed;
             this.maxClustering = maxClustering;
             this.operations = operations;
             this.flushRounds = flushRounds;
             this.valueType = valueType;
+            this.layout = layout;
+            this.memtable = memtable;
         }
 
-        static TrialParams derive(long trialSeed)
+        /** @param pinned a regression seed: the small overlay and the default memtable it was found with */
+        static TrialParams derive(long trialSeed, boolean pinned)
         {
             Random r = new Random(trialSeed);
             int maxClustering = 5 + r.nextInt(60);
             int operations = 10 + r.nextInt(150);
             int flushRounds = 1 + r.nextInt(4);
             ValueType valueType = VALUE_TYPES.get(r.nextInt(VALUE_TYPES.size()));
-            return new TrialParams(trialSeed, maxClustering, operations, flushRounds, valueType);
+            Random m = new Random(trialSeed ^ MEMTABLE_SALT);
+            MemtableLayout layout = pinned ? MemtableLayout.OVERLAY : MemtableLayout.values()[m.nextInt(MemtableLayout.values().length)];
+            String memtable = pinned ? null : MEMTABLES[m.nextInt(MEMTABLES.length)];
+            return new TrialParams(trialSeed, maxClustering, operations, flushRounds, valueType, layout, memtable);
         }
 
         TrialParams withOperations(int newOperations)
         {
-            return new TrialParams(trialSeed, maxClustering, newOperations, flushRounds, valueType);
+            return new TrialParams(trialSeed, maxClustering, newOperations, flushRounds, valueType, layout, memtable);
         }
 
         TrialParams withFlushRounds(int newFlushRounds)
         {
-            return new TrialParams(trialSeed, maxClustering, operations, newFlushRounds, valueType);
+            return new TrialParams(trialSeed, maxClustering, operations, newFlushRounds, valueType, layout, memtable);
         }
 
         TrialParams withMaxClustering(int newMaxClustering)
         {
-            return new TrialParams(trialSeed, newMaxClustering, operations, flushRounds, valueType);
+            return new TrialParams(trialSeed, newMaxClustering, operations, flushRounds, valueType, layout, memtable);
         }
 
         @Override
         public String toString()
         {
-            return String.format("trialSeed=%dL, maxClustering=%d, operations=%d, flushRounds=%d, valueType=%s",
-                                 trialSeed, maxClustering, operations, flushRounds, valueType.cql);
+            return String.format("trialSeed=%dL, maxClustering=%d, operations=%d, flushRounds=%d, valueType=%s, layout=%s, memtable=%s",
+                                 trialSeed, maxClustering, operations, flushRounds, valueType.cql, layout, memtable);
         }
     }
 
@@ -157,11 +193,13 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
         logger.info("RandomCursorReadDifferentialTest seed = {}", seed);
 
         for (long regressionSeed : KNOWN_REGRESSION_SEEDS)
-            runTrial(regressionSeed, "known-regression replay");
+            runTrial(regressionSeed, true, "known-regression replay");
+        for (long regressionSeed : KNOWN_LAYOUT_REGRESSION_SEEDS)
+            runTrial(regressionSeed, false, "known-regression replay");
 
         Random seedPicker = new Random(seed);
         for (int trial = 0; trial < TRIALS; trial++)
-            runTrial(seedPicker.nextLong(), "trial " + trial);
+            runTrial(seedPicker.nextLong(), false, "trial " + trial);
     }
 
     /** Seed -4715507501933830118L: a names read that once wrapped a row in a range tombstone whose
@@ -169,12 +207,12 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
     @Test
     public void namesReadNextToRangeTombstoneSeed() throws Throwable
     {
-        runTrial(-4715507501933830118L, "names read next to a range tombstone");
+        runTrial(-4715507501933830118L, true, "names read next to a range tombstone");
     }
 
-    private void runTrial(long trialSeed, String label) throws Throwable
+    private void runTrial(long trialSeed, boolean pinned, String label) throws Throwable
     {
-        TrialParams params = TrialParams.derive(trialSeed);
+        TrialParams params = TrialParams.derive(trialSeed, pinned);
         try
         {
             runOnce(params);
@@ -192,15 +230,16 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
             }
             throw new AssertionError(String.format(
                 "%s failed.%nOriginal: %s%nShrunk (minimal reproducer): %s%n" +
-                "If genuine, add trialSeed=%dL to KNOWN_REGRESSION_SEEDS once fixed.",
-                label, params, shrunkDescription, trialSeed), t);
+                "If genuine, add trialSeed=%dL to %s once fixed.",
+                label, params, shrunkDescription, trialSeed, pinned ? "KNOWN_REGRESSION_SEEDS" : "KNOWN_LAYOUT_REGRESSION_SEEDS"), t);
         }
     }
 
     private void runOnce(TrialParams p) throws Throwable
     {
         createTable("CREATE TABLE %s (k int, c int, s text static, v1 " + p.valueType.cql + ", v2 text, " +
-                    "PRIMARY KEY (k, c)) WITH gc_grace_seconds = 864000");
+                    "PRIMARY KEY (k, c)) WITH gc_grace_seconds = 864000" +
+                    (p.memtable == null ? "" : " AND memtable = '" + p.memtable + '\''));
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
 
@@ -272,6 +311,14 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
         Random r = new Random(p.trialSeed);
         AtomicLong ts = new AtomicLong(BASE_TS);
 
+        if (p.layout == MemtableLayout.MEMTABLE_ONLY)
+        {
+            // every op stays in the memtable, partition deletes included: no sstable is read
+            for (int op = 0; op < p.operations; op++)
+                applyOp(r, ts, p, true);
+            return;
+        }
+
         // Baseline rows at both ends of the clustering domain, with timestamps below every random op
         // so later ops can freely shadow them.  They guarantee the flushed sstable holds clustering
         // rows spanning [0, maxClustering], so a covering slice or names filter always intersects a
@@ -281,10 +328,11 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
         execute("INSERT INTO %s (k, c, v1, v2) VALUES (?, ?, ?, ?) USING TIMESTAMP ?",
                 1, p.maxClustering, p.valueType.generate.apply(r), "base-hi", BASE_TS - 1);
 
-        int perRound = Math.max(1, p.operations / p.flushRounds);
+        int flushedOperations = p.layout == MemtableLayout.LARGE_OVERLAY ? (p.operations + 1) / 2 : p.operations;
+        int perRound = Math.max(1, flushedOperations / p.flushRounds);
         int sinceFlush = 0;
         int roundsDone = 0;
-        for (int op = 0; op < p.operations; op++)
+        for (int op = 0; op < flushedOperations; op++)
         {
             applyOp(r, ts, p, true);
             if (++sinceFlush >= perRound && roundsDone < p.flushRounds - 1)
@@ -301,6 +349,14 @@ public class RandomCursorReadDifferentialTest extends CursorReadDifferentialTest
         // newer than every sstable correctly eliminates all sstables (the mostRecentPartitionTombstone
         // optimization), so the cursor would serve no leg and prove nothing.  Flushed partition
         // deletes above still exercise that path and keep their own sstable served.
+        if (p.layout == MemtableLayout.LARGE_OVERLAY)
+        {
+            // the other half stays in the memtable, partition deletes included; a partition delete
+            // newer than every sstable eliminates them all, and the read then reads no sstable
+            for (int op = flushedOperations; op < p.operations; op++)
+                applyOp(r, ts, p, true);
+            return;
+        }
         int overlay = 1 + r.nextInt(5);
         for (int op = 0; op < overlay; op++)
             applyOp(r, ts, p, false);

@@ -48,6 +48,7 @@ import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.filter.TombstoneOverwhelmingException;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteArrayAccessor;
+import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellLivenessInfo;
@@ -158,13 +159,19 @@ public final class CursorReads
     /** Sstable legs that entered a cursor-level merge (each such leg is also counted in
      *  {@link #sstableLegsServed}). */
     private static final AtomicLong SSTABLE_LEGS_CURSOR_MERGED = new AtomicLong();
-    /** Memtable legs that joined a cursor-level merge through the {@link MemtableMergeLeg} adapter. */
+    /** Memtable legs ({@link NativeMemtableMergeLeg}) that joined a cursor-level merge. */
     private static final AtomicLong MEMTABLE_LEGS_CURSOR_MERGED = new AtomicLong();
     /** Merged rows emitted by reusing the memtable's own live {@code Row} object (single-version
      *  fast path). */
     private static final AtomicLong MEMTABLE_ROWS_REUSED = new AtomicLong();
     /** Merged cells emitted by reusing the memtable's own live {@code Cell} object. */
     private static final AtomicLong MEMTABLE_CELLS_REUSED = new AtomicLong();
+    /** Memtable legs that read the memtable's own storage with no row or cell object
+     *  ({@link NativeMemtableMergeLeg} for a sink that streams cells). */
+    private static final AtomicLong MEMTABLE_LEGS_STREAMED = new AtomicLong();
+    /** Memtable rows a {@link NativeMemtableMergeLeg} cloned to heap for a sink that keeps row
+     *  objects, as {@code EnsureOnHeap} clones them on the iterator path. */
+    private static final AtomicLong MEMTABLE_ROWS_CLONED = new AtomicLong();
     /** Cursor merges closed before they reached the end of their slices, because the reader
      *  stopped asking for rows (a limit or page was reached).  A read aborted above the merge,
      *  for example by the tombstone guard, is counted too. */
@@ -275,6 +282,26 @@ public final class CursorReads
     public static long memtableCellsReused()
     {
         return MEMTABLE_CELLS_REUSED.get();
+    }
+
+    public static long memtableLegsStreamed()
+    {
+        return MEMTABLE_LEGS_STREAMED.get();
+    }
+
+    public static long memtableRowsCloned()
+    {
+        return MEMTABLE_ROWS_CLONED.get();
+    }
+
+    static void countMemtableLegStreamed()
+    {
+        MEMTABLE_LEGS_STREAMED.incrementAndGet();
+    }
+
+    static void countMemtableRowsCloned(long rows)
+    {
+        MEMTABLE_ROWS_CLONED.addAndGet(rows);
     }
 
     public static long mergesStoppedByLimit()
@@ -427,6 +454,21 @@ public final class CursorReads
      *       after tombstone pruning are all served on the cursor path</li>
      * </ul>
      */
+    /**
+     * Whether every memtable gives its partition data ({@code Memtable.readsPartitionData}), which
+     * the cursor merge reads its memtable legs from.  Every memtable implementation in the tree
+     * does; a read with one that does not takes the iterator path.
+     */
+    public static boolean memtablesGivePartitionData(Iterable<Memtable> memtables)
+    {
+        for (Memtable memtable : memtables)
+        {
+            if (!memtable.readsPartitionData())
+                return false;
+        }
+        return true;
+    }
+
     public static boolean isReadSupported(SinglePartitionReadCommand command,
                                           ColumnFamilyStore cfs,
                                           List<SSTableReader> sstables)
@@ -450,11 +492,11 @@ public final class CursorReads
         // A reverse-order read (ORDER BY ... DESC within a partition, CASSANDRA-20428 gap #5) is
         // served on the cursor path.  Each sstable leg walks its partition block by block from the
         // slice end backward (the cursor analog of BTI SSTableReversedIterator), emitting in
-        // descending clustering order; the surviving legs reconcile in the shared reverse merge
-        // (UnfilteredRowIterators.merge over per-leg reverse iterators), the same composition the
-        // iterator path uses for a reverse read.  A reverse read stays off the transcode path
-        // (queryStorageToResponseBytes declines it) and off the cursor-level merge
-        // (cursorMergedLegs is forced false for a reversed read).
+        // descending clustering order, and each memtable leg walks its rows in descending order.
+        // Several legs reconcile in the cursor merge in reverse (CursorReadMerger.forReversedMerge,
+        // through mergeLegsReversed for executeLocally and streamReversedResponse for the replica
+        // response), merging the legs as the iterator path merges its per-source reverse
+        // iterators.  A lone sstable leg is read as stored.
         // A multi-slice read is served on the cursor path (CASSANDRA-20428 gap #8 for a slice filter
         // of several ranges, gap #9 for a names filter of several clusterings).  The cursor merge
         // reads one slice at a time, seeking forward to each slice start where the row index
@@ -2180,7 +2222,7 @@ public final class CursorReads
      * Reconciles at the descriptor/byte level below materialization; only merge winners become
      * {@code Row}/{@code Cell} objects.  Returns one iterator whose emitted stream is byte-identical
      * to the object-level merge of the per-leg iterators.  Memtable legs join the same merge
-     * through {@link MemtableMergeLeg}.
+     * as {@link NativeMemtableMergeLeg}s.
      *
      * The merge is lazy: it merges one group each time the returned iterator needs another
      * unfiltered, so a read that stops early (a limit, a page) never merges the rest of the
@@ -3399,15 +3441,19 @@ public final class CursorReads
     }
 
     /**
-     * The merge-source contract {@code CursorReadMerger} (and {@link #mergeLegs}) consumes.  Two
+     * The merge-source contract {@code CursorReadMerger} (and {@link #mergeLegs}) consumes.  Three
      * implementations:
      * <ul>
      *   <li>{@link PendingLeg} — byte-backed: an sstable leg driven by {@link SSTableCursorReader}
      *       over reusable descriptors;</li>
-     *   <li>{@link MemtableMergeLeg} — object-backed: wraps the memtable leg's
-     *       {@code UnfilteredRowIterator}, presenting each live {@code Row}/{@code Cell}/marker as
-     *       descriptor-shaped state, with {@link #existingCell()}/{@link #consumeExistingRow()}
-     *       escape hatches so memtable-won data is emitted as the live object, not a rebuilt copy.</li>
+     *   <li>{@link NativeMemtableMergeLeg} — a memtable leg over the partition's own content: cells
+     *       from the memtable's storage for a sink that streams cells, else the iterator path's row
+     *       objects through the {@link #existingCell()}/{@link #consumeExistingRow()} escape
+     *       hatches;</li>
+     *   <li>{@link MemtableMergeLeg} — object-backed: wraps an {@code UnfilteredRowIterator} (the
+     *       merged repaired sstables of a read that tracks repaired data), presenting each
+     *       {@code Row}/{@code Cell}/marker as descriptor-shaped state, with the same escape
+     *       hatches.</li>
      * </ul>
      *
      * Contract notes:

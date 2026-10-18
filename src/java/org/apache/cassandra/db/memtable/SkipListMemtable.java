@@ -207,6 +207,21 @@ public class SkipListMemtable extends AbstractAllocatorMemtable
     }
 
     @Override
+    public boolean readsPartitionData()
+    {
+        return true;
+    }
+
+    @Override
+    public MemtablePartitionData partitionData(DecoratedKey key)
+    {
+        AtomicBTreePartition partition = partitions.get(key);
+        if (partition == null)
+            return null;
+        return new MemtablePartitionData(partition.partitionKey(), partition.currentData(), allocator.ensureOnHeap(), partition);
+    }
+
+    @Override
     public UnfilteredRowIterator rowIterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
     {
         Partition p = getPartition(key);

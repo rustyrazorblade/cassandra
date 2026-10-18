@@ -310,6 +310,13 @@ public class BTreeRow extends AbstractRow
         return (ColumnData) BTree.<Object>find(btree, ColumnMetadata.asymmetricColumnDataComparator, c);
     }
 
+    /** The column data at {@code index} in column order, {@code 0 <= index < columnCount()}: a walk
+     *  over the row's columns that needs no iterator. */
+    public ColumnData columnDataByIndex(int index)
+    {
+        return BTree.findByIndex(btree, index);
+    }
+
     @Override
     public Collection<ColumnData> columnData()
     {

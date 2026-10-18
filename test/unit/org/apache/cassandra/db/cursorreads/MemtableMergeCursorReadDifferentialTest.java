@@ -18,14 +18,30 @@
 
 package org.apache.cassandra.db.cursorreads;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 import java.util.function.Supplier;
 
 import org.junit.Test;
+import org.junit.runners.Parameterized;
 
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
+import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.filter.DataLimits;
+import org.apache.cassandra.db.filter.RowFilter;
+import org.apache.cassandra.db.rows.CellPath;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertEquals;
@@ -33,8 +49,8 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Differential scenarios for the MEMTABLE leg joining the cursor-level merge through the
- * object-backed adapter ({@code MemtableMergeLeg}): every scenario asserts byte-identical
+ * Differential scenarios for the MEMTABLE leg ({@code NativeMemtableMergeLeg}) joining the
+ * cursor-level merge: every scenario asserts byte-identical
  * canonical records and intra-node ReadResponse serialization against the iterator path (base
  * harness), plus the memtable-specific effectiveness guards:
  * <ul>
@@ -56,12 +72,44 @@ import static org.junit.Assert.fail;
  * corruption mutation tests for the adapter (a wrong merge decision involving the memtable leg,
  * and a wrong escape-hatch reuse).
  *
- * Runs once per sstable format, BIG and BTI (BTI legs seek).
- * {@code OffheapObjectsMemtableMergeCursorReadDifferentialTest} runs this whole corpus under
- * {@code offheap_objects} (heap_buffers is the default config this base class runs under).
+ * Runs once per sstable format, BIG and BTI (BTI legs seek), and per memtable implementation:
+ * {@code trie}, {@code skiplist} and {@code skiplist_sharded}.
+ * {@code OffheapObjectsMemtableMergeCursorReadDifferentialTest} and
+ * {@code OffheapBuffersMemtableMergeCursorReadDifferentialTest} run this whole corpus under
+ * {@code offheap_objects} and {@code offheap_buffers} (heap_buffers is the default config this
+ * base class runs under).
+ *
+ * <p>The replica response of every scenario reads the memtable with no row or cell object
+ * ({@link #assertReplicaResponseBuildsNoMemtableObject}).
  */
 public class MemtableMergeCursorReadDifferentialTest extends SSTableFormatParameterizedTester
 {
+    /** The memtable configurations of test/conf/cassandra.yaml the corpus runs against. */
+    private static final String[] MEMTABLES = { "trie", "skiplist", "skiplist_sharded" };
+
+    @Parameterized.Parameter(1)
+    public String memtable;
+
+    @Parameterized.Parameters(name = "format={0}, memtable={1}")
+    public static Collection<Object[]> formats()
+    {
+        List<Object[]> parameters = new ArrayList<>();
+        for (Object[] format : SSTableFormatParameterizedTester.formats())
+        {
+            for (String memtable : MEMTABLES)
+                parameters.add(new Object[]{ format[0], memtable });
+        }
+        return parameters;
+    }
+
+    /** Every table of the corpus uses this run's memtable implementation. */
+    @Override
+    protected String createTable(String query)
+    {
+        String option = "memtable = '" + memtable + "'";
+        return super.createTable(query + (query.contains(" WITH ") ? " AND " : " WITH ") + option);
+    }
+
     private Supplier<SinglePartitionReadCommand> fullPartition(ColumnFamilyStore cfs, long now, Object... key)
     {
         return () -> (SinglePartitionReadCommand) Util.cmd(cfs, key).withNowInSeconds(now).build();
@@ -82,6 +130,7 @@ public class MemtableMergeCursorReadDifferentialTest extends SSTableFormatParame
         long memtableLegsBefore = CursorReads.memtableLegsCursorMerged();
 
         assertCursorReadMatchesIterator(cfs, command);
+        assertReplicaResponseBuildsNoMemtableObject(cfs, command);
 
         assertEquals("cursor-level merges served across the harness's two cursor runs",
                      2L, CursorReads.cursorMergesServed() - mergesBefore);
@@ -389,6 +438,295 @@ public class MemtableMergeCursorReadDifferentialTest extends SSTableFormatParame
                      servedBefore, CursorReads.sstableLegsServed());
         assertTrue("the candidate sstable leg must be looked up and found absent on each cursor run",
                    CursorReads.sstableLegsWithoutPartition() - missedBefore >= 2);
+    }
+
+    // ---------------------------------------------------------------- the replica response
+
+    /**
+     * The replica response, with cursor reads on, read again on its own: its memtable legs give
+     * their cells from the memtable's own storage, so no memtable row or cell is reused or cloned
+     * and no row is built.
+     */
+    protected static void assertReplicaResponseBuildsNoMemtableObject(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command)
+    {
+        SinglePartitionReadCommand probe = command.get();
+        if (!CursorReadOracle.transcodeEligible(probe, cfs))
+            return;
+        DatabaseDescriptor.setCursorReadsEnabled(true);
+        try
+        {
+            long rowsReused = CursorReads.memtableRowsReused();
+            long cellsReused = CursorReads.memtableCellsReused();
+            long rowsCloned = CursorReads.memtableRowsCloned();
+            long rowsBuilt = CursorReads.mergeSinkRowsBuilt();
+            long streamed = CursorReads.memtableLegsStreamed();
+            long served = CursorReads.transcodeResponsesServed();
+            replicaResponseBytes(command.get());
+            assertEquals("the replica response was not streamed", 1, CursorReads.transcodeResponsesServed() - served);
+            assertTrue("no memtable leg was read from the memtable's own storage", CursorReads.memtableLegsStreamed() > streamed);
+            assertEquals("memtable rows reused by the replica response", 0, CursorReads.memtableRowsReused() - rowsReused);
+            assertEquals("memtable cells reused by the replica response", 0, CursorReads.memtableCellsReused() - cellsReused);
+            assertEquals("memtable rows cloned by the replica response", 0, CursorReads.memtableRowsCloned() - rowsCloned);
+            assertEquals("rows built for the replica response", 0, CursorReads.mergeSinkRowsBuilt() - rowsBuilt);
+        }
+        finally
+        {
+            DatabaseDescriptor.setCursorReadsEnabled(false);
+        }
+    }
+
+    /** The differential for a read of a partition only the memtable holds: no sstable is read. */
+    protected void assertMemtableOnlyMatches(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command)
+    {
+        assertCursorReadMatchesIteratorReadingNoSSTable(cfs, command);
+        assertReplicaResponseBuildsNoMemtableObject(cfs, command);
+    }
+
+    private static SinglePartitionReadCommand command(ColumnFamilyStore cfs, long now, Object key, ColumnFilter columns,
+                                                      Slices slices, boolean reversed)
+    {
+        SinglePartitionReadCommand base = (SinglePartitionReadCommand) Util.cmd(cfs, key).withNowInSeconds(now).build();
+        return SinglePartitionReadCommand.create(cfs.metadata(), now, columns, RowFilter.none(), DataLimits.NONE,
+                                                 base.partitionKey(), new ClusteringIndexSliceFilter(slices, reversed));
+    }
+
+    private static Slices slices(ClusteringComparator comparator, long... bounds)
+    {
+        Slices.Builder builder = new Slices.Builder(comparator);
+        for (int i = 0; i < bounds.length; i += 2)
+            builder.add(Slice.make(comparator.make(bounds[i]), comparator.make(bounds[i + 1])));
+        return builder.build();
+    }
+
+    private static ColumnMetadata column(ColumnFamilyStore cfs, String name)
+    {
+        return cfs.metadata().getColumn(ByteBufferUtil.bytes(name));
+    }
+
+    /** Each read shape over one partition: full, slice, reversed, names and several slices. */
+    private void assertEveryShapeMatches(ColumnFamilyStore cfs, long now, long pk, int sstableLegs)
+    {
+        TableMetadata metadata = cfs.metadata();
+        List<Supplier<SinglePartitionReadCommand>> reads = new ArrayList<>();
+        reads.add(fullPartition(cfs, now, pk));
+        reads.add(() -> (SinglePartitionReadCommand) Util.cmd(cfs, pk).withNowInSeconds(now).fromIncl(3L).toExcl(17L).build());
+        reads.add(() -> (SinglePartitionReadCommand) Util.cmd(cfs, pk).withNowInSeconds(now).reverse().build());
+        reads.add(() -> (SinglePartitionReadCommand) Util.cmd(cfs, pk).withNowInSeconds(now).fromIncl(2L).toIncl(12L).reverse().build());
+        reads.add(() -> (SinglePartitionReadCommand) Util.cmd(cfs, pk).withNowInSeconds(now).includeRow(1L).includeRow(6L).includeRow(13L).build());
+        reads.add(() -> command(cfs, now, pk, ColumnFilter.all(metadata), slices(metadata.comparator, 0, 4, 8, 11, 15, 30), false));
+        reads.add(() -> command(cfs, now, pk, ColumnFilter.all(metadata), slices(metadata.comparator, 0, 4, 8, 11, 15, 30), true));
+        for (Supplier<SinglePartitionReadCommand> read : reads)
+        {
+            try
+            {
+                if (sstableLegs == 0)
+                    assertMemtableOnlyMatches(cfs, read);
+                else if (sstablesRead(cfs, read, false) > 0)
+                    assertCursorReadMatchesIterator(cfs, read);
+                else
+                    assertCursorReadMatchesIteratorReadingNoSSTable(cfs, read);
+                assertReplicaResponseBuildsNoMemtableObject(cfs, read);
+            }
+            catch (AssertionError e)
+            {
+                throw new AssertionError(read.get().toCQLString() + ": " + e.getMessage(), e);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- the memtable leg's own filtering
+
+    /** A partition only the memtable holds, every read shape: the lone memtable leg. */
+    @Test
+    public void memtableOnlyPartition() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, s text static, v1 bigint, v2 text, m map<text, bigint>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (2, 0, 0)");
+        flush();
+        execute("UPDATE %s SET s = 'static' WHERE pk = 1");
+        for (long ck = 0; ck < 20; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2, m) VALUES (1, ?, ?, ?, ?)", ck, ck, "mem" + ck, map("a", ck, "b", ck + 1));
+        execute("DELETE FROM %s WHERE pk = 1 AND ck >= 5 AND ck < 9");
+        execute("DELETE v2 FROM %s WHERE pk = 1 AND ck = 10");
+        execute("DELETE m['a'] FROM %s WHERE pk = 1 AND ck = 11");
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (1, 30, 30) USING TTL 100000");
+        long now = FBUtilities.nowInSeconds();
+        assertEveryShapeMatches(cfs, now, 1L, 0);
+    }
+
+    /**
+     * Range tombstones in the memtable that overlap, with the same deletion time (the boundary
+     * between them changes nothing and {@code RowAndDeletionMergeIterator} drops it,
+     * CASSANDRA-14894), and one newer range inside an older one, over memtable and sstable rows.
+     */
+    @Test
+    public void overlappingMemtableRangeTombstones() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long ck = 0; ck < 30; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (1, ?, ?) USING TIMESTAMP 1000", ck, "sst" + ck);
+        flush();
+        // one batch: the same local deletion time, so the boundary between the two ranges is a no-op
+        execute("BEGIN UNLOGGED BATCH USING TIMESTAMP 2000 " +
+                "DELETE FROM %1$s WHERE pk = 1 AND ck >= 2 AND ck < 10; " +
+                "DELETE FROM %1$s WHERE pk = 1 AND ck >= 6 AND ck < 14; " +
+                "APPLY BATCH");
+        execute("DELETE FROM %s USING TIMESTAMP 3000 WHERE pk = 1 AND ck >= 16 AND ck < 25");
+        execute("DELETE FROM %s USING TIMESTAMP 4000 WHERE pk = 1 AND ck >= 18 AND ck < 20");
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (1, 7, 'over-rt') USING TIMESTAMP 2500");
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (1, 19, 'under-rt') USING TIMESTAMP 3500");
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (1, 22, 'over-rt') USING TIMESTAMP 3500");
+        long now = FBUtilities.nowInSeconds();
+        assertMemtableMergedMatches(cfs, fullPartition(cfs, now, 1L), 1, 1);
+        assertEveryShapeMatches(cfs, now, 1L, 1);
+    }
+
+    /** A memtable partition deletion with rows above and below it, and a static row. */
+    @Test
+    public void memtablePartitionDeletion() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, s text static, v1 text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long ck = 0; ck < 20; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (1, ?, ?) USING TIMESTAMP 1000", ck, "sst" + ck);
+        flush();
+        for (long ck = 0; ck < 20; ck += 3)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (1, ?, ?) USING TIMESTAMP 1500", ck, "mem-old" + ck);
+        execute("DELETE FROM %s USING TIMESTAMP 2000 WHERE pk = 1");
+        for (long ck = 1; ck < 20; ck += 4)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (1, ?, ?) USING TIMESTAMP 2500", ck, "mem-new" + ck);
+        execute("UPDATE %s USING TIMESTAMP 1800 SET s = 'under' WHERE pk = 1");
+        execute("DELETE FROM %s USING TIMESTAMP 1900 WHERE pk = 1 AND ck >= 3 AND ck < 8");
+        execute("DELETE FROM %s USING TIMESTAMP 3000 WHERE pk = 1 AND ck >= 9 AND ck < 12");
+        long now = FBUtilities.nowInSeconds();
+        assertEveryShapeMatches(cfs, now, 1L, 1);
+        // the partition deletion is newer than the sstable: the iterator path skips it
+        execute("UPDATE %s USING TIMESTAMP 2600 SET s = 'over' WHERE pk = 2");
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (2, 1, 'x') USING TIMESTAMP 2600");
+        assertEveryShapeMatches(cfs, now, 2L, 0);
+    }
+
+    /**
+     * Columns fetched but not queried, and sub-selections of a map: the memtable leg keeps the
+     * cells {@code BTreeRow.filter} keeps, with the skipped (empty) value for a cell that is not
+     * queried, and drops a cell that is not queried and older than the row.
+     */
+    @Test
+    public void fetchedButNotQueriedAndSubSelections() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, v2 text, m map<text, bigint>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long ck = 0; ck < 12; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2, m) VALUES (1, ?, ?, ?, ?) USING TIMESTAMP 1000", ck, ck, "sst" + ck, map("a", ck, "c", ck));
+        flush();
+        for (long ck = 0; ck < 12; ck += 2)
+            execute("INSERT INTO %s (pk, ck, v1, v2, m) VALUES (1, ?, ?, ?, ?) USING TIMESTAMP 2000", ck, ck + 50, "mem" + ck, map("a", ck + 5, "b", ck));
+        // cells older than their row: not queried, so dropped
+        for (long ck = 1; ck < 12; ck += 4)
+        {
+            execute("INSERT INTO %s (pk, ck) VALUES (1, ?) USING TIMESTAMP 3000", ck);
+            execute("UPDATE %s USING TIMESTAMP 900 SET v2 = 'old', m['z'] = 1 WHERE pk = 1 AND ck = ?", ck);
+        }
+        long now = FBUtilities.nowInSeconds();
+        TableMetadata metadata = cfs.metadata();
+        ColumnMetadata m = column(cfs, "m");
+        ColumnFilter queriedV1 = ColumnFilter.allRegularColumnsBuilder(metadata, false).add(column(cfs, "v1")).build();
+        ColumnFilter elementA = ColumnFilter.allRegularColumnsBuilder(metadata, false)
+                                            .select(m, CellPath.create(ByteBufferUtil.bytes("a"))).build();
+        ColumnFilter sliceAToB = ColumnFilter.selectionBuilder()
+                                             .slice(m, CellPath.create(ByteBufferUtil.bytes("a")), CellPath.create(ByteBufferUtil.bytes("b")))
+                                             .add(column(cfs, "v2")).build();
+        for (ColumnFilter columns : new ColumnFilter[]{ queriedV1, elementA, sliceAToB })
+        {
+            for (boolean reversed : new boolean[]{ false, true })
+            {
+                Supplier<SinglePartitionReadCommand> read = () -> command(cfs, now, 1L, columns, Slices.ALL, reversed);
+                assertMemtableMergedMatches(cfs, read, 1, 1);
+            }
+        }
+    }
+
+    /**
+     * A simple column and a map dropped and added again: cells from before the drop in the
+     * sstables, cells after it in the memtable.  The dropped columns make every memtable row go
+     * through the leg's {@code BTreeRow.filter}.  A schema change switches the memtable and
+     * flushes it in the background, so the test waits for that flush: the rows written before it
+     * are read from an sstable, and no source changes between the two paths' reads.
+     */
+    @Test
+    public void droppedAndReAddedColumns() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, v2 text, m map<text, bigint>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long ck = 0; ck < 10; ck++)
+            execute("INSERT INTO %s (pk, ck, v1, v2, m) VALUES (1, ?, ?, ?, ?)", ck, "sst" + ck, "sst" + ck, map("a", ck));
+        flush();
+        for (long ck = 0; ck < 10; ck += 2)
+            execute("INSERT INTO %s (pk, ck, v1, v2, m) VALUES (1, ?, ?, ?, ?)", ck, "mem" + ck, "mem" + ck, map("b", ck));
+        // a dropped collection not added again stays on the iterator path (CASSANDRA-21607)
+        execute("ALTER TABLE %s DROP v2");
+        execute("ALTER TABLE %s DROP m");
+        execute("ALTER TABLE %s ADD m map<text, bigint>");
+        execute("ALTER TABLE %s ADD v2 text");
+        // flushes finish in order, so this one, of another partition, waits for the ones the
+        // schema changes started
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (99, 0, 'other')");
+        flush();
+        assertTrue("a memtable is still flushing", cfs.getTracker().getView().flushingMemtables.isEmpty());
+        for (long ck = 1; ck < 10; ck += 3)
+            execute("INSERT INTO %s (pk, ck, v1, v2, m) VALUES (1, ?, ?, ?, ?)", ck, "new" + ck, "new" + ck, map("c", ck));
+        execute("UPDATE %s SET m['d'] = 1 WHERE pk = 1 AND ck = 2");
+        long now = FBUtilities.nowInSeconds();
+        // the sstable of partition 99 holds no row of partition 1
+        int sstableLegs = cfs.getLiveSSTables().size() - 1;
+        assertMemtableMergedMatches(cfs, fullPartition(cfs, now, 1L), sstableLegs, 1);
+        assertMemtableMergedMatches(cfs, () -> (SinglePartitionReadCommand) Util.cmd(cfs, 1L).withNowInSeconds(now).reverse().build(), sstableLegs, 1);
+        assertMemtableMergedMatches(cfs, () -> (SinglePartitionReadCommand) Util.cmd(cfs, 1L).withNowInSeconds(now).columns("v1").build(), sstableLegs, 1);
+        assertEveryShapeMatches(cfs, now, 1L, sstableLegs);
+    }
+
+    /** TTLs in the memtable read before and after they expire, on cells, elements and liveness. */
+    @Test
+    public void memtableTtlsBeforeAndAfterExpiry() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 text, m map<text, bigint>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long ck = 0; ck < 16; ck++)
+            execute("INSERT INTO %s (pk, ck, v1) VALUES (1, ?, ?)", ck, "sst" + ck);
+        flush();
+        for (long ck = 0; ck < 16; ck += 2)
+            execute("INSERT INTO %s (pk, ck, v1, m) VALUES (1, ?, ?, ?) USING TTL 100", ck, "ttl" + ck, map("a", ck));
+        execute("UPDATE %s USING TTL 100 SET m['x'] = 1 WHERE pk = 1 AND ck = 3");
+        long now = FBUtilities.nowInSeconds();
+        assertEveryShapeMatches(cfs, now, 1L, 1);
+        assertEveryShapeMatches(cfs, now + 1000, 1L, 1);
+    }
+
+    /** Counter cells in the memtable merged with counter shards in sstables, and alone. */
+    @Test
+    public void memtableCounters() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, c counter, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long ck = 0; ck < 12; ck++)
+            execute("UPDATE %s SET c = c + 1 WHERE pk = 1 AND ck = ?", ck);
+        flush();
+        for (long ck = 0; ck < 12; ck += 2)
+            execute("UPDATE %s SET c = c + 5 WHERE pk = 1 AND ck = ?", ck);
+        execute("UPDATE %s SET c = c + 3 WHERE pk = 2 AND ck = 1");
+        long now = FBUtilities.nowInSeconds();
+        assertMemtableMergedMatches(cfs, fullPartition(cfs, now, 1L), 1, 1);
+        assertEveryShapeMatches(cfs, now, 1L, 1);
+        assertEveryShapeMatches(cfs, now, 2L, 0);
     }
 
     // ---------------------------------------------------------------- mutation tests

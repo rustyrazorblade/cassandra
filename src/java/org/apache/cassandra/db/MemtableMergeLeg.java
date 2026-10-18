@@ -52,65 +52,33 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.TOMBSTON
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
 
 /**
- * The OBJECT-BACKED merge leg — the memtable adapter.
- * Wraps the exact {@link UnfilteredRowIterator} the memtable leg contributes to the
- * object-level merge today ({@code memtable.rowIterator(...)}, {@code RTBoundValidator}-wrapped by
- * the call site) and presents each live {@code Row}/{@code Cell}/{@code RangeTombstoneMarker} as
- * the descriptor-shaped {@link CursorReads.MergeLeg} state {@code CursorReadMerger} consumes, so
- * the memtable joins the SAME cursor-level merge as the sstable legs and the post-merge
- * object-level merge disappears for fully-supported reads.
+ * The object-backed merge leg: wraps an {@link UnfilteredRowIterator} the merge reads as one of its
+ * sources (the merged repaired sstables of a read that tracks repaired data, through the
+ * repaired-data digest) and presents each {@code Row}/{@code Cell}/{@code RangeTombstoneMarker}
+ * as the descriptor-shaped {@link CursorReads.MergeLeg} state {@code CursorReadMerger} consumes.
+ * Memtables have their own leg, {@link NativeMemtableMergeLeg}, which reads the partition data
+ * itself; this class keeps the descriptor and marker helpers both share.
  *
- * <b>EnsureOnHeap / off-heap safety</b>: this adapter
- * sits ABOVE the wrapping the memtable partition already applies —
- * {@code AtomicBTreePartition.unfilteredIterator} returns
- * {@code allocator.ensureOnHeap().applyToPartition(...)}, which is {@code EnsureOnHeap.NOOP} for
- * {@code heap_buffers} ({@code HeapPool}) and {@code CloneToHeap} for {@code offheap_buffers}
- * ({@code SlabAllocator} with {@code allocateOnHeapOnly == false}) and {@code offheap_objects}
- * ({@code NativeAllocator}). Every row, cell, marker, static row and partition key this adapter
- * touches has therefore already been cloned to heap exactly where today's object path clones it —
- * off-heap lifetime safety is inherited byte-for-byte under all three configs, and the adapter
- * needs no {@code CloneToHeap} handling of its own.
- *
- * <b>Zero-copy properties</b> (the reason this adapter exists at all — per-row/per-value copies
- * are where read-path allocation hides):
  * <ul>
- *   <li>Clustering comparison: each unfiltered's clustering is serialized ONCE into the reusable
- *       descriptor buffer (standard {@code serializeValuesWithoutSize} wire form, the same layout
- *       sstable descriptors hold), buying descriptor-vs-descriptor comparison through the existing
- *       shared {@code ClusteringComparator.compare} with zero steady-state allocation — one small
- *       memcpy per memtable unfiltered.</li>
- *   <li>{@link #materializeClusteringPrefix()} returns the row's OWN clustering object — no
- *       decode, no copy.</li>
- *   <li>{@link #existingCell()}/{@link #consumeExistingRow()}: memtable-won cells/rows are emitted
- *       as the already-live objects, mirroring the object merge ({@code Cells.reconcile} returns
- *       the winner object; {@code Row.Merger.merge}'s single-version fast path returns the row
- *       unchanged). Without this, the adapter would make memtable-hot reads allocate MORE than the
- *       object path it replaces.</li>
+ *   <li>Clustering comparison: each unfiltered's clustering is serialized once into the reusable
+ *       descriptor buffer (the {@code serializeValuesWithoutSize} wire form sstable descriptors
+ *       hold), so descriptors compare through the shared {@code ClusteringComparator.compare}.</li>
+ *   <li>{@link #materializeClusteringPrefix()} returns the row's own clustering object.</li>
+ *   <li>{@link #existingCell()}/{@link #consumeExistingRow()}: won cells and rows are emitted as
+ *       the source's own objects, mirroring the object merge ({@code Cells.reconcile} returns the
+ *       winner object; {@code Row.Merger.merge}'s single-version fast path returns the row
+ *       unchanged).</li>
  * </ul>
  *
- * <b>Filtering</b>: none is applied here, by design. The wrapped iterator's rows are already
- * column-filtered and shadow-filtered by {@code RowAndDeletionMergeIterator}
- * ({@code row.filter(selection, activeDeletion, ...)}) and clipped to the query slices — exactly
- * the stream today's object merge consumes. Notably this preserves the iterator path's asymmetry
- * for {@code canSkipValue} columns: memtable cells keep their full values while sstable legs
- * reconcile on EMPTY values, so value tie-breaks resolve identically to the object path.
+ * <b>Filtering</b>: none is applied here.  The wrapped iterator's rows are already filtered and
+ * sliced, exactly the stream the object merge consumes.
  *
- * <b>Validation</b>: {@link #validateRowHeader()}/{@link #validateMarkerHeader()} are no-ops —
- * the iterator path applies {@code UnfilteredValidation} only to sstable-attributed data
- * ({@code AbstractSSTableIterator}/{@code SSTableIdentityIterator}); memtable data is never
- * validated there, so it must not be validated here either.
+ * <b>Validation</b>: {@link #validateRowHeader()}/{@link #validateMarkerHeader()} are no-ops: the
+ * wrapped iterator's sstable readers already validated what they read.
  *
- * <b>Range tombstones</b>: the memtable's markers (from {@code DeletionInfo}, including the
- * artificial slice-bound markers the pre-clipped stream carries) enter the merge's cross-leg
- * open-marker set as normal, always-current contributions — a memtable leg never seeks, so
- * {@link #openDeletion()} is always null and the seed machinery never applies to it.
+ * <b>Range tombstones</b>: the source's markers enter the merge's cross-leg open-marker set as
+ * normal, always-current contributions; the leg never seeks, so {@link #openDeletion()} is null.
  */
-// Public (was package-private) so the mergeLegsWithSink test hook
-// (CursorReads.mergeLegsWithSink, @VisibleForTesting) can be driven with real memtable-adapter
-// legs from the test package (org.apache.cassandra.db.cursorreads), mirroring the already
-// -public CursorReads.PendingLeg for sstable legs and CursorReads.openLeg's factory pattern. Pure
-// visibility change; behavior and the (still package-private) CursorReads.MergeLeg contract are
-// unchanged.
 public final class MemtableMergeLeg implements CursorReads.MergeLeg
 {
     private final UnfilteredRowIterator iter;
@@ -136,39 +104,24 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
     private DeletionTime parkedComplexDeletion = DeletionTime.LIVE;
     private boolean parked;
 
-    /** See {@link #MemtableMergeLeg(UnfilteredRowIterator, Slices, boolean)}. */
-    private final boolean pullOnDemand;
     /** The merge has moved past the current unfiltered; the next one is pulled with its header. */
     private boolean pullPending;
 
-    public MemtableMergeLeg(UnfilteredRowIterator iter, Slices slices)
-    {
-        this(iter, slices, false);
-    }
-
     /**
-     * @param pullOnDemand pull each next unfiltered from {@code iter} only when the merge reads its
-     *                     header, not as soon as the merge has used the current one.  The iterator
-     *                     path's merge pulls its inputs this way.  A source whose pulls are counted
-     *                     (the repaired-data digest) needs it to be pulled exactly as far.
+     * Pulls each next unfiltered from {@code iter} only when the merge reads its header, not as
+     * soon as the merge has used the current one.  The iterator path's merge pulls its inputs this
+     * way, and a source whose pulls are counted (the repaired-data digest) must be pulled exactly
+     * as far.
      */
-    MemtableMergeLeg(UnfilteredRowIterator iter, Slices slices, boolean pullOnDemand)
+    MemtableMergeLeg(UnfilteredRowIterator iter, Slices slices)
     {
         this.iter = iter;
         this.slices = slices;
-        this.pullOnDemand = pullOnDemand;
         this.clusteringTypes = iter.metadata().comparator.subtypes();
         this.desc = new MemtableDescriptor(clusteringTypes);
-        if (pullOnDemand)
-        {
-            // the first unfiltered too: a merge that reads no row of the leg pulls none
-            pullPending = true;
-            state = ROW_START;
-        }
-        else
-        {
-            advance();
-        }
+        // the first unfiltered too: a merge that reads no row of the leg pulls none
+        pullPending = true;
+        state = ROW_START;
     }
 
     private void advance()
@@ -289,7 +242,7 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
         loadClustering(desc, clustering, columnsBound, clusteringTypes, clusteringScratch);
     }
 
-    private static void loadClustering(MemtableDescriptor desc, ClusteringPrefix<?> clustering, int columnsBound,
+    static void loadClustering(MemtableDescriptor desc, ClusteringPrefix<?> clustering, int columnsBound,
                                        AbstractType<?>[] clusteringTypes, DataOutputBuffer clusteringScratch)
     {
         clusteringScratch.clear();
@@ -330,14 +283,9 @@ public final class MemtableMergeLeg implements CursorReads.MergeLeg
     {
         if (state != UNFILTERED_END)
             throw new IllegalStateException("adapter asked to continue from state " + state);
-        if (pullOnDemand)
-        {
-            // readUnfilteredHeader pulls the next unfiltered; until then the leg reports a header to read
-            pullPending = true;
-            state = ROW_START;
-            return;
-        }
-        advance();
+        // readUnfilteredHeader pulls the next unfiltered; until then the leg reports a header to read
+        pullPending = true;
+        state = ROW_START;
     }
 
     public ClusteringPrefix<?> materializeClusteringPrefix()
