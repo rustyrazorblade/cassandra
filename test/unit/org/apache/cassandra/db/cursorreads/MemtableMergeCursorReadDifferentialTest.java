@@ -557,6 +557,31 @@ public class MemtableMergeCursorReadDifferentialTest extends SSTableFormatParame
     }
 
     /**
+     * A partition only the memtable holds, with a complex deletion and a row deletion equal to its
+     * partition deletion (one batch: the same local deletion time).  The iterator path reads the
+     * lone memtable as is and keeps both, where a merge of several sources drops a deletion that
+     * does not supersede the active one; the lone memtable leg is read as stored.
+     */
+    @Test
+    public void memtableOnlyDeletionsEqualToThePartitionDeletion() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, l list<bigint>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (2, 0, 0)");
+        flush();
+        // the list overwrite at 2001 stores a complex deletion at 2000
+        execute("BEGIN UNLOGGED BATCH " +
+                "DELETE FROM %1$s USING TIMESTAMP 2000 WHERE pk = 1; " +
+                "UPDATE %1$s USING TIMESTAMP 2001 SET l = [1, 2] WHERE pk = 1 AND ck = 1; " +
+                "DELETE FROM %1$s USING TIMESTAMP 2000 WHERE pk = 1 AND ck = 2; " +
+                "INSERT INTO %1$s (pk, ck, v1) VALUES (1, 3, 3) USING TIMESTAMP 2001; " +
+                "APPLY BATCH");
+        long now = FBUtilities.nowInSeconds();
+        assertEveryShapeMatches(cfs, now, 1L, 0);
+    }
+
+    /**
      * Range tombstones in the memtable that overlap, with the same deletion time (the boundary
      * between them changes nothing and {@code RowAndDeletionMergeIterator} drops it,
      * CASSANDRA-14894), and one newer range inside an older one, over memtable and sstable rows.

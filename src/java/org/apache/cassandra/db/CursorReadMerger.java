@@ -414,6 +414,13 @@ final class CursorReadMerger
     /** The only leg of a single-leg read, or null for a merge.  A single leg is read as stored,
      *  see {@link #advanceSingle}. */
     private final CursorReads.PendingLeg singleLeg;
+    /**
+     * Whether the read has one source, which the iterator path reads without a merge: a single
+     * sstable leg ({@link #singleLeg}), or one memtable (or other object source) merged as the only
+     * leg.  Its row, complex and cell data are kept as the source gives them: no deletion shadows
+     * them here, as {@code UnfilteredRowIterators.merge} returns a lone iterator unchanged.
+     */
+    private final boolean readAsStored;
     private final boolean[] equalsNext;
     private final ClusteringComparator comparator;
     private final MergeSink sink;
@@ -607,6 +614,7 @@ final class CursorReadMerger
         }
         this.legsAlreadySliced = legsAlreadySliced;
         this.singleLeg = singleLeg;
+        this.readAsStored = singleLeg != null || (legs.length == 1 && legs[0].sstableOrNull() == null);
         this.equalsNext = new boolean[legs.length];
         this.comparator = metadata.comparator;
         this.mergedPartitionDeletion = mergedPartitionDeletion;
@@ -960,7 +968,7 @@ final class CursorReadMerger
         // path never applies corrupted-tombstone validation to memtable data.
         // TEST_FORCE_MEMTABLE_ROW_REUSE breaks the isLive() condition so the
         // differential harness can prove it catches a wrong reuse (shadowed data resurrecting).
-        if (rowMergeLimit == 1 && (activeDeletion.isLive() || CursorReads.TEST_FORCE_MEMTABLE_ROW_REUSE))
+        if (rowMergeLimit == 1 && (activeDeletion.isLive() || readAsStored || CursorReads.TEST_FORCE_MEMTABLE_ROW_REUSE))
         {
             Row existing = legs[0].consumeExistingRow();
             if (existing != null)
@@ -1085,7 +1093,7 @@ final class CursorReadMerger
                 legs[i].validateRowHeader();
         }
 
-        if (singleLeg != null)
+        if (readAsStored)
         {
             // a single leg is read as stored: its row deletion is kept and shadows nothing
             groupDeletionSurvives = !mergedDeletion.isLive();
@@ -1319,7 +1327,7 @@ final class CursorReadMerger
      */
     private boolean rowReadAsStored(int rowMergeLimit)
     {
-        return rowMergeLimit == 1 && (singleLeg != null || activeDeletion.isLive());
+        return rowMergeLimit == 1 && (readAsStored || activeDeletion.isLive());
     }
 
     // ---------------------------------------------------------------- cell groups
@@ -1362,7 +1370,7 @@ final class CursorReadMerger
             complexDeletionNeedsReport = !mergedComplexDeletion.isLive();
         }
         // a single leg is read as stored: its complex deletion is kept and shadows nothing
-        if (singleLeg != null)
+        if (readAsStored)
             return rowActiveDeletion;
         if (!mergedComplexDeletion.isLive() && mergedComplexDeletion.supersedes(rowActiveDeletion))
             return mergedComplexDeletion;
