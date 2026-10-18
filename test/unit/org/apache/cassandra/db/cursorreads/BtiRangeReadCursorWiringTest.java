@@ -389,7 +389,7 @@ public class BtiRangeReadCursorWiringTest extends RangeReadOracle
 
         DatabaseDescriptor.setCursorRangeReadsEnabled(true);
         assertTrue("scenario is not supported by the cursor range gate; this run would compare iterator vs iterator",
-                   CursorRangeReads.unsupported(rangeCommand(cfs, dataRange), cfs, ReadExecutionController.empty(), liveSSTables(cfs, dataRange)) == null);
+                   CursorRangeReads.unsupported(rangeCommand(cfs, dataRange), cfs, ReadExecutionController.empty(), cfs.select(View.selectLive(dataRange.keyRange()))) == null);
         long servedBefore = CursorRangeReads.rangeReadsServed();
         List<String> cursor = renderRange(cfs, dataRange);
         byte[] cursorBytes = responseBytes(cfs, dataRange);
@@ -444,11 +444,6 @@ public class BtiRangeReadCursorWiringTest extends RangeReadOracle
                                                 RowFilter.none(),
                                                 DataLimits.NONE,
                                                 dataRange);
-    }
-
-    private static List<SSTableReader> liveSSTables(ColumnFamilyStore cfs, DataRange dataRange)
-    {
-        return new ArrayList<>(cfs.select(View.selectLive(dataRange.keyRange())).sstables);
     }
 
     private List<DecoratedKey> keysInTokenOrder(ColumnFamilyStore cfs)

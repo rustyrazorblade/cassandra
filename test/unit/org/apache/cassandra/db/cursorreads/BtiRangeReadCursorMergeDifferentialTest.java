@@ -21,6 +21,7 @@ package org.apache.cassandra.db.cursorreads;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
 import org.junit.After;
@@ -41,6 +42,7 @@ import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.db.memtable.MemtablePartitionData;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
 import org.apache.cassandra.db.rows.Cell;
@@ -343,11 +345,11 @@ public class BtiRangeReadCursorMergeDifferentialTest extends RangeReadOracle
     private UnfilteredPartitionIterator cursor(ColumnFamilyStore cfs, DataRange dataRange)
     {
         PartitionRangeReadCommand command = rangeCommand(cfs, dataRange);
-        List<UnfilteredPartitionIterator> memtableIterators = new ArrayList<>();
+        List<Iterator<MemtablePartitionData>> memtables = new ArrayList<>();
         for (Memtable memtable : cfs.select(View.selectLive(command.dataRange().keyRange())).memtables)
-            memtableIterators.add(memtable.partitionIterator(command.columnFilter(), command.dataRange(), SSTableReadsListener.NOOP_LISTENER));
+            memtables.add(memtable.partitionData(command.dataRange()));
         List<SSTableReader> sstables = new ArrayList<>(cfs.select(View.selectLive(command.dataRange().keyRange())).sstables);
-        return CursorRangeReads.rangeIterator(command, cfs, sstables, memtableIterators, null, SSTableReadsListener.NOOP_LISTENER);
+        return CursorRangeReads.rangeIterator(command, cfs, sstables, memtables, null, SSTableReadsListener.NOOP_LISTENER);
     }
 
     // ------------------------------------------------------------------ rendering

@@ -35,9 +35,11 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.compaction.CursorCompactor;
 import org.apache.cassandra.db.compaction.IteratorMergeOrder;
 import org.apache.cassandra.db.filter.ClusteringIndexFilter;
+import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.lifecycle.View;
+import org.apache.cassandra.db.memtable.MemtablePartitionData;
 import org.apache.cassandra.db.partitions.AbstractUnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.CachedPartition;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
@@ -47,7 +49,6 @@ import org.apache.cassandra.db.rows.ResponseWireWriter;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
-import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.db.rows.WrappingUnfilteredRowIterator;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
@@ -117,7 +118,9 @@ public final class CursorRangeReads
         /** An sstable is not at the latest format version. */
         SSTABLE_NOT_LATEST_VERSION,
         /** A dropped collection column that was not added back is still in an sstable header (CASSANDRA-21607). */
-        DROPPED_COLUMN_IN_SSTABLE_HEADER
+        DROPPED_COLUMN_IN_SSTABLE_HEADER,
+        /** A memtable does not give the content of its partitions ({@code Memtable.readsPartitionData}); none in the tree does not. */
+        MEMTABLE_WITHOUT_PARTITION_DATA
     }
 
     private static final LongAdder SERVED = new LongAdder();
@@ -153,6 +156,18 @@ public final class CursorRangeReads
             listener.accept(metadata.id, reason);
     }
 
+    private static final LongAdder ITERATOR_LEGS_OPENED = new LongAdder();
+
+    /**
+     * Partitions range reads took as objects from an iterator instead of reading them through a
+     * merge leg: a memtable partition through the memtable's row iterator, the merged repaired
+     * sstables of a read that tracks repaired data, a partition from the row cache.
+     */
+    public static long iteratorLegsOpened()
+    {
+        return ITERATOR_LEGS_OPENED.sum();
+    }
+
     /** Range reads the cursor path served. */
     public static long rangeReadsServed()
     {
@@ -183,12 +198,13 @@ public final class CursorRangeReads
     /**
      * Why the cursor path cannot serve {@code command}, or null when it can.  Does not count.
      *
-     * @param sstables the sstables selected for the command's key range
+     * @param view the memtables and sstables selected for the command's key range
      */
     public static Unsupported unsupported(PartitionRangeReadCommand command, ColumnFamilyStore cfs,
-                                          ReadExecutionController controller, Collection<SSTableReader> sstables)
+                                          ReadExecutionController controller, ColumnFamilyStore.ViewFragment view)
     {
         TableMetadata metadata = cfs.metadata();
+        Collection<SSTableReader> sstables = view.sstables;
         if (metadata.keyspace.equals(SchemaConstants.ACCORD_KEYSPACE_NAME))
             return Unsupported.ACCORD_KEYSPACE;
         if (!metadata.partitioner.supportsReusableKeys())
@@ -202,14 +218,16 @@ public final class CursorRangeReads
             if (CursorCompactor.unsupportedHeaderColumns(metadata, sstable, false))
                 return Unsupported.DROPPED_COLUMN_IN_SSTABLE_HEADER;
         }
+        if (!CursorReads.memtablesGivePartitionData(view.memtables))
+            return Unsupported.MEMTABLE_WITHOUT_PARTITION_DATA;
         return null;
     }
 
     /** {@link #unsupported}, counted: a read the cursor path serves counts as served, any other under its reason. */
     static boolean servedByCursor(PartitionRangeReadCommand command, ColumnFamilyStore cfs,
-                                  ReadExecutionController controller, Collection<SSTableReader> sstables)
+                                  ReadExecutionController controller, ColumnFamilyStore.ViewFragment view)
     {
-        Unsupported reason = unsupported(command, cfs, controller, sstables);
+        Unsupported reason = unsupported(command, cfs, controller, view);
         if (reason == null)
         {
             countServed(cfs.metadata());
@@ -226,8 +244,8 @@ public final class CursorRangeReads
      * gives them on the iterator path.  Nothing is read until the first {@code hasNext}.
      *
      * @param sstables          the sstables the iterator path would scan, in its order
-     * @param memtableIterators each memtable's partition iterator over the range, in the iterator
-     *                          path's order; the returned iterator owns them
+     * @param memtables         each memtable's partitions over the range ({@code Memtable.partitionData}),
+     *                          in the iterator path's order
      * @param repaired          the merged repaired sstables of a read that tracks repaired data, with
      *                          the repaired data digest, read after every other source as the iterator
      *                          path reads it; null for none.  The returned iterator owns it.
@@ -236,11 +254,11 @@ public final class CursorRangeReads
     public static UnfilteredPartitionIterator rangeIterator(PartitionRangeReadCommand command,
                                                      ColumnFamilyStore cfs,
                                                      List<SSTableReader> sstables,
-                                                     List<UnfilteredPartitionIterator> memtableIterators,
+                                                     List<Iterator<MemtablePartitionData>> memtables,
                                                      UnfilteredPartitionIterator repaired,
                                                      SSTableReadsListener listener)
     {
-        return new RangeMerge(command, cfs, sstables, memtableIterators, repaired, listener);
+        return new RangeMerge(command, cfs, sstables, memtables, repaired, listener);
     }
 
     /**
@@ -279,7 +297,7 @@ public final class CursorRangeReads
         if (!command.potentialTxnConflicts().allowed)
             ConsensusRequestRouter.validateSafeToReadNonTransactionally(command, null);
         ColumnFamilyStore.ViewFragment view = cfs.select(View.selectLive(command.dataRange().keyRange()));
-        if (unsupported(command, cfs, controller, view.sstables) != null)
+        if (unsupported(command, cfs, controller, view) != null)
             return null;
         // the range is formatted only for a traced read: it costs a String.format per read
         if (Tracing.isTracing())
@@ -411,20 +429,56 @@ public final class CursorRangeReads
         }
     };
 
-    /** A memtable, or the merged repaired sstables of a read that tracks repaired data. */
+    /**
+     * A memtable: the content of each of its partitions in the range, read once when the source
+     * reaches it, which the merge reads through a {@link NativeMemtableMergeLeg}.
+     */
     private static final class MemtableSource extends Source
     {
+        private final Iterator<MemtablePartitionData> partitions;
+        /** The current partition's content; null when the source has no more. */
+        MemtablePartitionData partition;
+        /** The leg of the current partition, once {@link RangeMerge#openOnKey} opened it. */
+        NativeMemtableMergeLeg leg;
+        /** The leg the source reopens at each partition it reads; null until the first. */
+        private NativeMemtableMergeLeg reused;
+
+        MemtableSource(Iterator<MemtablePartitionData> partitions)
+        {
+            this.partitions = partitions;
+        }
+
+        @Override
+        boolean advance()
+        {
+            leg = null;
+            partition = partitions.hasNext() ? partitions.next() : null;
+            key = partition == null ? null : partition.key;
+            return partition != null;
+        }
+
+        @Override
+        void close()
+        {
+            partition = null;
+            leg = null;
+        }
+    }
+
+    /**
+     * The merged repaired sstables of a read that tracks repaired data, as an iterator: every row
+     * the merge pulls from them feeds the repaired data digest.
+     */
+    private static final class RepairedSource extends Source
+    {
         private final UnfilteredPartitionIterator partitions;
-        /** The merged repaired sstables: every row the merge pulls from them feeds the repaired data digest. */
-        final boolean repaired;
         private UnfilteredRowIterator partition;
         /** The partition {@link #take} handed out last, until the source advances. */
         UnfilteredRowIterator taken;
 
-        MemtableSource(UnfilteredPartitionIterator partitions, boolean repaired)
+        RepairedSource(UnfilteredPartitionIterator partitions)
         {
             this.partitions = partitions;
-            this.repaired = repaired;
         }
 
         @Override
@@ -732,7 +786,7 @@ public final class CursorRangeReads
         private final ColumnFilter columnFilter;
         private final boolean reversed;
         private final List<SSTableReader> sstables;
-        private final List<UnfilteredPartitionIterator> memtableIterators;
+        private final List<Iterator<MemtablePartitionData>> memtables;
         /** See {@link #rangeIterator}; null for none. */
         private final UnfilteredPartitionIterator repaired;
         /** The repaired source's partition on the current key, or null. */
@@ -754,7 +808,7 @@ public final class CursorRangeReads
         private boolean closed;
 
         RangeMerge(PartitionRangeReadCommand command, ColumnFamilyStore cfs, List<SSTableReader> sstables,
-                   List<UnfilteredPartitionIterator> memtableIterators, UnfilteredPartitionIterator repaired,
+                   List<Iterator<MemtablePartitionData>> memtables, UnfilteredPartitionIterator repaired,
                    SSTableReadsListener listener)
         {
             this.repaired = repaired;
@@ -764,7 +818,7 @@ public final class CursorRangeReads
             this.columnFilter = command.columnFilter();
             this.reversed = command.isReversed();
             this.sstables = sstables;
-            this.memtableIterators = memtableIterators;
+            this.memtables = memtables;
             this.listener = listener;
         }
 
@@ -825,15 +879,15 @@ public final class CursorRangeReads
 
         private void openSources()
         {
-            sources = new Source[memtableIterators.size() + sstables.size() + (repaired == null ? 0 : 1)];
+            sources = new Source[memtables.size() + sstables.size() + (repaired == null ? 0 : 1)];
             int count = 0;
             try
             {
-                for (UnfilteredPartitionIterator memtable : memtableIterators)
-                    sources[count++] = new MemtableSource(memtable, false);
+                for (Iterator<MemtablePartitionData> memtable : memtables)
+                    sources[count++] = new MemtableSource(memtable);
                 // made before the sstable sources, so it is closed if one fails, but read last
                 if (repaired != null)
-                    sources[sources.length - 1] = new MemtableSource(repaired, true);
+                    sources[sources.length - 1] = new RepairedSource(repaired);
                 AbstractBounds<PartitionPosition> requested = command.dataRange().keyRange();
                 for (SSTableReader sstable : sstables)
                 {
@@ -846,7 +900,7 @@ public final class CursorRangeReads
             }
             catch (RuntimeException | Error e)
             {
-                // every memtable and repaired iterator has a source by now: sstable sources are made after them
+                // every memtable and the repaired iterator have a source by now: sstable sources are made after them
                 closed = true;
                 closeSources(sources.length, e);
                 throw e;
@@ -871,28 +925,21 @@ public final class CursorRangeReads
             }
             Slices slices = filter.getSlices(metadata);
             List<CursorReads.PendingLeg> legs = new ArrayList<>(onKeyCount);
-            List<UnfilteredRowIterator> memtables = new ArrayList<>(onKeyCount);
-            openOnKey(key, slices, legs, memtables);
+            List<NativeMemtableMergeLeg> memtableLegs = new ArrayList<>(onKeyCount);
+            // executeLocally keeps the merged rows: the memtable legs give the iterator path's objects
+            openOnKey(key, filter, slices, legs, memtableLegs, true);
 
-            if (legs.isEmpty())
-            {
-                // memtables only: the iterator path merges them as objects too
-                return memtables.size() == 1 ? memtables.get(0) : UnfilteredRowIterators.merge(memtables);
-            }
-            if (memtables.isEmpty() && legs.size() == 1)
+            // a lone object source is read as is, as the iterator path reads it
+            if (onKeyCount == 1 && repairedPartition != null)
+                return repairedPartition;
+            if (memtableLegs.isEmpty() && repairedPartition == null && legs.size() == 1)
                 return reversed ? CursorReads.completeSingleLegReversed(legs.get(0)) : CursorReads.completeSingleLeg(legs.get(0));
 
+            // memtables, a lone one too, merge in the cursor merge
             List<CursorReads.MergeLeg> mergeLegs = new ArrayList<>(onKeyCount);
             addMergeLegs(slices, mergeLegs);
             return reversed ? CursorReads.mergeLegsReversed(mergeLegs, metadata, key, slices, columnFilter)
                             : CursorReads.mergeLegs(mergeLegs, metadata, key, slices, columnFilter, null);
-        }
-
-        /** The merge leg of a memtable partition, or of the repaired sstables' partition, which the merge
-         *  pulls only as far as it reads, as the iterator path's merge pulls its inputs. */
-        private MemtableMergeLeg objectLeg(UnfilteredRowIterator partition, Slices slices)
-        {
-            return new MemtableMergeLeg(partition, slices);
         }
 
         /** The merge legs of the sources in {@link #onKey}, opened by {@link #openOnKey}, in the
@@ -905,7 +952,12 @@ public final class CursorRangeReads
                 Source source = onKey[i];
                 if (source instanceof MemtableSource)
                 {
-                    mergeLegs.add(objectLeg(((MemtableSource) source).taken, slices));
+                    mergeLegs.add(((MemtableSource) source).leg);
+                }
+                else if (source instanceof RepairedSource)
+                {
+                    // pulled only as far as the merge reads it, since every pull feeds the digest
+                    mergeLegs.add(new MemtableMergeLeg(((RepairedSource) source).taken, slices));
                 }
                 else
                 {
@@ -917,22 +969,38 @@ public final class CursorRangeReads
 
         /**
          * Opens the partition of every source in {@link #onKey}: each sstable leg into {@code legs},
-         * each memtable partition into {@code memtables}.  On failure it closes what it opened.
+         * each memtable partition as a {@link NativeMemtableMergeLeg} into {@code memtableLegs}, and
+         * the repaired sstables' partition into {@link #repairedPartition}.  On failure it closes
+         * what it opened.
+         *
+         * @param emitObjects whether the merge's sink keeps row objects (see {@link NativeMemtableMergeLeg})
          */
-        private void openOnKey(DecoratedKey key, Slices slices, List<CursorReads.PendingLeg> legs, List<UnfilteredRowIterator> memtables)
+        private void openOnKey(DecoratedKey key, ClusteringIndexFilter filter, Slices slices, List<CursorReads.PendingLeg> legs,
+                               List<NativeMemtableMergeLeg> memtableLegs, boolean emitObjects)
         {
+            // the slices of a names filter hold one clustering each
+            boolean names = filter instanceof ClusteringIndexNamesFilter;
+            repairedPartition = null;
             try
             {
-                repairedPartition = null;
                 for (int i = 0; i < onKeyCount; i++)
                 {
                     Source source = onKey[i];
                     if (source instanceof MemtableSource)
                     {
-                        UnfilteredRowIterator partition = ((MemtableSource) source).take();
-                        if (((MemtableSource) source).repaired)
-                            repairedPartition = partition;
-                        memtables.add(partition);
+                        MemtableSource memtable = (MemtableSource) source;
+                        // the partition before it is closed: one leg serves every partition of the source
+                        if (memtable.reused == null)
+                            memtable.reused = new NativeMemtableMergeLeg(metadata, memtable.partition, columnFilter, slices, names, reversed, emitObjects);
+                        else
+                            memtable.reused.reopen(memtable.partition, slices, names);
+                        memtable.leg = memtable.reused;
+                        memtableLegs.add(memtable.leg);
+                    }
+                    else if (source instanceof RepairedSource)
+                    {
+                        repairedPartition = ((RepairedSource) source).take();
+                        ITERATOR_LEGS_OPENED.increment();
                     }
                     else
                     {
@@ -945,12 +1013,12 @@ public final class CursorRangeReads
             catch (IOException e)
             {
                 RuntimeException failure = new RuntimeException("cursor range read failed for " + key, e);
-                closeOpened(legs, memtables, failure);
+                closeOpened(legs, memtableLegs, failure);
                 throw failure;
             }
             catch (RuntimeException | Error e)
             {
-                closeOpened(legs, memtables, e);
+                closeOpened(legs, memtableLegs, e);
                 throw e;
             }
         }
@@ -973,10 +1041,12 @@ public final class CursorRangeReads
         void writeTo(ResponseSink sink, ResponseSink.ResponseBuffer out, DataLimits.Counter counter,
                      CursorReads.TombstoneScanGuard scanGuard) throws IOException
         {
-            // a partition has at most one leg or memtable partition per source
-            int sourceCount = memtableIterators.size() + sstables.size() + (repaired == null ? 0 : 1);
+            // the response path never reads repaired data for its digest
+            assert repaired == null : "a range response does not track repaired data";
+            // a partition has at most one leg per source
+            int sourceCount = memtables.size() + sstables.size();
             List<CursorReads.PendingLeg> legs = new ArrayList<>(sourceCount);
-            List<UnfilteredRowIterator> memtables = new ArrayList<>(sourceCount);
+            List<NativeMemtableMergeLeg> memtableLegs = new ArrayList<>(sourceCount);
             List<CursorReads.MergeLeg> mergeLegs = new ArrayList<>(sourceCount);
             boolean rowCache = cfs.isRowCacheEnabled();
             while ((counter == null || !counter.isDone()) && nextKey())
@@ -985,33 +1055,39 @@ public final class CursorRangeReads
                 ClusteringIndexFilter filter = command.clusteringIndexFilter(key);
                 Slices slices = filter.getSlices(metadata);
                 legs.clear();
-                memtables.clear();
+                memtableLegs.clear();
                 mergeLegs.clear();
                 UnfilteredRowIterator cached = rowCache ? fromRowCache(key, filter) : null;
+                // the memtable legs give their cells from the memtable's own storage
                 if (cached == null)
-                    openOnKey(key, slices, legs, memtables);
-                else
-                    memtables.add(cached);
+                    openOnKey(key, filter, slices, legs, memtableLegs, false);
                 boolean written;
                 try
                 {
                     scanGuard.startPartition(key);
-                    sink.startRangePartition(writerFor(out, legs, memtables), slices, cached != null || onKeyCount == 1);
-                    written = cached != null ? CursorReads.streamResponse(cached, columnFilter, sink, out)
-                                             : writePartition(key, slices, legs, memtables, mergeLegs, sink, out);
+                    if (cached != null)
+                    {
+                        sink.startRangePartition(writerFor(out, cached), slices, true);
+                        written = CursorReads.streamResponse(cached, columnFilter, sink, out);
+                    }
+                    else
+                    {
+                        sink.startRangePartition(writerFor(out, legs, memtableLegs), slices, onKeyCount == 1);
+                        written = writePartition(key, slices, legs, mergeLegs, sink, out);
+                    }
                 }
                 catch (IOException e)
                 {
                     RuntimeException failure = new RuntimeException("cursor range read failed for " + key, e);
-                    closePartition(legs, memtables, mergeLegs, failure);
+                    closePartition(legs, memtableLegs, cached, mergeLegs, failure);
                     throw failure;
                 }
                 catch (RuntimeException | Error e)
                 {
-                    closePartition(legs, memtables, mergeLegs, e);
+                    closePartition(legs, memtableLegs, cached, mergeLegs, e);
                     throw e;
                 }
-                closePartition(legs, memtables, mergeLegs, null);
+                closePartition(legs, memtableLegs, cached, mergeLegs, null);
                 if (!sink.partitionSurvivedPurge())
                     scanGuard.partitionRemovedByPurge();
                 // the iterator path's counter sees only the partitions the purge and the row filter keep
@@ -1031,22 +1107,21 @@ public final class CursorRangeReads
             CachedPartition cached = cfs.getRawCachedPartition(key);
             if (cached == null || !cfs.isFilterFullyCoveredBy(filter, command.limits(), cached, command.nowInSec(), metadata.enforceStrictLiveness()))
                 return null;
+            ITERATOR_LEGS_OPENED.increment();
             return filter.getUnfilteredRowIterator(columnFilter, cached);
         }
 
         /** One partition, written the way {@link #mergePartition} reads it. */
         private boolean writePartition(DecoratedKey key, Slices slices, List<CursorReads.PendingLeg> legs,
-                                       List<UnfilteredRowIterator> memtables, List<CursorReads.MergeLeg> mergeLegs,
-                                       ResponseSink sink, ResponseSink.ResponseBuffer out) throws IOException
+                                       List<CursorReads.MergeLeg> mergeLegs, ResponseSink sink, ResponseSink.ResponseBuffer out) throws IOException
         {
-            if (onKeyCount == 1)
+            if (onKeyCount == 1 && !legs.isEmpty())
             {
-                // one source: the iterator path serializes its partition as is
-                if (!memtables.isEmpty())
-                    return CursorReads.streamResponse(memtables.get(0), columnFilter, sink, out);
+                // one sstable: the iterator path serializes its partition as is
                 return reversed ? CursorReads.streamReversedResponse(legs.get(0), columnFilter, sink, out)
                                 : CursorReads.streamResponse(legs, metadata, key, slices, columnFilter, null, sink, out);
             }
+            // memtables, a lone one too: the merge of one memtable leg gives what its row iterator gives
             addMergeLegs(slices, mergeLegs);
             return reversed ? CursorReads.streamReversedResponse(mergeLegs, metadata, key, slices, columnFilter, sink, out)
                             : CursorReads.streamResponse(mergeLegs, metadata, key, slices, columnFilter, null, sink, out);
@@ -1058,16 +1133,17 @@ public final class CursorRangeReads
          * the union of the columns and the merged stats of several, like {@code UnfilteredRowIterators.merge}.
          */
         private ResponseWireWriter writerFor(ResponseSink.ResponseBuffer out, List<CursorReads.PendingLeg> legs,
-                                             List<UnfilteredRowIterator> memtables)
+                                             List<NativeMemtableMergeLeg> memtableLegs)
         {
             RegularAndStaticColumns columns = null;
             partitionStats.clear();
             // indexed loops: this runs once per partition
-            for (int i = 0; i < memtables.size(); i++)
+            for (int i = 0; i < memtableLegs.size(); i++)
             {
-                UnfilteredRowIterator memtable = memtables.get(i);
-                columns = columns == null ? memtable.columns() : columns.mergeTo(memtable.columns());
-                partitionStats.add(memtable.stats());
+                // the columns and stats the memtable's row iterator reports
+                NativeMemtableMergeLeg memtable = memtableLegs.get(i);
+                columns = columns == null ? memtable.legColumns() : columns.mergeTo(memtable.legColumns());
+                partitionStats.add(memtable.legStats());
             }
             for (int i = 0; i < legs.size(); i++)
             {
@@ -1077,6 +1153,17 @@ public final class CursorRangeReads
             }
             EncodingStats stats = partitionStats.size() == 1 ? partitionStats.get(0)
                                                              : EncodingStats.merge(partitionStats, Function.identity());
+            return writerFor(out, columns, stats);
+        }
+
+        /** The writer for a cached partition, with its columns and stats. */
+        private ResponseWireWriter writerFor(ResponseSink.ResponseBuffer out, UnfilteredRowIterator cached)
+        {
+            return writerFor(out, cached.columns(), cached.stats());
+        }
+
+        private ResponseWireWriter writerFor(ResponseSink.ResponseBuffer out, RegularAndStaticColumns columns, EncodingStats stats)
+        {
             if (writer == null || !columns.equals(writerColumns) || !stats.equals(writerStats))
             {
                 SerializationHeader header = new SerializationHeader(false, metadata, columns, stats);
@@ -1093,13 +1180,15 @@ public final class CursorRangeReads
 
         /** Closes what {@link #writeTo} opened for a partition.  With no {@code cause}, the first
          *  failure to close is thrown. */
-        private static void closePartition(List<CursorReads.PendingLeg> legs, List<UnfilteredRowIterator> memtables,
-                                           List<CursorReads.MergeLeg> mergeLegs, Throwable cause)
+        private static void closePartition(List<CursorReads.PendingLeg> legs, List<NativeMemtableMergeLeg> memtableLegs,
+                                           UnfilteredRowIterator cached, List<CursorReads.MergeLeg> mergeLegs, Throwable cause)
         {
             Throwable failure = cause;
+            if (cached != null)
+                failure = closeQuietly(cached, failure);
             if (!mergeLegs.isEmpty())
             {
-                // the merge legs wrap every leg and memtable partition
+                // the merge legs wrap every leg
                 for (CursorReads.MergeLeg leg : mergeLegs)
                     failure = closeQuietly(leg, failure);
             }
@@ -1107,8 +1196,8 @@ public final class CursorRangeReads
             {
                 for (CursorReads.PendingLeg leg : legs)
                     failure = closeQuietly(leg, failure);
-                for (UnfilteredRowIterator memtable : memtables)
-                    failure = closeQuietly(memtable, failure);
+                for (NativeMemtableMergeLeg leg : memtableLegs)
+                    failure = closeQuietly(leg, failure);
             }
             if (cause == null && failure != null)
                 Throwables.maybeFail(failure);
@@ -1122,15 +1211,23 @@ public final class CursorRangeReads
         private DecoratedKey stableKey()
         {
             Source first = onKey[0];
-            if (first instanceof MemtableSource)
+            if (first instanceof MemtableSource || first instanceof RepairedSource)
                 return first.key;
             return metadata.partitioner.decorateKey(ByteBufferUtil.clone(first.key.getKey()));
         }
 
-        private static void closeOpened(List<CursorReads.PendingLeg> legs, List<UnfilteredRowIterator> memtables, Throwable cause)
+        private void closeOpened(List<CursorReads.PendingLeg> legs, List<NativeMemtableMergeLeg> memtableLegs, Throwable cause)
         {
             CursorReads.closeAll(legs, cause);
-            CursorReads.closeAll(memtables, cause);
+            CursorReads.closeAll(memtableLegs, cause);
+            if (repairedPartition != null)
+            {
+                UnfilteredRowIterator partition = repairedPartition;
+                repairedPartition = null;
+                Throwable failure = closeQuietly(partition, null);
+                if (failure != null)
+                    cause.addSuppressed(failure);
+            }
         }
 
         @Override
@@ -1153,9 +1250,7 @@ public final class CursorRangeReads
             next = null;
             if (sources == null)
             {
-                // nothing was read: the memtable and repaired iterators are still ours
-                for (UnfilteredPartitionIterator memtable : memtableIterators)
-                    failure = closeQuietly(memtable, failure);
+                // nothing was read: the repaired iterator is still ours
                 if (repaired != null)
                     failure = closeQuietly(repaired, failure);
             }

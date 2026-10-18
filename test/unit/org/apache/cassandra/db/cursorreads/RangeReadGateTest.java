@@ -152,9 +152,14 @@ public class RangeReadGateTest extends CQLTester
         return cfs.select(View.selectLive(command.dataRange().keyRange())).sstables;
     }
 
+    private static ColumnFamilyStore.ViewFragment viewFor(ColumnFamilyStore cfs, PartitionRangeReadCommand command)
+    {
+        return cfs.select(View.selectLive(command.dataRange().keyRange()));
+    }
+
     private static boolean gateAccepts(ColumnFamilyStore cfs, PartitionRangeReadCommand command)
     {
-        return CursorRangeReads.unsupported(command, cfs, ReadExecutionController.empty(), sstablesFor(cfs, command)) == null;
+        return CursorRangeReads.unsupported(command, cfs, ReadExecutionController.empty(), viewFor(cfs, command)) == null;
     }
 
     // ------------------------------------------------------------------ accept
@@ -169,7 +174,7 @@ public class RangeReadGateTest extends CQLTester
         List<SSTableReader> sstables = sstablesFor(cfs, command);
         assertFalse("scenario precondition: at least one candidate sstable", sstables.isEmpty());
         assertTrue("a plain single-slice forward range read on a BTI table must be cursor-supported",
-                   CursorRangeReads.unsupported(command, cfs, ReadExecutionController.empty(), sstables) == null);
+                   CursorRangeReads.unsupported(command, cfs, ReadExecutionController.empty(), viewFor(cfs, command)) == null);
     }
 
     @Test

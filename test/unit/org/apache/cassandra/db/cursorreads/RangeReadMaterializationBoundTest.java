@@ -20,6 +20,7 @@ package org.apache.cassandra.db.cursorreads;
 
 import java.lang.management.ManagementFactory;
 import java.util.List;
+import java.util.function.LongFunction;
 
 import org.junit.After;
 import org.junit.Before;
@@ -27,18 +28,26 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorRangeReads;
 import org.apache.cassandra.db.CursorReads;
+import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.PartitionRangeReadCommand;
 import org.apache.cassandra.db.ReadCommandVerbHandler;
 import org.apache.cassandra.db.ReadExecutionController;
 import org.apache.cassandra.db.ReadResponse;
+import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.filter.ClusteringIndexSliceFilter;
+import org.apache.cassandra.db.filter.ColumnFilter;
+import org.apache.cassandra.db.filter.DataLimits;
+import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.pager.PartitionRangeQueryPager;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.FBUtilities;
@@ -150,6 +159,127 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
                                    at -> rangeCommand("SELECT * FROM %s", at));
     }
 
+    // ---------------------------------------------------------------- memtables and reverse reads
+
+    @Test
+    public void replicaResponseOfMemtableOnlyPartitionsBuildsNoRows() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(0);
+        assertReplicaResponseBuildsNothing(cfs, now -> rangeCommand("SELECT * FROM %s", now));
+    }
+
+    @Test
+    public void replicaResponseOfSSTablesAndAMemtableBuildsNoRows() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(2);
+        writeMemtableOverlay();
+        assertReplicaResponseBuildsNothing(cfs, now -> rangeCommand("SELECT * FROM %s", now));
+    }
+
+    @Test
+    public void reverseReplicaResponseOfOneSSTableBuildsNoRows() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(1);
+        assertReplicaResponseBuildsNothing(cfs, now -> reversedFullScan(cfs, now));
+    }
+
+    @Test
+    public void reverseReplicaResponseOfOverlappingSSTablesBuildsNoRows() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(4);
+        assertReplicaResponseBuildsNothing(cfs, now -> reversedFullScan(cfs, now));
+    }
+
+    @Test
+    public void reverseReplicaResponseOfMemtableOnlyPartitionsBuildsNoRows() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(0);
+        assertReplicaResponseBuildsNothing(cfs, now -> reversedFullScan(cfs, now));
+    }
+
+    @Test
+    public void reverseReplicaResponseOfSSTablesAndAMemtableBuildsNoRows() throws Throwable
+    {
+        ColumnFamilyStore cfs = loadSmallPartitions(2);
+        writeMemtableOverlay();
+        assertReplicaResponseBuildsNothing(cfs, now -> reversedFullScan(cfs, now));
+    }
+
+    /**
+     * The replica response of {@code command} matches the iterator path's bytes, and the cursor path
+     * builds no row object for it: no merged row, no memtable row cloned or reused, no partition
+     * taken from an iterator.
+     */
+    private void assertReplicaResponseBuildsNothing(ColumnFamilyStore cfs, LongFunction<PartitionRangeReadCommand> command)
+    {
+        long now = FBUtilities.nowInSeconds();
+        setRangePath(false);
+        serialize(ReadCommandVerbHandler.instance.doRead(command.apply(now), false));
+        long allocated = threadAllocatedBytes();
+        byte[] iterator = serialize(ReadCommandVerbHandler.instance.doRead(command.apply(now), false));
+        long iteratorAllocated = threadAllocatedBytes() - allocated;
+
+        setRangePath(true);
+        try
+        {
+            serialize(ReadCommandVerbHandler.instance.doRead(command.apply(now), false));
+            long served = CursorRangeReads.rangeReadsServed();
+            long written = CursorRangeReads.rangeResponsesWritten();
+            long materialized = CursorReads.unfilteredsMaterialized();
+            long built = CursorReads.mergeSinkRowsBuilt();
+            long cloned = CursorReads.memtableRowsCloned();
+            long rowsReused = CursorReads.memtableRowsReused();
+            long cellsReused = CursorReads.memtableCellsReused();
+            long iteratorLegs = CursorRangeReads.iteratorLegsOpened();
+            allocated = threadAllocatedBytes();
+            byte[] cursor = serialize(ReadCommandVerbHandler.instance.doRead(command.apply(now), false));
+            long cursorAllocated = threadAllocatedBytes() - allocated;
+            assertEquals("the cursor path served the read", 1, CursorRangeReads.rangeReadsServed() - served);
+            assertEquals("the cursor path wrote the response", 1, CursorRangeReads.rangeResponsesWritten() - written);
+            assertArrayEquals("the replica responses differ", iterator, cursor);
+            long rows = (long) SMALL_PARTITIONS * ROWS_PER_SMALL_PARTITION;
+            logger.info("replica response over {} sstables and {} memtable partitions: cursor allocated {} bytes ({} per row), iterator {} ({} per row)",
+                        cfs.getLiveSSTables().size(), cfs.getTracker().getView().getCurrentMemtable().partitionCount(),
+                        cursorAllocated, cursorAllocated / rows, iteratorAllocated, iteratorAllocated / rows);
+            assertEquals("partitions taken from an iterator", 0, CursorRangeReads.iteratorLegsOpened() - iteratorLegs);
+            assertEquals("rows and markers built", 0, CursorReads.unfilteredsMaterialized() - materialized);
+            assertEquals("rows built by a merge", 0, CursorReads.mergeSinkRowsBuilt() - built);
+            assertEquals("memtable rows cloned", 0, CursorReads.memtableRowsCloned() - cloned);
+            assertEquals("memtable rows reused", 0, CursorReads.memtableRowsReused() - rowsReused);
+            assertEquals("memtable cells reused", 0, CursorReads.memtableCellsReused() - cellsReused);
+            // The iterator path reads the rows of a heap memtable without a copy, and the cursor path
+            // builds a merge per partition, so a heap memtable alone is not bounded here
+            boolean heapMemtableOnly = cfs.getLiveSSTables().isEmpty()
+                                       && DatabaseDescriptor.getMemtableAllocationType() == Config.MemtableAllocationType.heap_buffers;
+            if (!heapMemtableOnly)
+                assertTrue("the cursor path allocated " + cursorAllocated + " bytes for the replica response, the iterator path " + iteratorAllocated,
+                           cursorAllocated < iteratorAllocated);
+        }
+        finally
+        {
+            setRangePath(false);
+        }
+        assertAllReadSurfacesMatch(ReadCase.of("replica response", 1).at(now), cfs, command);
+    }
+
+    /** A full scan in reverse clustering order, as no CQL range read can ask for. */
+    private static PartitionRangeReadCommand reversedFullScan(ColumnFamilyStore cfs, long nowInSec)
+    {
+        TableMetadata metadata = cfs.metadata();
+        DataRange range = new DataRange(DataRange.allData(metadata.partitioner).keyRange(), new ClusteringIndexSliceFilter(Slices.ALL, true));
+        return PartitionRangeReadCommand.create(metadata, nowInSec, ColumnFilter.all(metadata), RowFilter.none(), DataLimits.NONE, range);
+    }
+
+    /** Newer rows in every tenth partition, with a row deletion, left in the memtable. */
+    private void writeMemtableOverlay() throws Throwable
+    {
+        for (int k = 0; k < SMALL_PARTITIONS; k += 10)
+        {
+            execute("INSERT INTO %s (k, c, v, p) VALUES (?, ?, ?, ?) USING TIMESTAMP 2000", k, 1, 7L, "memtable");
+            execute("DELETE FROM %s USING TIMESTAMP 2000 WHERE k = ? AND c = ?", k, 2);
+        }
+    }
+
     // ---------------------------------------------------------------- wide partition
 
     @Test
@@ -218,13 +348,16 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
                     "WITH compression = {'class': 'LZ4Compressor', 'chunk_length_in_kb': 16}");
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
-        for (int s = 0; s < sstables; s++)
+        // no sstable: everything stays in the memtable
+        int rounds = Math.max(1, sstables);
+        for (int s = 0; s < rounds; s++)
         {
             for (int k = 0; k < SMALL_PARTITIONS; k++)
                 for (int c = 0; c < ROWS_PER_SMALL_PARTITION; c++)
-                    if ((k + c) % sstables == s)
+                    if ((k + c) % rounds == s)
                         execute("INSERT INTO %s (k, c, v, p) VALUES (?, ?, ?, ?) USING TIMESTAMP ?", k, c, (long) c, "p" + k * 31 + c, 1000L + s);
-            flush();
+            if (sstables > 0)
+                flush();
         }
         return cfs;
     }

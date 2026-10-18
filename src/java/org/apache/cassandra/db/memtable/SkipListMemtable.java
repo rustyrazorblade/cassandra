@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Iterators;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,6 +60,7 @@ import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.Cloner;
+import org.apache.cassandra.utils.memory.EnsureOnHeap;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
 import org.apache.cassandra.utils.memory.NativeAllocator;
 
@@ -173,6 +175,19 @@ public class SkipListMemtable extends AbstractAllocatorMemtable
 
         return new MemtableUnfilteredPartitionIterator(metadata.get(), subMap, columnFilter, dataRange);
         // readsListener is ignored as it only accepts sstable signals
+    }
+
+    @Override
+    public Iterator<MemtablePartitionData> partitionData(DataRange dataRange)
+    {
+        AbstractBounds<PartitionPosition> keyRange = dataRange.keyRange();
+        boolean isBound = keyRange instanceof Bounds;
+        boolean includeLeft = isBound || keyRange instanceof IncludingExcludingBounds;
+        boolean includeRight = isBound || keyRange instanceof Range;
+        Map<PartitionPosition, AtomicBTreePartition> subMap = getPartitionsSubMap(keyRange.left, includeLeft, keyRange.right, includeRight);
+        EnsureOnHeap ensureOnHeap = allocator.ensureOnHeap();
+        return Iterators.transform(subMap.values().iterator(),
+                                   partition -> new MemtablePartitionData(partition.partitionKey(), partition.currentData(), ensureOnHeap, partition));
     }
 
     private Map<PartitionPosition, AtomicBTreePartition> getPartitionsSubMap(PartitionPosition left,

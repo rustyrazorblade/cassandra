@@ -299,6 +299,29 @@ public class TrieMemtable extends AbstractShardedMemtable
                                                                  final DataRange dataRange,
                                                                  SSTableReadsListener readsListener)
     {
+        return new MemtableUnfilteredPartitionIterator(metadata(),
+                                                       allocator.ensureOnHeap(),
+                                                       partitionsInRange(dataRange),
+                                                       columnFilter,
+                                                       dataRange);
+        // readsListener is ignored as it only accepts sstable signals
+    }
+
+    @Override
+    public Iterator<MemtablePartitionData> partitionData(DataRange dataRange)
+    {
+        EnsureOnHeap ensureOnHeap = allocator.ensureOnHeap();
+        TableMetadata metadata = metadata();
+        Iterator<Map.Entry<ByteComparable, BTreePartitionData>> entries = partitionsInRange(dataRange).entryIterator();
+        return Iterators.transform(entries, entry -> {
+            MemtablePartition partition = getPartitionFromTrieEntry(metadata, ensureOnHeap, entry);
+            return new MemtablePartitionData(partition.partitionKey(), entry.getValue(), ensureOnHeap, partition);
+        });
+    }
+
+    /** The partitions of {@code dataRange}'s key range. */
+    private Trie<BTreePartitionData> partitionsInRange(DataRange dataRange)
+    {
         AbstractBounds<PartitionPosition> keyRange = dataRange.keyRange();
 
         PartitionPosition left = keyRange.left;
@@ -312,14 +335,7 @@ public class TrieMemtable extends AbstractShardedMemtable
         boolean includeStart = isBound || keyRange instanceof IncludingExcludingBounds;
         boolean includeStop = isBound || keyRange instanceof Range;
 
-        Trie<BTreePartitionData> subMap = mergedTrie.subtrie(left, includeStart, right, includeStop);
-
-        return new MemtableUnfilteredPartitionIterator(metadata(),
-                                                       allocator.ensureOnHeap(),
-                                                       subMap,
-                                                       columnFilter,
-                                                       dataRange);
-        // readsListener is ignored as it only accepts sstable signals
+        return mergedTrie.subtrie(left, includeStart, right, includeStop);
     }
 
     private Partition getPartition(DecoratedKey key)
