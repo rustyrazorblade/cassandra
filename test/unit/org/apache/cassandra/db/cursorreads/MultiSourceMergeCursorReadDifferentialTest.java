@@ -152,6 +152,29 @@ public class MultiSourceMergeCursorReadDifferentialTest extends SSTableFormatPar
                      2L * emitted, materialized);
     }
 
+    /**
+     * A row only one leg holds, with complex deletions equal to its row deletion (deleted, then
+     * written again with collections, in one batch: the same local deletion time).  With no
+     * deletion active, {@code Row.Merger} returns the one version as it is, so the merge keeps the
+     * complex deletions, though they do not supersede the row deletion.
+     */
+    @Test
+    public void rowOfOneLegKeepsComplexDeletionsEqualToItsRowDeletion() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v1 bigint, l list<bigint>, m map<text, bigint>, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        execute("BEGIN UNLOGGED BATCH " +
+                "DELETE FROM %1$s USING TIMESTAMP 239 WHERE pk = 1 AND ck = 0; " +
+                "INSERT INTO %1$s (pk, ck, v1, l, m) VALUES (1, 0, 1, [1], {'a': 1}) USING TIMESTAMP 240; " +
+                "APPLY BATCH");
+        flush();
+        execute("INSERT INTO %s (pk, ck, v1) VALUES (1, 5, 5) USING TIMESTAMP 300");
+        flush();
+        long now = FBUtilities.nowInSeconds();
+        assertMergedCursorReadMatchesIterator(cfs, fullPartition(cfs, now, 1L), 2);
+    }
+
     /** Tie-heavy variant: every cell reconciliation is an exact-timestamp value tie (the COMPARE
      *  arm), across 5 legs. */
     @Test
