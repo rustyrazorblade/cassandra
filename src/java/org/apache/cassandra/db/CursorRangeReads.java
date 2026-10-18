@@ -262,6 +262,24 @@ public final class CursorRangeReads
     }
 
     /**
+     * {@link #rangeIterator} for the repaired sstables of a read that tracks repaired data, merged on
+     * their own.  After the read's limit, {@code RepairedDataInfo.overreadRepaired} reads on from the
+     * repaired partition the read stopped in, which the read's merge has closed by then.  The iterator
+     * path's sstable iterators do not own the scanner's file and still give the rest of the partition
+     * after their close, so a partition of this merge closed before its end first reads its rest
+     * into memory and stays readable.
+     */
+    public static UnfilteredPartitionIterator repairedRangeIterator(PartitionRangeReadCommand command,
+                                                             ColumnFamilyStore cfs,
+                                                             List<SSTableReader> sstables,
+                                                             SSTableReadsListener listener)
+    {
+        RangeMerge merge = new RangeMerge(command, cfs, sstables, new ArrayList<>(0), null, listener);
+        merge.readableAfterClose = true;
+        return merge;
+    }
+
+    /**
      * The replica data response of a range read, written from the cursor merge straight to the
      * response bytes through {@link ResponseSink}, with no row or cell objects for sstable data.
      * The bytes are those of {@code executeLocally} then {@code createResponse}: the sink applies the
@@ -870,7 +888,7 @@ public final class CursorRangeReads
             }
             if (!nextKey())
                 return null;
-            returned = new ReturnedPartition(mergePartition());
+            returned = new ReturnedPartition(mergePartition(), readableAfterClose);
             return returned;
         }
 
@@ -1064,6 +1082,9 @@ public final class CursorRangeReads
         {
             return writePartitions(sink, null, output, scanSink, counter, scanGuard);
         }
+
+        /** See {@link #repairedRangeIterator}. */
+        boolean readableAfterClose;
 
         /** The key of the last partition {@link #writePartitions} finished, whether or not it was written. */
         DecoratedKey lastPartitionKey;
@@ -1349,10 +1370,13 @@ public final class CursorRangeReads
     {
         private UnfilteredRowIterator source;
         private boolean closed;
+        /** See {@link CursorRangeReads#repairedRangeIterator}. */
+        private final boolean readableAfterClose;
 
-        ReturnedPartition(UnfilteredRowIterator source)
+        ReturnedPartition(UnfilteredRowIterator source, boolean readableAfterClose)
         {
             this.source = source;
+            this.readableAfterClose = readableAfterClose;
         }
 
         @Override
@@ -1384,6 +1408,8 @@ public final class CursorRangeReads
         {
             if (closed)
                 return;
+            if (readableAfterClose)
+                detach();
             closed = true;
             source.close();
         }
