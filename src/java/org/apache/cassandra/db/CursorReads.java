@@ -1195,7 +1195,7 @@ public final class CursorReads
      * active once the gate engages.  Clustering- and regular-column expressions additionally drop
      * rows at production; see {@link FilterPushdown#rowLevelPushdownEligible}.
      */
-    static FilterPushdown filterPushdownFor(SinglePartitionReadCommand command)
+    static FilterPushdown filterPushdownFor(ReadCommand command)
     {
         RowFilter rowFilter = command.rowFilter();
         if (rowFilter.isEmpty())
@@ -1204,8 +1204,12 @@ public final class CursorReads
             return null;
         // The row-level filter probe simulates the emitted surface over a single contiguous slice;
         // a multi-slice read (a names filter of several clusterings) would mis-account across the
-        // gaps between the point slices.  Decline so filtering stays at the top of stack.
-        if (command.clusteringIndexFilter().getSlices(command.metadata()).size() > 1)
+        // gaps between the point slices.  Decline so filtering stays at the top of stack.  A range
+        // read's filter is the same for every partition, but the one a paged read resumes in.
+        ClusteringIndexFilter clusteringFilter = command instanceof SinglePartitionReadCommand
+                                                 ? ((SinglePartitionReadCommand) command).clusteringIndexFilter()
+                                                 : ((PartitionRangeReadCommand) command).dataRange().clusteringIndexFilter;
+        if (clusteringFilter.getSlices(command.metadata()).size() > 1)
             return null;
         if (command.metadata().enforceStrictLiveness())
             return null; // MV tables are outside isReadSupported entirely; purely defensive
@@ -1278,7 +1282,7 @@ public final class CursorReads
          *  {@link #rowLevelPushdownEligible} is false). */
         private ScanStatsAccumulator scanStats;
 
-        private FilterPushdown(SinglePartitionReadCommand command, List<RowFilter.Expression> expressions)
+        private FilterPushdown(ReadCommand command, List<RowFilter.Expression> expressions)
         {
             this.metadata = command.metadata();
             // same split as RowFilter.filter: static or partition-key columns are partition-level,
@@ -1312,7 +1316,9 @@ public final class CursorReads
          * pushdown is eligible.  Only merged reads reach this; single-leg reads never evaluate
          * row-level expressions.  The accumulator lands on the {@link ReadExecutionController} so
          * {@code ReadCommand.withMetricsRecording} can fold the dropped-row contributions into its
-         * totals.
+         * totals.  A range read never activates it: the accumulator samples one partition, so a
+         * range read's merge drops no row, only skips a partition that fails its partition-level
+         * expressions.
          */
         void activateScanAccounting(ReadExecutionController controller, ColumnFamilyStore cfs,
                                     SinglePartitionReadCommand command)

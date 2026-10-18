@@ -805,6 +805,17 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
                                                               DataRange.allData(metadata.partitioner))));
         for (int i = 0; i < t.queries; i++)
             queries.add(randomQuery(t, r, cfs, keys));
+        if (t.statics)
+        {
+            // a partition-level filter, which the merge checks before reading a row; its own
+            // random, so the other reads of the trial stay what they were
+            Random s = new Random(t.seed ^ 0x27D4EB2F165667C5L);
+            String query = "SELECT * FROM %s WHERE s = 's" + s.nextInt(1000) + "' ALLOW FILTERING";
+            int pageSize = new int[]{ -1, 1, 3, 10 }[s.nextInt(4)];
+            queries.add(new Query("static filter", (c, store) -> assertCqlOnEverySurface(c, store, query, pageSize)));
+            String present = "SELECT * FROM %s WHERE s > 's5' ALLOW FILTERING";
+            queries.add(new Query("static range filter", (c, store) -> assertCqlOnEverySurface(c, store, present, pageSize)));
+        }
         return queries;
     }
 
