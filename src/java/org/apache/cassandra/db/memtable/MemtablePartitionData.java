@@ -22,6 +22,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.partitions.AbstractBTreePartition;
+import org.apache.cassandra.db.partitions.AtomicBTreePartition;
 import org.apache.cassandra.db.partitions.BTreePartitionData;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.utils.memory.EnsureOnHeap;
@@ -47,6 +48,17 @@ public final class MemtablePartitionData
         this.data = data;
         this.ensureOnHeap = ensureOnHeap;
         this.partition = partition;
+    }
+
+    /**
+     * The clone to heap the memtable's row iterator for a read of named clusterings applies
+     * ({@code AbstractBTreePartition.unfilteredIterator} with a set of clusterings, as a range
+     * read's names filter reads a memtable partition).  {@code AtomicBTreePartition} overrides only
+     * the slices form, so its names iterator gives the memtable's own objects.
+     */
+    public EnsureOnHeap ensureOnHeapForNames()
+    {
+        return partition instanceof AtomicBTreePartition ? EnsureOnHeap.NOOP : ensureOnHeap;
     }
 
     /** The memtable's row iterator over this content: {@code memtable.rowIterator} of the same snapshot. */

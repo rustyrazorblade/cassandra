@@ -217,6 +217,10 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
         long rangeReadsRecorded;
         String failure;
         long rangeServed, rangeNotServed, rangeNotServedForReason, legsFellBack, filterLookups, keyCacheDelta;
+        /** Partitions the run took as objects from an iterator ({@code CursorRangeReads.iteratorLegsOpened}). */
+        long iteratorLegs;
+        /** Whether a partition may come from an iterator: the table has the row cache or a repaired sstable. */
+        boolean iteratorLegsAllowed;
         /** This path's changes to the key cache entries of the table's sstables. */
         List<String> keyCacheChanges = Collections.emptyList();
 
@@ -576,6 +580,8 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
                     notServedForReason.increment();
             };
             long fellBack = CursorReads.sstableLegsFellBackToIterator();
+            long iteratorLegs = CursorRangeReads.iteratorLegsOpened();
+            into.iteratorLegsAllowed = cfs.isRowCacheEnabled() || cfs.getLiveSSTables().stream().anyMatch(SSTableReader::isRepaired);
             long lookups = filterLookups(cfs);
             long keyCacheSize = keyCacheSize();
             long rangeReads = cfs.metric.rangeLatency.latency.getCount();
@@ -598,6 +604,7 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
             into.rangeNotServed = notServed.sum();
             into.rangeNotServedForReason = notServedForReason.sum();
             into.legsFellBack = CursorReads.sstableLegsFellBackToIterator() - fellBack;
+            into.iteratorLegs = CursorRangeReads.iteratorLegsOpened() - iteratorLegs;
             into.filterLookups = filterLookups(cfs) - lookups;
             into.keyCacheDelta = keyCacheSize() - keyCacheSize;
             into.keyCacheChanges = keyCacheChangesSince(keyCacheAtStart, cfs);
@@ -746,6 +753,9 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
                                        iterator.rangeServed, iterator.rangeNotServed, iterator.legsFellBack));
         if (cursor.legsFellBack != 0)
             problems.add(cursor.legsFellBack + " sstable leg(s) of the cursor run were read by the iterator path");
+        // memtables join the cursor merge: only the repaired sstables and the row cache give objects
+        if (cursor.iteratorLegs != 0 && !cursor.iteratorLegsAllowed)
+            problems.add(cursor.iteratorLegs + " partition(s) of the cursor run were taken from an iterator");
         for (Observation o : new Observation[]{ iterator, cursor })
         {
             String path = o.cursor ? "cursor" : "iterator";

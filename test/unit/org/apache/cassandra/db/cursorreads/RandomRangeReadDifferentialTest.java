@@ -78,7 +78,11 @@ import org.apache.cassandra.utils.FBUtilities;
  * key, 0 to 2 clustering columns in either order, a static column or not, a collection or not),
  * writes a random history across several partitions (inserts, updates, short and long TTLs, cell,
  * row, range and partition deletions, static writes, timestamp ties), flushes it into 1 to 6
- * sstables in BIG, BTI or a mix of both, and leaves an overlay in the memtable.  It then runs
+ * sstables in BIG, BTI or a mix of both, and leaves an overlay in the memtable.  From its own
+ * stream of the seed a trial also picks where the memtable stands (a small overlay, the second half
+ * of the writes, or every write with nothing flushed, so partitions are in the memtable alone) and
+ * the memtable implementation; the {@link #KNOWN_REGRESSION_SEEDS} keep the small overlay and the
+ * default memtable they were found with.  It then runs
  * random range reads: the full ring, token ranges (wrapping or not), key bounds of each kind, empty
  * ranges, limits, per-partition limits, DISTINCT, column subsets, static-only selections, names and
  * slice filters, reversed reads, row filters, internal paging and CQL paging.
@@ -133,6 +137,35 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
         7650556690056646382L,
     };
 
+    /** Seeds of trials that failed with the memtable layout and implementation their seed picks.  Never remove one. */
+    private static final long[] KNOWN_LAYOUT_REGRESSION_SEEDS = {
+        // a partition in the memtable alone, merged as one leg: a complex deletion equal to the
+        // active deletion was dropped, which the iterator path, reading the lone memtable as is, keeps
+        -7333784131763744167L,
+        // a skiplist memtable read by names (a table with no clustering column reads by names too):
+        // its names iterator gives the memtable's own objects, not ones cloned to heap, whose heap
+        // size the read size guardrail measures
+        -7150240821680689603L,
+        -907622551635808982L,
+    };
+
+    /** The stream of a trial's seed that picks the memtable layout and implementation. */
+    private static final long MEMTABLE_SALT = 0x4CF5AD432745937FL;
+
+    /** Where the memtable stands in a trial's data. */
+    enum MemtableLayout
+    {
+        /** a few writes after the last flush */
+        OVERLAY,
+        /** the second half of the writes, partition deletions included */
+        LARGE_OVERLAY,
+        /** nothing is flushed */
+        MEMTABLE_ONLY
+    }
+
+    /** null for the default memtable of the configuration */
+    private static final String[] MEMTABLES = { null, "trie", "skiplist", "skiplist_sharded" };
+
     private SSTableFormat<?, ?> originalFormat;
     private int originalColumnIndexSizeKiB;
 
@@ -165,11 +198,13 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
         logger.info("{} format={} master seed = {}L, trials = {}", getClass().getSimpleName(), format, master, TRIALS);
 
         for (long seed : KNOWN_REGRESSION_SEEDS)
-            runTrial(seed, "known regression");
+            runTrial(seed, true, "known regression");
+        for (long seed : KNOWN_LAYOUT_REGRESSION_SEEDS)
+            runTrial(seed, false, "known regression");
 
         Random seeds = new Random(master);
         for (int trial = 0; trial < TRIALS; trial++)
-            runTrial(seeds.nextLong(), "trial " + trial + " of master seed " + master + 'L');
+            runTrial(seeds.nextLong(), false, "trial " + trial + " of master seed " + master + 'L');
     }
 
     /** Replays the trial of {@code -Dcassandra.test.cursor_range_trial_seed}. */
@@ -178,7 +213,9 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
     {
         String seed = System.getProperty("cassandra.test.cursor_range_trial_seed"); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
         Assume.assumeTrue("no trial seed to replay", seed != null);
-        runTrial(Long.parseLong(seed.endsWith("L") ? seed.substring(0, seed.length() - 1) : seed), "replay");
+        // a seed of KNOWN_REGRESSION_SEEDS replays with the memtable it was found with
+        boolean pinned = Boolean.getBoolean("cassandra.test.cursor_range_trial_pinned"); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
+        runTrial(Long.parseLong(seed.endsWith("L") ? seed.substring(0, seed.length() - 1) : seed), pinned, "replay");
     }
 
     // ---------------------------------------------------------------- trials
@@ -207,10 +244,14 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
         /** Two more collection columns, written so that rows hold a collection column with no
          *  cells on the iterator path (see {@link #writeRowsWithEmptyCollections}). */
         final boolean emptyCollections;
+        final MemtableLayout layout;
+        /** The table's memtable configuration, null for the default. */
+        final String memtable;
 
         private Trial(long seed, boolean compositeKey, int clusterings, boolean descending, boolean statics, String collection,
                       ValueType valueType, boolean purgeable, int formatMode, int maxClustering, boolean wide,
-                      int partitions, int operations, int flushes, int queries, int onlyQuery, boolean emptyCollections)
+                      int partitions, int operations, int flushes, int queries, int onlyQuery, boolean emptyCollections,
+                      MemtableLayout layout, String memtable)
         {
             this.seed = seed;
             this.compositeKey = compositeKey;
@@ -229,9 +270,12 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
             this.queries = queries;
             this.onlyQuery = onlyQuery;
             this.emptyCollections = emptyCollections;
+            this.layout = layout;
+            this.memtable = memtable;
         }
 
-        static Trial derive(long seed)
+        /** @param pinned a regression seed: the small overlay and the default memtable it was found with */
+        static Trial derive(long seed, boolean pinned)
         {
             Random r = new Random(seed);
             boolean compositeKey = r.nextInt(3) == 0;
@@ -250,24 +294,28 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
             int queries = 6 + r.nextInt(8);
             // its own random, so the other choices of a trial stay what they were before it existed
             boolean emptyCollections = new Random(seed ^ 0x632BE59BD9B4E019L).nextBoolean();
+            Random m = new Random(seed ^ MEMTABLE_SALT);
+            MemtableLayout layout = pinned ? MemtableLayout.OVERLAY : MemtableLayout.values()[m.nextInt(MemtableLayout.values().length)];
+            String memtable = pinned ? null : MEMTABLES[m.nextInt(MEMTABLES.length)];
             return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable,
-                             formatMode, maxClustering, wide, partitions, operations, flushes, queries, -1, emptyCollections);
+                             formatMode, maxClustering, wide, partitions, operations, flushes, queries, -1, emptyCollections,
+                             layout, memtable);
         }
 
-        Trial withOperations(int n) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, partitions, n, flushes, queries, onlyQuery, emptyCollections); }
-        Trial withPartitions(int n) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, n, operations, flushes, queries, onlyQuery, emptyCollections); }
-        Trial withFlushes(int n) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, partitions, operations, n, queries, onlyQuery, emptyCollections); }
-        Trial withOnlyQuery(int q) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, partitions, operations, flushes, queries, q, emptyCollections); }
+        Trial withOperations(int n) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, partitions, n, flushes, queries, onlyQuery, emptyCollections, layout, memtable); }
+        Trial withPartitions(int n) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, n, operations, flushes, queries, onlyQuery, emptyCollections, layout, memtable); }
+        Trial withFlushes(int n) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, partitions, operations, n, queries, onlyQuery, emptyCollections, layout, memtable); }
+        Trial withOnlyQuery(int q) { return new Trial(seed, compositeKey, clusterings, descending, statics, collection, valueType, purgeable, formatMode, maxClustering, wide, partitions, operations, flushes, queries, q, emptyCollections, layout, memtable); }
 
         @Override
         public String toString()
         {
             return String.format("seed=%dL compositeKey=%s clusterings=%d descending=%s statics=%s collection=%s value=%s " +
                                  "purgeable=%s formats=%s maxClustering=%d wide=%s partitions=%d operations=%d flushes=%d queries=%d onlyQuery=%d " +
-                                 "emptyCollections=%s",
+                                 "emptyCollections=%s layout=%s memtable=%s",
                                  seed, compositeKey, clusterings, descending, statics, collection, valueType.cql, purgeable,
                                  formatMode == 0 ? "class" : "mixed", maxClustering, wide, partitions, operations, flushes, queries, onlyQuery,
-                                 emptyCollections);
+                                 emptyCollections, layout, memtable);
         }
     }
 
@@ -283,9 +331,9 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
         }
     }
 
-    private void runTrial(long seed, String label) throws Throwable
+    private void runTrial(long seed, boolean pinned, String label) throws Throwable
     {
-        Trial trial = Trial.derive(seed);
+        Trial trial = Trial.derive(seed, pinned);
         try
         {
             runOnce(trial);
@@ -303,8 +351,10 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
                 shrunk = "(shrinking threw: " + shrinkFailure + ')';
             }
             throw new AssertionError(String.format("%s failed under %s.%nTrial:  %s%nShrunk: %s%n" +
-                                                   "Replay with -Dcassandra.test.cursor_range_trial_seed=%dL; once fixed, add it to KNOWN_REGRESSION_SEEDS.",
-                                                   label, getClass().getSimpleName() + " format=" + format, trial, shrunk, seed), t);
+                                                   "Replay with -Dcassandra.test.cursor_range_trial_seed=%dL -Dcassandra.test.cursor_range_trial_pinned=%s; " +
+                                                   "once fixed, add it to %s.",
+                                                   label, getClass().getSimpleName() + " format=" + format, trial, shrunk, seed, pinned,
+                                                   pinned ? "KNOWN_REGRESSION_SEEDS" : "KNOWN_LAYOUT_REGRESSION_SEEDS"), t);
         }
         // drop each trial's table, its data and its cached statements, so many trials fit the heap
         dropTable("DROP TABLE IF EXISTS %s");
@@ -399,6 +449,8 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
         ddl.append(")) WITH gc_grace_seconds = ").append(t.purgeable ? 0 : 864000);
         if (t.descending)
             ddl.append(" AND CLUSTERING ORDER BY (c1 DESC)");
+        if (t.memtable != null)
+            ddl.append(" AND memtable = '").append(t.memtable).append('\'');
         createTable(ddl.toString());
         ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
         cfs.disableAutoCompaction();
@@ -420,6 +472,11 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
 
     private void populate(Trial t, List<Object[]> keys) throws Throwable
     {
+        if (t.layout != MemtableLayout.OVERLAY)
+        {
+            populateWithLargerMemtable(t, keys);
+            return;
+        }
         Random r = new Random(t.seed ^ 0x5DEECE66DL);
         long ts = BASE_TS;
         int perFlush = Math.max(1, t.operations / t.flushes);
@@ -446,12 +503,55 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
             maybePickFormat(t, r);
             flush();
         }
-        writeRowsWithEmptyCollections(t, keys);
+        writeRowsWithEmptyCollections(t, keys, true);
         markSomeRepaired(t);
         // the memtable overlay, with the newest timestamps
         int overlay = r.nextInt(4) == 0 ? 0 : 1 + r.nextInt(Math.max(1, t.operations / 10));
         for (int op = 0; op < overlay; op++)
             write(t, r, keys.get(r.nextInt(keys.size())), ++ts);
+    }
+
+    /**
+     * {@link #populate} for {@link MemtableLayout#LARGE_OVERLAY}, where the second half of the writes
+     * stays in the memtable, and {@link MemtableLayout#MEMTABLE_ONLY}, where nothing is flushed.
+     * Partitions written only after the last flush are in the memtable alone.
+     */
+    private void populateWithLargerMemtable(Trial t, List<Object[]> keys) throws Throwable
+    {
+        Random r = new Random(t.seed ^ 0x5DEECE66DL);
+        long ts = BASE_TS;
+        boolean flushes = t.layout == MemtableLayout.LARGE_OVERLAY;
+        int flushedOperations = flushes ? (t.operations + 1) / 2 : 0;
+        int perFlush = Math.max(1, flushedOperations / t.flushes);
+        int flushed = 0;
+        int sinceFlush = 0;
+        int widePartition = r.nextInt(keys.size());
+        for (int op = 0; op < t.operations; op++)
+        {
+            if (flushes && op == flushedOperations)
+            {
+                if (flushed < t.flushes)
+                {
+                    maybePickFormat(t, r);
+                    flush();
+                }
+                writeRowsWithEmptyCollections(t, keys, true);
+                markSomeRepaired(t);
+            }
+            if (r.nextInt(8) != 0)
+                ts++;
+            Object[] key = keys.get(t.wide && r.nextInt(3) != 0 ? widePartition : r.nextInt(keys.size()));
+            write(t, r, key, ts);
+            if (op < flushedOperations && ++sinceFlush >= perFlush && flushed < t.flushes)
+            {
+                maybePickFormat(t, r);
+                flush();
+                flushed++;
+                sinceFlush = 0;
+            }
+        }
+        if (!flushes)
+            writeRowsWithEmptyCollections(t, keys, false);
     }
 
     /**
@@ -462,7 +562,7 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
      * insert (a row timestamp, which an unqueried map cell is older than) or an update, sometimes
      * with a short TTL, so the row expires.  Its own random, so the other writes of the trial stay.
      */
-    private void writeRowsWithEmptyCollections(Trial t, List<Object[]> keys) throws Throwable
+    private void writeRowsWithEmptyCollections(Trial t, List<Object[]> keys, boolean flushes) throws Throwable
     {
         if (!t.emptyCollections)
             return;
@@ -476,7 +576,7 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
             long ts = BASE_TS + r.nextInt(t.operations + 1);
             execute("UPDATE %s USING TIMESTAMP " + ts + " SET e1 = e1 + ? WHERE " + where + rowWhere(t),
                     concat(new Object[]{ Collections.singletonMap(r.nextInt(10), r.nextInt(100)) }, key, clustering));
-            if (r.nextInt(4) == 0)
+            if (r.nextInt(4) == 0 && flushes)
             {
                 maybePickFormat(t, r);
                 flush();
@@ -502,8 +602,11 @@ public class RandomRangeReadDifferentialTest extends RangeReadOracle
                         concat(new Object[]{ list }, key, clustering));
             }
         }
-        maybePickFormat(t, r);
-        flush();
+        if (flushes)
+        {
+            maybePickFormat(t, r);
+            flush();
+        }
     }
 
     /** In a third of the trials, marks each sstable repaired at random, so the reads that track

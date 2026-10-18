@@ -19,6 +19,7 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -32,6 +33,7 @@ import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.lifecycle.View;
 import org.apache.cassandra.db.memtable.Memtable;
+import org.apache.cassandra.db.memtable.MemtablePartitionData;
 import org.apache.cassandra.db.partitions.CachedPartition;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
@@ -406,7 +408,7 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
 
         // cursor range reads, when on and the gate accepts the read; every other read takes the
         // iterator path below, unchanged
-        if (DatabaseDescriptor.cursorRangeReadsEnabled() && CursorRangeReads.servedByCursor(this, cfs, controller, view.sstables))
+        if (DatabaseDescriptor.cursorRangeReadsEnabled() && CursorRangeReads.servedByCursor(this, cfs, controller, view))
             return queryStorageWithCursor(cfs, controller, view);
 
         // fetch data from current memtable, historical memtables, and SSTables in the correct order.
@@ -533,7 +535,7 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
                 (collector.isRepairedForTracking(sstable) ? repairedSSTables : unrepairedSSTables).add(sstable);
             if (!repairedSSTables.isEmpty())
             {
-                List<UnfilteredPartitionIterator> none = new ArrayList<>(0);
+                List<Iterator<MemtablePartitionData>> none = new ArrayList<>(0);
                 collector.addSSTableIterator(repairedSSTables.get(0),
                                              CursorRangeReads.rangeIterator(this, cfs, repairedSSTables, none, null, inputs.listener));
                 List<UnfilteredPartitionIterator> finalized;
@@ -543,7 +545,6 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
                 }
                 catch (RuntimeException | Error e)
                 {
-                    CursorReads.closeAll(inputs.memtables, e);
                     CursorReads.closeAll(collector.repairedIters, e);
                     throw e;
                 }
@@ -552,7 +553,7 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
             }
         }
 
-        // from here on the merge owns the memtable and repaired iterators
+        // from here on the merge owns the repaired iterator
         UnfilteredPartitionIterator merged = CursorRangeReads.rangeIterator(this, cfs, sstables, inputs.memtables, repaired, inputs.listener);
         final int selectedSSTables = inputs.sstables.size();
         return checkCacheFilter(Transformation.apply(merged, new Transformation<UnfilteredRowIterator>()
@@ -569,14 +570,14 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
     /** What a cursor range read reads: see {@link #cursorRangeInputs}. */
     static final class CursorRangeInputs
     {
-        /** Each memtable's partitions over the range, in the iterator path's order; the caller closes them. */
-        final List<UnfilteredPartitionIterator> memtables;
+        /** The content of each memtable's partitions over the range, in the iterator path's order. */
+        final List<Iterator<MemtablePartitionData>> memtables;
         /** The sstables the iterator path scans, in its order. */
         final List<SSTableReader> sstables;
         /** Counts each sstable read once, when its scan starts. */
         final SSTableReadsListener listener;
 
-        CursorRangeInputs(List<UnfilteredPartitionIterator> memtables, List<SSTableReader> sstables, SSTableReadsListener listener)
+        CursorRangeInputs(List<Iterator<MemtablePartitionData>> memtables, List<SSTableReader> sstables, SSTableReadsListener listener)
         {
             this.memtables = memtables;
             this.sstables = sstables;
@@ -585,47 +586,40 @@ public class PartitionRangeReadCommand extends ReadCommand implements PartitionR
     }
 
     /**
-     * The memtable iterators and the sstables {@link #queryStorage} reads, chosen as it chooses them,
-     * with its updates of the oldest unrepaired tombstone and its log line for a read of many sstables.
+     * The memtables and the sstables {@link #queryStorage} reads, chosen as it chooses them, with its
+     * updates of the oldest unrepaired tombstone and its log line for a read of many sstables.  Each
+     * memtable gives the content of its partitions, which the cursor merge reads itself, with the
+     * {@code RTBoundValidator} checks of the iterator path's memtable iterators.
      */
     CursorRangeInputs cursorRangeInputs(ReadExecutionController controller, ColumnFamilyStore.ViewFragment view)
     {
-        List<UnfilteredPartitionIterator> memtableIterators = new ArrayList<>();
+        List<Iterator<MemtablePartitionData>> memtables = new ArrayList<>();
         SSTableReadsListener readCountUpdater = newReadCountUpdater();
-        try
+        for (Memtable memtable : view.memtables)
         {
-            for (Memtable memtable : view.memtables)
-            {
-                UnfilteredPartitionIterator iter = memtable.partitionIterator(columnFilter(), dataRange(), readCountUpdater);
-                controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
-                memtableIterators.add(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false));
-            }
-
-            List<SSTableReader> selectedSSTables = new ArrayList<>(view.sstables.size());
-            for (SSTableReader sstable : view.sstables)
-            {
-                boolean intersects = intersects(sstable);
-                boolean hasPartitionLevelDeletions = hasPartitionLevelDeletions(sstable);
-                boolean hasRequiredStatics = hasRequiredStatics(sstable);
-
-                if (!intersects && !hasPartitionLevelDeletions && !hasRequiredStatics)
-                    continue;
-
-                selectedSSTables.add(sstable);
-
-                if (!sstable.isRepaired())
-                    controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
-            }
-
-            if (selectedSSTables.size() > DatabaseDescriptor.getSSTablesPerReadLogThreshold())
-                noSpamLogger.info("The following query '{}' has read {} SSTables.", this.toCQLString(), selectedSSTables.size());
-            return new CursorRangeInputs(memtableIterators, selectedSSTables, readCountUpdater);
+            memtables.add(memtable.partitionData(dataRange()));
+            controller.updateMinOldestUnrepairedTombstone(memtable.getMinLocalDeletionTime());
         }
-        catch (RuntimeException | Error e)
+
+        List<SSTableReader> selectedSSTables = new ArrayList<>(view.sstables.size());
+        for (SSTableReader sstable : view.sstables)
         {
-            CursorReads.closeAll(memtableIterators, e);
-            throw e;
+            boolean intersects = intersects(sstable);
+            boolean hasPartitionLevelDeletions = hasPartitionLevelDeletions(sstable);
+            boolean hasRequiredStatics = hasRequiredStatics(sstable);
+
+            if (!intersects && !hasPartitionLevelDeletions && !hasRequiredStatics)
+                continue;
+
+            selectedSSTables.add(sstable);
+
+            if (!sstable.isRepaired())
+                controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
         }
+
+        if (selectedSSTables.size() > DatabaseDescriptor.getSSTablesPerReadLogThreshold())
+            noSpamLogger.info("The following query '{}' has read {} SSTables.", this.toCQLString(), selectedSSTables.size());
+        return new CursorRangeInputs(memtables, selectedSSTables, readCountUpdater);
     }
 
     @Override

@@ -105,7 +105,8 @@ import org.apache.cassandra.utils.FBUtilities;
  * {@code 100000x10}, {@code 1000x1000}, {@code 10x100000} and {@code 1x1000000} (wide partitions),
  * rows of about 100 bytes.  {@code layout=one} is one sstable; {@code layout=four_plus_memtable}
  * spreads the rows over four sstables, row (pk, ck) in sstable {@code (pk * 31 + ck) % 4}, so a
- * partition is in most of them, and overwrites one row in 1000 in the memtable.  The sstables are
+ * partition is in most of them, and overwrites one row in 1000 in the memtable;
+ * {@code layout=memtable_only} writes every row into the memtable and flushes nothing.  The sstables are
  * written once per data set into {@code -Dcassandra.bench.range_read.cache=<dir>} (default
  * {@code build/microbench-data/RangeReadBench}) and hard-linked into each trial.
  *
@@ -224,6 +225,7 @@ public class RangeReadBench extends CQLTester
         {
             case "one": sstables = 1; break;
             case "four_plus_memtable": sstables = MULTI_SSTABLES; break;
+            case "memtable_only": sstables = 0; break;
             default: throw new IllegalArgumentException(layout);
         }
         switch (deletes)
@@ -258,7 +260,10 @@ public class RangeReadBench extends CQLTester
         cfs.disableAutoCompaction();
         nowInSec = FBUtilities.nowInSeconds();
 
-        linkCachedSSTables();
+        if (sstables == 0)
+            writeAllToMemtable();
+        else
+            linkCachedSSTables();
         if ("four_plus_memtable".equals(layout))
             writeMemtableOverwrites();
         long onDisk = 0;
@@ -698,6 +703,16 @@ public class RangeReadBench extends CQLTester
     }
 
     /** One row in MEMTABLE_EVERY, overwritten in the memtable. */
+    /** Every row of the data set, into the memtable, with the deletes of {@code deletes=mixed} left out. */
+    private void writeAllToMemtable() throws Throwable
+    {
+        Random random = new Random(SEED);
+        for (long pk = 0; pk < partitions; pk++)
+            for (long ck = 0; ck < rowsPerPartition; ck++)
+                execute("INSERT INTO %s (pk, ck, v1, v2, payload) VALUES (?, ?, ?, ?, ?) USING TIMESTAMP " + BASE_TIMESTAMP,
+                        pk, ck, (pk + ck) % 10, (int) ck, payload(random, pk, ck));
+    }
+
     private void writeMemtableOverwrites() throws Throwable
     {
         Random random = new Random(SEED);

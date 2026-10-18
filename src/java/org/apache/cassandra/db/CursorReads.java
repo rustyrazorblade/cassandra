@@ -2285,6 +2285,7 @@ public final class CursorReads
             closeAll(legs, e);
             throw e;
         }
+        // null when only memtables hold the partition (a range read); the merge does not validate on emission
         SSTableReader attribution = null;
         for (MergeLeg leg : legs)
         {
@@ -2294,7 +2295,6 @@ public final class CursorReads
                 break;
             }
         }
-        assert attribution != null : "the gate requires at least one sstable leg";
 
         // min-merge over the same per-leg stats the per-leg iterators would report, so the
         // response's stats total matches the object merge's. Non-tracking NAMES reads no longer
