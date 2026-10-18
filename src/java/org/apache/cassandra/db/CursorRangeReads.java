@@ -794,6 +794,14 @@ public final class CursorRangeReads
         private final SSTableReadsListener listener;
         /** One value-transfer scratch for every leg of the read. */
         private final CursorReads.ValueTransfer transfer = new CursorReads.ValueTransfer();
+        /**
+         * The read's filter pushdown ({@link CursorReads#filterPushdownFor}), or null: a forward
+         * merge reads no row of a partition whose partition-level expressions fail.  Rows are not
+         * dropped in the merge: a range read has no {@code ScanStatsAccumulator}, so its rows reach
+         * the scan metrics (for a response, {@code TombstoneScanGuard}, the one live count) before
+         * the row filter, as on the iterator path.
+         */
+        private final CursorReads.FilterPushdown filterPushdown;
 
         /** The sources, in the iterator path's input order: memtables, sstables, then the repaired sstables. */
         private Source[] sources;
@@ -820,6 +828,7 @@ public final class CursorRangeReads
             this.sstables = sstables;
             this.memtables = memtables;
             this.listener = listener;
+            this.filterPushdown = CursorReads.filterPushdownFor(command);
         }
 
         @Override
@@ -939,7 +948,7 @@ public final class CursorRangeReads
             List<CursorReads.MergeLeg> mergeLegs = new ArrayList<>(onKeyCount);
             addMergeLegs(slices, mergeLegs);
             return reversed ? CursorReads.mergeLegsReversed(mergeLegs, metadata, key, slices, columnFilter)
-                            : CursorReads.mergeLegs(mergeLegs, metadata, key, slices, columnFilter, null);
+                            : CursorReads.mergeLegs(mergeLegs, metadata, key, slices, columnFilter, filterPushdown);
         }
 
         /** The merge legs of the sources in {@link #onKey}, opened by {@link #openOnKey}, in the
@@ -1119,12 +1128,12 @@ public final class CursorRangeReads
             {
                 // one sstable: the iterator path serializes its partition as is
                 return reversed ? CursorReads.streamReversedResponse(legs.get(0), columnFilter, sink, out)
-                                : CursorReads.streamResponse(legs, metadata, key, slices, columnFilter, null, sink, out);
+                                : CursorReads.streamResponse(legs, metadata, key, slices, columnFilter, filterPushdown, sink, out);
             }
             // memtables, a lone one too: the merge of one memtable leg gives what its row iterator gives
             addMergeLegs(slices, mergeLegs);
             return reversed ? CursorReads.streamReversedResponse(mergeLegs, metadata, key, slices, columnFilter, sink, out)
-                            : CursorReads.streamResponse(mergeLegs, metadata, key, slices, columnFilter, null, sink, out);
+                            : CursorReads.streamResponse(mergeLegs, metadata, key, slices, columnFilter, filterPushdown, sink, out);
         }
 
         /**
