@@ -698,6 +698,14 @@ public final class NativeMemtableMergeLeg implements CursorReads.MergeLeg
         return row;
     }
 
+    /** The memtable's row, when {@code BTreeRow.filter} returns it unchanged and no cell of it has been read. */
+    @Override
+    public Row unchangedRow()
+    {
+        // a leg that emits objects hands its row over through consumeExistingRow
+        return !emitObjects && state == CELL_HEADER_START && !rowFiltered && !parked && columnIndex == 0 ? currentRow : null;
+    }
+
     private void endRow()
     {
         complexColumn = null;

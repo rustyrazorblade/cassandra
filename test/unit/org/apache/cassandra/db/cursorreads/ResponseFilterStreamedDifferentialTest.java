@@ -118,10 +118,10 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
         long seed = System.nanoTime();
         logger.info("ResponseFilterStreamedDifferentialTest.randomRegularTable seed = {}", seed);
         for (long regressionSeed : KNOWN_REGRESSION_SEEDS)
-            runTrial(regressionSeed, false);
+            runTrial(regressionSeed, false, false);
         Random seeds = new Random(seed);
         for (int i = 0; i < TRIALS; i++)
-            runTrial(seeds.nextLong(), false);
+            runTrial(seeds.nextLong(), false, false);
     }
 
     @Test
@@ -131,26 +131,50 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
         logger.info("ResponseFilterStreamedDifferentialTest.randomCounterTable seed = {}", seed);
         Random seeds = new Random(seed);
         for (int i = 0; i < TRIALS; i++)
-            runTrial(seeds.nextLong(), true);
+            runTrial(seeds.nextLong(), true, false);
     }
 
-    private void runTrial(long trialSeed, boolean counters) throws Throwable
+    /** {@link #randomRegularTable} with every write left in the memtable: the partition is one memtable leg. */
+    @Test
+    public void randomRegularTableInMemtable() throws Throwable
+    {
+        long seed = System.nanoTime();
+        logger.info("ResponseFilterStreamedDifferentialTest.randomRegularTableInMemtable seed = {}", seed);
+        Random seeds = new Random(seed);
+        for (int i = 0; i < TRIALS; i++)
+            runTrial(seeds.nextLong(), false, true);
+    }
+
+    /** {@link #randomCounterTable} with every write left in the memtable. */
+    @Test
+    public void randomCounterTableInMemtable() throws Throwable
+    {
+        long seed = System.nanoTime();
+        logger.info("ResponseFilterStreamedDifferentialTest.randomCounterTableInMemtable seed = {}", seed);
+        Random seeds = new Random(seed);
+        for (int i = 0; i < TRIALS; i++)
+            runTrial(seeds.nextLong(), true, true);
+    }
+
+    /** @param memtableOnly no flush: the trial's writes stay in the memtable */
+    private void runTrial(long trialSeed, boolean counters, boolean memtableOnly) throws Throwable
     {
         try
         {
             if (counters)
-                counterTrial(trialSeed);
+                counterTrial(trialSeed, memtableOnly);
             else
-                regularTrial(trialSeed);
+                regularTrial(trialSeed, memtableOnly);
         }
         catch (Throwable t)
         {
-            throw new AssertionError(String.format("trial failed; replay with trialSeed=%dL (%s table, format %s)",
-                                                   trialSeed, counters ? "counter" : "regular", formatName()), t);
+            throw new AssertionError(String.format("trial failed; replay with trialSeed=%dL (%s table, format %s%s)",
+                                                   trialSeed, counters ? "counter" : "regular", formatName(),
+                                                   memtableOnly ? ", memtable only" : ""), t);
         }
     }
 
-    private void regularTrial(long trialSeed) throws Throwable
+    private void regularTrial(long trialSeed, boolean memtableOnly) throws Throwable
     {
         Random r = new Random(trialSeed);
         createTable(TABLE + (r.nextBoolean() ? 0 : 864000));
@@ -168,7 +192,8 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
             int ops = 5 + r.nextInt(40);
             for (int i = 0; i < ops; i++)
                 regularOp(r, ts++, maxCk, true);
-            flush();
+            if (!memtableOnly)
+                flush();
         }
         boolean memtableOverlay = r.nextBoolean();
         if (memtableOverlay)
@@ -182,7 +207,7 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
         for (int read = 0; read < READS_PER_TRIAL; read++)
         {
             long readSeed = r.nextLong();
-            compare(cfs, regularRead(cfs, now, maxCk, readSeed), "read seed " + readSeed);
+            compare(cfs, regularRead(cfs, now, maxCk, readSeed), memtableOnly, "read seed " + readSeed);
         }
     }
 
@@ -370,7 +395,7 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
         }
     }
 
-    private void counterTrial(long trialSeed) throws Throwable
+    private void counterTrial(long trialSeed, boolean memtableOnly) throws Throwable
     {
         Random r = new Random(trialSeed);
         createTable(COUNTER_TABLE + (r.nextBoolean() ? 0 : 864000));
@@ -386,7 +411,8 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
             int ops = 5 + r.nextInt(30);
             for (int i = 0; i < ops; i++)
                 counterOp(r, maxCk);
-            flush();
+            if (!memtableOnly)
+                flush();
         }
         if (r.nextBoolean())
             counterOp(r, maxCk);
@@ -395,7 +421,7 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
         for (int read = 0; read < READS_PER_TRIAL; read++)
         {
             long readSeed = r.nextLong();
-            compare(cfs, counterRead(cfs, now, maxCk, readSeed), "read seed " + readSeed);
+            compare(cfs, counterRead(cfs, now, maxCk, readSeed), memtableOnly, "read seed " + readSeed);
         }
     }
 
@@ -537,6 +563,28 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
         assertMatchesAndReturnsRows(cfs, filtered(cfs, now + AFTER_EXPIRY, true, f -> f.add(column(cfs, "st"), Operator.CONTAINS, two)), 1);
     }
 
+    /**
+     * A memtable row the filter judges before its cells are read is judged purged, like the
+     * response row: once the element tombstone is purgeable (gc_grace_seconds 0, read later) a
+     * reconciling NOT CONTAINS KEY no longer finds the deleted key and keeps the row; before
+     * that it finds it and drops the row.
+     */
+    @Test
+    public void memtableRowIsFilteredAfterThePurge() throws Throwable
+    {
+        createTable(TABLE + 0);
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        execute("INSERT INTO %s (pk, ck, v, m) VALUES (1, 1, 1, {1: 1, 2: 2}) USING TIMESTAMP 10");
+        execute("DELETE m[1] FROM %s USING TIMESTAMP 11 WHERE pk = 1 AND ck = 1");
+        execute("INSERT INTO %s (pk, ck, v) VALUES (1, 2, 1) USING TIMESTAMP 12");
+        long now = FBUtilities.nowInSeconds();
+        ByteBuffer one = Int32Type.instance.decompose(1);
+        assertMemtableOnlyMatchesAndReturnsRows(cfs, filtered(cfs, now, true, f -> f.add(column(cfs, "m"), Operator.NOT_CONTAINS_KEY, one)), 0);
+        assertMemtableOnlyMatchesAndReturnsRows(cfs, filtered(cfs, now + AFTER_EXPIRY, true, f -> f.add(column(cfs, "m"), Operator.NOT_CONTAINS_KEY, one)), 1);
+        assertMemtableOnlyMatchesAndReturnsRows(cfs, filtered(cfs, now + AFTER_EXPIRY, false, f -> f.add(column(cfs, "m"), Operator.NOT_CONTAINS_KEY, one)), 1);
+    }
+
     /** A counter is compared by its total over every sstable. */
     @Test
     public void counterTotalOverSeveralSSTables() throws Throwable
@@ -590,9 +638,18 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
     /** The differential, then the replica response built again with no row built for the filter. */
     private void compare(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command, String label)
     {
+        compare(cfs, command, false, label);
+    }
+
+    /** @param memtableOnly the partition is in the memtable only, so no sstable is read */
+    private void compare(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command, boolean memtableOnly, String label)
+    {
         try
         {
-            assertCursorReadMatchesIterator(cfs, command);
+            if (memtableOnly)
+                assertCursorReadMatchesIteratorReadingNoSSTable(cfs, command);
+            else
+                assertCursorReadMatchesIterator(cfs, command);
             assertResponseBuildsNoRow(cfs, command);
         }
         catch (Throwable t)
@@ -624,9 +681,19 @@ public class ResponseFilterStreamedDifferentialTest extends SSTableFormatParamet
 
     private void assertMatchesAndReturnsRows(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command, int expectedRows)
     {
+        assertMatchesAndReturnsRows(cfs, command, false, expectedRows);
+    }
+
+    private void assertMemtableOnlyMatchesAndReturnsRows(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command, int expectedRows)
+    {
+        assertMatchesAndReturnsRows(cfs, command, true, expectedRows);
+    }
+
+    private void assertMatchesAndReturnsRows(ColumnFamilyStore cfs, Supplier<SinglePartitionReadCommand> command, boolean memtableOnly, int expectedRows)
+    {
         long rows = canonicalRecords(command.get()).stream().filter(s -> s.startsWith("ROW")).count();
         assertEquals("rows the iterator path returns: " + command.get().toCQLString(), expectedRows, rows);
-        compare(cfs, command, "targeted");
+        compare(cfs, command, memtableOnly, "targeted");
     }
 
     private static ColumnMetadata column(ColumnFamilyStore cfs, String name)

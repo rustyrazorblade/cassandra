@@ -165,6 +165,17 @@ final class CursorReadMerger
          *  for the same row group. */
         void addRow(Row row);
 
+        /**
+         * Whether the sink's row filter rejects {@code row}, the merged row of a group the merge
+         * reads as stored, given before the merge reads any of its cells.  When true the sink has
+         * done for the row all it does for a rejected row it is given cell by cell, and the merge
+         * skips the row.  Default false: the merge gives the row as usual.
+         */
+        default boolean dropsRowByFilter(Row row)
+        {
+            return false;
+        }
+
         void addRangeTombstoneMarker(RangeTombstoneMarker marker);
 
         /**
@@ -1020,6 +1031,18 @@ final class CursorReadMerger
                 }
                 sink.addRow(existing);
                 CursorReads.countMemtableRowReuse();
+                return;
+            }
+        }
+        // A row read as stored that a memtable leg holds unchanged is the merged row: the sink's
+        // row filter judges it as an object, and a row it rejects is skipped before its cells are read
+        if (rowReadAsStored(rowMergeLimit))
+        {
+            Row stored = legs[0].unchangedRow();
+            if (stored != null && sink.dropsRowByFilter(stored))
+            {
+                legs[0].skipRow();
+                CursorReads.countMemtableRowFilteredBeforeCells();
                 return;
             }
         }
