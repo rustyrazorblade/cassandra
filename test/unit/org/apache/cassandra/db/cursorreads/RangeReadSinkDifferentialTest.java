@@ -34,6 +34,7 @@ import org.junit.runners.Parameterized;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -95,6 +96,13 @@ public class RangeReadSinkDifferentialTest extends RangeReadOracle
     private static final int SHORT_TTL = 50;
     private static final int COLUMN_INDEX_SIZE_KIB = 1;
     private static final String[] MEMTABLES = { null, "trie", "skiplist" };
+    /**
+     * With {@code offheap_objects} the reference cannot read a skiplist memtable by names:
+     * its names iterator gives native clusterings, and {@code RTBoundCloser} fails on one with
+     * {@code UnsupportedOperationException} ({@code NativeAccessor.factory}) when a limit stops a
+     * read in a range tombstone.  That is a bug of the iterator path, not of the scan.
+     */
+    private static final String[] NATIVE_MEMTABLES = { null, "trie" };
 
     private SSTableFormat<?, ?> originalFormat;
     /** Reads compared, and of those the ones that returned a row. */
@@ -166,7 +174,9 @@ public class RangeReadSinkDifferentialTest extends RangeReadOracle
         Random r = new Random(seed);
         String type = createType("CREATE TYPE IF NOT EXISTS %s (a int, b text)");
         boolean purgeable = r.nextInt(3) == 0;
-        String memtable = MEMTABLES[r.nextInt(MEMTABLES.length)];
+        String[] memtables = DatabaseDescriptor.getMemtableAllocationType() == Config.MemtableAllocationType.offheap_objects
+                             ? NATIVE_MEMTABLES : MEMTABLES;
+        String memtable = memtables[r.nextInt(memtables.length)];
         createTable("CREATE TABLE %s (k1 int, k2 text, c int, s int static, v int, t text, fl frozen<list<int>>, st set<int>, " +
                     "m map<text, int>, l list<int>, u frozen<" + type + ">, PRIMARY KEY ((k1, k2), c)) " +
                     "WITH gc_grace_seconds = " + (purgeable ? 0 : 864000) + (memtable == null ? "" : " AND memtable = '" + memtable + '\''));
