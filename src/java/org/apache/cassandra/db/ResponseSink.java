@@ -42,9 +42,11 @@ import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.MapType;
+import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.CellValueSource;
+import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.NativeCell;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
@@ -834,16 +836,18 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
 
     /**
      * The row filter's verdict on a merged row the merge reads as stored, before its cells are
-     * read: {@link #acceptRow} up to the filter.  A row the filter keeps, or that the purge leaves
-     * empty, is left to the merge, which gives it cell by cell.
+     * read: {@link #acceptRow} up to the filter, for a row the purge leaves unchanged.  A row the
+     * filter keeps, or that the purge changes, is left to the merge, which gives it cell by cell.
      */
     @Override
     public boolean dropsRowByFilter(Row row)
     {
-        if (filter == null || !filter.hasRowLevelExpressions())
+        if (filter == null || !filter.hasRowLevelExpressions() || !(row instanceof BTreeRow) || row.isEmpty())
             return false;
-        Row purged = row.purge(purger, nowInSec, false);
-        if (purged == null || purged.isEmpty() || filter.rowObjectMatches(purged))
+        // the row is its own purge, so no purged copy is made
+        if (row.hasDeletion(nowInSec) && !purgeKeepsRow((BTreeRow) row))
+            return false;
+        if (filter.rowObjectMatches(row))
             return false;
         // what startRow and endRow do for a row the filter then rejects
         if (!enterSlice())
@@ -851,10 +855,43 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         maybeCancel();
         anyPurgeSurvivor = true;
         if (scanGuard != null)
-            scanGuard.wholeRow(purged);
+            scanGuard.wholeRow(row);
         if (dropEverything)
             stopped = true;
         return true;
+    }
+
+    /** Whether {@code row.purge(purger, nowInSec, false)} purges nothing and turns no expired cell into a tombstone. */
+    private boolean purgeKeepsRow(BTreeRow row)
+    {
+        LivenessInfo liveness = row.primaryKeyLivenessInfo();
+        if ((!liveness.isEmpty() && purger.shouldPurge(liveness, nowInSec)) || purger.shouldPurge(row.deletion().time()))
+            return false;
+        for (int i = 0, count = row.columnCount(); i < count; i++)
+        {
+            ColumnData data = row.columnDataByIndex(i);
+            if (!data.column().isComplex())
+            {
+                if (!purgeKeepsCell((Cell<?>) data))
+                    return false;
+                continue;
+            }
+            ComplexColumnData complex = (ComplexColumnData) data;
+            if (purger.shouldPurge(complex.complexDeletion()))
+                return false;
+            for (int j = 0; j < complex.cellsCount(); j++)
+            {
+                if (!purgeKeepsCell(complex.getCellByIndex(j)))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether {@code AbstractCell.purge} returns the cell itself. */
+    private boolean purgeKeepsCell(Cell<?> cell)
+    {
+        return cell.isLive(nowInSec) || (!cell.isExpiring() && !purger.shouldPurge(cell.timestamp(), cell.localDeletionTime()));
     }
 
     /** Purge, scan metrics, row filter, limit and write for a row object, with the real
