@@ -87,6 +87,7 @@ import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.net.ParamType;
 import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientWarn;
@@ -2850,6 +2851,82 @@ public final class CursorReads
     }
 
     /**
+     * The answers of a read's {@code DeserializationHelper} and {@link PartitionMaterializer} for
+     * each column of one column set, by the column's index in the set: whether the read keeps the
+     * column's cells, whether it skips their values, and the column's drop record.  The iterator
+     * path asks the helper for each cell, and each answer for a column is the same every time; a
+     * cell walk reads them here.  Each column is asked once, the first time a cell of it is read.
+     */
+    static final class ColumnFlags
+    {
+        /** The cells of the column are read: {@code includes(column)} and not {@code dropsWhenFilteredAgain}. */
+        private static final byte KEPT = 1;
+        /** {@code canSkipValue(column)}: the column is fetched but not queried. */
+        private static final byte SKIPS_VALUE = 2;
+        /** The other bits hold the column's answers. */
+        private static final byte KNOWN = 4;
+
+        final Columns columns;
+        final boolean rowsFilteredAgain;
+        private final PartitionMaterializer materializer;
+        private final byte[] flags;
+        /** Each column's drop record; null when the table has no dropped column. */
+        private final DroppedColumn[] dropped;
+
+        private ColumnFlags(PartitionMaterializer materializer, Columns columns)
+        {
+            this.materializer = materializer;
+            this.columns = columns;
+            this.rowsFilteredAgain = materializer.rowsFilteredAgain;
+            this.flags = new byte[columns.size()];
+            this.dropped = materializer.metadata.droppedColumns.isEmpty() ? null : new DroppedColumn[columns.size()];
+        }
+
+        private int of(int index, ColumnMetadata column)
+        {
+            int f = flags[index];
+            if (f != 0)
+                return f;
+            DeserializationHelper helper = materializer.filterHelper;
+            f = KNOWN;
+            if (helper.includes(column) && !materializer.dropsWhenFilteredAgain(column))
+                f |= KEPT;
+            if (helper.canSkipValue(column))
+                f |= SKIPS_VALUE;
+            if (dropped != null)
+                dropped[index] = materializer.metadata.droppedColumns.get(column.name.bytes);
+            flags[index] = (byte) f;
+            return f;
+        }
+
+        /** {@code includes(column) && !dropsWhenFilteredAgain(column)} for {@code column}, at {@code index} of the set. */
+        boolean kept(int index, ColumnMetadata column)
+        {
+            return (of(index, column) & KEPT) != 0;
+        }
+
+        /** {@code helper.canSkipValue(column)} for {@code column}, at {@code index} of the set. */
+        boolean skipsValue(int index, ColumnMetadata column)
+        {
+            return (of(index, column) & SKIPS_VALUE) != 0;
+        }
+
+        /**
+         * {@code helper.isDropped(column, timestamp, isComplex)} for {@code column}, at
+         * {@code index} of the set.  For a complex column the helper reads the drop record
+         * {@code startOfComplexColumn} looked up by the column's name, which is the one kept here.
+         */
+        boolean isDropped(int index, ColumnMetadata column, long timestamp)
+        {
+            if (dropped == null)
+                return false;
+            of(index, column);
+            DroppedColumn record = dropped[index];
+            return record != null && timestamp <= record.droppedTime;
+        }
+    }
+
+    /**
      * Drives {@link SSTableCursorReader} over one partition and materializes rows/markers,
      * mirroring the filtering behavior of {@code UnfilteredSerializer.readSimpleColumn} /
      * {@code readComplexColumn} / {@code AbstractSSTableIterator.readStaticRow} for the query's
@@ -2909,6 +2986,22 @@ public final class CursorReads
         {
             return rowsFilteredAgain && !metadata.droppedColumns.isEmpty()
                    && !columnFilter.fetchedColumns().columns(column.isStatic()).contains(column);
+        }
+
+        /** See {@link #columnFlags}. */
+        private ColumnFlags columnFlags;
+
+        /**
+         * What the read's column filter does with each column of {@code columns}, the column set
+         * of a cell cursor of this materializer's sstable.  The flags do not change while the set
+         * and {@link #rowsFilteredAgain} do not.
+         */
+        ColumnFlags columnFlags(Columns columns)
+        {
+            ColumnFlags flags = columnFlags;
+            if (flags == null || flags.columns != columns || flags.rowsFilteredAgain != rowsFilteredAgain)
+                columnFlags = flags = new ColumnFlags(this, columns);
+            return flags;
         }
 
         PartitionMaterializer(SSTableCursorReader cursor, SSTableReader sstable, TableMetadata metadata, DecoratedKey key, ColumnFilter columnFilter, ValueTransfer transfer)
@@ -4333,6 +4426,7 @@ public final class CursorReads
             if (syntheticPark)
                 return;
             DeserializationHelper helper = materializer.filterHelper;
+            ColumnFlags flags = null;
             boolean evaluate = evaluatePendingCell;
             evaluatePendingCell = false;
             for (;;)
@@ -4360,6 +4454,9 @@ public final class CursorReads
 
                 SSTableCursorReader.CellCursor cc = cursor.cellCursor();
                 ColumnMetadata column = cc.cellColumn;
+                int columnIndex = cc.cellColumnIndex();
+                if (flags == null)
+                    flags = materializer.columnFlags(cc.columns);
                 if (!cc.producedCell)
                 {
                     // natural deletion-only complex-column position (pauseAtEmptyComplexColumns)
@@ -4370,7 +4467,7 @@ public final class CursorReads
                         return;
                     }
                     primeComplexColumn(helper, column);
-                    if (helper.includes(column) && !materializer.dropsWhenFilteredAgain(column))
+                    if (flags.kept(columnIndex, column))
                     {
                         boolean deletionKept = !cc.complexDeletion.isLive()
                                                && !helper.isDroppedComplexDeletion(cc.complexDeletion);
@@ -4402,7 +4499,7 @@ public final class CursorReads
                         return;
                     }
                     primeComplexColumn(helper, column);
-                    if (helper.includes(column) && !materializer.dropsWhenFilteredAgain(column) && !cc.complexDeletion.isLive()
+                    if (flags.kept(columnIndex, column) && !cc.complexDeletion.isLive()
                         && !helper.isDroppedComplexDeletion(cc.complexDeletion))
                     {
                         stashPending = true;
@@ -4432,7 +4529,7 @@ public final class CursorReads
                 pendingValue = null;
                 pendingValueMaterialized = false;
                 pendingValueSkip = false;
-                if (!helper.includes(column) || materializer.dropsWhenFilteredAgain(column))
+                if (!flags.kept(columnIndex, column))
                 {
                     skipParkedCell();
                     continue;
@@ -4450,7 +4547,7 @@ public final class CursorReads
                         continue;
                     }
                 }
-                if (helper.isDropped(column, cc.cellLiveness.timestamp(), isComplex))
+                if (flags.isDropped(columnIndex, column, cc.cellLiveness.timestamp()))
                 {
                     skipParkedCell();
                     continue;
@@ -4462,8 +4559,9 @@ public final class CursorReads
                 if (stashPending && stashKeepsEmpty
                     && materializer.keptWhenRead(column, path, cc.cellLiveness.timestamp(), rowTimestamp, materializer.uDesc.deletionTime()))
                     stashPending = false; // the column has a cell when read, so a later filter drops it whole
-                boolean skipWholeCell = isComplex ? helper.canSkipValue(path) || (materializer.rowsFilteredAgain && helper.canSkipValue(column))
-                                                  : helper.canSkipValue(column);
+                boolean columnSkipsValue = flags.skipsValue(columnIndex, column);
+                boolean skipWholeCell = isComplex ? helper.canSkipValue(path) || (materializer.rowsFilteredAgain && columnSkipsValue)
+                                                  : columnSkipsValue;
                 if (skipWholeCell && cc.cellLiveness.timestamp() < rowTimestamp)
                 {
                     skipParkedCell();
@@ -4471,7 +4569,7 @@ public final class CursorReads
                 }
                 // a kept cell loses its value when its column or its path is not queried, like
                 // Cell.Serializer.deserialize
-                pendingValueSkip = helper.canSkipValue(column) || (isComplex && helper.canSkipValue(path));
+                pendingValueSkip = columnSkipsValue || (isComplex && helper.canSkipValue(path));
                 if (stashPending && sameColumn(syntheticColumn, column))
                     stashPending = false; // a surviving cell's park carries the column deletion itself
                 if (validateCells && hasInvalidCellDeletion(cc.cellLiveness.ttl(), cc.cellLiveness.localDeletionTime()))

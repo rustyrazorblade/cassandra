@@ -187,6 +187,8 @@ public class SSTableCursorReader implements AutoCloseable
         public AbstractType<?> cellPathType() { return cellPathType; }
         public byte[] cellPathBuffer() { return cellPathBuffer; }
         public int cellPathLength() { return cellPathLength; }
+        /** The index of {@link #cellColumn} in {@link #columns}. */
+        public int cellColumnIndex() { return cellColumnIndex; }
 
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
