@@ -26,7 +26,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 
 import com.carrotsearch.hppc.LongStack;
@@ -137,246 +137,246 @@ public final class CursorReads
     }
 
     /** Sstable legs served by a cursor. */
-    private static final AtomicLong SSTABLE_LEGS_SERVED = new AtomicLong();
+    private static final LongAdder SSTABLE_LEGS_SERVED = new LongAdder();
     /** Gated-in legs where the sstable turned out not to contain the partition (no cursor opened). */
-    private static final AtomicLong SSTABLE_LEGS_WITHOUT_PARTITION = new AtomicLong();
+    private static final LongAdder SSTABLE_LEGS_WITHOUT_PARTITION = new LongAdder();
     /** Sstable legs of a read that passed {@link #isReadSupported} but were still read through the
      *  iterator path.  Counted once per leg.  Must stay zero. */
-    private static final AtomicLong SSTABLE_LEGS_FELL_BACK_TO_ITERATOR = new AtomicLong();
+    private static final LongAdder SSTABLE_LEGS_FELL_BACK_TO_ITERATOR = new LongAdder();
     /** Sstable legs where the BTI row index produced a forward seek into the partition.  Counts
      *  merged-mode legs too: a merged read over N indexed BTI legs with a slice start advances
      *  this by N. */
-    private static final AtomicLong SSTABLE_LEG_ROW_INDEX_SEEKS = new AtomicLong();
+    private static final LongAdder SSTABLE_LEG_ROW_INDEX_SEEKS = new LongAdder();
     /** Unfiltereds (rows and range tombstone markers, static row excluded) materialized by cursor
      *  legs.  For a merged read this counts the merged output, not the per-leg sum. */
-    private static final AtomicLong UNFILTEREDS_MATERIALIZED = new AtomicLong();
+    private static final LongAdder UNFILTEREDS_MATERIALIZED = new LongAdder();
     /** Multi-leg reads served by the cursor-level merge (>= 2 legs through {@link #mergeLegs}). */
-    private static final AtomicLong CURSOR_MERGES_SERVED = new AtomicLong();
+    private static final LongAdder CURSOR_MERGES_SERVED = new LongAdder();
     /** Non-tracking NAMES reads served by the timestamp-order completeness driver
      *  ({@code SinglePartitionReadCommand.queryMemtableAndSSTablesInTimestampOrder}) with cursor
      *  legs.  Counts one per driver
      *  invocation, whether or not any sstable leg survives the completeness skip. */
-    private static final AtomicLong NAMES_TIMESTAMP_ORDER_READS = new AtomicLong();
+    private static final LongAdder NAMES_TIMESTAMP_ORDER_READS = new LongAdder();
     /** Sstable legs that entered a cursor-level merge (each such leg is also counted in
      *  {@link #sstableLegsServed}). */
-    private static final AtomicLong SSTABLE_LEGS_CURSOR_MERGED = new AtomicLong();
+    private static final LongAdder SSTABLE_LEGS_CURSOR_MERGED = new LongAdder();
     /** Memtable legs ({@link NativeMemtableMergeLeg}) that joined a cursor-level merge. */
-    private static final AtomicLong MEMTABLE_LEGS_CURSOR_MERGED = new AtomicLong();
+    private static final LongAdder MEMTABLE_LEGS_CURSOR_MERGED = new LongAdder();
     /** Merged rows emitted by reusing the memtable's own live {@code Row} object (single-version
      *  fast path). */
-    private static final AtomicLong MEMTABLE_ROWS_REUSED = new AtomicLong();
+    private static final LongAdder MEMTABLE_ROWS_REUSED = new LongAdder();
     /** Merged cells emitted by reusing the memtable's own live {@code Cell} object. */
-    private static final AtomicLong MEMTABLE_CELLS_REUSED = new AtomicLong();
+    private static final LongAdder MEMTABLE_CELLS_REUSED = new LongAdder();
     /** Memtable legs that read the memtable's own storage with no row or cell object
      *  ({@link NativeMemtableMergeLeg} for a sink that streams cells). */
-    private static final AtomicLong MEMTABLE_LEGS_STREAMED = new AtomicLong();
+    private static final LongAdder MEMTABLE_LEGS_STREAMED = new LongAdder();
     /** Memtable rows a {@link NativeMemtableMergeLeg} cloned to heap for a sink that keeps row
      *  objects, as {@code EnsureOnHeap} clones them on the iterator path. */
-    private static final AtomicLong MEMTABLE_ROWS_CLONED = new AtomicLong();
+    private static final LongAdder MEMTABLE_ROWS_CLONED = new LongAdder();
     /** Cursor merges closed before they reached the end of their slices, because the reader
      *  stopped asking for rows (a limit or page was reached).  A read aborted above the merge,
      *  for example by the tombstone guard, is counted too. */
-    private static final AtomicLong MERGES_STOPPED_BY_LIMIT = new AtomicLong();
+    private static final LongAdder MERGES_STOPPED_BY_LIMIT = new LongAdder();
     /** Cursor merges that ran with a RowFilter pushdown context attached. */
-    private static final AtomicLong FILTER_PUSHDOWNS_ENGAGED = new AtomicLong();
+    private static final LongAdder FILTER_PUSHDOWNS_ENGAGED = new LongAdder();
     /** Merged partitions skipped entirely because a partition-level filter expression failed. */
-    private static final AtomicLong PARTITIONS_SKIPPED_BY_FILTER = new AtomicLong();
+    private static final LongAdder PARTITIONS_SKIPPED_BY_FILTER = new LongAdder();
     /** Merged row groups dropped at production because a row-level filter expression failed
      *  (a clustering-column expression against the descriptor bytes, or a regular-column
      *  expression at winner resolution). */
-    private static final AtomicLong ROWS_DROPPED_BY_FILTER = new AtomicLong();
+    private static final LongAdder ROWS_DROPPED_BY_FILTER = new LongAdder();
     /** The subset of {@link #ROWS_DROPPED_BY_FILTER} dropped because a regular-column expression
      *  failed at winner resolution. */
-    private static final AtomicLong ROWS_DROPPED_BY_REGULAR_FILTER = new AtomicLong();
+    private static final LongAdder ROWS_DROPPED_BY_REGULAR_FILTER = new LongAdder();
     /** Sstable-winner cell values materialized into a {@code byte[]}/{@code Cell}.  A streaming
      *  sink leaves this at zero for its sstable-won cells; a non-streaming sink advances it once
      *  per sstable-won cell. */
-    private static final AtomicLong SSTABLE_CELL_VALUES_MATERIALIZED = new AtomicLong();
+    private static final LongAdder SSTABLE_CELL_VALUES_MATERIALIZED = new LongAdder();
 
     /** Rows a {@link MaterializingMergeSink} built from merge events.  A read that streams its
      *  response ({@link ResponseSink}) builds none. */
-    private static final AtomicLong MERGE_SINK_ROWS_BUILT = new AtomicLong();
+    private static final LongAdder MERGE_SINK_ROWS_BUILT = new LongAdder();
     /** Memtable rows the response's row filter dropped before the merge read their cells. */
-    private static final AtomicLong MEMTABLE_ROWS_FILTERED_BEFORE_CELLS = new AtomicLong();
+    private static final LongAdder MEMTABLE_ROWS_FILTERED_BEFORE_CELLS = new LongAdder();
 
     @VisibleForTesting
     public static long mergeSinkRowsBuilt()
     {
-        return MERGE_SINK_ROWS_BUILT.get();
+        return MERGE_SINK_ROWS_BUILT.sum();
     }
 
     static void countMemtableRowFilteredBeforeCells()
     {
-        MEMTABLE_ROWS_FILTERED_BEFORE_CELLS.incrementAndGet();
+        MEMTABLE_ROWS_FILTERED_BEFORE_CELLS.increment();
     }
 
     @VisibleForTesting
     public static long memtableRowsFilteredBeforeCells()
     {
-        return MEMTABLE_ROWS_FILTERED_BEFORE_CELLS.get();
+        return MEMTABLE_ROWS_FILTERED_BEFORE_CELLS.sum();
     }
 
     static void countSstableCellValueMaterialized()
     {
-        SSTABLE_CELL_VALUES_MATERIALIZED.incrementAndGet();
+        SSTABLE_CELL_VALUES_MATERIALIZED.increment();
     }
 
     @VisibleForTesting
     public static long sstableCellValuesMaterialized()
     {
-        return SSTABLE_CELL_VALUES_MATERIALIZED.get();
+        return SSTABLE_CELL_VALUES_MATERIALIZED.sum();
     }
 
     /** {@code ReadResponse}s served via the transcode fast path from a replica-serving call site,
      *  counted only after the merge has run. */
-    private static final AtomicLong TRANSCODE_RESPONSES_SERVED = new AtomicLong();
+    private static final LongAdder TRANSCODE_RESPONSES_SERVED = new LongAdder();
 
     static void countTranscodeResponseServed()
     {
-        TRANSCODE_RESPONSES_SERVED.incrementAndGet();
+        TRANSCODE_RESPONSES_SERVED.increment();
     }
 
     @VisibleForTesting
     public static long transcodeResponsesServed()
     {
-        return TRANSCODE_RESPONSES_SERVED.get();
+        return TRANSCODE_RESPONSES_SERVED.sum();
     }
 
     /** Replica data reads, with cursor reads enabled, that the transcode path declined: they are
      *  served by {@code executeLocally} instead. */
-    private static final AtomicLong TRANSCODE_RESPONSES_DECLINED = new AtomicLong();
+    private static final LongAdder TRANSCODE_RESPONSES_DECLINED = new LongAdder();
 
     static void countTranscodeResponseDeclined()
     {
-        TRANSCODE_RESPONSES_DECLINED.incrementAndGet();
+        TRANSCODE_RESPONSES_DECLINED.increment();
     }
 
     @VisibleForTesting
     public static long transcodeResponsesDeclined()
     {
-        return TRANSCODE_RESPONSES_DECLINED.get();
+        return TRANSCODE_RESPONSES_DECLINED.sum();
     }
 
     public static long sstableLegsServed()
     {
-        return SSTABLE_LEGS_SERVED.get();
+        return SSTABLE_LEGS_SERVED.sum();
     }
 
     public static long cursorMergesServed()
     {
-        return CURSOR_MERGES_SERVED.get();
+        return CURSOR_MERGES_SERVED.sum();
     }
 
     static void countNamesTimestampOrderRead()
     {
-        NAMES_TIMESTAMP_ORDER_READS.incrementAndGet();
+        NAMES_TIMESTAMP_ORDER_READS.increment();
     }
 
     @VisibleForTesting
     public static long namesTimestampOrderReads()
     {
-        return NAMES_TIMESTAMP_ORDER_READS.get();
+        return NAMES_TIMESTAMP_ORDER_READS.sum();
     }
 
     public static long sstableLegsCursorMerged()
     {
-        return SSTABLE_LEGS_CURSOR_MERGED.get();
+        return SSTABLE_LEGS_CURSOR_MERGED.sum();
     }
 
     public static long memtableLegsCursorMerged()
     {
-        return MEMTABLE_LEGS_CURSOR_MERGED.get();
+        return MEMTABLE_LEGS_CURSOR_MERGED.sum();
     }
 
     public static long memtableRowsReused()
     {
-        return MEMTABLE_ROWS_REUSED.get();
+        return MEMTABLE_ROWS_REUSED.sum();
     }
 
     public static long memtableCellsReused()
     {
-        return MEMTABLE_CELLS_REUSED.get();
+        return MEMTABLE_CELLS_REUSED.sum();
     }
 
     public static long memtableLegsStreamed()
     {
-        return MEMTABLE_LEGS_STREAMED.get();
+        return MEMTABLE_LEGS_STREAMED.sum();
     }
 
     public static long memtableRowsCloned()
     {
-        return MEMTABLE_ROWS_CLONED.get();
+        return MEMTABLE_ROWS_CLONED.sum();
     }
 
     static void countMemtableLegStreamed()
     {
-        MEMTABLE_LEGS_STREAMED.incrementAndGet();
+        MEMTABLE_LEGS_STREAMED.increment();
     }
 
     static void countMemtableRowsCloned(long rows)
     {
-        MEMTABLE_ROWS_CLONED.addAndGet(rows);
+        MEMTABLE_ROWS_CLONED.add(rows);
     }
 
     public static long mergesStoppedByLimit()
     {
-        return MERGES_STOPPED_BY_LIMIT.get();
+        return MERGES_STOPPED_BY_LIMIT.sum();
     }
 
     public static long filterPushdownEngaged()
     {
-        return FILTER_PUSHDOWNS_ENGAGED.get();
+        return FILTER_PUSHDOWNS_ENGAGED.sum();
     }
 
     public static long partitionsSkippedByFilter()
     {
-        return PARTITIONS_SKIPPED_BY_FILTER.get();
+        return PARTITIONS_SKIPPED_BY_FILTER.sum();
     }
 
     public static long rowsDroppedByFilter()
     {
-        return ROWS_DROPPED_BY_FILTER.get();
+        return ROWS_DROPPED_BY_FILTER.sum();
     }
 
     public static long rowsDroppedByRegularColumnFilter()
     {
-        return ROWS_DROPPED_BY_REGULAR_FILTER.get();
+        return ROWS_DROPPED_BY_REGULAR_FILTER.sum();
     }
 
     /** Counter hooks for {@code CursorReadMerger}'s escape-hatch emissions. */
     static void countMemtableRowReuse()
     {
-        MEMTABLE_ROWS_REUSED.incrementAndGet();
+        MEMTABLE_ROWS_REUSED.increment();
     }
 
     static void countMemtableCellReuse()
     {
-        MEMTABLE_CELLS_REUSED.incrementAndGet();
+        MEMTABLE_CELLS_REUSED.increment();
     }
 
     public static long sstableLegsWithoutPartition()
     {
-        return SSTABLE_LEGS_WITHOUT_PARTITION.get();
+        return SSTABLE_LEGS_WITHOUT_PARTITION.sum();
     }
 
     static void countSstableLegFellBackToIterator()
     {
-        SSTABLE_LEGS_FELL_BACK_TO_ITERATOR.incrementAndGet();
+        SSTABLE_LEGS_FELL_BACK_TO_ITERATOR.increment();
     }
 
     public static long sstableLegsFellBackToIterator()
     {
-        return SSTABLE_LEGS_FELL_BACK_TO_ITERATOR.get();
+        return SSTABLE_LEGS_FELL_BACK_TO_ITERATOR.sum();
     }
 
     public static long sstableLegRowIndexSeeks()
     {
-        return SSTABLE_LEG_ROW_INDEX_SEEKS.get();
+        return SSTABLE_LEG_ROW_INDEX_SEEKS.sum();
     }
 
     public static long unfilteredsMaterialized()
     {
-        return UNFILTEREDS_MATERIALIZED.get();
+        return UNFILTEREDS_MATERIALIZED.sum();
     }
 
     /** Test only: corrupts materialized cell timestamps (+1) so the differential harness can prove
@@ -778,7 +778,7 @@ public final class CursorReads
             btiEntry = BtiCursorSeekSupport.exactPartitionEntry(bti, key, listener);
             if (btiEntry == null)
             {
-                SSTABLE_LEGS_WITHOUT_PARTITION.incrementAndGet();
+                SSTABLE_LEGS_WITHOUT_PARTITION.increment();
                 return null;
             }
             position = btiEntry.dataPosition;
@@ -790,7 +790,7 @@ public final class CursorReads
             position = sstable.getPosition(key, SSTableReader.Operator.EQ, listener);
             if (position < 0)
             {
-                SSTABLE_LEGS_WITHOUT_PARTITION.incrementAndGet();
+                SSTABLE_LEGS_WITHOUT_PARTITION.increment();
                 return null;
             }
         }
@@ -813,7 +813,7 @@ public final class CursorReads
             // surfacing here is unexpected IO.
             throw new RuntimeException("cursor read failed for " + sstable, e);
         }
-        SSTABLE_LEGS_SERVED.incrementAndGet();
+        SSTABLE_LEGS_SERVED.increment();
         return leg;
     }
 
@@ -1972,7 +1972,7 @@ public final class CursorReads
         public void beginDroppedRow(MergeLeg clusteringSource, boolean onEmittedSurface,
                                     LivenessInfo mergedLiveness, DeletionTime mergedRowDeletion)
         {
-            ROWS_DROPPED_BY_FILTER.incrementAndGet();
+            ROWS_DROPPED_BY_FILTER.increment();
             if (onEmittedSurface)
                 openSurface(); // the artificial slice-start open precedes this row's counts
             acc.beginDroppedRow(clusteringSource, onEmittedSurface, mergedLiveness, mergedRowDeletion);
@@ -2047,8 +2047,8 @@ public final class CursorReads
         public void abandonRowGroup(MergeLeg clusteringSource, boolean onEmittedSurface,
                                     CellLivenessInfo failedWinnerLiveness)
         {
-            ROWS_DROPPED_BY_FILTER.incrementAndGet();
-            ROWS_DROPPED_BY_REGULAR_FILTER.incrementAndGet();
+            ROWS_DROPPED_BY_FILTER.increment();
+            ROWS_DROPPED_BY_REGULAR_FILTER.increment();
             if (onEmittedSurface)
                 openSurface(); // the artificial slice-start open precedes this row's counts
             if (sawStartRow)
@@ -2101,8 +2101,8 @@ public final class CursorReads
         @Override
         public void abandonExistingRow(Row row, boolean onEmittedSurface)
         {
-            ROWS_DROPPED_BY_FILTER.incrementAndGet();
-            ROWS_DROPPED_BY_REGULAR_FILTER.incrementAndGet();
+            ROWS_DROPPED_BY_FILTER.increment();
+            ROWS_DROPPED_BY_REGULAR_FILTER.increment();
             if (onEmittedSurface)
                 openSurface();
             LivenessInfo pk = row.primaryKeyLivenessInfo();
@@ -2419,7 +2419,7 @@ public final class CursorReads
             }
             else if (partitionFailsFilter)
             {
-                PARTITIONS_SKIPPED_BY_FILTER.incrementAndGet();
+                PARTITIONS_SKIPPED_BY_FILTER.increment();
             }
         }
         if (merger != null)
@@ -2574,7 +2574,7 @@ public final class CursorReads
         Row mergedStatic = mergedStaticRow(legs, columnFilter, sink, mergedDeletion);
         boolean partitionSkippedByFilter = partitionFailsFilter(filterPushdown, key, mergedStatic);
         if (partitionSkippedByFilter)
-            PARTITIONS_SKIPPED_BY_FILTER.incrementAndGet();
+            PARTITIONS_SKIPPED_BY_FILTER.increment();
         return setUpMergeRows(legs, metadata, key, columnFilter, filterPushdown, sink, null, false,
                               mergedDeletion, mergedStatic, partitionSkippedByFilter);
     }
@@ -2626,7 +2626,7 @@ public final class CursorReads
     {
         if (filterPushdown == null)
             return false;
-        FILTER_PUSHDOWNS_ENGAGED.incrementAndGet();
+        FILTER_PUSHDOWNS_ENGAGED.increment();
         return !filterPushdown.partitionLevelMatches(key, mergedStatic);
     }
 
@@ -3514,7 +3514,7 @@ public final class CursorReads
             {
                 throw new IllegalStateException("reverse pop seek yielded state " + state);
             }
-            UNFILTEREDS_MATERIALIZED.incrementAndGet();
+            UNFILTEREDS_MATERIALIZED.increment();
             UnfilteredValidation.maybeValidateUnfiltered(result, metadata, key, sstable);
             return result.isEmpty() ? null : result;
         }
@@ -4015,7 +4015,7 @@ public final class CursorReads
                 {
                     deferred = false;
                     deferredExhausted = true;
-                    SSTABLE_LEGS_WITHOUT_PARTITION.incrementAndGet();
+                    SSTABLE_LEGS_WITHOUT_PARTITION.increment();
                     return;
                 }
                 position = btiEntry.dataPosition;
@@ -4027,12 +4027,12 @@ public final class CursorReads
                 {
                     deferred = false;
                     deferredExhausted = true;
-                    SSTABLE_LEGS_WITHOUT_PARTITION.incrementAndGet();
+                    SSTABLE_LEGS_WITHOUT_PARTITION.increment();
                     return;
                 }
             }
             open(position);
-            SSTABLE_LEGS_SERVED.incrementAndGet();
+            SSTABLE_LEGS_SERVED.increment();
             deferred = false;
         }
 
@@ -4289,7 +4289,7 @@ public final class CursorReads
         public void seekTo(BtiCursorSeekSupport.SeekPoint point) throws IOException
         {
             cursor.seekUnfiltered(point.dataPosition);
-            SSTABLE_LEG_ROW_INDEX_SEEKS.incrementAndGet();
+            SSTABLE_LEG_ROW_INDEX_SEEKS.increment();
             hasOpenDeletion = point.openMarker != null && !TEST_DROP_MERGE_SEEK_OPEN_MARKER;
             if (!hasOpenDeletion)
                 return;
@@ -5514,7 +5514,7 @@ public final class CursorReads
         /** The merge counters, advanced once a merged read closes without failing. */
         private void countServedMerge()
         {
-            CURSOR_MERGES_SERVED.incrementAndGet();
+            CURSOR_MERGES_SERVED.increment();
             int sstableLegCount = 0;
             int memtableLegCount = 0;
             for (MergeLeg leg : legs)
@@ -5526,13 +5526,13 @@ public final class CursorReads
                 else
                     memtableLegCount++;
             }
-            SSTABLE_LEGS_CURSOR_MERGED.addAndGet(sstableLegCount);
-            MEMTABLE_LEGS_CURSOR_MERGED.addAndGet(memtableLegCount);
+            SSTABLE_LEGS_CURSOR_MERGED.add(sstableLegCount);
+            MEMTABLE_LEGS_CURSOR_MERGED.add(memtableLegCount);
             if ((merger != null || rowsPendingWithRowLegs()) && !exhausted && !partitionFailsFilter)
-                MERGES_STOPPED_BY_LIMIT.incrementAndGet();
+                MERGES_STOPPED_BY_LIMIT.increment();
             // no row was read for a partition the filter drops
             if (partitionFailsFilter && rowsPending)
-                PARTITIONS_SKIPPED_BY_FILTER.incrementAndGet();
+                PARTITIONS_SKIPPED_BY_FILTER.increment();
         }
 
         @Override
@@ -5541,8 +5541,8 @@ public final class CursorReads
             if (closed)
                 return;
             closed = true;
-            UNFILTEREDS_MATERIALIZED.addAndGet(sink.materializedCount());
-            MERGE_SINK_ROWS_BUILT.addAndGet(sink.rowsBuilt());
+            UNFILTEREDS_MATERIALIZED.add(sink.materializedCount());
+            MERGE_SINK_ROWS_BUILT.add(sink.rowsBuilt());
             if (countsAsMerge() && !failed)
                 countServedMerge();
             RuntimeException failure = null;
