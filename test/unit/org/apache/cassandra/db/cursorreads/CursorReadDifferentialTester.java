@@ -28,7 +28,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 
 import org.junit.After;
@@ -178,19 +178,19 @@ public abstract class CursorReadDifferentialTester extends CQLTester
     }
 
     /** The production counters of {@link CursorReads}, which the cursor path moves. */
-    private static final List<AtomicLong> CURSOR_COUNTERS = cursorCounters();
+    private static final List<LongAdder> CURSOR_COUNTERS = cursorCounters();
 
-    private static List<AtomicLong> cursorCounters()
+    private static List<LongAdder> cursorCounters()
     {
-        List<AtomicLong> counters = new ArrayList<>();
+        List<LongAdder> counters = new ArrayList<>();
         try
         {
             for (Field field : CursorReads.class.getDeclaredFields())
             {
-                if (Modifier.isStatic(field.getModifiers()) && field.getType() == AtomicLong.class)
+                if (Modifier.isStatic(field.getModifiers()) && field.getType() == LongAdder.class)
                 {
                     field.setAccessible(true);
-                    counters.add((AtomicLong) field.get(null));
+                    counters.add((LongAdder) field.get(null));
                 }
             }
         }
@@ -198,6 +198,8 @@ public abstract class CursorReadDifferentialTester extends CQLTester
         {
             throw new AssertionError(e);
         }
+        if (counters.isEmpty())
+            throw new AssertionError("found no counters in CursorReads to restore");
         return counters;
     }
 
@@ -205,14 +207,17 @@ public abstract class CursorReadDifferentialTester extends CQLTester
     {
         long[] values = new long[CURSOR_COUNTERS.size()];
         for (int i = 0; i < values.length; i++)
-            values[i] = CURSOR_COUNTERS.get(i).get();
+            values[i] = CURSOR_COUNTERS.get(i).sum();
         return values;
     }
 
     private static void setCounterValues(long[] values)
     {
         for (int i = 0; i < values.length; i++)
-            CURSOR_COUNTERS.get(i).set(values[i]);
+        {
+            CURSOR_COUNTERS.get(i).reset();
+            CURSOR_COUNTERS.get(i).add(values[i]);
+        }
     }
 
     /** What one path's run of {@link #assertCursorReadMatchesIterator} produced. */
