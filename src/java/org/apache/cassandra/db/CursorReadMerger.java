@@ -829,7 +829,7 @@ final class CursorReadMerger
             {
                 // the row's cells go to the sink as stored: prepareRowGroup and foldComplexDeletion
                 // apply no deletion to a single leg
-                mergeRowGroup(1);
+                streamStoredRow();
                 if (singleLeg.cursorState() == UNFILTERED_END)
                     singleLeg.continueReading();
                 return true;
@@ -952,6 +952,9 @@ final class CursorReadMerger
 
     private int prepareAndSortCellsForMerge(int rowMergeLimit, int prevCellMergeLimit)
     {
+        // one leg is in order: the sort would move nothing
+        if (rowMergeLimit == 1)
+            return legs[0].parkedAtCellPosition() ? 1 : 0;
         cellSort.sortPerturbed(legs, equalsNext, prevCellMergeLimit, rowMergeLimit);
         if (!legs[0].parkedAtCellPosition())
             return 0;
@@ -1095,6 +1098,88 @@ final class CursorReadMerger
         {
             sink.endRow();
         }
+    }
+
+    /**
+     * {@link #mergeRowGroup} for a row of {@link #singleLeg}, read as stored, for a sink that
+     * streams cells.  It does what that method does for a group of one leg read as stored with no
+     * filter probe: no deletion shadows the row or its cells, and each cell goes to the sink as
+     * the leg holds it.  The walk calls the leg as its own class rather than as a
+     * {@code MergeLeg}, so each call goes straight to it.
+     */
+    private void streamStoredRow() throws IOException
+    {
+        CursorReads.PendingLeg leg = singleLeg;
+        DeletionTime rowActiveDeletion = prepareRowGroup(1);
+        boolean livenessSurvives = !groupMergedInfo.isEmpty() && !rowActiveDeletion.deletes(groupMergedInfo);
+        DeletionTime rowDeletionOut = groupDeletionSurvives ? groupMergedDeletion : DeletionTime.LIVE;
+        LivenessInfo livenessOut = livenessSurvives ? groupMergedInfo : LivenessInfo.EMPTY;
+        if (!livenessOut.isEmpty() || !rowDeletionOut.isLive())
+            startRow(livenessOut, rowDeletionOut);
+
+        rowAbandonedByFilter = false;
+        currentComplexColumn = null;
+        foldLegs = legs;
+        foldCount = 1;
+        for (;;)
+        {
+            if (leg.needsCellAdvance())
+                leg.ensureParkedAtCell(groupValidateInSlice);
+            if (!leg.parkedAtCellPosition())
+                break;
+            streamStoredCell(leg, rowActiveDeletion);
+            leg.advancePastCellPosition();
+        }
+        if (rowStarted)
+            sink.endRow();
+    }
+
+    /** {@link #mergeCellGroup} for the cell {@code leg} is parked at, in {@link #streamStoredRow}. */
+    private void streamStoredCell(CursorReads.PendingLeg leg, DeletionTime rowActiveDeletion) throws IOException
+    {
+        ColumnMetadata column = leg.cellColumn();
+        if (column.type.isCounter())
+        {
+            mergeCounterCells(1, rowActiveDeletion);
+            return;
+        }
+        DeletionTime effectiveDeletion = rowActiveDeletion;
+        if (column.isComplex())
+        {
+            effectiveDeletion = foldComplexDeletion(column, 1, rowActiveDeletion);
+            if (complexDeletionNeedsReport)
+            {
+                ensureRowStarted();
+                sink.addComplexDeletion(column, CursorReads.copyOf(mergedComplexDeletion));
+            }
+            if (!leg.cellProduced())
+            {
+                // see mergeCellGroup: a row read as stored keeps a column with a live deletion and no cells
+                if (leg.keepsColumnWithNoCells())
+                {
+                    ensureRowStarted();
+                    sink.addComplexDeletion(column, DeletionTime.LIVE);
+                }
+                return;
+            }
+        }
+        CellLivenessInfo liveness = leg.cellLiveness();
+        long timestamp = liveness.timestamp();
+        if (effectiveDeletion.deletesCellAt(timestamp))
+        {
+            leg.discardCellValue();
+            return;
+        }
+        int ttl = liveness.ttl();
+        long localDeletionTime = liveness.localDeletionTime();
+        CellPath path = leg.cellPath();
+        if (CursorReads.TEST_CORRUPT_CELL_TIMESTAMPS)
+            timestamp += 1;
+        ensureRowStarted();
+        winnerCellValueSource.resetToStoredLeg(leg);
+        sink.addCellFromWire(column, timestamp, ttl, localDeletionTime, path, winnerCellValueSource);
+        // see mergeCellGroup: a value the sink did not read must be skipped before the leg moves on
+        leg.discardCellValue();
     }
 
     /**
@@ -2272,17 +2357,28 @@ final class CursorReadMerger
     {
         private CellValueScratch scratch;
         private CursorReads.MergeLeg leg;
+        /** {@link #leg} when it is the single leg, called as its own class; else null. */
+        private CursorReads.PendingLeg storedLeg;
 
         void resetToScratch(CellValueScratch scratch)
         {
             this.scratch = scratch;
             this.leg = null;
+            this.storedLeg = null;
         }
 
         void resetToLeg(CursorReads.MergeLeg leg)
         {
             this.scratch = null;
             this.leg = leg;
+            this.storedLeg = null;
+        }
+
+        void resetToStoredLeg(CursorReads.PendingLeg leg)
+        {
+            this.scratch = null;
+            this.leg = leg;
+            this.storedLeg = leg;
         }
 
         @Override
@@ -2291,7 +2387,9 @@ final class CursorReadMerger
             // A zero-length staged scratch and "no value at all" are indistinguishable on the
             // wire (see CellValueScratch#streamTo) and are therefore indistinguishable here too —
             // correct either way, since both mean nothing is written.
-            return scratch != null ? scratch.length() > 0 : leg.cellHasValue();
+            if (scratch != null)
+                return scratch.length() > 0;
+            return storedLeg != null ? storedLeg.cellHasValue() : leg.cellHasValue();
         }
 
         @Override
@@ -2319,7 +2417,10 @@ final class CursorReadMerger
                 testCorruptionScratch.streamTo(dest);
                 return;
             }
-            leg.stageCellValue(dest);
+            if (storedLeg != null)
+                storedLeg.stageCellValue(dest);
+            else
+                leg.stageCellValue(dest);
         }
 
         @Override
