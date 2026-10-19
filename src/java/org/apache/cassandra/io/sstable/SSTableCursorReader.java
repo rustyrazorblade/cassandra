@@ -566,6 +566,8 @@ public class SSTableCursorReader implements AutoCloseable
     private long sequentialStart;
     /** The chunk length of a compressed sstable, for the chunk cache checks. */
     private int readAheadChunkLength;
+    /** The disk access mode of the read-ahead reader; null for the data file's own mode. */
+    private DiskAccessMode readAheadDiskAccessMode;
     /** Where the read ends, asked only when the read is about to move to the read-ahead reader. */
     private ReadEnd readEnd;
     /** The rows the read returns, shared with the read's other readers; null for no limit. */
@@ -672,10 +674,14 @@ public class SSTableCursorReader implements AutoCloseable
     /**
      * {@link #forRead} for a range read over the whole data file: it reads nothing until the first
      * {@link #seekToPartition}, which must come next, and then moves from partition to partition.
+     * Once it moves to the read-ahead reader, that reader uses {@code range_read_disk_access_mode};
+     * with direct I/O a long range read bypasses the page cache, as compaction reads do.
      */
     public static SSTableCursorReader forRangeRead(SSTableReader reader)
     {
-        return new SSTableCursorReader(reader, reader.metadata(), null, null, null, false, false).moveToReadAheadOnLongReads();
+        SSTableCursorReader cursor = new SSTableCursorReader(reader, reader.metadata(), null, null, null, false, false);
+        cursor.readAheadDiskAccessMode = DatabaseDescriptor.getRangeReadDiskAccessMode();
+        return cursor.moveToReadAheadOnLongReads();
     }
 
     /**
@@ -777,7 +783,7 @@ public class SSTableCursorReader implements AutoCloseable
             return;
         }
         moveToReadAheadAfter = 0;
-        RandomAccessReader readAhead = ssTableReader.openDataReaderForScan();
+        RandomAccessReader readAhead = ssTableReader.openDataReaderForScan(readAheadDiskAccessMode);
         if (limit > position)
         {
             readAhead.limitReadAhead(limit);
@@ -890,6 +896,13 @@ public class SSTableCursorReader implements AutoCloseable
             dataReader.close();
             throw e;
         }
+    }
+
+    /** The data file reader the cursor reads with now, to tell which kind it is. */
+    @VisibleForTesting
+    public RandomAccessReader dataReader()
+    {
+        return dataReader;
     }
 
     @Override
