@@ -275,6 +275,9 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
 
     protected final FileHandle dfile;
 
+    /** Whether the data file can be read with direct I/O; null until checked.  The check creates a file. */
+    private volatile Boolean dataFileSupportsDirectIO;
+
     // technically isCompacted is not necessary since it should never be unreferenced unless it is also compacted,
     // but it seems like a good extra layer of protection against reference counting bugs to not delete data based on that alone
     public final AtomicBoolean isSuspect = new AtomicBoolean(false);
@@ -1495,7 +1498,15 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     {
         return diskAccessMode == null
                || diskAccessMode == dfile.diskAccessMode()
-               || (diskAccessMode == DiskAccessMode.direct && !dfile.supportsDirectIO());
+               || (diskAccessMode == DiskAccessMode.direct && !dataFileSupportsDirectIO());
+    }
+
+    private boolean dataFileSupportsDirectIO()
+    {
+        Boolean supported = dataFileSupportsDirectIO;
+        if (supported == null)
+            dataFileSupportsDirectIO = supported = dfile.supportsDirectIO();
+        return supported;
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)
