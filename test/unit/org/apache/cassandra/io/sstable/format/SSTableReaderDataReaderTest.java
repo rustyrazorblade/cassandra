@@ -24,6 +24,7 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.Config.DiskAccessMode;
@@ -33,6 +34,7 @@ import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.RowUpdateBuilder;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.io.util.ChannelProxy;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.schema.KeyspaceParams;
@@ -47,6 +49,10 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 
 /**
  * Tests for {@code SSTableReader#canReuseDfile} / {@code SSTableReader#openDataReaderInternal}.
@@ -234,6 +240,25 @@ public class SSTableReaderDataReaderTest
         try (RandomAccessReader reader = sstable.openDataReaderForScan(DiskAccessMode.direct))
         {
             assertReaderHasOwnChannel(sstable, reader);
+        }
+    }
+
+    @Test
+    public void testDirectIOSupportCheckedOncePerSSTable()
+    {
+        SSTableReader sstable = createSSTable(CF_COMPRESSED);
+
+        try (MockedStatic<FileUtils> fileUtils = mockStatic(FileUtils.class, CALLS_REAL_METHODS))
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                try (RandomAccessReader reader = sstable.openDataReaderForScan(DiskAccessMode.direct))
+                {
+                    assertReaderHasOwnChannel(sstable, reader);
+                }
+            }
+            // the check creates and deletes a file, too costly for every read
+            fileUtils.verify(() -> FileUtils.isDirectIOSupported(any()), times(1));
         }
     }
 
