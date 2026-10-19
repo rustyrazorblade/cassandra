@@ -493,6 +493,8 @@ public class Config
     public int commitlog_max_compression_buffers_in_pool = 3;
     public DiskAccessMode commitlog_disk_access_mode = DiskAccessMode.legacy;
     public DiskAccessMode compaction_read_disk_access_mode = DiskAccessMode.auto;
+    /** Data file reads of cursor range reads: direct (the default) or auto, which inherits disk_access_mode. */
+    public DiskAccessMode range_read_disk_access_mode = DiskAccessMode.direct;
     @Replaces(oldName = "periodic_commitlog_sync_lag_block_in_ms", converter = Converters.MILLIS_DURATION_INT, deprecated = true)
     public DurationSpec.IntMillisecondsBound periodic_commitlog_sync_lag_block;
     public TransparentDataEncryptionOptions transparent_data_encryption_options = new TransparentDataEncryptionOptions();
