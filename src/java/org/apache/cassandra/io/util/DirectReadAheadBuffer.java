@@ -21,12 +21,8 @@ package org.apache.cassandra.io.util;
 import java.nio.ByteBuffer;
 
 import org.agrona.BitUtil;
-import org.agrona.BufferUtil;
 
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
-import org.apache.cassandra.utils.memory.MemoryUtil;
-
-import sun.nio.ch.DirectBuffer;
 
 public final class DirectReadAheadBuffer extends ReadAheadBuffer
 {
@@ -35,7 +31,8 @@ public final class DirectReadAheadBuffer extends ReadAheadBuffer
 
     public DirectReadAheadBuffer(ChannelProxy channel, int bufferSize, int blockSize)
     {
-        super(channel, () -> BufferUtil.allocateDirectAligned(BitUtil.align(bufferSize, blockSize), blockSize));
+        // kept per thread like the buffered read-ahead buffers, so a short read neither allocates nor zeroes one
+        super(channel, () -> keptOrNewAligned(BitUtil.align(bufferSize, blockSize), blockSize), true);
         this.blockSize = blockSize;
     }
 
@@ -55,13 +52,5 @@ public final class DirectReadAheadBuffer extends ReadAheadBuffer
 
         if (channel.read(blockBuffer, blockPosition) < sizeToRead)
             throw new CorruptSSTableException(null, channel.filePath());
-    }
-
-    @Override
-    protected void cleanBuffer(ByteBuffer buffer)
-    {
-        // BufferUtil.allocateDirectAligned returns an aligned slice with no cleaner; free the backing
-        // allocation through the attachment, matching DirectThreadLocalByteBufferHolder.
-        MemoryUtil.clean((ByteBuffer) ((DirectBuffer) buffer).attachment());
     }
 }

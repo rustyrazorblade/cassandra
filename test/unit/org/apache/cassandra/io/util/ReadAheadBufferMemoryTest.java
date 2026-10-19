@@ -45,6 +45,7 @@ import io.netty.util.concurrent.FastThreadLocalThread;
 import static org.apache.cassandra.config.CassandraRelevantProperties.JAVA_IO_TMPDIR;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 
 /**
  * Direct memory held by the read-ahead buffers that threads keep for reuse, measured with the JDK
@@ -181,6 +182,63 @@ public class ReadAheadBufferMemoryTest
         });
 
         assertEquals("1000 reads on one thread reserve one buffer", BUFFER_SIZE, mostAllocated.get(), SLACK);
+    }
+
+    @Test
+    public void repeatedDirectReadsOnOneThreadReuseOneAlignedBuffer() throws Throwable
+    {
+        assumeTrue("direct I/O is supported for " + file, FileUtils.isDirectIOSupported(file));
+        DatabaseDescriptor.setCompressedReadAheadBufferPoolSize(new DataStorageSpec.LongMebibytesBound("64MiB"));
+        int blockSize = FileUtils.getFileBlockSize(file);
+        AtomicLong mostAllocated = new AtomicLong();
+        long before = DIRECT.getMemoryUsed();
+
+        runOnThreadThatKeepsBuffers(() -> {
+            try (ChannelProxy channel = new ChannelProxy(file, ChannelProxy.IOMode.DIRECT))
+            {
+                for (int i = 0; i < 1000; i++)
+                {
+                    DirectReadAheadBuffer buffer = new DirectReadAheadBuffer(channel, BUFFER_SIZE, blockSize);
+                    buffer.fill((i % 256) * (long) blockSize);
+                    assertEquals("the buffer is block aligned", 0, buffer.bufferAddress() % blockSize);
+                    buffer.close();
+                    mostAllocated.accumulateAndGet(DIRECT.getMemoryUsed() - before, Math::max);
+                }
+            }
+            assertEquals("the thread keeps its aligned buffer for the next read", 1, (int) ReadAheadBuffer.metrics.bufferCount.getValue());
+        });
+
+        assertEquals("1000 direct reads on one thread reserve one aligned buffer", BUFFER_SIZE + blockSize, mostAllocated.get(), SLACK);
+        assertTrue("the thread's exit frees its kept aligned buffer", DIRECT.getMemoryUsed() - before <= SLACK);
+        assertEquals(0L, (long) ReadAheadBuffer.metrics.size.getValue());
+    }
+
+    /** A kept aligned buffer can serve a buffered read-ahead buffer, which must free it when it cannot keep it. */
+    @Test
+    public void bufferedReadFreesAKeptAlignedBuffer() throws Throwable
+    {
+        assumeTrue("direct I/O is supported for " + file, FileUtils.isDirectIOSupported(file));
+        DatabaseDescriptor.setCompressedReadAheadBufferPoolSize(new DataStorageSpec.LongMebibytesBound("64MiB"));
+        int blockSize = FileUtils.getFileBlockSize(file);
+        long before = DIRECT.getMemoryUsed();
+
+        runOnThreadThatKeepsBuffers(() -> {
+            try (ChannelProxy direct = new ChannelProxy(file, ChannelProxy.IOMode.DIRECT);
+                 ChannelProxy buffered = new ChannelProxy(file))
+            {
+                DirectReadAheadBuffer aligned = new DirectReadAheadBuffer(direct, BUFFER_SIZE, blockSize);
+                aligned.fill(0);
+                aligned.close();
+                // nothing more may be kept, so the buffered reader frees the aligned buffer it took
+                DatabaseDescriptor.setCompressedReadAheadBufferPoolSize(new DataStorageSpec.LongMebibytesBound("0MiB"));
+                ReadAheadBuffer plain = new ReadAheadBuffer(buffered, BUFFER_SIZE, BufferType.OFF_HEAP);
+                plain.fill(0);
+                plain.close();
+            }
+        });
+
+        assertTrue("the aligned buffer is freed", DIRECT.getMemoryUsed() - before <= SLACK);
+        assertEquals(0L, (long) ReadAheadBuffer.metrics.size.getValue());
     }
 
     @Test
