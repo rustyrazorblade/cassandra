@@ -19,7 +19,9 @@ package org.apache.cassandra.io.sstable.format;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
+import org.awaitility.Awaitility;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -47,8 +49,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mockStatic;
@@ -260,6 +264,56 @@ public class SSTableReaderDataReaderTest
             // the check creates and deletes a file, too costly for every read
             fileUtils.verify(() -> FileUtils.isDirectIOSupported(any()), times(1));
         }
+    }
+
+    @Test
+    public void testDirectScansShareOneHandle()
+    {
+        SSTableReader sstable = createSSTable(CF_COMPRESSED);
+        assumeTrue(sstable.dfile.supportsDirectIO());
+
+        ChannelProxy shared = null;
+        for (int i = 0; i < 5; i++)
+        {
+            try (RandomAccessReader reader = sstable.openDataReaderForDirectScan())
+            {
+                assertNotNull(reader);
+                assertReaderHasOwnChannel(sstable, reader);
+                if (shared == null)
+                    shared = reader.getChannel();
+                assertSame("every direct scan reads through the one direct handle", shared, reader.getChannel());
+            }
+            assertFalse("closing a reader leaves the shared direct handle open", shared.isCleanedUp());
+        }
+    }
+
+    @Test
+    public void testNoDirectScanWithoutDirectIO()
+    {
+        SSTableReader sstable = createSSTable(CF_UNCOMPRESSED);
+        assertNull(sstable.openDataReaderForDirectScan());
+    }
+
+    @Test
+    public void testDirectHandleReleasedWithTheSSTable()
+    {
+        SSTableReader live = createSSTable(CF_COMPRESSED);
+        assumeTrue(live.dfile.supportsDirectIO());
+        // a second reader of the same files, with its own reference, released below
+        SSTableReader sstable = SSTableReader.open(Keyspace.open(KEYSPACE).getColumnFamilyStore(CF_COMPRESSED), live.descriptor);
+
+        ChannelProxy direct;
+        try (RandomAccessReader reader = sstable.openDataReaderForDirectScan())
+        {
+            direct = reader.getChannel();
+        }
+        ChannelProxy data = sstable.dfile.channel;
+        assertFalse(direct.isCleanedUp());
+
+        sstable.selfRef().release();
+
+        Awaitility.await().atMost(30, TimeUnit.SECONDS).until(() -> data.isCleanedUp() && direct.isCleanedUp());
+        assertFalse("the live sstable keeps its own data file", live.dfile.channel.isCleanedUp());
     }
 
     private void assertReaderSharesDfileChannel(SSTableReader sstable, RandomAccessReader reader)
