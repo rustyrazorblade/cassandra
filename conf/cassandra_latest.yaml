@@ -715,10 +715,10 @@ cursor_range_reads_enabled: true
 # compaction_read_disk_access_mode: auto
 
 # Set the disk access mode for reading compressed SSTables during range reads on the cursor
-# path (cursor_range_reads_enabled).  It applies once a range read moves to read-ahead, after
-# one read-ahead buffer (compressed_read_ahead_buffer_size) of reads that miss the chunk cache;
-# shorter reads keep disk_access_mode and the chunk cache. The allowed values are:
-# - direct: use direct I/O, bypassing the OS page cache (default)
+# path (cursor_range_reads_enabled). The allowed values are:
+# - direct: use direct I/O from the first read, bypassing the OS page cache and the chunk
+#   cache (default).  Each seek reads one chunk first and reads further ahead as the read goes
+#   on, up to compressed_read_ahead_buffer_size.
 # - auto: inherit from disk_access_mode
 # range_read_disk_access_mode: direct
 
