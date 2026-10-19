@@ -19,6 +19,9 @@
 package org.apache.cassandra.db.cursorreads;
 
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -41,18 +44,23 @@ import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBou
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
 
+import jdk.jfr.Recording;
+import jdk.jfr.consumer.RecordedEvent;
+import jdk.jfr.consumer.RecordingFile;
+
 import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.DONE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 
 /**
- * A cursor range read that moves to the read-ahead reader opens it with
- * {@code range_read_disk_access_mode}: direct I/O by default, the data file's own mode under
- * {@code auto}.  Single-partition cursor reads keep the data file's own mode.  The chunk reader
- * under the cursor's data reader shows which kind it is.
+ * A cursor range read reads with {@code range_read_disk_access_mode}: direct I/O from its first
+ * read by default; under {@code auto} the data file's own mode, moving to the read-ahead reader on a
+ * long read.  Single-partition cursor reads keep the data file's own mode.  The chunk reader under
+ * the cursor's data reader shows which kind it is.
  */
 public class RangeReadDiskAccessModeTest extends CQLTester
 {
@@ -89,15 +97,77 @@ public class RangeReadDiskAccessModeTest extends CQLTester
     }
 
     @Test
-    public void longRangeReadReadsAheadWithDirectIO() throws Throwable
+    public void rangeReadIsDirectFromItsFirstRead() throws Throwable
     {
         SSTableReader sstable = writeSSTable();
         assumeTrue("direct I/O is supported for the data directory", FileUtils.isDirectIOSupported(sstable.descriptor.directory));
         DatabaseDescriptor.setRangeReadDiskAccessMode(DiskAccessMode.direct);
 
-        String reader = readAheadReaderOf(sstable, SSTableCursorReader::forRangeRead);
+        try (SSTableCursorReader cursor = SSTableCursorReader.forRangeRead(sstable))
+        {
+            RandomAccessReader first = cursor.dataReader();
+            assertTrue("the first reader of a range read is " + first, first.toString().contains(DIRECT_READER));
+            cursor.seekToPartition(0);
+            int partitions = 0;
+            while (cursor.skipPartition() != DONE)
+                partitions++;
+            assertTrue("the cursor read " + partitions + " partitions", partitions >= PARTITIONS - 1);
+            assertSame("a direct range read keeps its first reader", first, cursor.dataReader());
+        }
+    }
 
-        assertTrue("the read-ahead reader of a range read is " + reader, reader.contains(DIRECT_READER));
+    /** A LIMIT 10 range read reads a chunk or two of the data file with direct I/O, not a read-ahead buffer. */
+    @Test
+    public void limitedRangeReadReadsAFewChunks() throws Throwable
+    {
+        SSTableReader sstable = writeSSTable();
+        assumeTrue("direct I/O is supported for the data directory", FileUtils.isDirectIOSupported(sstable.descriptor.directory));
+        DatabaseDescriptor.setRangeReadDiskAccessMode(DiskAccessMode.direct);
+        DatabaseDescriptor.setCursorRangeReadsEnabled(true);
+        DatabaseDescriptor.setCursorReadsEnabled(true);
+
+        long served = CursorRangeReads.rangeReadsServed();
+        long bytes = dataFileBytesRead(() -> assertEquals(10, execute("SELECT pk, v FROM %s LIMIT 10").size()));
+
+        assertEquals("the cursor path served the read", 1, CursorRangeReads.rangeReadsServed() - served);
+        long bound = 3L * CHUNK_KIB * 1024;
+        assertTrue("a LIMIT 10 range read read " + bytes + " bytes of the data file, bound " + bound
+                   + " (the read-ahead buffer is " + DatabaseDescriptor.getCompressedReadAheadBufferSize() + ')',
+                   bytes > 0 && bytes <= bound);
+    }
+
+    /** The bytes the read takes from Data.db files on this thread, from the JFR file read events. */
+    private static long dataFileBytesRead(ThrowingRunnable read) throws Throwable
+    {
+        Path dump = Files.createTempFile("range-read-direct", ".jfr");
+        try (Recording recording = new Recording())
+        {
+            recording.enable("jdk.FileRead").withThreshold(Duration.ZERO);
+            if (ChunkCache.instance != null)
+                ChunkCache.instance.clear();
+            recording.start();
+            read.run();
+            recording.stop();
+            recording.dump(dump);
+            long bytes = 0;
+            for (RecordedEvent event : RecordingFile.readAllEvents(dump))
+            {
+                String file = event.getString("path");
+                if (file != null && file.endsWith("Data.db") && event.getThread() != null
+                    && event.getThread().getJavaThreadId() == Thread.currentThread().getId())
+                    bytes += Math.max(0, event.getLong("bytesRead"));
+            }
+            return bytes;
+        }
+        finally
+        {
+            Files.deleteIfExists(dump);
+        }
+    }
+
+    private interface ThrowingRunnable
+    {
+        void run() throws Throwable;
     }
 
     @Test
@@ -106,6 +176,10 @@ public class RangeReadDiskAccessModeTest extends CQLTester
         SSTableReader sstable = writeSSTable();
         DatabaseDescriptor.setRangeReadDiskAccessMode(DatabaseDescriptor.getDiskAccessMode());
 
+        try (SSTableCursorReader cursor = SSTableCursorReader.forRangeRead(sstable))
+        {
+            assertFalse("auto never reads direct", cursor.dataReader().toString().contains(DIRECT_READER));
+        }
         String reader = readAheadReaderOf(sstable, SSTableCursorReader::forRangeRead);
 
         assertTrue("the read-ahead reader of a range read under auto is " + reader, reader.contains(CHUNK_READER));

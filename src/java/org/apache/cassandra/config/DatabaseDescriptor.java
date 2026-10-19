@@ -3505,7 +3505,7 @@ public class DatabaseDescriptor
         conf.compaction_read_disk_access_mode = scanDiskAccessMode;
     }
 
-    /** The disk access mode of the data file reads of a cursor range read, once it reads ahead. */
+    /** The disk access mode of the data file reads of a cursor range read. */
     public static DiskAccessMode getRangeReadDiskAccessMode()
     {
         return rangeReadDiskAccessMode;
