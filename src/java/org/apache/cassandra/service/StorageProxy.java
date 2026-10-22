@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.cache.CacheLoader;
 import com.google.common.collect.Iterables;
@@ -2175,6 +2176,14 @@ public class StorageProxy implements StorageProxyMBean
         return concatAndBlockOnRepair(results, repairs);
     }
 
+    /**
+     * Test only: serve a local read as a replica serves a remote one
+     * ({@code ReadCommand.createResponseLocally}), so a CQL test on one node reads through the
+     * replica response path.
+     */
+    @VisibleForTesting
+    public static volatile boolean localReadsAsReplicaResponses = false;
+
     public static class LocalReadRunnable extends DroppableRunnable implements RunnableDebuggableTask
     {
         private final ReadCommand command;
@@ -2205,10 +2214,10 @@ public class StorageProxy implements StorageProxyMBean
                 command.setMonitoringTime(requestTime.startedAtNanos(), false, deadline - requestTime.startedAtNanos(), DatabaseDescriptor.getSlowQueryTimeout(NANOSECONDS));
 
                 ReadResponse response;
-                try (ReadExecutionController controller = command.executionController(trackRepairedStatus);
-                     UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+                try (ReadExecutionController controller = command.executionController(trackRepairedStatus))
                 {
-                    response = command.createResponse(iterator, controller.getRepairedDataInfo());
+                    response = localReadsAsReplicaResponses ? command.createResponseLocally(controller)
+                                                            : localResponse(controller);
                 }
                 catch (RejectException e)
                 {
@@ -2252,6 +2261,14 @@ public class StorageProxy implements StorageProxyMBean
                     handler.onFailure(FBUtilities.getBroadcastAddressAndPort(), RequestFailureReason.UNKNOWN);
                     throw t;
                 }
+            }
+        }
+
+        private ReadResponse localResponse(ReadExecutionController controller)
+        {
+            try (UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+            {
+                return command.createResponse(iterator, controller.getRepairedDataInfo());
             }
         }
 

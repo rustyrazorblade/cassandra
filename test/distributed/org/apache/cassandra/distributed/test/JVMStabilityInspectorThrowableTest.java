@@ -30,7 +30,9 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.Config.DiskFailurePolicy;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
@@ -50,6 +52,7 @@ import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.ForwardingSSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.service.CassandraDaemon;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.Throwables;
@@ -129,6 +132,11 @@ public class JVMStabilityInspectorThrowableTest extends TestBaseImpl
             {
                 // we expect that above query fails as we corrupted an sstable or throw FS error when read
             }
+
+            // the cursor read path opens the data file itself; the iterator path asks for a row iterator
+            boolean cursorReads = node.callOnInstance(DatabaseDescriptor::cursorReadsEnabled);
+            String failedIn = node.callOnInstance(() -> CorruptedSSTableReader.failedIn);
+            Assert.assertEquals("the read that failed", cursorReads ? "openDataReader" : "rowIterator", failedIn);
 
             waitForStop(!expectGossiperEnabled, node, new SerializableCallable<Boolean>()
             {
@@ -214,6 +222,8 @@ public class JVMStabilityInspectorThrowableTest extends TestBaseImpl
 
     private static final class CorruptedSSTableReader extends ForwardingSSTableReader
     {
+        /** The read method that threw, so the test can check which read path ran. */
+        static volatile String failedIn;
         private boolean shouldThrowCorrupted;
         public CorruptedSSTableReader(SSTableReader delegate, boolean shouldThrowCorrupted)
         {
@@ -224,6 +234,37 @@ public class JVMStabilityInspectorThrowableTest extends TestBaseImpl
         @Override
         public UnfilteredRowIterator rowIterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
         {
+            throw fail("rowIterator");
+        }
+
+        // the cursor read path reads the data file through these
+        @Override
+        public RandomAccessReader openDataReader()
+        {
+            throw fail("openDataReader");
+        }
+
+        @Override
+        public RandomAccessReader openDataReader(DiskAccessMode diskAccessMode)
+        {
+            throw fail("openDataReader");
+        }
+
+        @Override
+        public RandomAccessReader openDataReaderForScan()
+        {
+            throw fail("openDataReader");
+        }
+
+        @Override
+        public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode)
+        {
+            throw fail("openDataReader");
+        }
+
+        private RuntimeException fail(String method)
+        {
+            failedIn = method;
             if (shouldThrowCorrupted)
                 throw throwCorrupted();
             throw throwFSError();

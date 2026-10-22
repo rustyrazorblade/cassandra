@@ -67,6 +67,23 @@ public class DirectReadAheadBufferTest extends ReadAheadBufferTest
     }
 
     @Test
+    public void testLimitedDirectReadsLikeChannelProxy()
+    {
+        qt().withFixedSeed(seed).forAll(reads(), longs().between(1, Integer.MAX_VALUE)).checkAssert((inputs, limit) -> {
+            int blockSize = FileUtils.getFileBlockSize(inputs.file);
+            try (ChannelProxy bufferedChannel = new ChannelProxy(inputs.file);
+                 ChannelProxy directChannel = new ChannelProxy(inputs.file, ChannelProxy.IOMode.DIRECT))
+            {
+                ReadAheadBuffer rab = new DirectReadAheadBuffer(directChannel, blockSize * 64, blockSize);
+                rab.limitTo(limit);
+                for (Pair<Long, Integer> read : inputs.positionsAndLengths)
+                    testRead(read, bufferedChannel, rab);
+                rab.close();
+            }
+        });
+    }
+
+    @Test
     public void testDirectMemoryIsCleanedOnClose()
     {
         BufferPoolMXBean directPool = getDirectBufferPool();

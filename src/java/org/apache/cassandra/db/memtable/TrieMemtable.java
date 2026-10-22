@@ -323,6 +323,24 @@ public class TrieMemtable extends AbstractShardedMemtable
     }
 
     @Override
+    public boolean readsPartitionData()
+    {
+        return true;
+    }
+
+    @Override
+    public MemtablePartitionData partitionData(DecoratedKey key)
+    {
+        int shardIndex = boundaries.getShardForKey(key);
+        BTreePartitionData data = shards[shardIndex].data.get(key);
+        if (data == null)
+            return null;
+        EnsureOnHeap ensureOnHeap = allocator.ensureOnHeap();
+        MemtablePartition partition = createPartition(metadata(), ensureOnHeap, key, data);
+        return new MemtablePartitionData(partition.partitionKey(), data, ensureOnHeap, partition);
+    }
+
+    @Override
     public UnfilteredRowIterator rowIterator(DecoratedKey key, Slices slices, ColumnFilter selectedColumns, boolean reversed, SSTableReadsListener listener)
     {
         Partition p = getPartition(key);

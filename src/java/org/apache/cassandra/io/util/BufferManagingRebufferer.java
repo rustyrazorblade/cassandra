@@ -74,6 +74,12 @@ public abstract class BufferManagingRebufferer implements Rebufferer, Rebufferer
     }
 
     @Override
+    public void limitReadAhead(long position)
+    {
+        source.limitReadAhead(position);
+    }
+
+    @Override
     public BufferHolder rebuffer(long position)
     {
         offset = alignedPosition(position);

@@ -40,6 +40,24 @@ public interface Rebufferer extends ReaderFileProxy
      */
     void closeReader();
 
+    /**
+     * Whether the chunk holding {@code position} is in the chunk cache, without loading it.
+     * False when this rebufferer does not read through the chunk cache.
+     */
+    default boolean isChunkCached(long position)
+    {
+        return false;
+    }
+
+    /**
+     * Tells a read-ahead (scan) rebufferer that the reader needs nothing at or past the
+     * uncompressed {@code position}, so it reads no further ahead than the chunk before it.  No
+     * effect on a rebufferer that does not read ahead.
+     */
+    default void limitReadAhead(long position)
+    {
+    }
+
     interface BufferHolder
     {
         /**

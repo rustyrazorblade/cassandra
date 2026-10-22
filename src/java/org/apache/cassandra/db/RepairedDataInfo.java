@@ -277,38 +277,9 @@ class RepairedDataInfo
 
             public UnfilteredRowIterator moreContents()
             {
-                // We don't need to do anything until the DataLimits of the
-                // of the read have been reached
-                if (!limit.isDone() || repairedCounter.isDone())
-                    return null;
-
-                long countBeforeOverreads = repairedCounter.counted();
-                long overreadStartTime = nanoTime();
-                if (currentPartition != null)
-                    consumePartition(currentPartition, repairedCounter);
-
-                if (postLimitPartitions != null)
-                    while (postLimitPartitions.hasNext() && !repairedCounter.isDone())
-                        consumePartition(postLimitPartitions.next(), repairedCounter);
-
+                overreadRepaired(limit);
                 // we're not actually providing any more rows, just consuming the repaired data
-                long rows = repairedCounter.counted() - countBeforeOverreads;
-                long nanos = nanoTime() - overreadStartTime;
-                metrics.repairedDataTrackingOverreadRows.update(rows);
-                metrics.repairedDataTrackingOverreadTime.update(nanos, TimeUnit.NANOSECONDS);
-                Tracing.trace("Read {} additional rows of repaired data for tracking in {}ps", rows, TimeUnit.NANOSECONDS.toMicros(nanos));
                 return null;
-            }
-
-            private void consumePartition(UnfilteredRowIterator partition, DataLimits.Counter counter)
-            {
-                if (partition == null)
-                    return;
-
-                while (!counter.isDone() && partition.hasNext())
-                    partition.next();
-
-                partition.close();
             }
         }
         // If the read didn't touch any sstables prepare() hasn't been called and
@@ -316,6 +287,46 @@ class RepairedDataInfo
         if (metrics == null || repairedCounter.isDone())
             return partitions;
         return Transformation.apply(partitions, new OverreadRepairedData());
+    }
+
+    /**
+     * Once the read's own limit is reached, keeps reading the repaired data until the repaired
+     * counter is satisfied, so every replica digests the same amount of repaired data.  Does
+     * nothing before the limit is reached.  Called by {@link #extend}, and directly by a cursor
+     * read that does not run the iterator stack.
+     */
+    void overreadRepaired(DataLimits.Counter limit)
+    {
+        // We don't need to do anything until the DataLimits of the
+        // of the read have been reached
+        if (metrics == null || !limit.isDone() || repairedCounter.isDone())
+            return;
+
+        long countBeforeOverreads = repairedCounter.counted();
+        long overreadStartTime = nanoTime();
+        if (currentPartition != null)
+            consumePartition(currentPartition, repairedCounter);
+
+        if (postLimitPartitions != null)
+            while (postLimitPartitions.hasNext() && !repairedCounter.isDone())
+                consumePartition(postLimitPartitions.next(), repairedCounter);
+
+        long rows = repairedCounter.counted() - countBeforeOverreads;
+        long nanos = nanoTime() - overreadStartTime;
+        metrics.repairedDataTrackingOverreadRows.update(rows);
+        metrics.repairedDataTrackingOverreadTime.update(nanos, TimeUnit.NANOSECONDS);
+        Tracing.trace("Read {} additional rows of repaired data for tracking in {}ps", rows, TimeUnit.NANOSECONDS.toMicros(nanos));
+    }
+
+    private static void consumePartition(UnfilteredRowIterator partition, DataLimits.Counter counter)
+    {
+        if (partition == null)
+            return;
+
+        while (!counter.isDone() && partition.hasNext())
+            partition.next();
+
+        partition.close();
     }
 
     /**

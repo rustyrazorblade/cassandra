@@ -125,6 +125,67 @@ public abstract class ReadResponse
         return sb.toString();
     }
 
+    /**
+     * Wraps fully built wire bytes (the {@code UnfilteredPartitionIterators.Serializer} envelope around one
+     * partition's worth of transcode-produced bytes) directly, with {@link DeserializationHelper.Flag#LOCAL}
+     * semantics like {@link LocalDataResponse}, since this response is built on the replica that owns the data.
+     *
+     * @param data the serialized partitions, in order; written to the wire one after another
+     */
+    static ReadResponse createTranscodedDataResponse(ByteBuffer[] data, RepairedDataInfo rdi)
+    {
+        return new TranscodedDataResponse(data, rdi.getDigest(), rdi.isConclusive());
+    }
+
+    private static class TranscodedDataResponse extends DataResponse
+    {
+        /** The serialized data in parts, so a large response is never copied into one array. */
+        private final ByteBuffer[] parts;
+        private final int length;
+        /** The parts in one buffer, built only when something reads this response in process. */
+        private ByteBuffer joined;
+
+        private TranscodedDataResponse(ByteBuffer[] parts, ByteBuffer repairedDataDigest, boolean isRepairedDigestConclusive)
+        {
+            super(parts.length == 1 ? parts[0] : null, repairedDataDigest, isRepairedDigestConclusive,
+                  MessagingService.current_version, DeserializationHelper.Flag.LOCAL);
+            this.parts = parts;
+            int total = 0;
+            for (ByteBuffer part : parts)
+                total += part.remaining();
+            this.length = total;
+        }
+
+        @Override
+        protected ByteBuffer getSerializedData()
+        {
+            if (parts.length == 1)
+                return parts[0];
+            if (joined == null)
+            {
+                ByteBuffer buffer = ByteBuffer.allocate(length);
+                for (ByteBuffer part : parts)
+                    buffer.put(part.duplicate());
+                buffer.flip();
+                joined = buffer;
+            }
+            return joined;
+        }
+
+        @Override
+        protected int serializedDataLength()
+        {
+            return length;
+        }
+
+        @Override
+        protected void writeSerializedData(DataOutputPlus out) throws IOException
+        {
+            for (ByteBuffer part : parts)
+                out.write(part);
+        }
+    }
+
     protected static ByteBuffer makeDigest(UnfilteredPartitionIterator iterator, ReadCommand command)
     {
         Digest digest = Digest.forReadResponse();
@@ -247,7 +308,7 @@ public abstract class ReadResponse
 
         public UnfilteredPartitionIterator makeIterator(ReadCommand command)
         {
-            try (DataInputBuffer in = new DataInputBuffer(data, true))
+            try (DataInputBuffer in = new DataInputBuffer(getSerializedData(), true))
             {
                 // Note that the command parameter shadows the 'command' field and this is intended because
                 // the later can be null (for RemoteDataResponse as those are created in the serializers and
@@ -292,6 +353,23 @@ public abstract class ReadResponse
         {
             return false;
         }
+
+        protected ByteBuffer getSerializedData()
+        {
+            return data;
+        }
+
+        /** The length of the serialized data on the wire. */
+        protected int serializedDataLength()
+        {
+            return getSerializedData().remaining();
+        }
+
+        /** Writes the serialized data, without its length. */
+        protected void writeSerializedData(DataOutputPlus out) throws IOException
+        {
+            out.write(getSerializedData());
+        }
     }
 
     private static class Serializer implements IVersionedSerializer<ReadResponse>
@@ -316,8 +394,9 @@ public abstract class ReadResponse
                 ByteBufferUtil.writeWithVIntLength(response.repairedDataDigest(), out);
                 out.writeBoolean(response.isRepairedDigestConclusive());
 
-                ByteBuffer data = ((DataResponse)response).data;
-                ByteBufferUtil.writeWithVIntLength(data, out);
+                DataResponse data = (DataResponse) response;
+                out.writeUnsignedVInt32(data.serializedDataLength());
+                data.writeSerializedData(out);
             }
         }
 
@@ -356,8 +435,8 @@ public abstract class ReadResponse
                 // In theory, we should deserialize/re-serialize if the version asked is different from the current
                 // version as the content could have a different serialization format. So far though, we haven't made
                 // change to partition iterators serialization since 3.0 so we skip this.
-                ByteBuffer data = ((DataResponse)response).data;
-                size += ByteBufferUtil.serializedSizeWithVIntLength(data);
+                int length = ((DataResponse) response).serializedDataLength();
+                size += TypeSizes.sizeofUnsignedVInt(length) + length;
             }
             return size;
         }

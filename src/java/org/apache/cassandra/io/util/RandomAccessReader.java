@@ -45,6 +45,18 @@ public class RandomAccessReader extends RebufferingInputStream implements FileDa
      *
      * @param rebufferer Rebufferer to use
      */
+    /** See {@link Rebufferer#isChunkCached}. */
+    public boolean isChunkCached(long position)
+    {
+        return rebufferer.isChunkCached(position);
+    }
+
+    /** See {@link Rebufferer#limitReadAhead}. */
+    public void limitReadAhead(long position)
+    {
+        rebufferer.limitReadAhead(position);
+    }
+
     protected RandomAccessReader(Rebufferer rebufferer)
     {
         super(Rebufferer.EMPTY.buffer());

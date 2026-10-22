@@ -2616,6 +2616,26 @@ public class DatabaseDescriptor
         conf.compressed_read_ahead_buffer_size = createIntKibibyteBoundAndEnsureItIsValidForByteConversion(sizeInKb, "compressed_read_ahead_buffer_size");
     }
 
+    /** Upper bound, in bytes, on the read-ahead buffers kept by all threads for reuse. */
+    public static long getCompressedReadAheadBufferPoolSize()
+    {
+        DataStorageSpec.LongMebibytesBound size = conf.compressed_read_ahead_buffer_pool_size;
+        if (size != null)
+            return size.toBytes();
+
+        Integer compactors = conf.concurrent_compactors;
+        int compactionThreads = compactors == null ? 0 : compactors;
+        // validations above concurrent_compactors need a system property; count them as compactors
+        long threads = (long) conf.concurrent_reads + compactionThreads + Math.min(conf.concurrent_validations, compactionThreads);
+        return 2 * threads * getCompressedReadAheadBufferSize();
+    }
+
+    @VisibleForTesting
+    public static void setCompressedReadAheadBufferPoolSize(DataStorageSpec.LongMebibytesBound size)
+    {
+        conf.compressed_read_ahead_buffer_pool_size = size;
+    }
+
     public static long getMinFreeSpacePerDriveInMebibytes()
     {
         return conf.min_free_space_per_drive.toMebibytes();
@@ -4440,6 +4460,17 @@ public class DatabaseDescriptor
     public static void setCursorRepairEnabled(boolean cursor_repair_enabled)
     {
         conf.cursor_repair_enabled = cursor_repair_enabled;
+    }
+
+    public static boolean cursorReadsEnabled()
+    {
+        return conf.cursor_reads_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setCursorReadsEnabled(boolean cursor_reads_enabled)
+    {
+        conf.cursor_reads_enabled = cursor_reads_enabled;
     }
 
     public static boolean enableDropCompactStorage()

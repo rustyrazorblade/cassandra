@@ -1,0 +1,531 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.cassandra.db;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Iterator;
+
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.CellLivenessInfo;
+import org.apache.cassandra.db.rows.CellPath;
+import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.ComplexColumnData;
+import org.apache.cassandra.db.rows.EncodingStats;
+import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
+import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
+import org.apache.cassandra.db.rows.RangeTombstoneMarker;
+import org.apache.cassandra.db.rows.ReusableCellLivenessInfo;
+import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.Unfiltered;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.io.sstable.SSTableCursorReader;
+import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.utils.ByteBufferUtil;
+
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.CELL_HEADER_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.PARTITION_END;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.ROW_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.TOMBSTONE_START;
+import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTERED_END;
+
+/**
+ * The object-backed merge leg: wraps an {@link UnfilteredRowIterator} the merge reads as one of its
+ * sources (the merged repaired sstables of a read that tracks repaired data, through the
+ * repaired-data digest) and presents each {@code Row}/{@code Cell}/{@code RangeTombstoneMarker}
+ * as the descriptor-shaped {@link CursorReads.MergeLeg} state {@code CursorReadMerger} consumes.
+ * Memtables have their own leg, {@link NativeMemtableMergeLeg}, which reads the partition data
+ * itself; this class keeps the descriptor and marker helpers both share.
+ *
+ * <ul>
+ *   <li>Clustering comparison: each unfiltered's clustering is serialized once into the reusable
+ *       descriptor buffer (the {@code serializeValuesWithoutSize} wire form sstable descriptors
+ *       hold), so descriptors compare through the shared {@code ClusteringComparator.compare}.</li>
+ *   <li>{@link #materializeClusteringPrefix()} returns the row's own clustering object.</li>
+ *   <li>{@link #existingCell()}/{@link #consumeExistingRow()}: won cells and rows are emitted as
+ *       the source's own objects, mirroring the object merge ({@code Cells.reconcile} returns the
+ *       winner object; {@code Row.Merger.merge}'s single-version fast path returns the row
+ *       unchanged).</li>
+ * </ul>
+ *
+ * <b>Filtering</b>: none is applied here.  The wrapped iterator's rows are already filtered and
+ * sliced, exactly the stream the object merge consumes.
+ *
+ * <b>Validation</b>: {@link #validateRowHeader()}/{@link #validateMarkerHeader()} are no-ops: the
+ * wrapped iterator's sstable readers already validated what they read.
+ *
+ * <b>Range tombstones</b>: the source's markers enter the merge's cross-leg open-marker set as
+ * normal, always-current contributions; the leg never seeks, so {@link #openDeletion()} is null.
+ */
+public final class MemtableMergeLeg implements CursorReads.MergeLeg
+{
+    private final UnfilteredRowIterator iter;
+    private final Slices slices;
+    private final MemtableDescriptor desc;
+    private final AbstractType<?>[] clusteringTypes;
+    /** reusable wire-form staging for the descriptor's clustering bytes (grow-once) */
+    private final DataOutputBuffer clusteringScratch = new DataOutputBuffer(64);
+    /** reusable liveness view of the parked cell, reset per park */
+    private final ReusableCellLivenessInfo parkedCellLiveness = new ReusableCellLivenessInfo();
+
+    /** {@link SSTableCursorReader.State} vocabulary, per the MergeLeg contract. */
+    private int state;
+    private Unfiltered current;
+    private Row currentRow;
+
+    // ---- cell-walk state (valid while state == CELL_HEADER_START) ----
+    private Iterator<ColumnData> columnDataIter;
+    private Iterator<Cell<?>> complexCellIter;
+    private ColumnMetadata parkedColumn;
+    /** null at a deletion-only complex-column position ({@link #cellProduced()} == false) */
+    private Cell<?> parkedCell;
+    private DeletionTime parkedComplexDeletion = DeletionTime.LIVE;
+    private boolean parked;
+
+    /** The merge has moved past the current unfiltered; the next one is pulled with its header. */
+    private boolean pullPending;
+
+    /**
+     * Pulls each next unfiltered from {@code iter} only when the merge reads its header, not as
+     * soon as the merge has used the current one.  The iterator path's merge pulls its inputs this
+     * way, and a source whose pulls are counted (the repaired-data digest) must be pulled exactly
+     * as far.
+     */
+    MemtableMergeLeg(UnfilteredRowIterator iter, Slices slices)
+    {
+        this.iter = iter;
+        this.slices = slices;
+        this.clusteringTypes = iter.metadata().comparator.subtypes().toArray(AbstractType[]::new);
+        this.desc = new MemtableDescriptor(clusteringTypes);
+        // the first unfiltered too: a merge that reads no row of the leg pulls none
+        pullPending = true;
+        state = ROW_START;
+    }
+
+    private void advance()
+    {
+        if (iter.hasNext())
+        {
+            current = iter.next();
+            state = current.isRow() ? ROW_START : TOMBSTONE_START;
+        }
+        else
+        {
+            current = null;
+            currentRow = null;
+            state = PARTITION_END;
+        }
+    }
+
+    // ---------------------------------------------------------------- partition-level surface
+
+    public DeletionTime partitionLevelDeletion()
+    {
+        return iter.partitionLevelDeletion();
+    }
+
+    public Row staticRow()
+    {
+        return iter.staticRow();
+    }
+
+    public Slices legSlices()
+    {
+        return slices;
+    }
+
+    public EncodingStats legStats()
+    {
+        // the same stats the memtable iterator reports to the object merge's EncodingStats.merge
+        return iter.stats();
+    }
+
+    public RegularAndStaticColumns legColumns()
+    {
+        return iter.columns();
+    }
+
+    public SSTableReader sstableOrNull()
+    {
+        return null;
+    }
+
+    public void enterMergeMode()
+    {
+        // nothing to switch: the adapter is merge-shaped from construction
+    }
+
+    public void seekForMerge(ClusteringBound<?> sliceStart)
+    {
+        // memtable legs never seek: the stream is already in memory and pre-clipped to the slices
+    }
+
+    // ---------------------------------------------------------------- unfiltered walk
+
+    public int cursorState()
+    {
+        return state;
+    }
+
+    public UnfilteredDescriptor unfiltered()
+    {
+        return desc;
+    }
+
+    public void readUnfilteredHeader()
+    {
+        if (pullPending)
+        {
+            pullPending = false;
+            advance();
+            if (state == PARTITION_END)
+                return;
+        }
+        if (state == ROW_START)
+        {
+            currentRow = (Row) current;
+            loadClusteringIntoDescriptor(currentRow.clustering(), clusteringTypes.length);
+            LivenessInfo liveness = currentRow.primaryKeyLivenessInfo();
+            long timestamp = liveness.timestamp();
+            if (CursorReads.TEST_SKEW_MEMTABLE_LEG_TIMESTAMPS && !liveness.isEmpty())
+                timestamp += 1;
+            desc.livenessInfo().reset(timestamp, liveness.ttl(), liveness.localExpirationTime());
+            Row.Deletion deletion = currentRow.deletion();
+            if (deletion.isLive())
+                desc.deletionTime().resetLive();
+            else
+                desc.deletionTime().reset(deletion.time());
+            columnDataIter = currentRow.iterator();
+            complexCellIter = null;
+            parked = false;
+            parkedCell = null;
+            parkedColumn = null;
+            parkedComplexDeletion = DeletionTime.LIVE;
+            state = CELL_HEADER_START;
+        }
+        else if (state == TOMBSTONE_START)
+        {
+            currentRow = null;
+            loadMarker(desc, (RangeTombstoneMarker) current, clusteringTypes, clusteringScratch);
+            state = UNFILTERED_END;
+        }
+        else
+        {
+            throw new IllegalStateException("unexpected adapter state before header read: " + state);
+        }
+    }
+
+    private void loadClusteringIntoDescriptor(ClusteringPrefix<?> clustering, int columnsBound)
+    {
+        loadClustering(desc, clustering, columnsBound, clusteringTypes, clusteringScratch);
+    }
+
+    static void loadClustering(MemtableDescriptor desc, ClusteringPrefix<?> clustering, int columnsBound,
+                                       AbstractType<?>[] clusteringTypes, DataOutputBuffer clusteringScratch)
+    {
+        clusteringScratch.clear();
+        try
+        {
+            ClusteringPrefix.serializer.serializeValuesWithoutSize(clustering, clusteringScratch,
+                                                                   MessagingService.current_version, desc.clusteringTypesList());
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException("serializing to an in-memory buffer cannot throw", e);
+        }
+        desc.loadObjectClustering(clustering.kind(), columnsBound,
+                                  clusteringScratch.getData(), clusteringScratch.getLength());
+    }
+
+    /** Loads a range tombstone marker object into {@code desc}, in the form a marker read from an
+     *  sstable has there. */
+    static void loadMarker(MemtableDescriptor desc, RangeTombstoneMarker marker, AbstractType<?>[] clusteringTypes,
+                           DataOutputBuffer clusteringScratch)
+    {
+        ClusteringPrefix<?> clustering = marker.clustering();
+        loadClustering(desc, clustering, clustering.size(), clusteringTypes, clusteringScratch);
+        if (clustering.kind().isBoundary())
+        {
+            RangeTombstoneBoundaryMarker boundary = (RangeTombstoneBoundaryMarker) marker;
+            // loadTombstone convention: deletionTime = CLOSE side, deletionTime2 = OPEN side
+            desc.deletionTime().reset(boundary.closeDeletionTime(false));
+            desc.deletionTime2().reset(boundary.openDeletionTime(false));
+        }
+        else
+        {
+            desc.deletionTime().reset(((RangeTombstoneBoundMarker) marker).deletionTime());
+        }
+    }
+
+    public void continueReading()
+    {
+        if (state != UNFILTERED_END)
+            throw new IllegalStateException("adapter asked to continue from state " + state);
+        // readUnfilteredHeader pulls the next unfiltered; until then the leg reports a header to read
+        pullPending = true;
+        state = ROW_START;
+    }
+
+    public ClusteringPrefix<?> materializeClusteringPrefix()
+    {
+        // the live object itself — zero decode, zero copy (the object path emits the same object)
+        return current.clustering();
+    }
+
+    public byte[][] materializeBoundValues()
+    {
+        return boundValues(current.clustering());
+    }
+
+    /** The clustering values of {@code clustering}, as {@link #materializeBoundValues} gives them. */
+    static byte[][] boundValues(ClusteringPrefix<?> clustering)
+    {
+        int size = clustering.size();
+        if (size == 0)
+            return NO_VALUES;
+        byte[][] values = new byte[size][];
+        for (int i = 0; i < size; i++)
+        {
+            ByteBuffer value = clustering.bufferAt(i);
+            values[i] = value == null ? null : ByteBufferUtil.getArray(value);
+        }
+        return values;
+    }
+
+    private static final byte[][] NO_VALUES = new byte[0][];
+
+    public void skipRow()
+    {
+        // the stream is pre-clipped to the slices, so the merge never asks; consuming the row
+        // object is all a skip needs
+        consumeExistingRow();
+    }
+
+    public Row consumeExistingRow()
+    {
+        // Caller (CursorReadMerger.mergeRowGroup) has verified the Row.Merger single-version
+        // fast-path conditions; the current row stands as the merged row unchanged.
+        Row row = currentRow;
+        if (row == null)
+            throw new IllegalStateException("consumeExistingRow outside a row group");
+        currentRow = null;
+        columnDataIter = null;
+        complexCellIter = null;
+        parked = false;
+        state = UNFILTERED_END;
+        return row;
+    }
+
+    // ---------------------------------------------------------------- cell walk
+
+    public boolean parkedAtCellPosition()
+    {
+        return parked;
+    }
+
+    public boolean needsCellAdvance()
+    {
+        return !parked && state == CELL_HEADER_START;
+    }
+
+    public void ensureParkedAtCell(boolean validateCells)
+    {
+        // validateCells ignored: the iterator path never validates memtable data (class javadoc)
+        if (parked || state != CELL_HEADER_START)
+            return;
+        for (;;)
+        {
+            if (complexCellIter != null)
+            {
+                if (complexCellIter.hasNext())
+                {
+                    parkCell(complexCellIter.next());
+                    return;
+                }
+                complexCellIter = null;
+            }
+            if (!columnDataIter.hasNext())
+            {
+                state = UNFILTERED_END;
+                return;
+            }
+            ColumnData columnData = columnDataIter.next();
+            if (columnData.column().isSimple())
+            {
+                parkedColumn = columnData.column();
+                parkedComplexDeletion = DeletionTime.LIVE;
+                parkCell((Cell<?>) columnData);
+                return;
+            }
+            ComplexColumnData complex = (ComplexColumnData) columnData;
+            parkedColumn = complex.column();
+            parkedComplexDeletion = complex.complexDeletion();
+            if (complex.cellsCount() == 0)
+            {
+                if (parkedComplexDeletion.isLive())
+                    continue; // fully empty column data: nothing to contribute (defensive)
+                // deletion-only position: sorts before any cell of the same column in the merge
+                parkedCell = null;
+                parked = true;
+                return;
+            }
+            complexCellIter = complex.iterator();
+            // loop back to park at the column's first cell; its park carries the column deletion
+        }
+    }
+
+    private void parkCell(Cell<?> cell)
+    {
+        parkedCell = cell;
+        long timestamp = cell.timestamp();
+        if (CursorReads.TEST_SKEW_MEMTABLE_LEG_TIMESTAMPS)
+            timestamp += 1;
+        parkedCellLiveness.reset(timestamp, cell.ttl(), cell.localDeletionTime());
+        parked = true;
+    }
+
+    public void advancePastCellPosition()
+    {
+        parked = false;
+        parkedCell = null;
+    }
+
+    public boolean cellProduced()
+    {
+        return parkedCell != null;
+    }
+
+    public ColumnMetadata cellColumn()
+    {
+        return parkedColumn;
+    }
+
+    public CellLivenessInfo cellLiveness()
+    {
+        return parkedCellLiveness;
+    }
+
+    public ByteBuffer cellPathWindow()
+    {
+        // the live path buffer itself — zero copy, matching the design's cell-path answer
+        return parkedCell.path().get(0);
+    }
+
+    public DeletionTime cellComplexDeletion()
+    {
+        return parkedComplexDeletion;
+    }
+
+    public CellPath cellPath()
+    {
+        return parkedCell.path();
+    }
+
+    public Cell<?> existingCell()
+    {
+        return parkedCell;
+    }
+
+    public byte[] cellValue()
+    {
+        // Unreachable in practice — existingCell() short-circuits emission for object-backed
+        // winners — but kept correct: the raw value bytes, exactly what the byte-backed legs
+        // produce (one defensive copy).
+        return parkedCell == null ? org.apache.cassandra.utils.ByteArrayUtil.EMPTY_BYTE_ARRAY
+                                  : ByteBufferUtil.getArray(parkedCell.buffer());
+    }
+
+    public void stageCellValue(DataOutputPlus scratch) throws IOException
+    {
+        // Tie-break staging: the value bytes are read NON-destructively off the live object (the
+        // object stays intact for existingCell() emission). Heap buffers (the only kind that can
+        // appear here — EnsureOnHeap has already cloned off-heap configs) write without copying.
+        ByteBuffer value = parkedCell.buffer();
+        if (value.hasArray())
+        {
+            scratch.write(value.array(), value.arrayOffset() + value.position(), value.remaining());
+        }
+        else
+        {
+            // correctness-first fallback; not expected post-EnsureOnHeap
+            byte[] copy = ByteBufferUtil.getArray(value);
+            scratch.write(copy, 0, copy.length);
+        }
+    }
+
+    public void discardCellValue()
+    {
+        // nothing staged on a cursor: the live object needs no discard
+    }
+
+    public boolean cellHasValue()
+    {
+        // Unreachable in practice — existingCell() short-circuits emission for object-backed
+        // winners before CursorReadMerger.mergeCellGroup ever asks (see cellValue()'s own note)
+        // — but kept correct: mirrors Cell.Serializer's own hasValue definition (valueSize > 0).
+        return parkedCell != null && parkedCell.valueSize() > 0;
+    }
+
+    // ---------------------------------------------------------------- validation (no-ops)
+
+    public void validateRowHeader()
+    {
+        // the iterator path never applies UnfilteredValidation to memtable data — parity demands
+        // the cursor path does not either (see class javadoc)
+    }
+
+    public void validateMarkerHeader()
+    {
+        // see validateRowHeader
+    }
+
+    @Override
+    public void close()
+    {
+        iter.close();
+    }
+
+    /**
+     * The adapter's reusable descriptor: an {@link UnfilteredDescriptor} loaded from live objects
+     * instead of the data file. The subclass only needs the protected clustering mutation surface
+     * ({@code clusteringKind(Kind)} is public; {@code clusteringColumnsBound}/{@code overwrite}
+     * are protected) plus the public reusable liveness/deletion resets — no shared-code change,
+     * the same trick {@code CursorReadMerger.SliceBoundDescriptor} already established.
+     */
+    static final class MemtableDescriptor extends UnfilteredDescriptor
+    {
+        MemtableDescriptor(AbstractType<?>[] clusteringTypes)
+        {
+            super(clusteringTypes);
+        }
+
+        void loadObjectClustering(ClusteringPrefix.Kind kind, int columnsBound, byte[] wireBytes, int length)
+        {
+            clusteringKind(kind);
+            clusteringColumnsBound = columnsBound;
+            overwrite(wireBytes, length);
+        }
+    }
+}

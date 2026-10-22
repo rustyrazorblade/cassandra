@@ -21,6 +21,7 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.util.Arrays;
 
+import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.Columns;
 import org.apache.cassandra.db.DeletionTime.ReusableDeletionTime;
 import org.apache.cassandra.db.ReusableLivenessInfo;
@@ -60,9 +61,32 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
         super(clusteringTypes);
     }
 
+    /**
+     * Builds a comparison-only descriptor from a query-side clustering bound (never handed to a
+     * cursor, never row/marker fields).  The cursor read path uses this to give a not-yet-opened
+     * sstable leg a sortable lower bound in the merge, so the leg's partition header is opened
+     * only when the merge actually reaches its data.  The bound's values go through the same
+     * {@code serializeValuesWithoutSize} wire form {@link #loadClustering} parses, so the result
+     * compares byte-for-byte against a leg's own loaded descriptor.
+     */
+    public static UnfilteredDescriptor forBound(AbstractType<?>[] clusteringTypes, ClusteringBound<?> bound)
+    {
+        UnfilteredDescriptor descriptor = new UnfilteredDescriptor(clusteringTypes);
+        descriptor.storeClustering((byte) bound.kind().ordinal(), bound.size(), bound);
+        return descriptor;
+    }
+
     void loadTombstone(RandomAccessReader dataReader,
                        SerializationHeader serializationHeader,
                        int flags) throws IOException
+    {
+        loadTombstoneBound(dataReader, flags);
+        loadTombstoneBody(dataReader, serializationHeader);
+    }
+
+    /** Reads a marker's bound: its kind and clustering, and nothing after them.
+     *  {@link #loadTombstoneBody} reads the rest. */
+    void loadTombstoneBound(RandomAccessReader dataReader, int flags) throws IOException
     {
         this.flags = flags;
         this.extendedFlags = 0;
@@ -77,6 +101,13 @@ public class UnfilteredDescriptor extends ClusteringDescriptor
 
         int columnsBound = dataReader.readUnsignedShort();
         loadClustering(dataReader, clusteringKind, columnsBound);
+    }
+
+    /** Reads the rest of the marker whose bound {@link #loadTombstoneBound} read: its sizes and
+     *  deletion times. */
+    void loadTombstoneBody(RandomAccessReader dataReader, SerializationHeader serializationHeader) throws IOException
+    {
+        byte clusteringKind = clusteringKindEncoded();
         unfilteredSize = dataReader.readUnsignedVInt();
         prevUnfilteredSize = dataReader.readUnsignedVInt(); // debug only, unused otherwise
         if (clusteringKind == EXCL_END_INCL_START_BOUNDARY_CLUSTERING_KIND ||
