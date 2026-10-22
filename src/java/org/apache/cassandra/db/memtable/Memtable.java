@@ -18,12 +18,14 @@
 
 package org.apache.cassandra.db.memtable;
 
+import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
 import org.apache.cassandra.db.CellSourceIdentifier;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DataRange;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.RegularAndStaticColumns;
@@ -251,6 +253,19 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource, CellSo
      * @throws UnsupportedOperationException when {@link #readsPartitionData} is false
      */
     default MemtablePartitionData partitionData(DecoratedKey key)
+    {
+        throw new UnsupportedOperationException(getClass().getName() + " does not give its partition data");
+    }
+
+    /**
+     * The content of each partition in the key range of {@code dataRange}, in key order, each read
+     * once as {@link #partitionData(DecoratedKey)} reads it: the partitions {@code partitionIterator}
+     * would give, for a range read that walks them itself.  The content stays valid while the caller
+     * holds the table's read order group.
+     *
+     * @throws UnsupportedOperationException when {@link #readsPartitionData} is false
+     */
+    default Iterator<MemtablePartitionData> partitionData(DataRange dataRange)
     {
         throw new UnsupportedOperationException(getClass().getName() + " does not give its partition data");
     }

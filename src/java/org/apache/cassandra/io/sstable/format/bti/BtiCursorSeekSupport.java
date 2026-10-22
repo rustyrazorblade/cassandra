@@ -101,6 +101,11 @@ public final class BtiCursorSeekSupport
         TrieIndexEntry entry = sstable.getExactPosition(key, listener, true);
         if (entry == null)
             return null;
+        return entryOf(entry);
+    }
+
+    static PartitionEntry entryOf(TrieIndexEntry entry)
+    {
         return new PartitionEntry(entry.position, entry.indexTrieRoot, entry.isIndexed() ? entry.deletionTime() : null);
     }
 

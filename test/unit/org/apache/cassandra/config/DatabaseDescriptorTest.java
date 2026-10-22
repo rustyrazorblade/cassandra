@@ -27,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -583,6 +584,44 @@ public class DatabaseDescriptorTest
         conf.concurrent_validations = conf.concurrent_compactors + 1;
         DatabaseDescriptor.applyConcurrentValidations(conf);
         assertThat(conf.concurrent_validations).isEqualTo(conf.concurrent_compactors + 1);
+    }
+
+    @Test
+    public void testRangeReadDiskAccessMode()
+    {
+        Config.DiskAccessMode saved = DatabaseDescriptor.getRangeReadDiskAccessMode();
+        try
+        {
+            // direct by default
+            Config conf = new Config();
+            assertThat(conf.range_read_disk_access_mode).isEqualTo(Config.DiskAccessMode.direct);
+            conf.disk_access_mode = Config.DiskAccessMode.standard;
+            DatabaseDescriptor.applyRangeReadDiskAccessMode(conf);
+            assertThat(DatabaseDescriptor.getRangeReadDiskAccessMode()).isEqualTo(Config.DiskAccessMode.direct);
+
+            // auto inherits disk_access_mode
+            Config auto = YamlConfigurationLoader.fromMap(Collections.singletonMap("range_read_disk_access_mode", "auto"), Config.class);
+            assertThat(auto.range_read_disk_access_mode).isEqualTo(Config.DiskAccessMode.auto);
+            for (Config.DiskAccessMode diskAccessMode : new Config.DiskAccessMode[]{ Config.DiskAccessMode.standard, Config.DiskAccessMode.mmap })
+            {
+                auto.disk_access_mode = diskAccessMode;
+                DatabaseDescriptor.applyRangeReadDiskAccessMode(auto);
+                assertThat(DatabaseDescriptor.getRangeReadDiskAccessMode()).isEqualTo(diskAccessMode);
+            }
+
+            // only direct and auto are allowed
+            for (Config.DiskAccessMode mode : EnumSet.complementOf(EnumSet.of(Config.DiskAccessMode.direct, Config.DiskAccessMode.auto)))
+            {
+                conf.range_read_disk_access_mode = mode;
+                assertThatThrownBy(() -> DatabaseDescriptor.applyRangeReadDiskAccessMode(conf))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("range_read_disk_access_mode");
+            }
+        }
+        finally
+        {
+            DatabaseDescriptor.setRangeReadDiskAccessMode(saved);
+        }
     }
 
     @Test

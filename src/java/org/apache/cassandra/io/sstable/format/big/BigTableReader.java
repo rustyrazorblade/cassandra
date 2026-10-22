@@ -150,6 +150,28 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
     }
 
     @Override
+    public KeyReader keyReader(PartitionPosition key) throws IOException
+    {
+        FileHandle iFile = ifile.sharedCopy();
+        RandomAccessReader reader = iFile.createReader();
+        reader.seek(getIndexScanPosition(key));
+        KeyReader keys = BigTableKeyReader.create(iFile, reader, rowIndexEntrySerializer);
+
+        boolean hasMoreKeys = true;
+        while (hasMoreKeys)
+        {
+            ByteBuffer indexKey = keys.key();
+            DecoratedKey indexDecoratedKey = decorateKey(indexKey);
+            if (indexDecoratedKey.compareTo(key) >= 0)
+                break;
+
+            // Advance the iterator and check if more keys are available
+            hasMoreKeys = keys.advance();
+        }
+        return keys;
+    }
+
+    @Override
     public KeyReader keyReader(boolean detailed) throws IOException
     {
         return BigTableKeyReader.create(ifile, rowIndexEntrySerializer, detailed);

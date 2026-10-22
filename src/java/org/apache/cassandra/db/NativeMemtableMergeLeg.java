@@ -97,16 +97,18 @@ import static org.apache.cassandra.io.sstable.SSTableCursorReader.State.UNFILTER
 public final class NativeMemtableMergeLeg implements CursorReads.MergeLeg
 {
     private final TableMetadata metadata;
-    private final DecoratedKey partitionKey;
-    private final BTreePartitionData data;
     private final ColumnFilter selection;
-    private final Slices slices;
     private final boolean reversed;
     private final boolean emitObjects;
-    private final EnsureOnHeap ensureOnHeap;
     private final Comparator<Clusterable> order;
-    private final DeletionTime partitionDeletion;
-    private final Row staticRow;
+
+    // ---- the partition the leg reads, set by reopen ----
+    private DecoratedKey partitionKey;
+    private BTreePartitionData data;
+    private Slices slices;
+    private EnsureOnHeap ensureOnHeap;
+    private DeletionTime partitionDeletion;
+    private Row staticRow;
     private final AbstractType<?>[] clusteringTypes;
     private final MemtableMergeLeg.MemtableDescriptor desc;
     private final DataOutputBuffer clusteringScratch = new DataOutputBuffer(64);
@@ -176,25 +178,62 @@ public final class NativeMemtableMergeLeg implements CursorReads.MergeLeg
     public NativeMemtableMergeLeg(TableMetadata metadata, MemtablePartitionData partition, ColumnFilter selection,
                                   Slices slices, boolean reversed, boolean emitObjects)
     {
+        this(metadata, partition, selection, slices, false, reversed, emitObjects);
+    }
+
+    /**
+     * @param names whether the read's filter names its clusterings ({@code ClusteringIndexNamesFilter}),
+     *              which {@code slices} then holds one each: the objects are cloned as the
+     *              memtable's names iterator clones them ({@link MemtablePartitionData#ensureOnHeapForNames})
+     */
+    public NativeMemtableMergeLeg(TableMetadata metadata, MemtablePartitionData partition, ColumnFilter selection,
+                                  Slices slices, boolean names, boolean reversed, boolean emitObjects)
+    {
         this.metadata = metadata;
-        this.partitionKey = partition.key;
-        this.data = partition.data;
-        this.ensureOnHeap = partition.ensureOnHeap;
         this.selection = selection;
-        this.slices = slices;
         this.reversed = reversed;
         this.emitObjects = emitObjects;
         this.order = reversed ? metadata.comparator.reversed() : metadata.comparator;
-        // UnfilteredRowIterators.noRowsIterator, for a read with no slice, reports the LIVE object
-        DeletionTime deletion = data.deletionInfo().getPartitionDeletion();
-        this.partitionDeletion = slices.isEmpty() && deletion.isLive() ? DeletionTime.LIVE : deletion;
         this.mayFilterColumns = !selection.fetchesAllColumns(false) || !selection.allFetchedColumnsAreQueried();
         this.droppedColumns = metadata.droppedColumns;
         this.fetchedColumns = selection.fetchedColumns().regulars;
         this.queriedColumns = selection.queriedColumns().regulars;
-        this.staticRow = filteredStaticRow();
         this.clusteringTypes = metadata.comparator.subtypes().toArray(AbstractType[]::new);
         this.desc = new MemtableMergeLeg.MemtableDescriptor(clusteringTypes);
+        reopen(partition, slices, names);
+    }
+
+    /**
+     * Points the leg at another partition of the same memtable read, as if it were made anew: a
+     * range read keeps one leg per memtable.  The caller has closed it, or is done with it.
+     */
+    public void reopen(MemtablePartitionData partition, Slices slices, boolean names)
+    {
+        this.partitionKey = partition.key;
+        this.data = partition.data;
+        this.ensureOnHeap = names ? partition.ensureOnHeapForNames() : partition.ensureOnHeap;
+        this.slices = slices;
+        // UnfilteredRowIterators.noRowsIterator, for a read with no slice, reports the LIVE object
+        DeletionTime deletion = data.deletionInfo().getPartitionDeletion();
+        this.partitionDeletion = slices.isEmpty() && deletion.isLive() ? DeletionTime.LIVE : deletion;
+        this.staticRow = filteredStaticRow();
+        slicesOpened = 0;
+        sliceOpen = false;
+        rows = null;
+        ranges = null;
+        nextRow = null;
+        nextRange = null;
+        openRange = null;
+        validatorOpenDeletion = null;
+        currentRow = null;
+        currentMarker = null;
+        complexColumn = null;
+        parked = false;
+        parkedCell = null;
+        parkedColumn = null;
+        parkedComplexDeletion = DeletionTime.LIVE;
+        parkedKeepsColumnWithNoCells = false;
+        rowsCloned = 0;
         if (!emitObjects)
             CursorReads.countMemtableLegStreamed();
         advance();

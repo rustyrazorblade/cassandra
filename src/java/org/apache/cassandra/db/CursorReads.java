@@ -1188,7 +1188,7 @@ public final class CursorReads
      * active once the gate engages.  Clustering- and regular-column expressions additionally drop
      * rows at production; see {@link FilterPushdown#rowLevelPushdownEligible}.
      */
-    static FilterPushdown filterPushdownFor(SinglePartitionReadCommand command)
+    static FilterPushdown filterPushdownFor(ReadCommand command)
     {
         RowFilter rowFilter = command.rowFilter();
         if (rowFilter.isEmpty())
@@ -1197,8 +1197,12 @@ public final class CursorReads
             return null;
         // The row-level filter probe simulates the emitted surface over a single contiguous slice;
         // a multi-slice read (a names filter of several clusterings) would mis-account across the
-        // gaps between the point slices.  Decline so filtering stays at the top of stack.
-        if (command.clusteringIndexFilter().getSlices(command.metadata()).size() > 1)
+        // gaps between the point slices.  Decline so filtering stays at the top of stack.  A range
+        // read's filter is the same for every partition, but the one a paged read resumes in.
+        ClusteringIndexFilter clusteringFilter = command instanceof SinglePartitionReadCommand
+                                                 ? ((SinglePartitionReadCommand) command).clusteringIndexFilter()
+                                                 : ((PartitionRangeReadCommand) command).dataRange().clusteringIndexFilter;
+        if (clusteringFilter.getSlices(command.metadata()).size() > 1)
             return null;
         if (command.metadata().enforceStrictLiveness())
             return null; // MV tables are outside isReadSupported entirely; purely defensive
@@ -1230,7 +1234,7 @@ public final class CursorReads
     /** True iff the size-tracking transformation would engage for this command's
      *  {@code executeLocally} run.  Query-size tracking walks the object stream the transcode path
      *  never builds, so a command with tracking active must decline. */
-    static boolean querySizeTrackingActive(SinglePartitionReadCommand command)
+    static boolean querySizeTrackingActive(ReadCommand command)
     {
         return command.isTrackingWarnings()
                && !SchemaConstants.isSystemKeyspace(command.metadata().keyspace)
@@ -1269,7 +1273,7 @@ public final class CursorReads
          *  {@link #rowLevelPushdownEligible} is false). */
         private ScanStatsAccumulator scanStats;
 
-        private FilterPushdown(SinglePartitionReadCommand command, List<RowFilter.Expression> expressions)
+        private FilterPushdown(ReadCommand command, List<RowFilter.Expression> expressions)
         {
             this.metadata = command.metadata();
             // same split as RowFilter.filter: static or partition-key columns are partition-level,
@@ -1303,7 +1307,9 @@ public final class CursorReads
          * pushdown is eligible.  Only merged reads reach this; single-leg reads never evaluate
          * row-level expressions.  The accumulator lands on the {@link ReadExecutionController} so
          * {@code ReadCommand.withMetricsRecording} can fold the dropped-row contributions into its
-         * totals.
+         * totals.  A range read never activates it: the accumulator samples one partition, so a
+         * range read's merge drops no row, only skips a partition that fails its partition-level
+         * expressions.
          */
         void activateScanAccounting(ReadExecutionController controller, ColumnFamilyStore cfs,
                                     SinglePartitionReadCommand command)
@@ -2261,6 +2267,7 @@ public final class CursorReads
             closeAll(legs, e);
             throw e;
         }
+        // null when only memtables hold the partition (a range read); the merge does not validate on emission
         SSTableReader attribution = null;
         for (MergeLeg leg : legs)
         {
@@ -2270,7 +2277,6 @@ public final class CursorReads
                 break;
             }
         }
-        assert attribution != null : "the gate requires at least one sstable leg";
 
         // min-merge over the same per-leg stats the per-leg iterators would report, so the
         // response's stats total matches the object merge's. Non-tracking NAMES reads no longer
@@ -2913,7 +2919,8 @@ public final class CursorReads
         private final SSTableCursorReader cursor;
         private final SSTableReader sstable;
         private final TableMetadata metadata;
-        private final DecoratedKey key;
+        /** Changes per partition for a range read's leg. */
+        private DecoratedKey key;
         private final ColumnFilter columnFilter;
         // Same helper type the iterator path drives its filtering with; using the real thing keeps
         // the includes/canSkipValue/isDropped semantics identical by construction.
@@ -3041,7 +3048,12 @@ public final class CursorReads
             // already positioned; see PendingLeg.open.
             if (cursor.state() != PARTITION_START)
                 throw new IllegalStateException("seek to partition at " + position + " yielded state " + cursor.state());
-            int state = cursor.readPartitionHeader(pHeader);
+            return openAfterHeader(cursor.readPartitionHeader(pHeader));
+        }
+
+        /** The rest of {@link #openPartition}, once the header is read: {@code state} is the cursor state after it. */
+        int openAfterHeader(int state) throws IOException
+        {
             // corrupted_tombstone_strategy check on the partition-level deletion, mirroring
             // AbstractSSTableIterator's validate() -> handleInvalid and cursor compaction.
             // Validating the descriptor's deletion time range-checks the on-disk unsigned
@@ -3746,8 +3758,9 @@ public final class CursorReads
     {
         final SSTableReader sstable;
         final TableMetadata metadata;
-        final DecoratedKey key;
-        final Slices legSlices;
+        // both change per partition for a range read's leg (see forRangeRead)
+        DecoratedKey key;
+        Slices legSlices;
         final ColumnFilter columnFilter;
         // Non-final because a deferred leg (see deferOpen) looks up its BTI partition entry lazily
         // in openForMerge, not at construction.
@@ -3756,6 +3769,10 @@ public final class CursorReads
         private final ValueTransfer transfer;
 
         private SSTableCursorReader cursor; // null once closed
+        /** A range read's cursor, shared by every partition this leg reads; null for other reads. */
+        private SSTableCursorReader rangeCursor;
+        /** The cursor state after the header {@link #readRangePartitionHeader} read. */
+        private int rangeHeaderState;
         /** The partition's row index, opened at the first seek and kept for later slices. */
         private RowIndexReader rowIndex;
         /** Where a deferred leg's merge first reads it, when that is past its first slice start. */
@@ -3885,6 +3902,77 @@ public final class CursorReads
                 rowIndex = BtiCursorSeekSupport.openRowIndex((BtiTableReader) sstable, btiEntry);
             long blockEnd = BtiCursorSeekSupport.blockEndAfter((BtiTableReader) sstable, rowIndex, btiEntry, metadata.comparator, end);
             return blockEnd < 0 ? -1 : blockEnd + UNFILTERED_HEADER_ALLOWANCE;
+        }
+
+        /**
+         * A leg that reads the partitions of one sstable, in order, for a range read.  It keeps one
+         * cursor for the whole read: the caller moves the cursor to each partition, reads its header
+         * ({@link #readRangePartitionHeader}) and opens it ({@link #openRangePartition}).  Closing
+         * the leg after a partition leaves the cursor open; {@link #closeRangeCursor} closes it.
+         */
+        public static PendingLeg forRangeRead(SSTableReader sstable, TableMetadata metadata, ColumnFilter columnFilter,
+                                              SSTableCursorReader cursor, ValueTransfer transfer)
+        {
+            PendingLeg leg = new PendingLeg(sstable, metadata, null, Slices.NONE, columnFilter, null, transfer);
+            leg.rangeCursor = cursor;
+            leg.materializer = new PartitionMaterializer(cursor, sstable, metadata, null, columnFilter, transfer);
+            return leg;
+        }
+
+        /** Reads the header of the partition the range cursor is at.  Returns its key, which the
+         *  next header read overwrites. */
+        public DecoratedKey readRangePartitionHeader()
+        {
+            if (rangeCursor.state() != PARTITION_START)
+                throw new IllegalStateException("no partition header to read in cursor state " + rangeCursor.state());
+            rangeHeaderState = rangeCursor.readPartitionHeader(materializer.pHeader);
+            return materializer.pHeader.key();
+        }
+
+        /**
+         * Opens the partition whose header {@link #readRangePartitionHeader} read, as {@link #open}
+         * opens one: the partition deletion is checked and the static row read.
+         *
+         * @param key      the partition key, as an object the reader may keep
+         * @param entry    the partition's row index entry, or null when it has none
+         */
+        public void openRangePartition(DecoratedKey key, Slices slices, BtiCursorSeekSupport.PartitionEntry entry, boolean reversed) throws IOException
+        {
+            closeRowIndex();
+            this.key = key;
+            this.legSlices = slices;
+            this.btiEntry = entry;
+            this.reversed = reversed;
+            this.firstReadStart = null;
+            this.hasOpenDeletion = false;
+            materializer.key = key;
+            materializer.rowsFilteredAgain = rowsFilteredAgain();
+            cursor = rangeCursor;
+            openState = materializer.openAfterHeader(rangeHeaderState);
+            // a Slices.NONE leg reads no rows, like open's
+            if (slices.isEmpty())
+                cursor = null;
+        }
+
+        /** Closes a range read's cursor; the leg cannot read after this. */
+        public void closeRangeCursor()
+        {
+            closeRowIndex();
+            cursor = null;
+            SSTableCursorReader toClose = rangeCursor;
+            rangeCursor = null;
+            if (toClose != null)
+                toClose.close();
+        }
+
+        private void closeRowIndex()
+        {
+            if (rowIndex != null)
+            {
+                RowIndexReader toClose = rowIndex;
+                rowIndex = null;
+                toClose.close();
+            }
         }
 
         void open(long position) throws IOException
@@ -4045,6 +4133,9 @@ public final class CursorReads
         {
             // a Slices.NONE leg is read like makeRowIteratorWithSkippedNonStaticContent, which has none
             if (legSlices.isEmpty())
+                return null;
+            // a range read's sstable scanners give their partitions with no lower bound
+            if (rangeCursor != null)
                 return null;
             ClusteringBound<?> bound = metadataLowerBound(sstable, metadata, key, legSlices, reversed);
             return bound == null ? null : UnfilteredDescriptor.forBound(metadata.comparator.subtypes().toArray(AbstractType[]::new), bound);
@@ -4787,11 +4878,12 @@ public final class CursorReads
         @Override
         public void close()
         {
-            if (rowIndex != null)
+            closeRowIndex();
+            if (rangeCursor != null)
             {
-                RowIndexReader toClose = rowIndex;
-                rowIndex = null;
-                toClose.close();
+                // a range read's cursor stays open for its next partition
+                cursor = null;
+                return;
             }
             if (cursor != null)
             {
@@ -4928,7 +5020,9 @@ public final class CursorReads
         private final TableMetrics metric;
         private final long startTimeNanos;
         private final long nowInSec;
-        private final DecoratedKey key;
+        /** The partition being read; changes per partition for a range read. */
+        private DecoratedKey key;
+        private DecoratedKey keyBeforePartition;
         private final int failureThreshold;
         private final int warningThreshold;
         private final boolean respectTombstoneThresholds;
@@ -4936,6 +5030,9 @@ public final class CursorReads
 
         private int liveRows;
         private int tombstones;
+        // the counts when the current partition started, for its top partition samples
+        private int liveRowsBeforePartition;
+        private int tombstonesBeforePartition;
 
         // per-row scratch, reset by startRow / wholeRow
         private long rowMinDeletionTime;
@@ -4957,6 +5054,36 @@ public final class CursorReads
             this.warningThreshold = DatabaseDescriptor.getTombstoneWarnThreshold();
             this.respectTombstoneThresholds = !SchemaConstants.isLocalSystemKeyspace(command.metadata().keyspace);
             this.enforceStrictLiveness = command.metadata().enforceStrictLiveness();
+        }
+
+        /** A range read moves to its next partition: the previous one gets its top partition
+         *  samples, like {@code MetricRecording.onPartitionClose}. */
+        void startPartition(DecoratedKey next)
+        {
+            samplePartition();
+            keyBeforePartition = key;
+            key = next;
+        }
+
+        /** The purge removed the partition, so {@code MetricRecording} never sees it: the key it
+         *  reports stays the previous partition's.  Nothing of the partition was counted. */
+        void partitionRemovedByPurge()
+        {
+            key = keyBeforePartition;
+        }
+
+        private void samplePartition()
+        {
+            if (key == null)
+                return;
+            int partitionLiveRows = liveRows - liveRowsBeforePartition;
+            int partitionTombstones = tombstones - tombstonesBeforePartition;
+            if (partitionLiveRows > 0)
+                metric.topReadPartitionRowCount.addSample(key.getKey(), partitionLiveRows);
+            if (partitionTombstones > 0)
+                metric.topReadPartitionTombstoneCount.addSample(key.getKey(), partitionTombstones);
+            liveRowsBeforePartition = liveRows;
+            tombstonesBeforePartition = tombstones;
         }
 
         /** Builds the current row's clustering for a {@link #startRow} that was given none. */
@@ -5103,10 +5230,7 @@ public final class CursorReads
             command.recordLatency(metric, nanoTime() - startTimeNanos);
             metric.tombstoneScannedHistogram.update(tombstones);
             metric.liveScannedHistogram.update(liveRows);
-            if (liveRows > 0)
-                metric.topReadPartitionRowCount.addSample(key.getKey(), liveRows);
-            if (tombstones > 0)
-                metric.topReadPartitionTombstoneCount.addSample(key.getKey(), tombstones);
+            samplePartition();
 
             boolean warnTombstones = tombstones > warningThreshold && respectTombstoneThresholds;
             if (warnTombstones)

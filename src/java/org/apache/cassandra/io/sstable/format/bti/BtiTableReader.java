@@ -87,6 +87,12 @@ public class BtiTableReader extends SSTableReaderWithFilter
         return rowIndexFile;
     }
 
+    /** The partition index, for {@link BtiCursorRangeSupport}, which takes its own shared copy. */
+    PartitionIndex partitionIndex()
+    {
+        return partitionIndex;
+    }
+
     protected final Builder unbuildTo(Builder builder, boolean sharedCopy)
     {
         Builder b = super.unbuildTo(builder, sharedCopy);
@@ -309,6 +315,15 @@ public class BtiTableReader extends SSTableReaderWithFilter
     public ScrubPartitionIterator scrubPartitionsIterator() throws IOException
     {
         return new ScrubIterator(partitionIndex, rowIndexFile, descriptor.version);
+    }
+
+    @Override
+    public PartitionIterator keyReader(PartitionPosition key) throws IOException
+    {
+        return PartitionIterator.create(partitionIndex, metadata().partitioner, rowIndexFile, dfile,
+                                        key, -1,
+                                        metadata().partitioner.getMaximumToken().maxKeyBound(), 0,
+                                        descriptor.version);
     }
 
     @Override
