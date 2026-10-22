@@ -555,6 +555,8 @@ public class SSTableCursorReader implements AutoCloseable
     private long sequentialStart;
     /** The chunk length of a compressed sstable, for the chunk cache checks. */
     private int readAheadChunkLength;
+    /** A direct range read: each seek starts the read-ahead at one chunk, and it grows as the read goes on. */
+    private boolean growReadAheadFromSeeks;
     /** Where the read ends, asked only when the read is about to move to the read-ahead reader. */
     private ReadEnd readEnd;
     /** The rows the read returns, shared with the read's other readers; null for no limit. */
@@ -656,6 +658,48 @@ public class SSTableCursorReader implements AutoCloseable
     {
         return new SSTableCursorReader(reader, reader.metadata(), null, Collections.singletonList(partition), null, false, false)
                .moveToReadAheadOnLongReads();
+    }
+
+    /**
+     * {@link #forRead} for a range read over the whole data file: it reads nothing until the first
+     * {@link #seekToPartition}, which must come next, and then moves from partition to partition.
+     * With {@code range_read_disk_access_mode} direct it reads with direct I/O from its first read,
+     * bypassing the page cache and the chunk cache as compaction's scans do, on the sstable's shared
+     * direct handle; each seek reads ahead one chunk first, and further as the read goes on
+     * ({@link #growReadAheadFromSeeks}).  Otherwise, and when the data file does not support direct
+     * I/O, it reads like {@link #forRead}.
+     */
+    public static SSTableCursorReader forRangeRead(SSTableReader reader)
+    {
+        if (DatabaseDescriptor.getRangeReadDiskAccessMode() == DiskAccessMode.direct)
+        {
+            RandomAccessReader direct = reader.openDataReaderForDirectScan();
+            if (direct != null)
+                return new SSTableCursorReader(reader, reader.metadata(), null, null, null, true, false, direct).growReadAheadFromSeeks();
+        }
+        return new SSTableCursorReader(reader, reader.metadata(), null, null, null, false, false).moveToReadAheadOnLongReads();
+    }
+
+    /**
+     * A short read must not fill a whole read-ahead buffer for a few rows.  Each seek limits the
+     * read-ahead to the chunk it lands in; the limit then grows as {@link #maybeExtendReadAhead}
+     * grows an estimated one: as far again as the read has gone since the seek, at least four
+     * chunks, so a long read soon fills whole buffers.  Only for compressed sstables, the only ones
+     * read with direct I/O.
+     */
+    private SSTableCursorReader growReadAheadFromSeeks()
+    {
+        growReadAheadFromSeeks = true;
+        readAheadChunkLength = ssTableReader.getCompressionMetadata().chunkLength();
+        return this;
+    }
+
+    private void startReadAheadAt(long position)
+    {
+        sequentialStart = position;
+        readAheadLimitFinal = false;
+        readAheadLimit = (position & -readAheadChunkLength) + readAheadChunkLength;
+        dataReader.limitReadAhead(readAheadLimit);
     }
 
     /**
@@ -817,15 +861,24 @@ public class SSTableCursorReader implements AutoCloseable
         this(reader, metadata, readerRef, bounds, diskAccessMode, scan, true);
     }
 
+    private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
+                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode, boolean scan,
+                                boolean enterFirstSegment)
+    {
+        this(reader, metadata, readerRef, bounds, diskAccessMode, scan, enterFirstSegment, null);
+    }
+
     /**
      * @param bounds the segments to read, or null for the whole file
      * @param scan   read ahead and bypass the chunk cache, as a scan does, or read through the cache
      * @param enterFirstSegment seek to the first partition now; otherwise only take the first
      *                          segment's bounds, and the caller seeks
+     * @param opened the data file reader to read with, which the cursor then owns; null to open one
+     *               from {@code diskAccessMode} and {@code scan}
      */
     private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
                                 Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode, boolean scan,
-                                boolean enterFirstSegment)
+                                boolean enterFirstSegment, RandomAccessReader opened)
     {
         ssTableReader = reader;
         ssTableReaderRef = readerRef;
@@ -842,7 +895,7 @@ public class SSTableCursorReader implements AutoCloseable
         serializationHeader = reader.header;
         sstableHasDroppedColumns = anyDroppedColumn(deserializationHelper, serializationHeader);
 
-        dataReader = scan ? reader.openDataReaderForScan(diskAccessMode) : reader.openDataReader(diskAccessMode);
+        dataReader = opened != null ? opened : scan ? reader.openDataReaderForScan(diskAccessMode) : reader.openDataReader(diskAccessMode);
         // the HEADER decides whether this sstable can contain static rows: after
         // ALTER TABLE ... DROP of the last static column, current metadata has no static
         // columns but older sstables legitimately still carry static rows
@@ -870,6 +923,13 @@ public class SSTableCursorReader implements AutoCloseable
             dataReader.close();
             throw e;
         }
+    }
+
+    /** The data file reader the cursor reads with now, to tell which kind it is. */
+    @VisibleForTesting
+    public RandomAccessReader dataReader()
+    {
+        return dataReader;
     }
 
     @Override
@@ -971,6 +1031,40 @@ public class SSTableCursorReader implements AutoCloseable
     }
 
     /**
+     * Moves to the start of the partition at {@code position}, in the cursor's segment, ready for
+     * {@link #readPartitionHeader}.  Reads nothing when the cursor is already there, at the end of
+     * the partition before it; otherwise it seeks, so a range read can leave a partition early.
+     * {@link #bytesRead()} counts the bytes walked before the seek, and none for the bytes skipped.
+     */
+    public int seekToPartition(long position)
+    {
+        if (isState(state, PARTITION_START | PARTITION_END) && dataReader.getFilePointer() == position)
+        {
+            resetOnPartitionStart();
+            return state = PARTITION_START;
+        }
+        if (position < segmentStart || position >= segmentEnd)
+            throw new IllegalArgumentException("partition position " + position + " outside the cursor's segment ["
+                                               + segmentStart + ", " + segmentEnd + ')');
+        bytesReadInPreviousSegments += dataReader.getFilePointer() - segmentStart;
+        segmentStart = position;
+        if (growReadAheadFromSeeks)
+            startReadAheadAt(position);
+        try
+        {
+            seekPartition(position);
+        }
+        catch (IOException e)
+        {
+            return corruptSSTable(e);
+        }
+        if (moveToReadAheadAfter > 0)
+            restartSequentialRead(position);
+        resetOnPartitionStart();
+        return state = PARTITION_START;
+    }
+
+    /**
      * Positions the cursor at an unfiltered's flags byte mid-partition (e.g. a BTI row-index
      * block start) and consumes those flags, leaving the cursor ready for {@link #readRowHeader}
      * / {@link #readTombstoneMarker} exactly as if it had walked there row by row. No
@@ -985,6 +1079,8 @@ public class SSTableCursorReader implements AutoCloseable
     public int seekUnfiltered(long position)
     {
         state = SEEK;
+        if (growReadAheadFromSeeks)
+            startReadAheadAt(position);
         // partition elements (Unfiltered) have flags
         dataReader.seek(position);
         if (moveToReadAheadAfter > 0)

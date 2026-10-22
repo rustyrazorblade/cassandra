@@ -239,6 +239,12 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
+    public KeyReader keyReader(PartitionPosition key) throws IOException
+    {
+        return delegate.keyReader(key);
+    }
+
+    @Override
     public KeyReader keyReader(boolean detailed) throws IOException
     {
         return delegate.keyReader(detailed);

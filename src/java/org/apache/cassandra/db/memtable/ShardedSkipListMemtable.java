@@ -56,6 +56,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.Cloner;
+import org.apache.cassandra.utils.memory.EnsureOnHeap;
 import org.apache.cassandra.utils.memory.MemtableAllocator;
 import org.github.jamm.Unmetered;
 
@@ -216,6 +217,18 @@ public class ShardedSkipListMemtable extends AbstractShardedMemtable
 
         return new MemtableUnfilteredPartitionIterator(metadata(), iterator, columnFilter, dataRange);
         // readsListener is ignored as it only accepts sstable signals
+    }
+
+    @Override
+    public Iterator<MemtablePartitionData> partitionData(DataRange dataRange)
+    {
+        AbstractBounds<PartitionPosition> keyRange = dataRange.keyRange();
+        boolean isBound = keyRange instanceof Bounds;
+        boolean includeStart = isBound || keyRange instanceof IncludingExcludingBounds;
+        boolean includeStop = isBound || keyRange instanceof Range;
+        EnsureOnHeap ensureOnHeap = allocator.ensureOnHeap();
+        return Iterators.transform(getPartitionIterator(keyRange.left, includeStart, keyRange.right, includeStop),
+                                   partition -> new MemtablePartitionData(partition.partitionKey(), partition.currentData(), ensureOnHeap, partition));
     }
 
     private Iterator<AtomicBTreePartition> getPartitionIterator(PartitionPosition left, boolean includeStart, PartitionPosition right, boolean includeStop)

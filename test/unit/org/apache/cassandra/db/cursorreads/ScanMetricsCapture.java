@@ -148,21 +148,31 @@ public final class ScanMetricsCapture
         return "count=" + histogram.getCount() + " buckets=" + Arrays.toString(Arrays.copyOf(values, length));
     }
 
-    /** Waits for the samples the read queued on the sampler executor. */
+    /** Waits for the samples queued on the sampler executor.  The queue drops a task when it is
+     *  full, the marker task too, so a marker that does not run soon is sent again. */
     private static void awaitSamples()
     {
-        try
+        for (int attempt = 0; ; attempt++)
         {
-            Sampler.samplerExecutor.submit(() -> {}).get(1, TimeUnit.MINUTES);
-        }
-        catch (InterruptedException e)
-        {
-            Thread.currentThread().interrupt();
-            throw new AssertionError(e);
-        }
-        catch (ExecutionException | TimeoutException e)
-        {
-            throw new AssertionError(e);
+            try
+            {
+                Sampler.samplerExecutor.submit(() -> {}).get(1, TimeUnit.SECONDS);
+                return;
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(e);
+            }
+            catch (ExecutionException e)
+            {
+                throw new AssertionError(e);
+            }
+            catch (TimeoutException e)
+            {
+                if (attempt >= 60)
+                    throw new AssertionError(e);
+            }
         }
     }
 
@@ -189,6 +199,8 @@ public final class ScanMetricsCapture
 
         Snapshot snapshot = new Snapshot();
         ClientWarn.instance.captureWarnings();
+        // the sampler queue drops samples when it is full: a read of many partitions would lose some
+        Sampler.insertOnCallerForTesting = true;
         try
         {
             read.run();
@@ -203,6 +215,7 @@ public final class ScanMetricsCapture
         }
         finally
         {
+            Sampler.insertOnCallerForTesting = false;
             List<String> warnings = ClientWarn.instance.getWarnings();
             if (warnings != null)
                 snapshot.clientWarnings.addAll(warnings);

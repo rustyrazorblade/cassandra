@@ -23,8 +23,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.cassandra.db.Columns;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.LivenessInfo;
+import org.apache.cassandra.db.ResponseSink;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -91,7 +93,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  * assumed ALREADY PURGED by the caller ({@code org.apache.cassandra.db.ResponseSink}) — this class only
  * ever encodes what it is handed.
  */
-public final class ResponseWireWriter
+public final class ResponseWireWriter implements ResponseSink.Output
 {
     /**
      * An output whose written bytes can be changed or dropped, so a row is written in place before
@@ -113,13 +115,15 @@ public final class ResponseWireWriter
     }
 
     private final DataOutputPlus out;
-    private final SerializationHeader header;
-    private final SerializationHelper helper;
+    private SerializationHeader header;
+    private SerializationHelper helper;
     private final int version;
 
     // ---- row-local staging (reset per row by startRow; flushed to `out` only by endRow) ----
-    private final DataOutputBuffer rowHeaderBuffer = new DataOutputBuffer();
-    private final DataOutputBuffer rowBody = new DataOutputBuffer();
+    /** Made with {@link #rowBody}, or at the first in-place row that lacks some header column. */
+    private DataOutputBuffer rowHeaderBuffer;
+    /** Made only for a header whose rows are staged, not written in place. */
+    private DataOutputBuffer rowBody;
     /** The open row's clustering in its wire form, {@code Clustering.serializer}'s, valid until endRow. */
     private byte[] rowClustering;
     private int rowClusteringLength;
@@ -137,19 +141,22 @@ public final class ResponseWireWriter
     // merged deletion, so endRow can interleave the row-level-decided [deletion][count] header
     // immediately before the already-buffered cell bytes without a second staging copy.
     private static final int MARKER_GROWTH = 8;
+    private static final int[] NO_INTS = new int[0];
+    private static final long[] NO_LONGS = new long[0];
     private int complexMarkerCount;
-    private int[] markerStart = new int[MARKER_GROWTH];
-    private int[] markerEnd = new int[MARKER_GROWTH];
-    private int[] markerCellCount = new int[MARKER_GROWTH];
-    private long[] markerDeletionMfda = new long[MARKER_GROWTH];
-    private long[] markerDeletionLdt = new long[MARKER_GROWTH];
+    // empty until the first complex column, which most rows never have
+    private int[] markerStart = NO_INTS;
+    private int[] markerEnd = NO_INTS;
+    private int[] markerCellCount = NO_INTS;
+    private long[] markerDeletionMfda = NO_LONGS;
+    private long[] markerDeletionLdt = NO_LONGS;
     private final DeletionTime.ReusableDeletionTime reusableDeletion = DeletionTime.ReusableDeletionTime.live();
 
     /** Rows go straight to {@code out}: it is patchable and no complex column needs a prefix
      *  decided at the row's end.  Otherwise they are staged in {@link #rowBody}. */
-    private final PatchableOutput inPlace;
+    private PatchableOutput inPlace;
     /** Where the open row's cells go: {@code out} when written in place, else {@link #rowBody}. */
-    private final DataOutputPlus body;
+    private DataOutputPlus body;
     /** In place: where the open row starts, and where its cells start. */
     private int rowStart;
     private int rowCellsStart;
@@ -157,7 +164,7 @@ public final class ResponseWireWriter
     /** The table has dropped columns, so a row can carry a cell of a column the header does not. */
     private final boolean tableHasDroppedColumns;
 
-    private final AbstractType<?>[] clusteringTypes;
+    private AbstractType<?>[] clusteringTypes;
 
     /**
      * @param tableHasDroppedColumns whether the table has dropped columns: only then can a row
@@ -166,23 +173,41 @@ public final class ResponseWireWriter
      */
     public ResponseWireWriter(DataOutputPlus out, SerializationHeader header, int version, boolean tableHasDroppedColumns)
     {
-        assert !header.isForSSTable() : "ResponseWireWriter is the MESSAGING flavor only";
         this.out = out;
+        this.tableHasDroppedColumns = tableHasDroppedColumns;
+        this.version = version;
+        useHeader(header);
+    }
+
+    /**
+     * Writes the next partitions with {@code header}, keeping this writer's buffers.  A range read
+     * calls this when a partition's header differs from the one before.  No row may be open.
+     */
+    public void useHeader(SerializationHeader header)
+    {
+        assert !header.isForSSTable() : "ResponseWireWriter is the MESSAGING flavor only";
+        assert !rowOpen : "useHeader called while a row is open";
         this.header = header;
         this.clusteringTypes = header.clusteringTypes().toArray(AbstractType[]::new);
-        this.tableHasDroppedColumns = tableHasDroppedColumns;
         this.inPlace = out instanceof PatchableOutput && !header.columns(false).hasComplex() ? (PatchableOutput) out : null;
+        if (inPlace == null && rowBody == null)
+        {
+            rowBody = new DataOutputBuffer();
+            if (rowHeaderBuffer == null)
+                rowHeaderBuffer = new DataOutputBuffer();
+        }
         this.body = inPlace != null ? out : rowBody;
         this.helper = new SerializationHelper(header);
-        this.version = version;
     }
 
     /** The clustering types the response header serializes clusterings with. */
+    @Override
     public AbstractType<?>[] clusteringTypes()
     {
         return clusteringTypes;
     }
 
+    @Override
     public List<AbstractType<?>> clusteringTypesList()
     {
         return header.clusteringTypes();
@@ -196,6 +221,45 @@ public final class ResponseWireWriter
     public void writeKey(ByteBuffer key) throws IOException
     {
         ByteBufferUtil.writeWithVIntLength(key, out);
+    }
+
+    // where the open partition starts, and where its header starts, in a patchable output
+    private int partitionStart;
+    private int headerStart;
+
+    /** The "has next partition" flag, the key, the header and the static row.  Needs a
+     *  {@link PatchableOutput}, which can drop or rewrite them. */
+    @Override
+    public void openPartition(DecoratedKey key, boolean reversed, DeletionTime partitionDeletion, Row staticRow,
+                              ColumnFilter selection) throws IOException
+    {
+        PatchableOutput patchable = (PatchableOutput) out;
+        partitionStart = patchable.getLength();
+        out.writeBoolean(true);
+        writeKey(key.getKey());
+        headerStart = patchable.getLength();
+        writeHeader(false, reversed, partitionDeletion, staticRow != null, selection);
+        if (staticRow != null)
+            writeStaticRow(staticRow);
+    }
+
+    @Override
+    public void removePartition()
+    {
+        ((PatchableOutput) out).truncate(partitionStart);
+    }
+
+    @Override
+    public void closeEmptyPartition(boolean reversed, DeletionTime partitionDeletion, ColumnFilter selection) throws IOException
+    {
+        ((PatchableOutput) out).truncate(headerStart);
+        writeHeader(true, reversed, partitionDeletion, false, selection);
+    }
+
+    @Override
+    public void closePartition() throws IOException
+    {
+        writeEndOfPartition();
     }
 
     /** {@code isEmpty} short-circuits to the single-byte IS_EMPTY form — the caller (which drives
@@ -230,6 +294,7 @@ public final class ResponseWireWriter
 
     /** Whole-row escape hatch passthrough: the merged row IS this already-live object (see
      *  {@code CursorReadMerger.MergeSink#addRow}) — nothing to transcode. */
+    @Override
     public void writeRow(Row row) throws IOException
     {
         UnfilteredSerializer.serializer.serialize(row, helper, out, version);
@@ -238,6 +303,7 @@ public final class ResponseWireWriter
     /** Range tombstone marker passthrough: {@code CursorReadMerger.mergeMarkerGroup} always builds
      *  a real {@code RangeTombstoneBoundMarker}/{@code RangeTombstoneBoundaryMarker} before calling
      *  the sink — nothing to transcode. */
+    @Override
     public void writeMarker(RangeTombstoneMarker marker) throws IOException
     {
         UnfilteredSerializer.serializer.serialize(marker, helper, out, version);
@@ -261,6 +327,7 @@ public final class ResponseWireWriter
      *                   with this writer's header clustering types, in its first
      *                   {@code clusteringLength} bytes
      */
+    @Override
     public void startRow(byte[] clustering, int clusteringLength, LivenessInfo liveness, DeletionTime rowDeletion) throws IOException
     {
         assert !rowOpen : "startRow called while a row is already open";
@@ -271,8 +338,10 @@ public final class ResponseWireWriter
         this.rowColumns.clear();
         this.openComplexColumn = null;
         this.complexMarkerCount = 0;
-        this.rowHeaderBuffer.clear();
-        this.rowBody.clear();
+        if (rowHeaderBuffer != null)
+            this.rowHeaderBuffer.clear();
+        if (rowBody != null)
+            this.rowBody.clear();
         this.rowOpen = true;
         if (inPlace != null)
         {
@@ -325,11 +394,13 @@ public final class ResponseWireWriter
      *  cells.  Any other live-deletion complex column is announced only by its first
      *  {@link #addCell}, exactly like the {@code MergeSink} grammar it mirrors — see
      *  {@code ResponseSink}. */
+    @Override
     public void addComplexDeletion(ColumnMetadata column, DeletionTime complexDeletion) throws IOException
     {
         openComplexColumn(column, complexDeletion);
     }
 
+    @Override
     public void addCell(Cell<?> cell) throws IOException
     {
         ColumnMetadata column = cell.column();
@@ -364,6 +435,7 @@ public final class ResponseWireWriter
      *                 passes false here even when {@code source} still has bytes)
      * @param source   the winner's raw value bytes, streamed only when {@code hasValue} is true
      */
+    @Override
     public void addCellFromWire(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime,
                                 CellPath path, boolean hasValue, CellValueSource source) throws IOException
     {
@@ -463,6 +535,7 @@ public final class ResponseWireWriter
     }
 
     /** Discards the open row: nothing staged for it reaches {@code out}. */
+    @Override
     public void abandonRow()
     {
         assert rowOpen : "abandonRow called with no open row";
@@ -478,6 +551,7 @@ public final class ResponseWireWriter
      *
      * @return true if the row was flushed, false if it was empty and discarded (nothing written)
      */
+    @Override
     public boolean endRow() throws IOException
     {
         assert rowOpen : "endRow called with no open row";
@@ -532,6 +606,8 @@ public final class ResponseWireWriter
             if (!hasAllColumns)
             {
                 // the column subset goes before the cells: rare, so the cells move to make room
+                if (rowHeaderBuffer == null)
+                    rowHeaderBuffer = new DataOutputBuffer();
                 Columns.serializer.serializeSubset(rowColumns, header.columns(false), rowHeaderBuffer);
                 inPlace.insert(rowCellsStart, rowHeaderBuffer.getData(), 0, rowHeaderBuffer.getLength());
             }

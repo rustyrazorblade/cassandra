@@ -31,6 +31,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -272,6 +273,12 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public final OpenReason openReason;
 
     protected final FileHandle dfile;
+
+    /** Whether the data file can be read with direct I/O; null until checked.  The check creates a file. */
+    private volatile Boolean dataFileSupportsDirectIO;
+
+    /** The data file opened once with direct I/O, for {@link #openDataReaderForDirectScan}; null until then. */
+    private volatile FileHandle directDataFile;
 
     // technically isCompacted is not necessary since it should never be unreferenced unless it is also compacted,
     // but it seems like a good extra layer of protection against reference counting bugs to not delete data based on that alone
@@ -974,6 +981,11 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public abstract KeyReader keyReader(boolean detailed) throws IOException;
 
     /**
+     * Returns a {@link KeyReader} positioned at the first key at or after {@code key}.
+     */
+    public abstract KeyReader keyReader(PartitionPosition key) throws IOException;
+
+    /**
      * Returns a {@link KeyIterator} over all keys in the sstable.
      */
     public KeyIterator keyIterator() throws IOException
@@ -1474,7 +1486,49 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     {
         return diskAccessMode == null
                || diskAccessMode == dfile.diskAccessMode()
-               || (diskAccessMode == DiskAccessMode.direct && !dfile.supportsDirectIO());
+               || (diskAccessMode == DiskAccessMode.direct && !dataFileSupportsDirectIO());
+    }
+
+    /**
+     * A scan reader of the data file with direct I/O.  Unlike {@link #openDataReaderForScan(DiskAccessMode)}
+     * it opens no file: every such reader reads through one direct file handle, opened on first use and
+     * closed with this sstable reader's other components.  Null when the data file does not support
+     * direct I/O.
+     */
+    public RandomAccessReader openDataReaderForDirectScan()
+    {
+        if (!dataFileSupportsDirectIO())
+            return null;
+        FileHandle handle = directDataFile;
+        if (handle == null && (handle = openDirectDataFile()) == null)
+            return openDataReaderForScan(DiskAccessMode.direct); // never set up, so nothing would close a shared handle
+        return handle.createReader(null, true, OnReaderClose.RETAIN_FILE_OPEN);
+    }
+
+    private FileHandle openDirectDataFile()
+    {
+        synchronized (tidy)
+        {
+            if (directDataFile == null)
+            {
+                FileHandle handle = dfile.toBuilder().withDiskAccessMode(DiskAccessMode.direct).complete();
+                if (!tidy.addCloseable(handle))
+                {
+                    handle.close();
+                    return null;
+                }
+                directDataFile = handle;
+            }
+            return directDataFile;
+        }
+    }
+
+    private boolean dataFileSupportsDirectIO()
+    {
+        Boolean supported = dataFileSupportsDirectIO;
+        if (supported == null)
+            dataFileSupportsDirectIO = supported = dfile.supportsDirectIO();
+        return supported;
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)
@@ -1577,7 +1631,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         private final Descriptor descriptor;
         private final WeakReference<Owner> owner;
 
-        private List<? extends AutoCloseable> closeables;
+        private List<AutoCloseable> closeables;
         private Runnable runOnClose;
 
         private boolean isReplaced = false;
@@ -1596,9 +1650,19 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
             this.global = globalRef.get();
             if (trackHotness)
                 global.ensureReadMeter();
-            this.closeables = new ArrayList<>(closeables);
+            // copy on write: a component added later (addCloseable) must not break a concurrent addTo
+            this.closeables = new CopyOnWriteArrayList<>(closeables);
             // to avoid tidy seeing partial state, set setup=true at the end
             this.setup = true;
+        }
+
+        /** Closes {@code closeable} with the other components; false when this reader was never set up. */
+        synchronized boolean addCloseable(AutoCloseable closeable)
+        {
+            if (!setup)
+                return false;
+            closeables.add(closeable);
+            return true;
         }
 
         private InstanceTidier(Descriptor descriptor, Owner owner)

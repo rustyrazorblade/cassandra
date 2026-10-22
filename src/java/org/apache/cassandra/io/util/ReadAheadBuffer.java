@@ -29,14 +29,18 @@ import javax.annotation.concurrent.NotThreadSafe;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.agrona.BufferUtil;
+
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.compress.CorruptBlockException;
 import org.apache.cassandra.metrics.ReadAheadBufferMetrics;
 import org.apache.cassandra.utils.Closeable;
+import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import io.netty.util.concurrent.FastThreadLocal;
 import io.netty.util.concurrent.FastThreadLocalThread;
+import sun.nio.ch.DirectBuffer;
 
 /**
  * A read-ahead buffer for sequential scans of a single file.
@@ -99,7 +103,8 @@ public class ReadAheadBuffer implements Closeable
         this(channel, bufferSupplier, false);
     }
 
-    private ReadAheadBuffer(ChannelProxy channel, Supplier<ByteBuffer> bufferSupplier, boolean keepBuffer)
+    /** @param keepBuffer the buffer goes back to the thread's kept buffers on close, rather than being freed */
+    protected ReadAheadBuffer(ChannelProxy channel, Supplier<ByteBuffer> bufferSupplier, boolean keepBuffer)
     {
         this.channel = channel;
         this.channelSize = channel.size();
@@ -114,16 +119,27 @@ public class ReadAheadBuffer implements Closeable
 
     private static ByteBuffer keptOrNew(int bufferSize, BufferType bufferType)
     {
-        if (!keepsBuffers())
-            return bufferType.allocate(bufferSize);
+        return keptOrNew(bufferSize, bufferType == BufferType.OFF_HEAP, 1, () -> bufferType.allocate(bufferSize));
+    }
 
-        boolean direct = bufferType == BufferType.OFF_HEAP;
+    /** A kept or new direct buffer whose address is a multiple of {@code alignment}, for direct I/O. */
+    protected static ByteBuffer keptOrNewAligned(int bufferSize, int alignment)
+    {
+        return keptOrNew(bufferSize, true, alignment, () -> BufferUtil.allocateDirectAligned(bufferSize, alignment));
+    }
+
+    private static ByteBuffer keptOrNew(int bufferSize, boolean direct, int alignment, Supplier<ByteBuffer> allocate)
+    {
+        if (!keepsBuffers())
+            return allocate.get();
+
         ByteBuffer match = null;
         Iterator<ByteBuffer> kept = KEPT.get().iterator();
         while (kept.hasNext())
         {
             ByteBuffer buffer = kept.next();
-            if (match == null && buffer.capacity() == bufferSize && buffer.isDirect() == direct)
+            if (match == null && buffer.capacity() == bufferSize && buffer.isDirect() == direct
+                && (alignment <= 1 || MemoryUtil.getAddress(buffer) % alignment == 0))
             {
                 kept.remove();
                 untrack(buffer);
@@ -136,7 +152,7 @@ public class ReadAheadBuffer implements Closeable
                 freeKept(buffer);
             }
         }
-        return match != null ? match : bufferType.allocate(bufferSize);
+        return match != null ? match : allocate.get();
     }
 
     /** Keeps {@code buffer} for this thread if the per-thread and node-wide limits allow it. */
@@ -169,7 +185,14 @@ public class ReadAheadBuffer implements Closeable
     private static void freeKept(ByteBuffer buffer)
     {
         untrack(buffer);
-        FileUtils.clean(buffer);
+        free(buffer);
+    }
+
+    /** Frees a buffer this class allocated: an aligned buffer is a slice, so its root allocation. */
+    private static void free(ByteBuffer buffer)
+    {
+        Object root = buffer.isDirect() ? ((DirectBuffer) buffer).attachment() : null;
+        FileUtils.clean(root instanceof ByteBuffer ? (ByteBuffer) root : buffer);
     }
 
     public boolean hasBuffer()
@@ -181,6 +204,12 @@ public class ReadAheadBuffer implements Closeable
     int bufferSize()
     {
         return buffer == null ? -1 : buffer.capacity();
+    }
+
+    @VisibleForTesting
+    long bufferAddress()
+    {
+        return buffer == null ? -1 : MemoryUtil.getAddress(buffer);
     }
 
     public int remaining()
@@ -300,7 +329,8 @@ public class ReadAheadBuffer implements Closeable
 
     protected void cleanBuffer(ByteBuffer buffer)
     {
-        FileUtils.clean(buffer);
+        // a kept buffer may be an aligned one, whichever kind of read-ahead buffer took it
+        free(buffer);
     }
 
     @Override

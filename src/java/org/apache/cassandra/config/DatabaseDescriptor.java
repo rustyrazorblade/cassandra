@@ -189,6 +189,8 @@ public class DatabaseDescriptor
 
     private static DiskAccessMode compactionReadDiskAccessMode;
 
+    private static DiskAccessMode rangeReadDiskAccessMode;
+
     private static DiskAccessMode backgroundWriteDiskAccessMode;
 
     private static AbstractCryptoProvider cryptoProvider;
@@ -569,6 +571,8 @@ public class DatabaseDescriptor
                                                "(options: direct/auto) " + conf.compaction_read_disk_access_mode);
         }
         logger.info("compaction_read_disk_access_mode resolved to: {}", compactionReadDiskAccessMode);
+
+        applyRangeReadDiskAccessMode(conf);
 
         /* phi convict threshold for FailureDetector */
         if (conf.phi_convict_threshold < 5 || conf.phi_convict_threshold > 16)
@@ -1122,6 +1126,25 @@ public class DatabaseDescriptor
             logger.info("Global memtable off-heap threshold is 0; memtable_allocation_type {} does not allocate off-heap",
                         conf.memtable_allocation_type);
         }
+    }
+
+    @VisibleForTesting
+    static void applyRangeReadDiskAccessMode(Config config)
+    {
+        if (DiskAccessMode.auto == config.range_read_disk_access_mode)
+        {
+            rangeReadDiskAccessMode = config.disk_access_mode;
+        }
+        else if (DiskAccessMode.direct == config.range_read_disk_access_mode)
+        {
+            rangeReadDiskAccessMode = DiskAccessMode.direct;
+        }
+        else
+        {
+            throw new IllegalArgumentException("Unsupported disk access mode for range_read_disk_access_mode " +
+                                               "(options: direct/auto) " + config.range_read_disk_access_mode);
+        }
+        logger.info("range_read_disk_access_mode resolved to: {}", rangeReadDiskAccessMode);
     }
 
     @VisibleForTesting
@@ -2978,6 +3001,19 @@ public class DatabaseDescriptor
         conf.compaction_read_disk_access_mode = scanDiskAccessMode;
     }
 
+    /** The disk access mode of the data file reads of a cursor range read. */
+    public static DiskAccessMode getRangeReadDiskAccessMode()
+    {
+        return rangeReadDiskAccessMode;
+    }
+
+    @VisibleForTesting
+    public static void setRangeReadDiskAccessMode(DiskAccessMode diskAccessMode)
+    {
+        rangeReadDiskAccessMode = diskAccessMode;
+        conf.range_read_disk_access_mode = diskAccessMode;
+    }
+
     /**
      * Return commitlog disk access mode.
      */
@@ -4471,6 +4507,17 @@ public class DatabaseDescriptor
     public static void setCursorReadsEnabled(boolean cursor_reads_enabled)
     {
         conf.cursor_reads_enabled = cursor_reads_enabled;
+    }
+
+    public static boolean cursorRangeReadsEnabled()
+    {
+        return conf.cursor_range_reads_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setCursorRangeReadsEnabled(boolean cursor_range_reads_enabled)
+    {
+        conf.cursor_range_reads_enabled = cursor_range_reads_enabled;
     }
 
     public static boolean enableDropCompactStorage()
