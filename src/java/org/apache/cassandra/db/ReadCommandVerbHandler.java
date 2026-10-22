@@ -25,7 +25,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.QueryCancelledException;
@@ -46,6 +45,16 @@ public class ReadCommandVerbHandler implements IVerbHandler<ReadCommand>
     private static final Logger logger = LoggerFactory.getLogger(ReadCommandVerbHandler.class);
     private static final String logMessageTemplate = "Receiving read(s) for token(s) neither owned nor pending. Example: from {} for token {} in {}.{}";
     private static final String exceptionMessageTemplate = "Exception thrown checking if token {} outside valid range for keyspace {} - permitting";
+
+    public ReadResponse doRead(ReadCommand command, boolean trackRepairedData)
+    {
+        // createResponseLocally's default implementation is exactly the executeLocally + createResponse
+        // pair this replaced; SinglePartitionReadCommand may first try the flag-gated cursor path.
+        try (ReadExecutionController controller = command.executionController(trackRepairedData))
+        {
+            return command.createResponseLocally(controller);
+        }
+    }
 
     public void doVerb(Message<ReadCommand> message)
     {
@@ -89,10 +98,9 @@ public class ReadCommandVerbHandler implements IVerbHandler<ReadCommand>
             command.trackWarnings();
 
         ReadResponse response;
-        try (ReadExecutionController controller = command.executionController(message.trackRepairedData());
-             UnfilteredPartitionIterator iterator = command.executeLocally(controller))
+        try
         {
-            response = command.createResponse(iterator, controller.getRepairedDataInfo());
+            response = doRead(command, message.trackRepairedData());
         }
         catch (RejectException e)
         {

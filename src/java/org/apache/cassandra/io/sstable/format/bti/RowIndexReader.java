@@ -97,6 +97,19 @@ public class RowIndexReader extends Walker<RowIndexReader>
         return getCurrentIndexInfo();
     }
 
+    /**
+     * The index block after the one {@link #separatorFloor} finds for {@code key}: the block with the
+     * smallest separator greater than {@code key}, or null when the floor block is the last one.
+     */
+    public IndexInfo separatorAfterFloor(ByteComparable key) throws IOException
+    {
+        prefixAndNeighbours(key, RowIndexReader::readPayload);
+        if (greaterBranch == NONE)
+            return null;
+        goMin(greaterBranch);
+        return getCurrentIndexInfo();
+    }
+
     public IndexInfo min() throws IOException
     {
         goMin(root);

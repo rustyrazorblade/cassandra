@@ -312,6 +312,59 @@ public abstract class DataLimits
             return assumeLiveData || row.hasLiveData(nowInSec, enforceStrictLiveness);
         }
 
+        /**
+         * CASSANDRA-20428 (cursor reads): public bridge so the cursor merge's production
+         * bound can drive a DETACHED counter over merged output directly, outside the
+         * transformation framework. Must be called once, before any {@link #countRow}, with the
+         * partition's key and (merged) static row — this is what seeds the paging-resume
+         * {@code rowsInCurrentPartition} state on {@code CQLPagingLimits}' counter. The counter is
+         * never attached to an iterator, so the {@code stop()}/{@code stopInPartition()} signals
+         * its counting fires are harmless no-ops; callers consult {@link #isDone()}/
+         * {@link #isDoneForPartition()} instead.
+         */
+        public void countPartition(DecoratedKey partitionKey, Row staticRow)
+        {
+            stopSignalled = false;
+            applyToPartition(partitionKey, staticRow);
+        }
+
+        /**
+         * CASSANDRA-20428 (cursor reads): public bridge counting one row exactly as this
+         * counter's {@code applyToRow} would, from the row's clustering and whether it has live
+         * data, so a cursor read can count a row it never builds — see {@link #countPartition} for
+         * the detached-counter contract.
+         *
+         * @return false when the counter drops the row from the result, like {@code applyToRow}
+         *         returning null
+         */
+        public boolean countRow(Clustering<?> clustering, boolean hasLiveData)
+        {
+            return applyToRow(clustering, assumeLiveData || hasLiveData);
+        }
+
+        /** Counts one row; the body of {@code applyToRow}.  Returns false when the row is dropped. */
+        protected abstract boolean applyToRow(Clustering<?> clustering, boolean isLive);
+
+        /**
+         * CASSANDRA-20428 (cursor reads): whether counting has signalled the end of the current
+         * partition since {@link #countPartition}, the signal an attached counter gives its
+         * iterator.  A detached counter has no iterator to stop, so its caller checks this.
+         */
+        public boolean stopSignalled()
+        {
+            return stopSignalled;
+        }
+
+        private boolean stopSignalled;
+
+        @Override
+        protected void stopInPartition()
+        {
+            // stop() ends with stopInPartition(), so this sees both signals
+            stopSignalled = true;
+            super.stopInPartition();
+        }
+
         @Override
         protected BaseRowIterator<?> applyToPartition(BaseRowIterator<?> partition)
         {
@@ -495,9 +548,16 @@ public abstract class DataLimits
             @Override
             public Row applyToRow(Row row)
             {
-                if (isLive(row))
-                    incrementRowCount();
+                applyToRow(row.clustering(), isLive(row));
                 return row;
+            }
+
+            @Override
+            protected boolean applyToRow(Clustering<?> clustering, boolean isLive)
+            {
+                if (isLive)
+                    incrementRowCount();
+                return true;
             }
 
             @Override
@@ -932,10 +992,16 @@ public abstract class DataLimits
             @Override
             public Row applyToRow(Row row)
             {
+                return applyToRow(row.clustering(), isLive(row)) ? row : null;
+            }
+
+            @Override
+            protected boolean applyToRow(Clustering<?> clustering, boolean isLive)
+            {
                 // We want to check if the row belongs to a new group even if it has been deleted. The goal being
                 // to minimize the chances of having to go through the same data twice if we detect on the next
                 // non deleted row that we have reached the limit.
-                if (groupMaker.isNewGroup(currentPartitionKey, row.clustering()))
+                if (groupMaker.isNewGroup(currentPartitionKey, clustering))
                 {
                     if (hasUnfinishedGroup)
                     {
@@ -950,17 +1016,17 @@ public abstract class DataLimits
                 if (enforceLimits && isDoneForPartition())
                 {
                     hasUnfinishedGroup = false;
-                    return null;
+                    return false;
                 }
 
-                if (isLive(row))
+                if (isLive)
                 {
                     hasUnfinishedGroup = true;
                     incrementRowCount();
                     hasReturnedRowsFromCurrentPartition = true;
                 }
 
-                return row;
+                return true;
             }
 
             @Override

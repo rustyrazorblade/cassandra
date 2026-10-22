@@ -493,6 +493,12 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         }
 
         protected abstract Kind kind();
+
+        public boolean isMapElementExpression()
+        {
+            return kind() == Kind.MAP_EQUALITY;
+        }
+
         protected final ColumnMetadata column;
         protected final Operator operator;
         protected final ByteBuffer value;

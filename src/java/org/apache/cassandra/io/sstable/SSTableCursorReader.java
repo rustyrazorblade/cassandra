@@ -21,6 +21,7 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collection;
+import java.util.Collections;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -29,6 +30,7 @@ import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ReusableLivenessInfo;
 import org.apache.cassandra.io.util.ResizableByteBuffer;
+import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.Columns;
 import org.apache.cassandra.db.DeletionTime;
@@ -81,6 +83,8 @@ public class SSTableCursorReader implements AutoCloseable
         int PARTITION_END = 1 << 8;
         /** no segment left to read; EOF for a whole-file cursor */
         int DONE = 1 << 9;
+        /** {@link #seekUnfiltered} has positioned the reader but not yet resolved the flags */
+        int SEEK = 1 << 10;
 
         static boolean isState(int state, int mask) {
             return (state & mask) != 0;
@@ -160,6 +164,21 @@ public class SSTableCursorReader implements AutoCloseable
         // The type that compares the path bytes of the current cell: see
         // ColumnMetadata.pathNameComparator. It is null for a simple column.
         public AbstractType<?> cellPathType;
+
+        // Accessors over the cell state above. The merge loop reads the cell through these rather
+        // than through the fields, so the same walk can later run over a source that is not this
+        // class. Names match CursorReads.MergeLeg where it has a counterpart.
+        public ColumnMetadata cellColumn() { return cellColumn; }
+        public ReusableCellLivenessInfo cellLiveness() { return cellLiveness; }
+        public boolean cellProduced() { return producedCell; }
+        public int cellFlags() { return cellFlags; }
+        public AbstractType<?> cellType() { return cellType; }
+        public AbstractType<?> cellPathType() { return cellPathType; }
+        public byte[] cellPathBuffer() { return cellPathBuffer; }
+        public int cellPathLength() { return cellPathLength; }
+        /** The index of {@link #cellColumn} in {@link #columns}. */
+        public int cellColumnIndex() { return cellColumnIndex; }
+
         private ColumnMetadata[] columnsArray;
         private AbstractType<?>[] cellTypeArray;
         // One entry per column of columnsArray: the path comparator type of a complex column, or
@@ -527,10 +546,36 @@ public class SSTableCursorReader implements AutoCloseable
 
     // need to be closed
     private final SSTableReader ssTableReader;
-    private final RandomAccessReader dataReader;
+    private RandomAccessReader dataReader;
+    /** For a read on the chunk cache: once it has read this many bytes in a row without a seek,
+     *  all missing the chunk cache, it moves to the read-ahead reader; 0 when it does not. */
+    private long moveToReadAheadAfter;
+    /** Where the bytes read in a row that miss the chunk cache started: the last seek, or the
+     *  last chunk found in the cache. */
+    private long sequentialStart;
+    /** The chunk length of a compressed sstable, for the chunk cache checks. */
+    private int readAheadChunkLength;
+    /** Where the read ends, asked only when the read is about to move to the read-ahead reader. */
+    private ReadEnd readEnd;
+    /** The rows the read returns, shared with the read's other readers; null for no limit. */
+    private RowBudget rowBudget;
+    /** Unfiltereds read since {@link #countStart}, for the read-ahead estimate of a limited read. */
+    private long unfilteredsRead;
+    private long countStart;
+    /** The read-ahead reader reads no further than this; extended as a limited read goes on.
+     *  -1 when there is no read-ahead limit. */
+    private long readAheadLimit = -1;
+    /** {@link #readAheadLimit} is where the read ends, not an estimate. */
+    private boolean readAheadLimitFinal;
+    /** {@link ReadEnd#readEnd}, asked once; {@link Long#MIN_VALUE} until then. */
+    private long knownReadEnd = Long.MIN_VALUE;
+    /** The start of the chunk after the one being read, which is checked in the chunk cache when the
+     *  read reaches it. */
+    private long nextChunkCheck;
     private final DeletionTime.Serializer deletionTimeSerializer;
 
-    private final CellCursor staticRowCellCursor = new CellCursor();
+    // created at the first static row
+    private CellCursor staticRowCellCursor;
     private final CellCursor rowCellCursor = new CellCursor();
 
 
@@ -565,17 +610,17 @@ public class SSTableCursorReader implements AutoCloseable
         TableMetadata metadata = Util.metadataFromSSTable(desc);
         SSTableReader reader = SSTableReader.openNoValidation(null, desc, TableMetadataRef.forOfflineTools(metadata));
         // The cursor owns this reader, so closing it releases the reader's own reference.
-        return new SSTableCursorReader(reader, metadata, reader.selfRef(), null, null);
+        return new SSTableCursorReader(reader, metadata, reader.selfRef(), null, null, true);
     }
 
     public SSTableCursorReader(SSTableReader reader)
     {
-        this(reader, reader.metadata(), null, null, null);
+        this(reader, reader.metadata(), null, null, null, true);
     }
 
     public SSTableCursorReader(SSTableReader reader, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, null, diskAccessMode);
+        this(reader, reader.metadata(), null, null, diskAccessMode, true);
     }
 
     /**
@@ -587,12 +632,200 @@ public class SSTableCursorReader implements AutoCloseable
      */
     public SSTableCursorReader(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, bounds, diskAccessMode);
+        this(reader, reader.metadata(), null, bounds, diskAccessMode, true);
     }
 
-    /** @param bounds the segments to read, or null for the whole file */
+    /**
+     * A cursor for a read, over the given ranges like the constructor above.  It reads the data
+     * file through the chunk cache, like the iterator read path.  The constructors read ahead and
+     * bypass the cache, as a scan does; a short read would then pay a disk read, a decompression
+     * and a new read-ahead buffer every time.
+     */
+    public static SSTableCursorReader forRead(SSTableReader reader, Collection<PartitionPositionBounds> bounds)
+    {
+        return new SSTableCursorReader(reader, reader.metadata(), null, bounds, null, false).moveToReadAheadOnLongReads();
+    }
+
+    /**
+     * {@link #forRead} for a read that starts inside a row-indexed partition, at a row index
+     * block: it reads nothing until the first {@link #seekUnfiltered}, which must come next.
+     * The partition header is never read, like the BTI iterator path for a read that needs no
+     * static row: the partition deletion comes from the partition index.
+     */
+    public static SSTableCursorReader forReadInsidePartition(SSTableReader reader, PartitionPositionBounds partition)
+    {
+        return new SSTableCursorReader(reader, reader.metadata(), null, Collections.singletonList(partition), null, false, false)
+               .moveToReadAheadOnLongReads();
+    }
+
+    /**
+     * A long contiguous read of data that is not in the chunk cache, as a cold scan, reads faster
+     * through the read-ahead reader: one large read per buffer and no chunk cache churn.  A read
+     * starts on the chunk cache, so a short one never pays a read-ahead fill.  It moves once it
+     * has read one read-ahead buffer's worth in a row whose chunks miss the chunk cache.  Data
+     * that is in the chunk cache stays on it.  With the chunk cache disabled every chunk misses.
+     * Only for compressed sstables, the ones the read-ahead reader serves.
+     */
+    private SSTableCursorReader moveToReadAheadOnLongReads()
+    {
+        if (ssTableReader.compression)
+        {
+            moveToReadAheadAfter = DatabaseDescriptor.getCompressedReadAheadBufferSize();
+            readAheadChunkLength = ssTableReader.getCompressionMetadata().chunkLength();
+            restartSequentialRead(dataReader.getPosition());
+        }
+        return this;
+    }
+
+    private void restartSequentialRead(long position)
+    {
+        sequentialStart = position;
+        nextChunkCheck = (position & -readAheadChunkLength) + readAheadChunkLength;
+    }
+
+    /** Where a read ends in the data file, for {@link #readEnd}. */
+    public interface ReadEnd
+    {
+        /** The data file position the read needs nothing at or past, or -1 when it is not known. */
+        long readEnd();
+    }
+
+    /**
+     * The rows a limited read returns, shared by the sstable readers of one read: each counts the
+     * unfiltereds it reads, so a reader can estimate how much of the data file the read still needs.
+     */
+    public static final class RowBudget
+    {
+        final long rows;
+        long read;
+
+        public RowBudget(long rows)
+        {
+            this.rows = rows;
+        }
+    }
+
+    /** The read returns at most {@code budget}'s rows, counted across the readers that share it. */
+    public void rowBudget(RowBudget budget)
+    {
+        this.rowBudget = budget;
+    }
+
+    /**
+     * Sets where this read ends: the read-ahead reader reads no further, and a read with less than
+     * one read-ahead buffer left does not move to it.
+     */
+    public void readEnd(ReadEnd readEnd)
+    {
+        this.readEnd = readEnd;
+    }
+
+    private void maybeMoveToReadAhead()
+    {
+        if (rowBudget != null)
+        {
+            rowBudget.read++;
+            if (unfilteredsRead++ == 0)
+                countStart = dataReader.getPosition();
+        }
+        if (readAheadLimit > 0)
+        {
+            maybeExtendReadAhead();
+            return;
+        }
+        if (moveToReadAheadAfter <= 0)
+            return;
+        long position = dataReader.getPosition();
+        if (position >= nextChunkCheck)
+        {
+            // the read has entered a new chunk: check the next one, which it has not read yet
+            nextChunkCheck = (position & -readAheadChunkLength) + readAheadChunkLength;
+            if (dataReader.isChunkCached(nextChunkCheck))
+                sequentialStart = nextChunkCheck;
+        }
+        if (position - sequentialStart < moveToReadAheadAfter)
+            return;
+        long end = knownReadEnd();
+        long estimate = estimatedReadEnd(position);
+        readAheadLimitFinal = end > position && (estimate < 0 || end <= estimate);
+        long limit = readAheadLimitFinal ? end : estimate;
+        // the rest of a short read stays on the chunk reader
+        if (limit > position && limit - position < moveToReadAheadAfter)
+        {
+            if (readAheadLimitFinal)
+                moveToReadAheadAfter = 0;
+            return;
+        }
+        moveToReadAheadAfter = 0;
+        RandomAccessReader readAhead = ssTableReader.openDataReaderForScan();
+        if (limit > position)
+        {
+            readAhead.limitReadAhead(limit);
+            readAheadLimit = limit;
+        }
+        readAhead.seek(position);
+        dataReader.close();
+        dataReader = readAhead;
+    }
+
+    private long knownReadEnd()
+    {
+        if (knownReadEnd == Long.MIN_VALUE)
+            knownReadEnd = readEnd == null ? -1 : readEnd.readEnd();
+        return knownReadEnd;
+    }
+
+    /**
+     * Where the read is likely to end.  A limited read: the rows its readers have not yet read, at
+     * the bytes per unfiltered this reader has read so far, with two chunks to spare.  The readers
+     * of a merge share the count, so each reads ahead about its own share, not the whole limit.  A
+     * read with no limit: as far again as it has read without a seek, so read-ahead grows as the
+     * read goes on, up to one buffer, and a read that ends soon after the move reads little past it.
+     */
+    private long estimatedReadEnd(long position)
+    {
+        if (rowBudget == null)
+            return position + Math.max(4L * readAheadChunkLength, position - sequentialStart);
+        long rowsLeft = Math.max(0, rowBudget.rows - rowBudget.read);
+        long bytesPerUnfiltered = Math.max(1, (position - countStart) / Math.max(1, unfilteredsRead));
+        return position + rowsLeft * bytesPerUnfiltered + 2L * readAheadChunkLength;
+    }
+
+    /** Moves an estimated read-ahead limit on before the read reaches it. */
+    private void maybeExtendReadAhead()
+    {
+        if (readAheadLimitFinal)
+            return;
+        long position = dataReader.getPosition();
+        if (position + 2L * readAheadChunkLength < readAheadLimit)
+            return;
+        long estimate = estimatedReadEnd(position);
+        long end = knownReadEnd();
+        long limit = Math.max(estimate, position + 4L * readAheadChunkLength);
+        if (end > position && end <= limit)
+        {
+            limit = end;
+            readAheadLimitFinal = true;
+        }
+        readAheadLimit = limit;
+        dataReader.limitReadAhead(limit);
+    }
+
     private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
-                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
+                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode, boolean scan)
+    {
+        this(reader, metadata, readerRef, bounds, diskAccessMode, scan, true);
+    }
+
+    /**
+     * @param bounds the segments to read, or null for the whole file
+     * @param scan   read ahead and bypass the chunk cache, as a scan does, or read through the cache
+     * @param enterFirstSegment seek to the first partition now; otherwise only take the first
+     *                          segment's bounds, and the caller seeks
+     */
+    private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
+                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode, boolean scan,
+                                boolean enterFirstSegment)
     {
         ssTableReader = reader;
         ssTableReaderRef = readerRef;
@@ -609,7 +842,7 @@ public class SSTableCursorReader implements AutoCloseable
         serializationHeader = reader.header;
         sstableHasDroppedColumns = anyDroppedColumn(deserializationHelper, serializationHeader);
 
-        dataReader = reader.openDataReaderForScan(diskAccessMode);
+        dataReader = scan ? reader.openDataReaderForScan(diskAccessMode) : reader.openDataReader(diskAccessMode);
         // the HEADER decides whether this sstable can contain static rows: after
         // ALTER TABLE ... DROP of the last static column, current metadata has no static
         // columns but older sstables legitimately still carry static rows
@@ -620,7 +853,17 @@ public class SSTableCursorReader implements AutoCloseable
                    : bounds.toArray(new PartitionPositionBounds[0]);
         try
         {
-            state = advanceSegment();
+            if (enterFirstSegment)
+            {
+                state = advanceSegment();
+            }
+            else
+            {
+                PartitionPositionBounds first = segments[segmentIndex++];
+                segmentStart = first.lowerPosition;
+                segmentEnd = first.upperPosition;
+                state = State.SEEK;
+            }
         }
         catch (RuntimeException | Error e)
         {
@@ -727,6 +970,51 @@ public class SSTableCursorReader implements AutoCloseable
                                   + Integer.toHexString(marker));
     }
 
+    /**
+     * Positions the cursor at an unfiltered's flags byte mid-partition (e.g. a BTI row-index
+     * block start) and consumes those flags, leaving the cursor ready for {@link #readRowHeader}
+     * / {@link #readTombstoneMarker} exactly as if it had walked there row by row. No
+     * partition-scoped stream state needs reconstructing: clustering values, liveness and
+     * deletion times are all encoded relative to the serialization HEADER (never running-delta
+     * against preceding unfiltereds), and cell-cursor state is re-initialized per row. The one
+     * piece of logical state a mid-partition position carries — the currently-OPEN range
+     * tombstone — is not recoverable from the data stream at the seek point and must be tracked
+     * by the caller (for BTI, the row index stores it per block:
+     * {@code RowIndexReader.IndexInfo.openDeletion}).
+     */
+    public int seekUnfiltered(long position)
+    {
+        state = SEEK;
+        // partition elements (Unfiltered) have flags
+        dataReader.seek(position);
+        if (moveToReadAheadAfter > 0)
+            restartSequentialRead(position);
+        try
+        {
+            long preFlagsPosition = dataReader.getPosition();
+            basicUnfilteredFlags = dataReader.readUnsignedByte();
+            // A seek target can land on the end-of-partition marker. A BTI row-index block boundary
+            // can coincide with the partition end: the reverse block walk seeks the last block's
+            // start, which can be the end marker itself. Report PARTITION_END so the caller treats
+            // the block as empty, exactly as the reference reverse reader does when
+            // deserializer.hasNext() is false. Do NOT advance to the next segment; a random seek
+            // must never cross into another partition.
+            if (UnfilteredSerializer.isEndOfPartition(basicUnfilteredFlags))
+                return state = PARTITION_END;
+            // resolve the flags straight to ROW_START/TOMBSTONE_START; there is no preceding
+            // unfiltered to close after a seek, and a mid-partition position is never a static row
+            readRowExtendedFlags(basicUnfilteredFlags, false, preFlagsPosition);
+            state = nextStateMidPartition(basicUnfilteredFlags);
+        }
+        catch (IOException e)
+        {
+            return corruptSSTable(e);
+        }
+        if (!isState(state, ROW_START | TOMBSTONE_START))
+            throw new IllegalStateException("Seeking to an unfiltered at: " + position + " did not result in a valid state: " + state);
+        return state;
+    }
+
     // struct partition {
     //   struct partition_header header
     //   optional<struct row> row
@@ -772,6 +1060,8 @@ public class SSTableCursorReader implements AutoCloseable
             return corruptSSTable(e);
         }
 
+        if (staticRowCellCursor == null)
+            staticRowCellCursor = new CellCursor();
         staticRowCellCursor.init(unfilteredDescriptor.rowColumns(), unfilteredDescriptor.missingColumnsMask(),
                                  unfilteredDescriptor.presentColumnsWords(),
                                  unfilteredDescriptor.hasComplexDeletion(),
@@ -801,6 +1091,17 @@ public class SSTableCursorReader implements AutoCloseable
     public int lastCellValueLength()
     {
         return cellCursor.cellValueLength;
+    }
+
+    /**
+     * A {@link #copyCellValue} destination that reads the value bytes straight from the data
+     * file, so the copy needs no transfer buffer.
+     */
+    public interface DirectValueTarget
+    {
+        /** Reads exactly {@code length} value bytes from {@code in}.  For a variable-length value,
+         *  {@code writeUnsignedVInt32(length)} is called first, as for any destination. */
+        void readValue(DataInputPlus in, int length) throws IOException;
     }
 
     public int copyCellValue(DataOutputPlus writer, byte[] buffer) throws IOException
@@ -879,7 +1180,23 @@ public class SSTableCursorReader implements AutoCloseable
             }
             return;
         }
+        if (writer instanceof DirectValueTarget)
+        {
+            // A chunk that fails its checksum throws CorruptSSTableException; mark the sstable
+            // suspect for it too, as the iterator path does for a row it reads.
+            try
+            {
+                ((DirectValueTarget) writer).readValue(dataReader, length);
+            }
+            catch (IOException | CorruptSSTableException e)
+            {
+                corruptSSTable(e);
+            }
+            return;
+        }
         // Fallback for any other DataOutputPlus: copy in blocks the size of the transfer buffer.
+        if (transferBuffer == null || transferBuffer.length == 0)
+            throw new IllegalArgumentException("copying a cell value to " + writer.getClass().getSimpleName() + " needs a transfer buffer");
         int remaining = length;
         while (remaining > 0)
         {
@@ -1012,6 +1329,43 @@ public class SSTableCursorReader implements AutoCloseable
             // A marker has no cells, and loadTombstone does not set dataStart, so the descriptor
             // still holds the previous row's dataStart. Close the window instead of leaving that
             // value reachable.
+            unfilteredEnd = NO_UNFILTERED_END;
+            return checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
+        }
+        catch (Exception e)
+        {
+            return corruptSSTable(e);
+        }
+    }
+
+    /**
+     * Reads the bound of the marker at {@code TOMBSTONE_START} into {@code unfilteredDescriptor}:
+     * its kind and clustering, and nothing after them, the way
+     * {@code UnfilteredDeserializer.compareNextTo} does.  {@link #finishTombstoneMarker} or a
+     * seek must follow.
+     */
+    public void readTombstoneBound(UnfilteredDescriptor unfilteredDescriptor)
+    {
+        try
+        {
+            if (state != TOMBSTONE_START) throw new IllegalStateException();
+            if (!UnfilteredSerializer.isTombstoneMarker(basicUnfilteredFlags)) throw new IllegalStateException();
+            unfilteredDescriptor.loadTombstoneBound(dataReader, basicUnfilteredFlags);
+        }
+        catch (Exception e)
+        {
+            corruptSSTable(e);
+        }
+    }
+
+    /** Reads the rest of the marker whose bound {@link #readTombstoneBound} read, like
+     *  {@link #readTombstoneMarker}.  Returns the state at the next unfiltered or this partition's end. */
+    public int finishTombstoneMarker(UnfilteredDescriptor unfilteredDescriptor)
+    {
+        try
+        {
+            if (state != TOMBSTONE_START) throw new IllegalStateException();
+            unfilteredDescriptor.loadTombstoneBody(dataReader, serializationHeader);
             unfilteredEnd = NO_UNFILTERED_END;
             return checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
         }
@@ -1260,6 +1614,76 @@ public class SSTableCursorReader implements AutoCloseable
         }
     }
 
+    /**
+     * Skips the rows at or before {@code bound}, from a row whose flags are read, reading only the
+     * clustering and the size of each, like {@code ForwardReader.handlePreSliceData}.  Stops at a
+     * row past the bound, still at its start, or at a marker or the partition end.
+     *
+     * @param scratch takes each row's clustering for the comparison
+     */
+    public int skipRowsAtOrBefore(ClusteringDescriptor bound, ClusteringDescriptor scratch)
+    {
+        try
+        {
+            while (state == State.ROW_START)
+            {
+                long rowStart = dataReader.getPosition();
+                scratch.loadClustering(dataReader, ClusteringDescriptor.ROW_CLUSTERING_KIND, clusteringColumnTypes.length);
+                if (ClusteringComparator.compare(scratch, bound) > 0)
+                {
+                    dataReader.seek(rowStart);
+                    return state;
+                }
+                long rowSize = dataReader.readUnsignedVInt();
+                dataReader.seek(dataReader.getPosition() + rowSize);
+                // the next unfiltered, or this partition's end: never past it
+                checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
+                continueReading();
+            }
+            return state;
+        }
+        catch (Exception e)
+        {
+            return corruptSSTable(e);
+        }
+    }
+
+    /**
+     * Reads the clustering of the row at {@code ROW_START} into {@code scratch}, and nothing after
+     * it, the way {@code UnfilteredDeserializer.compareNextTo} does.  The reader stays inside the
+     * row: {@link #skipRowAfterClustering} or a seek must follow.
+     */
+    public void readRowClustering(ClusteringDescriptor scratch)
+    {
+        if (state != State.ROW_START) throw new IllegalStateException();
+        try
+        {
+            scratch.loadClustering(dataReader, ClusteringDescriptor.ROW_CLUSTERING_KIND, clusteringColumnTypes.length);
+        }
+        catch (Exception e)
+        {
+            corruptSSTable(e);
+        }
+    }
+
+    /** Skips the rest of the row whose clustering {@link #readRowClustering} read.  Returns the
+     *  state at the next unfiltered or this partition's end. */
+    public int skipRowAfterClustering()
+    {
+        if (state != State.ROW_START) throw new IllegalStateException();
+        try
+        {
+            long rowSize = dataReader.readUnsignedVInt();
+            dataReader.seek(dataReader.getPosition() + rowSize);
+            checkNextFlagsAfterStaticRowOrUnfilteredStart(false);
+            return continueReading();
+        }
+        catch (Exception e)
+        {
+            return corruptSSTable(e);
+        }
+    }
+
     public int skipRowCells(long unfilteredDataStart, long unfilteredSize, boolean autoContinue)
     {
         if (!(isState(state,CELL_HEADER_START | CELL_VALUE_START | CELL_END))) throw new IllegalStateException();
@@ -1401,6 +1825,7 @@ public class SSTableCursorReader implements AutoCloseable
 
     private int checkNextFlagsAfterStaticRowOrUnfilteredStart(boolean autoContinue) throws IOException
     {
+        maybeMoveToReadAhead();
         long preFlagsPosition = dataReader.getPosition();
         int flags = this.basicUnfilteredFlags = dataReader.readUnsignedByte();
         readRowExtendedFlags(flags, false, preFlagsPosition);
@@ -1416,6 +1841,7 @@ public class SSTableCursorReader implements AutoCloseable
 
     private int checkNextFlagsAfterCellValuesEnd() throws IOException
     {
+        maybeMoveToReadAhead();
         // The cell walk must have consumed exactly the body the row header declared. Checked here,
         // before the next unfiltered's flag byte is read, so the two positions are comparable.
         //

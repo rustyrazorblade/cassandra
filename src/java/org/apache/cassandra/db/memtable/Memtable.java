@@ -24,6 +24,7 @@ import javax.annotation.concurrent.NotThreadSafe;
 
 import org.apache.cassandra.db.CellSourceIdentifier;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.commitlog.CommitLogPosition;
@@ -232,6 +233,27 @@ public interface Memtable extends Comparable<Memtable>, UnfilteredSource, CellSo
     }
 
     // Read operations are provided by the UnfilteredSource interface.
+
+    /**
+     * Whether {@link #partitionData} gives the content of this memtable's partitions.
+     */
+    default boolean readsPartitionData()
+    {
+        return false;
+    }
+
+    /**
+     * The content of the partition {@code key} as it stands now, read once: what
+     * {@code rowIterator} would read, for a read that walks the partition itself.  The content stays valid while the caller
+     * holds the table's read order group.
+     *
+     * @return null when this memtable does not hold the partition
+     * @throws UnsupportedOperationException when {@link #readsPartitionData} is false
+     */
+    default MemtablePartitionData partitionData(DecoratedKey key)
+    {
+        throw new UnsupportedOperationException(getClass().getName() + " does not give its partition data");
+    }
 
     // Statistics
 

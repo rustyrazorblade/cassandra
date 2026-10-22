@@ -49,6 +49,32 @@ public class ReadExecutionController implements AutoCloseable
     private final RepairedDataInfo repairedDataInfo;
     private long oldestUnrepairedTombstone = Long.MAX_VALUE;
 
+    /**
+     * CASSANDRA-20428: dropped-row scan-stats accumulator for cursor-read filter
+     * pushdown, or null (the overwhelmingly common case) when pushdown accounting is not engaged
+     * for this execution. Attached by the cursor merge's call site
+     * ({@code SinglePartitionReadCommand.queryMemtableAndDiskInternal}, under the same
+     * final-stream routing gate as the pushdown itself) BEFORE the merge produces anything, and read by
+     * {@code ReadCommand.withMetricsRecording} — created later in the same {@code executeLocally}
+     * run — so the metrics recorded for the query still include the rows the merge dropped at
+     * production instead of materializing. One accumulator per execution: a fresh attach replaces
+     * any previous one (each {@code executeLocally} run attaches its own).
+     */
+    private CursorReads.ScanStatsAccumulator scanStats;
+
+    /**
+     * CASSANDRA-20428: per-execution cursor cell-value scratch, shared by every cursor-served leg
+     * AND every command of one query execution.  A multi-command query -- an IN read, or the
+     * legacy-2i base-read fan-out -- runs all its per-partition {@code SinglePartitionReadCommand}s
+     * under one controller, so they reuse one {@link CursorReads.ValueTransfer} instead of allocating
+     * a 4 KB bounce buffer per command.  Lazily created on first cursor leg.  Index reads run on a
+     * separate controller (see {@link #indexReadController()}), so an index scan and its base reads
+     * never share one transfer.  The read runs on one thread and each cell copy completes before the
+     * next, so the transfer is never in flight twice at once; {@code ValueTransfer}'s inUse guard
+     * asserts that invariant.
+     */
+    private CursorReads.ValueTransfer cursorValueTransfer;
+
     ReadExecutionController(ReadCommand command,
                             OpOrder.Group baseOp,
                             TableMetadata baseMetadata,
@@ -104,6 +130,29 @@ public class ReadExecutionController implements AutoCloseable
     void updateMinOldestUnrepairedTombstone(long candidate)
     {
         oldestUnrepairedTombstone = Math.min(oldestUnrepairedTombstone, candidate);
+    }
+
+    /** See {@link #scanStats}. */
+    void attachScanStats(CursorReads.ScanStatsAccumulator accumulator)
+    {
+        scanStats = accumulator;
+    }
+
+    /** See {@link #scanStats}; null when cursor-read filter-pushdown accounting is not engaged. */
+    CursorReads.ScanStatsAccumulator scanStats()
+    {
+        return scanStats;
+    }
+
+    /**
+     * The per-execution cursor cell-value scratch (see {@link #cursorValueTransfer}), created on
+     * first use.  Every cursor-served leg and command of this execution shares the returned instance.
+     */
+    public CursorReads.ValueTransfer cursorValueTransfer()
+    {
+        if (cursorValueTransfer == null)
+            cursorValueTransfer = new CursorReads.ValueTransfer();
+        return cursorValueTransfer;
     }
 
     boolean validForReadOn(ColumnFamilyStore cfs)
