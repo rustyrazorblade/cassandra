@@ -685,7 +685,7 @@ cursor_compaction_enabled: false
 cursor_repair_enabled: true
 
 # Experimental.  New garbage free single-partition read path, gated by CursorReads.isReadSupported.
-cursor_reads_enabled: false
+cursor_reads_enabled: true
 
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)

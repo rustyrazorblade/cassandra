@@ -12,6 +12,7 @@ commitlog_disk_access_mode: auto
 compaction_read_disk_access_mode: direct
 background_write_disk_access_mode: direct
 cursor_repair_enabled: true
+cursor_reads_enabled: true
 # commitlog_compression:
 # - class_name: LZ4Compressor
 cdc_raw_directory: build/test/cassandra/cdc_raw
