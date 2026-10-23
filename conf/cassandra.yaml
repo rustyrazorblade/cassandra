@@ -689,7 +689,7 @@ cursor_reads_enabled: true
 
 # Experimental.  Range reads on the cursor path, gated by CursorRangeReads.unsupported.  Independent of
 # cursor_reads_enabled.
-cursor_range_reads_enabled: false
+cursor_range_reads_enabled: true
 
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
