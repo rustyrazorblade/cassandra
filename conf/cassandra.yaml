@@ -682,7 +682,7 @@ cursor_compaction_enabled: false
 
 # Experimental.  Runs repair validation and anticompaction on the cursor path.
 # Works on its own, with cursor_compaction_enabled on or off.
-cursor_repair_enabled: false
+cursor_repair_enabled: true
 
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
