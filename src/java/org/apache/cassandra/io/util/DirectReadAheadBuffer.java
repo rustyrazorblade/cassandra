@@ -22,7 +22,7 @@ import java.nio.ByteBuffer;
 
 import org.agrona.BitUtil;
 
-import org.apache.cassandra.io.sstable.CorruptSSTableException;
+import org.apache.cassandra.io.compress.CorruptBlockException;
 
 public final class DirectReadAheadBuffer extends ReadAheadBuffer
 {
@@ -44,13 +44,13 @@ public final class DirectReadAheadBuffer extends ReadAheadBuffer
     }
 
     @Override
-    protected void loadBlock(ByteBuffer blockBuffer, long blockPosition, int sizeToRead)
+    protected void loadBlock(ByteBuffer blockBuffer, long blockPosition, int sizeToRead) throws CorruptBlockException
     {
         int alignedSizeToRead = BitUtil.align(sizeToRead, blockSize);
 
         blockBuffer.limit(alignedSizeToRead);
 
         if (channel.read(blockBuffer, blockPosition) < sizeToRead)
-            throw new CorruptSSTableException(null, channel.filePath());
+            throw new CorruptBlockException(channel.filePath(), blockPosition, sizeToRead);
     }
 }
