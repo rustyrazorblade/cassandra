@@ -85,13 +85,20 @@ public class SSTableWriterTransactionTest extends AbstractTransactionalTest
             this.descriptor = desc;
             this.writer = sw;
 
-            for (int i = 0; i < 100; i++)
-            {
-                UpdateBuilder update = UpdateBuilder.create(cfs.metadata(), i);
-                for (int j = 0; j < 10; j++)
-                    update.newRow(j).add("val", SSTableRewriterTest.random(0, 1000));
-                writer.append(update.build().unfilteredIterator());
-            }
+            int i = 0;
+            while (i < 100)
+                append(i++);
+            // A direct I/O writer stages compressed chunks in direct_write_buffer_size before writing them
+            while (file.length() == 0 && i < 1_000_000)
+                append(i++);
+        }
+
+        private void append(int key)
+        {
+            UpdateBuilder update = UpdateBuilder.create(cfs.metadata(), key);
+            for (int j = 0; j < 10; j++)
+                update.newRow(j).add("val", SSTableRewriterTest.random(0, 1000));
+            writer.append(update.build().unfilteredIterator());
         }
 
         protected void assertInProgress() throws Exception

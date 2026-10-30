@@ -79,6 +79,7 @@ import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.notifications.SSTableAddedNotification;
@@ -1403,8 +1404,11 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
                                .replaceAll("\"expired\":\"normalized\"");
         }
 
-        // 6. stats spot-check summary
+        // 6. stats spot-check summary; a format that does not store the token space coverage or the
+        // partition level deletion marker (nb) reads them back as defaults, so a reader reopened from
+        // disk differs from the one its writer opened; leave them out there
         StatsMetadata stats = sstable.getSSTableMetadata();
+        Version version = sstable.descriptor.version;
         String statsSummary = "minTimestamp=" + stats.minTimestamp +
                               " maxTimestamp=" + stats.maxTimestamp +
                               " minLocalDeletionTime=" + stats.minLocalDeletionTime +
@@ -1419,9 +1423,9 @@ public abstract class DifferentialCompactionTester extends DifferentialCorpusDri
                               " partitionSize=" + stats.estimatedPartitionSize.mean() + "/" + stats.estimatedPartitionSize.count() +
                               " sstableLevel=" + stats.sstableLevel +
                               " coveredClustering=" + stats.coveredClustering.toString(sstable.metadata().comparator) +
-                              " tokenSpaceCoverage=" + stats.tokenSpaceCoverage +
+                              (version.hasTokenSpaceCoverage() ? " tokenSpaceCoverage=" + stats.tokenSpaceCoverage : "") +
                               " minTTL=" + stats.minTTL + " maxTTL=" + stats.maxTTL +
-                              " hasPartitionLevelDeletions=" + stats.hasPartitionLevelDeletions;
+                              (version.hasPartitionLevelDeletionsPresenceMarker() ? " hasPartitionLevelDeletions=" + stats.hasPartitionLevelDeletions : "");
 
         CapturedSSTable captured = new CapturedSSTable(dir, json, statsSummary, stats.totalRows);
         captured.componentSizes.putAll(copiedSizes);

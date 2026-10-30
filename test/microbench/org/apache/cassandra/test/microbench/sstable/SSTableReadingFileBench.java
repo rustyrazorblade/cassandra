@@ -53,7 +53,8 @@ import static org.apache.cassandra.config.CassandraRelevantProperties.TEST_UTIL_
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Warmup(iterations = 10, time = 1)
 @Measurement(iterations = 10, time = 1)
-@Fork(value = 1)
+// The test data is oa, which the default CASSANDRA_4 storage compatibility mode cannot read
+@Fork(value = 1, jvmArgsAppend = "-Dcassandra.test.storage_compatibility_mode=NONE")
 @State(Scope.Benchmark)
 public class SSTableReadingFileBench
 {
