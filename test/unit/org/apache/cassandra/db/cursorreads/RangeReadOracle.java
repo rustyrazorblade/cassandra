@@ -98,7 +98,7 @@ import io.netty.buffer.Unpooled;
  *   <li>S6: what the reads did besides their result: the iterator run never reaches the cursor
  *       path; the cursor run serves every range read it makes (or the case names the reason it must
  *       not), no sstable leg falls back to the iterator, and neither run makes a partition lookup
- *       through the bloom filters or changes the key cache size.</li>
+ *       through the bloom filters or changes the number of the table's key cache entries.</li>
  * </ul>
  * Every case pins one {@code nowInSec}.  The case seed's low bit picks which path runs first.  Both
  * paths start from the same key cache.  Cold mode empties the chunk cache and the key cache before
@@ -583,7 +583,7 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
             long iteratorLegs = CursorRangeReads.iteratorLegsOpened();
             into.iteratorLegsAllowed = cfs.isRowCacheEnabled() || cfs.getLiveSSTables().stream().anyMatch(SSTableReader::isRepaired);
             long lookups = filterLookups(cfs);
-            long keyCacheSize = keyCacheSize();
+            long keyCacheSize = keyCacheSize(cfs);
             long rangeReads = cfs.metric.rangeLatency.latency.getCount();
             ClearableHistogram sstablesPerRangeRead = (ClearableHistogram) cfs.metric.sstablesPerRangeReadHistogram.cf;
             sstablesPerRangeRead.clear();
@@ -606,7 +606,7 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
             into.legsFellBack = CursorReads.sstableLegsFellBackToIterator() - fellBack;
             into.iteratorLegs = CursorRangeReads.iteratorLegsOpened() - iteratorLegs;
             into.filterLookups = filterLookups(cfs) - lookups;
-            into.keyCacheDelta = keyCacheSize() - keyCacheSize;
+            into.keyCacheDelta = keyCacheSize(cfs) - keyCacheSize;
             into.keyCacheChanges = keyCacheChangesSince(keyCacheAtStart, cfs);
             into.rangeReadsRecorded = cfs.metric.rangeLatency.latency.getCount() - rangeReads;
             into.sstablesPerRangeReadCount = sstablesPerRangeRead.getCount();
@@ -621,9 +621,11 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
         }
     }
 
-    private static long keyCacheSize()
+    /** The key cache entries of {@code cfs}'s sstables: compactions of other tables put entries in the cache at any time. */
+    private static long keyCacheSize(ColumnFamilyStore cfs)
     {
-        return CacheService.instance.keyCache == null ? 0 : CacheService.instance.keyCache.size();
+        TableId table = cfs.metadata().id;
+        return keyCacheEntries().keySet().stream().filter(key -> key.tableId.equals(table)).count();
     }
 
     private static void emptyCaches()
@@ -762,7 +764,7 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
             if (o.filterLookups != 0)
                 problems.add(String.format("the %s run made %d partition lookup(s) through the bloom filters", path, o.filterLookups));
             if (o.keyCacheDelta != 0)
-                problems.add(String.format("the %s run changed the key cache size by %d", path, o.keyCacheDelta));
+                problems.add(String.format("the %s run changed the table's key cache entries by %d", path, o.keyCacheDelta));
         }
         // every range read the cursor run made reached the gate once, and recorded its latency once
         if (c.notServedBecause == null)
