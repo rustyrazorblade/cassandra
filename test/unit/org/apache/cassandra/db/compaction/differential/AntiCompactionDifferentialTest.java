@@ -431,12 +431,12 @@ public class AntiCompactionDifferentialTest extends DifferentialCompactionTester
             assertEquals("the legacy scanners did not read every input byte: " + table, inputDataBytes, legacy.throttled.scannedBytes);
             assertEquals("the cursor path did not pass every input byte to the rate limiter: " + table, inputDataBytes, cursor.scannedBytes);
             assertTrue("too few rate limiter calls to test the meter: " + table, cursor.calls > 1);
-            // Each call acquires its bytes times the compression ratio, rounded down, plus one.  One
-            // more byte of slack for the order in which the ratio's sums are added.
+            // Each call reports its bytes times the compression ratio, rounded down.  One more byte of
+            // slack for the order in which the ratio's sums are added.
             double scaled = cursor.scannedBytes * legacy.cursorRun.compressionRatio;
-            assertTrue(String.format("the cursor path acquired %d bytes, not within %d calls above %.1f scanned bytes times the ratio: %s",
+            assertTrue(String.format("the cursor path reported %d bytes, not within %d calls below %.1f scanned bytes times the ratio: %s",
                                      cursor.permits, cursor.calls, scaled, table),
-                       cursor.permits > scaled - 1 && cursor.permits <= scaled + cursor.calls + 1);
+                       cursor.permits > scaled - cursor.calls - 1 && cursor.permits <= scaled + 1);
         }
     }
 

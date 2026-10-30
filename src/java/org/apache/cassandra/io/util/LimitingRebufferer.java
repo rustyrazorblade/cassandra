@@ -23,7 +23,6 @@ package org.apache.cassandra.io.util;
 import javax.annotation.concurrent.NotThreadSafe;
 
 import com.google.common.primitives.Ints;
-import com.google.common.util.concurrent.RateLimiter;
 
 /**
  * Rebufferer wrapper that applies rate limiting.
@@ -36,10 +35,10 @@ import com.google.common.util.concurrent.RateLimiter;
 @NotThreadSafe
 public class LimitingRebufferer extends WrappingRebufferer
 {
-    final private RateLimiter limiter;
+    final private ThroughputLimiter limiter;
     final private int limitQuant;
 
-    public LimitingRebufferer(Rebufferer wrapped, RateLimiter limiter, int limitQuant)
+    public LimitingRebufferer(Rebufferer wrapped, ThroughputLimiter limiter, int limitQuant)
     {
         super(wrapped);
         this.limiter = limiter;
@@ -55,7 +54,8 @@ public class LimitingRebufferer extends WrappingRebufferer
         if (remaining == 0)
             return this;
 
-        if (remaining > limitQuant)
+        // Smaller buffers spread the charges, which only matters while a limit is set.
+        if (remaining > limitQuant && limiter.isLimited())
         {
             buffer.limit(posInBuffer + limitQuant); // certainly below current limit
             remaining = limitQuant;

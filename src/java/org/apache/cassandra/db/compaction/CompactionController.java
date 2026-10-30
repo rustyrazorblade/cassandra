@@ -29,7 +29,6 @@ import java.util.function.LongPredicate;
 
 import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
-import com.google.common.util.concurrent.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,6 +41,7 @@ import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.schema.CompactionParams.TombstoneOption;
 import org.apache.cassandra.utils.OverlapIterator;
 import org.apache.cassandra.utils.concurrent.Refs;
@@ -64,7 +64,7 @@ public class CompactionController extends AbstractCompactionController
     private Refs<SSTableReader> overlappingSSTables;
     private OverlapIterator<PartitionPosition, SSTableReader> overlapIterator;
     private final Iterable<SSTableReader> compacting;
-    private final RateLimiter limiter;
+    private final ThroughputLimiter limiter;
     private final long minTimestamp;
     final Map<SSTableReader, FileDataInput> openDataFiles = new HashMap<>();
 
@@ -79,7 +79,7 @@ public class CompactionController extends AbstractCompactionController
              cfs.getCompactionStrategyManager().getCompactionParams().tombstoneOption());
     }
 
-    public CompactionController(ColumnFamilyStore cfs, Set<SSTableReader> compacting, long gcBefore, RateLimiter limiter, TombstoneOption tombstoneOption)
+    public CompactionController(ColumnFamilyStore cfs, Set<SSTableReader> compacting, long gcBefore, ThroughputLimiter limiter, TombstoneOption tombstoneOption)
     {
         //When making changes to the method, be aware that some of the state of the controller may still be uninitialized
         //(e.g. TWCS sets up the value of ignoreOverlaps() after this completes)

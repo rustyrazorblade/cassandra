@@ -78,6 +78,7 @@ import org.apache.cassandra.io.sstable.format.SortedTableWriter;
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.metrics.TopPartitionTracker;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.CompactionParams;
@@ -649,7 +650,8 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
          * {@link CompactionIterator#CompactionIterator(OperationType, List, AbstractCompactionController, long, TimeUUID, ActiveCompactionsTracker)}
          */
 
-        StatefulCursor[] cursors = convertScannersToCursors(scanners, sstables, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+        StatefulCursor[] cursors = convertScannersToCursors(scanners, sstables, DatabaseDescriptor.getCompactionReadDiskAccessMode(),
+                                                               CompactionManager.instance.getRateLimiter());
         // close() never runs on a constructor that throws, so a failure below must close the cursors itself
         try
         {
@@ -839,7 +841,8 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
             this.hasStaticColumns = anyStaticColumns;
             this.schemaHasStaticColumns = !metadata.staticColumns().isEmpty();
 
-            cursors = convertSSTablesToPartialRangeCursors(positionsByScanner, sstables.size(), DatabaseDescriptor.getCompactionReadDiskAccessMode());
+            cursors = convertSSTablesToPartialRangeCursors(positionsByScanner, sstables.size(), DatabaseDescriptor.getCompactionReadDiskAccessMode(),
+                                                           CompactionManager.instance.getRateLimiter());
             this.sstableCursors = cursors;
             this.sstableCursorsEqualsNext = new boolean[sstables.size()];
             // the cursors are still in scanner order here; the sorts reorder them
@@ -2925,7 +2928,7 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
      * full-range one, and each of its sstables gets a whole-file cursor.
      */
     private static StatefulCursor[] convertScannersToCursors(List<ISSTableScanner> scanners, ImmutableSet<SSTableReader> sstables,
-                                                             DiskAccessMode diskAccessMode)
+                                                             DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
     {
         for (ISSTableScanner scanner : scanners)
             scanner.close();
@@ -2939,12 +2942,12 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
                 if (scanner instanceof SSTableSimpleScanner)
                 {
                     SSTableReader reader = Iterables.getOnlyElement(scanner.getBackingSSTables());
-                    cursors[i++] = new StatefulCursor(reader, ((SSTableSimpleScanner) scanner).positionBounds(), diskAccessMode);
+                    cursors[i++] = new StatefulCursor(reader, ((SSTableSimpleScanner) scanner).positionBounds(), diskAccessMode, limiter);
                 }
                 else
                 {
                     for (SSTableReader reader : scanner.getBackingSSTables())
-                        cursors[i++] = new StatefulCursor(reader, diskAccessMode);
+                        cursors[i++] = new StatefulCursor(reader, null, diskAccessMode, limiter);
                 }
             }
             assert i == cursors.length : "cursor count " + i + " differs from sstable count " + cursors.length;
@@ -3013,7 +3016,8 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
     }
 
     private static StatefulCursor[] convertSSTablesToPartialRangeCursors(List<Map<SSTableReader, List<PartitionPositionBounds>>> positionsByScanner,
-                                                                         int cursorCount, DiskAccessMode diskAccessMode)
+                                                                         int cursorCount, DiskAccessMode diskAccessMode,
+                                                                         ThroughputLimiter limiter)
     {
         StatefulCursor[] cursors = new StatefulCursor[cursorCount];
         int i = 0;
@@ -3021,7 +3025,7 @@ public class CursorCompactor extends CompactionInfo.Holder implements AutoClosea
         {
             for (Map<SSTableReader, List<PartitionPositionBounds>> positions : positionsByScanner)
                 for (Map.Entry<SSTableReader, List<PartitionPositionBounds>> entry : positions.entrySet())
-                    cursors[i++] = new StatefulCursor(entry.getKey(), entry.getValue(), diskAccessMode);
+                    cursors[i++] = new StatefulCursor(entry.getKey(), entry.getValue(), diskAccessMode, limiter);
             assert i == cursorCount : "cursor count " + i + " differs from sstable count " + cursorCount;
             return cursors;
         }

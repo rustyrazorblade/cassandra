@@ -60,7 +60,6 @@ import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.sai.disk.format.IndexComponent;
 import org.apache.cassandra.index.sai.disk.format.IndexDescriptor;
 import org.apache.cassandra.index.sai.utils.IndexIdentifier;
-import org.apache.cassandra.index.sai.disk.io.IndexFileUtils;
 import org.apache.cassandra.index.sai.disk.v1.IndexWriterConfig;
 import org.apache.cassandra.index.sai.disk.v1.SAICodecUtils;
 import org.apache.cassandra.index.sai.disk.v1.segment.SegmentMetadata;
@@ -344,9 +343,9 @@ public class OnHeapGraph<T>
                                                                                   postingsMap.keySet().size(), vectorValues.size());
         logger.debug("Writing graph with {} rows and {} distinct vectors", postingsMap.values().stream().mapToInt(VectorPostings::size).sum(), vectorValues.size());
 
-        try (var pqOutput = IndexFileUtils.instance.openOutput(indexDescriptor.fileFor(IndexComponent.COMPRESSED_VECTORS, indexIdentifier), true);
-             var postingsOutput = IndexFileUtils.instance.openOutput(indexDescriptor.fileFor(IndexComponent.POSTING_LISTS, indexIdentifier), true);
-             var indexOutput = IndexFileUtils.instance.openOutput(indexDescriptor.fileFor(IndexComponent.TERMS_DATA, indexIdentifier), true))
+        try (var pqOutput = indexDescriptor.openPerIndexOutput(IndexComponent.COMPRESSED_VECTORS, indexIdentifier, true);
+             var postingsOutput = indexDescriptor.openPerIndexOutput(IndexComponent.POSTING_LISTS, indexIdentifier, true);
+             var indexOutput = indexDescriptor.openPerIndexOutput(IndexComponent.TERMS_DATA, indexIdentifier, true))
         {
             SAICodecUtils.writeHeader(pqOutput);
             SAICodecUtils.writeHeader(postingsOutput);

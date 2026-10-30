@@ -29,6 +29,7 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionInfo;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableMetadata;
 
@@ -66,7 +67,12 @@ public class CompactionMetrics
     /** Total number of compactions which have outright failed due to lack of disk space */
     public final Counter compactionsAborted;
 
-    public CompactionMetrics(final ExecutorPlus... collectors)
+    /** Bytes that memtable flush charged to the compaction limiter, with memtable_flush_throttle_enabled */
+    public final Gauge<Long> flushBytesCharged;
+    /** Time that memtable flush waited for the compaction limiter, in nanoseconds */
+    public final Gauge<Long> flushThrottledNanos;
+
+    public CompactionMetrics(ThroughputLimiter limiter, final ExecutorPlus... collectors)
     {
         pendingTasks = Metrics.register(factory.createMetricName("PendingTasks"), new Gauge<Integer>()
         {
@@ -149,6 +155,8 @@ public class CompactionMetrics
         totalCompactionsCompleted = Metrics.meter(factory.createMetricName("TotalCompactionsCompleted"));
         bytesCompacted = Metrics.counter(factory.createMetricName("BytesCompacted"));
         compressedBytesCompacted = Metrics.counter(factory.createMetricName("CompressedBytesCompacted"));
+        flushBytesCharged = Metrics.register(factory.createMetricName("FlushBytesCharged"), (Gauge<Long>) limiter::priorityBytesCharged);
+        flushThrottledNanos = Metrics.register(factory.createMetricName("FlushThrottledNanos"), (Gauge<Long>) limiter::priorityWaitNanos);
 
         // compaction failure metrics
         compactionsReduced = Metrics.counter(factory.createMetricName("CompactionsReduced"));

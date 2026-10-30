@@ -56,6 +56,7 @@ import org.apache.cassandra.io.util.CheckedFunction;
 import org.apache.cassandra.io.util.DataIntegrityMetadata;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.metrics.RestorableMeter;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.EstimatedHistogram;
@@ -341,15 +342,15 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
+    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
     {
-        return delegate.getScanner(diskAccessMode);
+        return delegate.getScanner(diskAccessMode, limiter);
     }
 
     @Override
-    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
     {
-        return delegate.getScanner(ranges, diskAccessMode);
+        return delegate.getScanner(ranges, diskAccessMode, limiter);
     }
 
     @Override
@@ -545,7 +546,7 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public RandomAccessReader openDataReader(RateLimiter limiter)
+    public RandomAccessReader openDataReader(ThroughputLimiter limiter)
     {
         return delegate.openDataReader(limiter);
     }
@@ -563,9 +564,15 @@ public abstract class ForwardingSSTableReader extends SSTableReader
     }
 
     @Override
-    public RandomAccessReader openDataReaderForScan(RateLimiter limiter)
+    public RandomAccessReader openDataReaderForScan(ThroughputLimiter limiter)
     {
         return delegate.openDataReaderForScan(limiter);
+    }
+
+    @Override
+    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
+    {
+        return delegate.openDataReaderForScan(diskAccessMode, limiter);
     }
 
     @Override

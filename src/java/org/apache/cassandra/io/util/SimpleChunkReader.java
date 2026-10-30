@@ -19,6 +19,7 @@
 package org.apache.cassandra.io.util;
 
 import java.nio.ByteBuffer;
+import javax.annotation.Nullable;
 
 import org.apache.cassandra.io.compress.BufferType;
 
@@ -57,10 +58,16 @@ class SimpleChunkReader extends AbstractReaderFileProxy implements ChunkReader
     @Override
     public Rebufferer instantiateRebufferer(boolean isScan)
     {
+        return instantiateRebufferer(isScan, null);
+    }
+
+    @Override
+    public Rebufferer instantiateRebufferer(boolean isScan, @Nullable ThroughputLimiter limiter)
+    {
         if (Integer.bitCount(bufferSize) == 1)
-            return new BufferManagingRebufferer.Aligned(this);
+            return new BufferManagingRebufferer.Aligned(this, limiter);
         else
-            return new BufferManagingRebufferer.Unaligned(this);
+            return new BufferManagingRebufferer.Unaligned(this, limiter);
     }
 
     @Override

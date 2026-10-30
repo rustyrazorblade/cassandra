@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
@@ -36,12 +37,14 @@ import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.IntervalSet;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.FBUtilities;
@@ -151,6 +154,8 @@ public class Flushing
         private void writeSortedContents()
         {
             logger.info("Writing {}, flushed range = [{}, {})", toFlush.memtable(), toFlush.from(), toFlush.to());
+            ThroughputLimiter limiter = CompactionManager.instance.getRateLimiter();
+            long startThrottledNanos = limiter.threadPriorityWaitNanos();
 
             // (we can't clear out the map as-we-go to free up memory,
             //  since the memtable is being used for queries in the "pending flush" category)
@@ -176,10 +181,11 @@ public class Flushing
             if (logCompletion)
             {
                 long bytesFlushed = writer.getBytesWritten();
-                logger.info("Completed flushing {} ({}) for commitlog position {}",
+                logger.info("Completed flushing {} ({}) for commitlog position {}, throttled: {} ms",
                             writer.getFilename(),
                             FBUtilities.prettyPrintMemory(bytesFlushed),
-                            toFlush.memtable().getFinalCommitLogUpperBound());
+                            toFlush.memtable().getFinalCommitLogUpperBound(),
+                            TimeUnit.NANOSECONDS.toMillis(limiter.threadPriorityWaitNanos() - startThrottledNanos));
                 // Update the metrics
                 metrics.bytesFlushed.inc(bytesFlushed);
             }

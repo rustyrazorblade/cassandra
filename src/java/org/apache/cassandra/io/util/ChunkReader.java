@@ -53,4 +53,13 @@ public interface ChunkReader extends RebuffererFactory
 
     /** See {@link Rebufferer#limitReadAhead}. */
     default void limitReadAhead(long position) {}
+
+    /**
+     * Returns the bytes on disk of the chunk at {@code position}.  {@code chunk} must be the buffer that
+     * {@link #readChunk} has just filled.
+     */
+    default int diskBytes(long position, ByteBuffer chunk)
+    {
+        return chunk.remaining();
+    }
 }

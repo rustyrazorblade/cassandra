@@ -55,7 +55,6 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multiset;
 import com.google.common.collect.Sets;
-import com.google.common.util.concurrent.RateLimiter;
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -99,6 +98,7 @@ import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.locator.RangesAtEndpoint;
 import org.apache.cassandra.metrics.CompactionMetrics;
 import org.apache.cassandra.metrics.TableMetrics;
@@ -164,19 +164,19 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     @VisibleForTesting
     public static final LongAdder cursorAnticompactionPartitionsWritten = new LongAdder();
 
-    /** Sees each call to the compaction rate limiter. */
+    /** Sees each call to {@link #markBytesCompacted}. */
     @VisibleForTesting
     public interface RateLimiterListener
     {
         /**
          * @param scannedBytes the scanned bytes that this call covers
-         * @param permits the bytes it acquires from the rate limiter and marks on the throughput meter
+         * @param permits those bytes scaled to bytes on disk
          */
         void acquired(long scannedBytes, long permits);
     }
 
     /**
-     * Set by tests to see what is passed to the compaction rate limiter; null otherwise.  Not
+     * Set by tests to see what is passed to {@link #markBytesCompacted}; null otherwise.  Not
      * volatile: a test sets it on the thread that then runs the operation.  It sees the calls of
      * every compaction thread, so a test listener counts only the calls from its own thread.
      */
@@ -215,7 +215,9 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     // own pool to prevent either scenario.
     private final SecondaryIndexExecutor secondaryIndexExecutor = new SecondaryIndexExecutor();
 
-    private final CompactionMetrics metrics = new CompactionMetrics(executor, validationExecutor, viewBuildExecutor, secondaryIndexExecutor);
+    private final ThroughputLimiter compactionRateLimiter = new ThroughputLimiter(Double.MAX_VALUE);
+
+    private final CompactionMetrics metrics = new CompactionMetrics(compactionRateLimiter, executor, validationExecutor, viewBuildExecutor, secondaryIndexExecutor);
 
     @VisibleForTesting
     final Multiset<ColumnFamilyStore> compactingCF = ConcurrentHashMultiset.create();
@@ -225,20 +227,18 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     // used to temporarily pause non-strategy managed compactions (like index summary redistribution)
     private final AtomicInteger globalCompactionPauseCount = new AtomicInteger(0);
 
-    private final RateLimiter compactionRateLimiter = RateLimiter.create(Double.MAX_VALUE);
-
     public CompactionMetrics getMetrics()
     {
         return metrics;
     }
 
     /**
-     * Gets compaction rate limiter.
-     * Rate unit is bytes per sec.
+     * Gets the compaction rate limiter, which compaction readers and writers charge with the bytes they read from
+     * and write to disk.  Rate unit is bytes per sec.
      *
-     * @return RateLimiter with rate limit set
+     * @return the limiter, with its rate set from compaction_throughput
      */
-    public RateLimiter getRateLimiter()
+    public ThroughputLimiter getRateLimiter()
     {
         setRateInBytes(DatabaseDescriptor.getCompactionThroughputBytesPerSec());
         return compactionRateLimiter;
@@ -257,15 +257,15 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     }
 
     /**
-     * Sets the rate for the rate limiter. When compaction_throughput is 0 or node is bootstrapping,
-     * this sets the rate to Double.MAX_VALUE bytes per second.
+     * Sets the rate for the rate limiter. When compaction_throughput is 0, or the node is bootstrapping or shutting
+     * down, this sets the rate to Double.MAX_VALUE bytes per second.
      * @param throughputBytesPerSec throughput to set in B/s
      */
     public void setRateInBytes(final double throughputBytesPerSec)
     {
         double throughput = throughputBytesPerSec;
         // if throughput is set to 0, throttling is disabled
-        if (throughput == 0 || StorageService.instance.isBootstrapMode())
+        if (throughput == 0 || StorageService.instance.isBootstrapMode() || StorageService.instance.isShutdown())
             throughput = Double.MAX_VALUE;
         if (compactionRateLimiter.getRate() != throughput)
             compactionRateLimiter.setRate(throughput);
@@ -1548,7 +1548,6 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             if (bounds.isEmpty())
                 return false;
 
-            RateLimiter limiter = getRateLimiter();
             double compressionRatio = sstable.getCompressionRatio();
             if (compressionRatio == MetadataCollector.NO_COMPRESSION_RATIO)
                 compressionRatio = 1.0;
@@ -1593,7 +1592,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
 
                     long bytesScanned = compactor.getTotalBytesScanned();
 
-                    compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+                    markBytesCompacted(bytesScanned, lastBytesScanned, compressionRatio);
 
                     lastBytesScanned = bytesScanned;
                 }
@@ -1622,7 +1621,6 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                                     long start) throws IOException
     {
         File compactionFileLocation = sstable.descriptor.directory;
-        RateLimiter limiter = getRateLimiter();
         double compressionRatio = sstable.getCompressionRatio();
         if (compressionRatio == MetadataCollector.NO_COMPRESSION_RATIO)
             compressionRatio = 1.0;
@@ -1654,7 +1652,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
 
                     long bytesScanned = scanner.getBytesScanned();
 
-                    compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+                    markBytesCompacted(bytesScanned, lastBytesScanned, compressionRatio);
 
                     lastBytesScanned = bytesScanned;
                 }
@@ -1685,21 +1683,16 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                                   FBUtilities.prettyPrintMemory(endsize), (int) (ratio * 100), totalkeysWritten, dTime));
     }
 
-    static void compactionRateLimiterAcquire(RateLimiter limiter, long bytesScanned, long lastBytesScanned, double compressionRatio)
+    /**
+     * Reports the bytes scanned from {@code lastBytesScanned} to {@code bytesScanned}, and those bytes scaled by
+     * {@code compressionRatio} to bytes on disk, to {@link #rateLimiterListener}.  It charges nothing: compaction
+     * charges the rate limiter at each disk read and write.
+     */
+    static void markBytesCompacted(long bytesScanned, long lastBytesScanned, double compressionRatio)
     {
-        long lengthRead = (long) ((bytesScanned - lastBytesScanned) * compressionRatio) + 1;
         RateLimiterListener listener = rateLimiterListener;
         if (listener != null)
-            listener.acquired(bytesScanned - lastBytesScanned, lengthRead);
-        while (lengthRead >= Integer.MAX_VALUE)
-        {
-            limiter.acquire(Integer.MAX_VALUE);
-            lengthRead -= Integer.MAX_VALUE;
-        }
-        if (lengthRead > 0)
-        {
-            limiter.acquire((int) lengthRead);
-        }
+            listener.acquired(bytesScanned - lastBytesScanned, (long) ((bytesScanned - lastBytesScanned) * compressionRatio));
     }
 
     private static abstract class CleanupStrategy
@@ -1760,7 +1753,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             @Override
             public ISSTableScanner getScanner(SSTableReader sstable)
             {
-                return sstable.getScanner(cursorScanRanges(), DatabaseDescriptor.getCompactionReadDiskAccessMode());
+                return sstable.getScanner(cursorScanRanges(), DatabaseDescriptor.getCompactionReadDiskAccessMode(), instance.getRateLimiter());
             }
 
             @Override
@@ -1798,7 +1791,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             @Override
             public ISSTableScanner getScanner(SSTableReader sstable)
             {
-                return sstable.getScanner(DatabaseDescriptor.getCompactionReadDiskAccessMode());
+                return sstable.getScanner(DatabaseDescriptor.getCompactionReadDiskAccessMode(), instance.getRateLimiter());
             }
 
             @Override
@@ -1974,7 +1967,6 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
         Set<SSTableReader> sstableAsSet = txn.originals();
 
         File destination = cfs.getDirectories().getWriteableLocationAsFile(cfs.getExpectedCompactedFileSize(sstableAsSet, OperationType.ANTICOMPACTION));
-        RateLimiter limiter = getRateLimiter();
 
         /**
          * HACK WARNING
@@ -2038,7 +2030,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             if (compactor != null)
             {
                 assert ci == null : "both the cursor and the legacy merge were built";
-                cursorAntiCompactGroup(compactor, fullWriter, transWriter, unrepairedWriter, fullChecker, transChecker, limiter, compressionRatio);
+                cursorAntiCompactGroup(compactor, fullWriter, transWriter, unrepairedWriter, fullChecker, transChecker, compressionRatio);
             }
 
             long lastBytesScanned = 0;
@@ -2066,7 +2058,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                         ci.setTargetDirectory(unrepairedWriter.currentWriter().getFilename());
                     }
                     long bytesScanned = scanners.getTotalBytesScanned();
-                    compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+                    markBytesCompacted(bytesScanned, lastBytesScanned, compressionRatio);
                     lastBytesScanned = bytesScanned;
                 }
             }
@@ -2129,7 +2121,6 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                                         SSTableRewriter unrepairedWriter,
                                         Predicate<Token> fullChecker,
                                         Predicate<Token> transChecker,
-                                        RateLimiter limiter,
                                         double compressionRatio)
     {
         CursorCompactor.OutputWriterProvider[] outputs = { antiCompactionOutput(compactor, fullWriter),
@@ -2157,12 +2148,12 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             {
                 partitionsWritten++;
                 long bytesScanned = compactor.getTotalBytesScanned();
-                compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+                markBytesCompacted(bytesScanned, lastBytesScanned, compressionRatio);
                 lastBytesScanned = bytesScanned;
             }
             // The last call, which returned false, counted the bytes read after the last partition.
             if (compactor.getTotalBytesScanned() != lastBytesScanned)
-                compactionRateLimiterAcquire(limiter, compactor.getTotalBytesScanned(), lastBytesScanned, compressionRatio);
+                markBytesCompacted(compactor.getTotalBytesScanned(), lastBytesScanned, compressionRatio);
             cursorAnticompactionPartitionsWritten.add(partitionsWritten);
         }
         catch (IOException e)

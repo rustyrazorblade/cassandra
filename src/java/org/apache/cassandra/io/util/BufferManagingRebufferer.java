@@ -22,6 +22,7 @@ package org.apache.cassandra.io.util;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import javax.annotation.Nullable;
 
 import org.apache.cassandra.utils.memory.BufferPools;
 
@@ -34,6 +35,9 @@ import org.apache.cassandra.utils.memory.BufferPools;
 public abstract class BufferManagingRebufferer implements Rebufferer, Rebufferer.BufferHolder
 {
     protected final ChunkReader source;
+    /** Charged with the bytes on disk of each chunk read, or null for none. */
+    @Nullable
+    private final ThroughputLimiter limiter;
     protected final ByteBuffer buffer;
     protected long offset = 0;
 
@@ -41,7 +45,13 @@ public abstract class BufferManagingRebufferer implements Rebufferer, Rebufferer
 
     protected BufferManagingRebufferer(ChunkReader wrapped)
     {
+        this(wrapped, null);
+    }
+
+    protected BufferManagingRebufferer(ChunkReader wrapped, @Nullable ThroughputLimiter limiter)
+    {
         this.source = wrapped;
+        this.limiter = limiter;
         buffer = BufferPools.forChunkCache().get(wrapped.chunkSize(), wrapped.preferredBufferType()).order(ByteOrder.BIG_ENDIAN);
         buffer.limit(0);
     }
@@ -84,6 +94,8 @@ public abstract class BufferManagingRebufferer implements Rebufferer, Rebufferer
     {
         offset = alignedPosition(position);
         source.readChunk(offset, buffer);
+        if (limiter != null)
+            limiter.acquire(source.diskBytes(offset, buffer));
         return this;
     }
 
@@ -124,6 +136,11 @@ public abstract class BufferManagingRebufferer implements Rebufferer, Rebufferer
             super(wrapped);
         }
 
+        public Unaligned(ChunkReader wrapped, @Nullable ThroughputLimiter limiter)
+        {
+            super(wrapped, limiter);
+        }
+
         @Override
         long alignedPosition(long position)
         {
@@ -135,7 +152,12 @@ public abstract class BufferManagingRebufferer implements Rebufferer, Rebufferer
     {
         public Aligned(ChunkReader wrapped)
         {
-            super(wrapped);
+            this(wrapped, null);
+        }
+
+        public Aligned(ChunkReader wrapped, @Nullable ThroughputLimiter limiter)
+        {
+            super(wrapped, limiter);
             assert Integer.bitCount(wrapped.chunkSize()) == 1;
         }
 

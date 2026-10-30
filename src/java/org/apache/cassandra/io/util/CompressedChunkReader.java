@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
+import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.Ints;
@@ -106,7 +107,21 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
     @Override
     public Rebufferer instantiateRebufferer(boolean isScan)
     {
-        return new BufferManagingRebufferer.Aligned(isScan ? forScan() : this);
+        return instantiateRebufferer(isScan, null);
+    }
+
+    @Override
+    public Rebufferer instantiateRebufferer(boolean isScan, @Nullable ThroughputLimiter limiter)
+    {
+        ChunkReader source = isScan ? forScan() : this;
+        return new BufferManagingRebufferer.Aligned(source, limiter);
+    }
+
+    /** The compressed chunk and its checksum. */
+    @Override
+    public int diskBytes(long position, ByteBuffer chunk)
+    {
+        return metadata.chunkFor(position).length + Integer.BYTES;
     }
 
     protected interface CompressedReader extends Closeable

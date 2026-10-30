@@ -19,6 +19,7 @@
 package org.apache.cassandra.db.compaction;
 
 import java.util.Collection;
+import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -35,6 +36,7 @@ import org.apache.cassandra.io.sstable.SSTableCursorReader;
 import org.apache.cassandra.io.sstable.UnfilteredDescriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader.PartitionPositionBounds;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 
 import static org.apache.cassandra.db.rows.Cell.INVALID_DELETION_TIME;
 import static org.apache.cassandra.db.rows.Cell.NO_DELETION_TIME;
@@ -89,7 +91,14 @@ class StatefulCursor extends SSTableCursorReader
     /** @param bounds the segments to read, or null for the whole sstable; see {@link SSTableCursorReader#SSTableCursorReader(SSTableReader, Collection, DiskAccessMode)} */
     public StatefulCursor(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
     {
-        super(reader, bounds, diskAccessMode);
+        this(reader, bounds, diskAccessMode, null);
+    }
+
+    /** @param limiter the limiter to charge with the bytes read from disk, or null for none */
+    public StatefulCursor(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode,
+                          @Nullable ThroughputLimiter limiter)
+    {
+        super(reader, bounds, diskAccessMode, limiter);
         // A deletion-only complex column must reach the merge as a position of its own, so that
         // its column-level deletion reaches the output. pauseAtEmptyComplexColumns defaults to
         // true on SSTableCursorReader for exactly this reason; no override needed here.

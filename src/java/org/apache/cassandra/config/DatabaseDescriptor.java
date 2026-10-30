@@ -2590,6 +2590,16 @@ public class DatabaseDescriptor
         conf.compaction_throughput = new DataRateSpec.LongBytesPerSecondBound(value, MEBIBYTES_PER_SECOND);
     }
 
+    public static boolean isMemtableFlushThrottleEnabled()
+    {
+        return conf.memtable_flush_throttle_enabled;
+    }
+
+    public static void setMemtableFlushThrottleEnabled(boolean enabled)
+    {
+        conf.memtable_flush_throttle_enabled = enabled;
+    }
+
     public static int getConcurrentValidations()
     {
         return conf.concurrent_validations;
