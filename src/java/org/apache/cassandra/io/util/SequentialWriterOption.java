@@ -20,6 +20,7 @@ package org.apache.cassandra.io.util;
 
 import java.nio.ByteBuffer;
 import java.util.Objects;
+import javax.annotation.Nullable;
 
 import org.apache.cassandra.io.compress.BufferType;
 
@@ -47,18 +48,25 @@ public class SequentialWriterOption
     private final boolean trickleFsync;
     private final int trickleFsyncByteInterval;
     private final boolean finishOnClose;
+    @Nullable
+    private final ThroughputLimiter limiter;
+    private final boolean paced;
 
     private SequentialWriterOption(int bufferSize,
                                    BufferType bufferType,
                                    boolean trickleFsync,
                                    int trickleFsyncByteInterval,
-                                   boolean finishOnClose)
+                                   boolean finishOnClose,
+                                   @Nullable ThroughputLimiter limiter,
+                                   boolean paced)
     {
         this.bufferSize = bufferSize;
         this.bufferType = bufferType;
         this.trickleFsync = trickleFsync;
         this.trickleFsyncByteInterval = trickleFsyncByteInterval;
         this.finishOnClose = finishOnClose;
+        this.limiter = limiter;
+        this.paced = paced;
     }
 
     public static Builder newBuilder()
@@ -91,6 +99,40 @@ public class SequentialWriterOption
         return finishOnClose;
     }
 
+    /** The limiter to charge with the bytes written, or null for none. */
+    @Nullable
+    public ThroughputLimiter limiter()
+    {
+        return limiter;
+    }
+
+    /**
+     * Whether the writer syncs its writes to disk and charges the limiter once per
+     * {@link SequentialWriter#PACED_SYNC_BYTES}, with {@link ThroughputLimiter#acquirePriority}.
+     */
+    public boolean paced()
+    {
+        return paced;
+    }
+
+    /** Returns a copy of these options with {@link #limiter()} set to {@code limiter}, not {@link #paced()}. */
+    public SequentialWriterOption withLimiter(@Nullable ThroughputLimiter limiter)
+    {
+        return new SequentialWriterOption(bufferSize, bufferType, trickleFsync, trickleFsyncByteInterval, finishOnClose, limiter, false);
+    }
+
+    /** Returns a copy of these options with {@link #limiter()} set to {@code limiter}, and {@link #paced()}. */
+    public SequentialWriterOption withFlushLimiter(ThroughputLimiter limiter)
+    {
+        return new SequentialWriterOption(bufferSize, bufferType, trickleFsync, trickleFsyncByteInterval, finishOnClose, Objects.requireNonNull(limiter), true);
+    }
+
+    /** Returns a copy of these options with the {@link #limiter()} and {@link #paced()} of {@code source}. */
+    public SequentialWriterOption withLimiterOf(SequentialWriterOption source)
+    {
+        return new SequentialWriterOption(bufferSize, bufferType, trickleFsync, trickleFsyncByteInterval, finishOnClose, source.limiter, source.paced);
+    }
+
     /**
      * Allocate buffer using set buffer type and buffer size.
      *
@@ -119,7 +161,7 @@ public class SequentialWriterOption
         public SequentialWriterOption build()
         {
             return new SequentialWriterOption(bufferSize, bufferType, trickleFsync,
-                                   trickleFsyncByteInterval, finishOnClose);
+                                   trickleFsyncByteInterval, finishOnClose, null, false);
         }
 
         public Builder bufferSize(int bufferSize)

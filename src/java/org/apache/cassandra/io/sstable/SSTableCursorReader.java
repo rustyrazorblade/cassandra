@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.Collections;
+import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -51,6 +52,7 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
@@ -634,7 +636,19 @@ public class SSTableCursorReader implements AutoCloseable
      */
     public SSTableCursorReader(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, bounds, diskAccessMode, true);
+        this(reader, bounds, diskAccessMode, null);
+    }
+
+    /**
+     * Same as {@link #SSTableCursorReader(SSTableReader, Collection, DiskAccessMode)}, and charges {@code limiter}
+     * with the bytes read from disk.
+     *
+     * @param limiter the limiter to charge, or null for none
+     */
+    public SSTableCursorReader(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode,
+                               @Nullable ThroughputLimiter limiter)
+    {
+        this(reader, reader.metadata(), null, bounds, diskAccessMode, true, true, null, limiter);
     }
 
     /**
@@ -675,7 +689,7 @@ public class SSTableCursorReader implements AutoCloseable
         {
             RandomAccessReader direct = reader.openDataReaderForDirectScan();
             if (direct != null)
-                return new SSTableCursorReader(reader, reader.metadata(), null, null, null, true, false, direct).growReadAheadFromSeeks();
+                return new SSTableCursorReader(reader, reader.metadata(), null, null, null, true, false, direct, null).growReadAheadFromSeeks();
         }
         return new SSTableCursorReader(reader, reader.metadata(), null, null, null, false, false).moveToReadAheadOnLongReads();
     }
@@ -865,7 +879,7 @@ public class SSTableCursorReader implements AutoCloseable
                                 Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode, boolean scan,
                                 boolean enterFirstSegment)
     {
-        this(reader, metadata, readerRef, bounds, diskAccessMode, scan, enterFirstSegment, null);
+        this(reader, metadata, readerRef, bounds, diskAccessMode, scan, enterFirstSegment, null, null);
     }
 
     /**
@@ -875,10 +889,11 @@ public class SSTableCursorReader implements AutoCloseable
      *                          segment's bounds, and the caller seeks
      * @param opened the data file reader to read with, which the cursor then owns; null to open one
      *               from {@code diskAccessMode} and {@code scan}
+     * @param limiter the limiter that a scan reader it opens charges with the bytes read from disk, or null for none
      */
     private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
                                 Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode, boolean scan,
-                                boolean enterFirstSegment, RandomAccessReader opened)
+                                boolean enterFirstSegment, RandomAccessReader opened, @Nullable ThroughputLimiter limiter)
     {
         ssTableReader = reader;
         ssTableReaderRef = readerRef;
@@ -895,7 +910,7 @@ public class SSTableCursorReader implements AutoCloseable
         serializationHeader = reader.header;
         sstableHasDroppedColumns = anyDroppedColumn(deserializationHelper, serializationHeader);
 
-        dataReader = opened != null ? opened : scan ? reader.openDataReaderForScan(diskAccessMode) : reader.openDataReader(diskAccessMode);
+        dataReader = opened != null ? opened : scan ? reader.openDataReaderForScan(diskAccessMode, limiter) : reader.openDataReader(diskAccessMode);
         // the HEADER decides whether this sstable can contain static rows: after
         // ALTER TABLE ... DROP of the last static column, current metadata has no static
         // columns but older sstables legitimately still carry static rows

@@ -96,6 +96,7 @@ import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.metrics.RestorableMeter;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadataRef;
@@ -1111,16 +1112,19 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner()
     {
-        return getScanner(dfile.diskAccessMode());
+        return getScanner(dfile.diskAccessMode(), null);
     }
 
-    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
+    /**
+     * @param limiter the limiter to charge with the bytes read from disk, or null for none
+     */
+    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode, @Nullable ThroughputLimiter limiter)
     {
         PartitionPositionBounds fullRange = getPositionsForFullRange();
         if (fullRange != null)
-            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), diskAccessMode);
+            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), diskAccessMode, limiter);
         else
-            return new SSTableSimpleScanner(this, Collections.emptyList(), diskAccessMode);
+            return new SSTableSimpleScanner(this, Collections.emptyList(), diskAccessMode, limiter);
     }
 
     /**
@@ -1131,15 +1135,18 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Collection<Range<Token>> ranges)
     {
-        return getScanner(ranges, dfile.diskAccessMode());
+        return getScanner(ranges, dfile.diskAccessMode(), null);
     }
 
-    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
+    /**
+     * @param limiter the limiter to charge with the bytes read from disk, or null for none
+     */
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode, @Nullable ThroughputLimiter limiter)
     {
         if (ranges != null)
-            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), diskAccessMode);
+            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), diskAccessMode, limiter);
         else
-            return getScanner(diskAccessMode);
+            return getScanner(diskAccessMode, limiter);
     }
 
     /**
@@ -1434,7 +1441,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         return openDataReaderInternal(null, null, false);
     }
 
-    public RandomAccessReader openDataReader(RateLimiter limiter)
+    public RandomAccessReader openDataReader(ThroughputLimiter limiter)
     {
         assert limiter != null;
         return openDataReaderInternal(null, limiter, false);
@@ -1455,14 +1462,22 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         return openDataReaderInternal(diskAccessMode, null, true);
     }
 
-    public RandomAccessReader openDataReaderForScan(RateLimiter limiter)
+    public RandomAccessReader openDataReaderForScan(ThroughputLimiter limiter)
     {
         assert limiter != null;
         return openDataReaderInternal(null, limiter, true);
     }
 
+    /**
+     * @param limiter the limiter to charge with the bytes read from disk, or null for none
+     */
+    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, @Nullable ThroughputLimiter limiter)
+    {
+        return openDataReaderInternal(diskAccessMode, limiter, true);
+    }
+
     private RandomAccessReader openDataReaderInternal(@Nullable DiskAccessMode diskAccessMode,
-                                                      @Nullable RateLimiter limiter,
+                                                      @Nullable ThroughputLimiter limiter,
                                                       boolean isScan)
     {
         if (canReuseDfile(diskAccessMode))

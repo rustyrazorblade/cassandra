@@ -22,6 +22,7 @@ package org.apache.cassandra.cache;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.annotation.Nullable;
 
 import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
@@ -39,6 +40,7 @@ import org.apache.cassandra.io.util.ChunkReader;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.Rebufferer;
 import org.apache.cassandra.io.util.RebuffererFactory;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.metrics.ChunkCacheMetrics;
 import org.apache.cassandra.utils.memory.BufferPool;
 import org.apache.cassandra.utils.memory.BufferPools;
@@ -270,6 +272,12 @@ public class ChunkCache
         {
             // Bypass the cache for scans, so they don't evict hot data with chunks that may never be revisited.
             return isScan ? source.instantiateRebufferer(isScan) : this;
+        }
+
+        @Override
+        public Rebufferer instantiateRebufferer(boolean isScan, @Nullable ThroughputLimiter limiter)
+        {
+            return isScan ? source.instantiateRebufferer(true, limiter) : RebuffererFactory.super.instantiateRebufferer(false, limiter);
         }
 
         @Override

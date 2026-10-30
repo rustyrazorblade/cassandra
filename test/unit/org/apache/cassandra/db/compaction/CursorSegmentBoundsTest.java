@@ -429,7 +429,7 @@ public class CursorSegmentBoundsTest extends CQLTester
     /**
      * The deltas that reach the rate limiter. {@code bytesReadSinceSnapshot} is what
      * {@code CursorCompactor.updateTotalBytesRead} adds to {@code totalBytesRead}, which drives
-     * {@code getTotalBytesScanned}, compaction progress and {@code compactionRateLimiterAcquire}.
+     * {@code getTotalBytesScanned}, compaction progress and {@code markBytesCompacted}.
      * Nothing else tests it, and a negative delta there makes progress run backwards.
      */
     @Test

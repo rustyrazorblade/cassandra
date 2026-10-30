@@ -811,6 +811,11 @@ public interface StorageServiceMBean extends NotificationEmitter
     public int getCompactionThroughputMbPerSec();
     public void setCompactionThroughputMbPerSec(int value);
 
+    /** Whether memtable flush writes count against compaction_throughput. */
+    public boolean isMemtableFlushThrottleEnabled();
+    /** Applies to flushes that start after the call. */
+    public void setMemtableFlushThrottleEnabled(boolean enabled);
+
     public int getCompressedReadAheadBufferInKB();
     public void setCompressedReadAheadBufferInKB(int sizeInKb);
 

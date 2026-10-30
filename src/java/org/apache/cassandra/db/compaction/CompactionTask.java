@@ -32,7 +32,7 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
-import com.google.common.util.concurrent.RateLimiter;
+
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -190,7 +190,6 @@ public class CompactionTask extends AbstractCompactionTask
 
             logger.info("Compacting ({}) {}", taskId, ssTableLoggerMsg);
 
-            RateLimiter limiter = CompactionManager.instance.getRateLimiter();
             long start = nanoTime();
             long startTime = currentTimeMillis();
             long totalKeysWritten = 0;
@@ -241,8 +240,7 @@ public class CompactionTask extends AbstractCompactionTask
                         // If we ingested less than a MB, keep going
                         if (bytesScanned - lastBytesScanned > MEGABYTE)
                         {
-                            // Rate limit the scanners, and account for compression
-                            CompactionManager.compactionRateLimiterAcquire(limiter, bytesScanned, lastBytesScanned, compressionRatio);
+                            CompactionManager.markBytesCompacted(bytesScanned, lastBytesScanned, compressionRatio);
 
                             lastBytesScanned = bytesScanned;
                         }
@@ -256,7 +254,7 @@ public class CompactionTask extends AbstractCompactionTask
                     if (ci.getTotalBytesScanned() != lastBytesScanned)
                     {
                         // Report any leftover bytes
-                        CompactionManager.compactionRateLimiterAcquire(limiter, ci.getTotalBytesScanned(), lastBytesScanned, compressionRatio);
+                        CompactionManager.markBytesCompacted(ci.getTotalBytesScanned(), lastBytesScanned, compressionRatio);
                     }
                     timeSpentWritingKeys = TimeUnit.NANOSECONDS.toMillis(nanoTime() - start);
 

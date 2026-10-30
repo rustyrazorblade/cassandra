@@ -24,6 +24,7 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import javax.annotation.Nullable;
 
 import com.google.common.collect.ImmutableSet;
 
@@ -33,6 +34,7 @@ import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.schema.TableMetadata;
 
 import static org.apache.cassandra.config.Config.DiskAccessMode;
@@ -74,9 +76,19 @@ implements ISSTableScanner
                                 Collection<PartitionPositionBounds> boundsList,
                                 DiskAccessMode diskAccessMode)
     {
+        this(sstable, boundsList, diskAccessMode, null);
+    }
+
+    /// Same as [#SSTableSimpleScanner(SSTableReader, Collection, DiskAccessMode)], and charges `limiter` with the
+    /// bytes read from disk. A null `limiter` charges nothing.
+    public SSTableSimpleScanner(SSTableReader sstable,
+                                Collection<PartitionPositionBounds> boundsList,
+                                DiskAccessMode diskAccessMode,
+                                @Nullable ThroughputLimiter limiter)
+    {
         assert sstable != null;
 
-        this.dfile = sstable.openDataReaderForScan(diskAccessMode);
+        this.dfile = sstable.openDataReaderForScan(diskAccessMode, limiter);
         this.sstable = sstable;
         this.sizeInBytes = boundsList.stream().mapToLong(ppb -> ppb.upperPosition - ppb.lowerPosition).sum();
         this.compressedSizeInBytes = sstable.compression ? sstable.onDiskSizeForPartitionPositions(boundsList) : sizeInBytes;

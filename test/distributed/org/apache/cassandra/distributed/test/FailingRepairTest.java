@@ -35,7 +35,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import com.google.common.util.concurrent.RateLimiter;
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -72,6 +71,7 @@ import org.apache.cassandra.io.sstable.format.ForwardingSSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.ChannelProxy;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.repair.RepairParallelism;
 import org.apache.cassandra.repair.messages.RepairOption;
@@ -333,12 +333,12 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
             return new FailingISSTableScanner(this);
         }
 
-        public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
+        public ISSTableScanner getScanner(DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
         {
             return new FailingISSTableScanner(this);
         }
 
-        public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
+        public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
         {
             return new FailingISSTableScanner(this);
         }
@@ -354,7 +354,7 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
             throw corrupt();
         }
 
-        public RandomAccessReader openDataReader(RateLimiter limiter)
+        public RandomAccessReader openDataReader(ThroughputLimiter limiter)
         {
             throw corrupt();
         }
@@ -374,7 +374,12 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
             throw corrupt();
         }
 
-        public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, RateLimiter limiter)
+        public RandomAccessReader openDataReaderForScan(ThroughputLimiter limiter)
+        {
+            throw corrupt();
+        }
+
+        public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
         {
             throw corrupt();
         }

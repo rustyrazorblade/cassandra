@@ -35,9 +35,14 @@ import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.lifecycle.LifecycleNewTracker;
+import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Token;
@@ -55,7 +60,9 @@ import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
 import org.apache.cassandra.io.sstable.metadata.MetadataType;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.MmappedRegionsCache;
+import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Transactional;
@@ -125,7 +132,7 @@ public abstract class SSTableWriter extends SSTable implements Transactional
             this.observers = Collections.unmodifiableList(observers);
             for (Index.Group group : builder.getIndexGroups())
             {
-                SSTableFlushObserver observer = group.getFlushObserver(descriptor, lifecycleNewTracker, metadata.getLocal());
+                SSTableFlushObserver observer = group.getFlushObserver(descriptor, lifecycleNewTracker, metadata.getLocal(), builder.getWriterOptions());
                 if (observer != null)
                 {
                     observer.begin();
@@ -575,6 +582,8 @@ public abstract class SSTableWriter extends SSTable implements Transactional
 
         public abstract MmappedRegionsCache getMmappedRegionsCache();
 
+        private SequentialWriterOption writerOptions;
+
         public Builder(Descriptor descriptor)
         {
             super(descriptor);
@@ -586,7 +595,38 @@ public abstract class SSTableWriter extends SSTable implements Transactional
 
             validateRepairedMetadata(getRepairedAt(), getPendingRepair(), isTransientSSTable());
 
+            // An offline tool, and a writer with no operation (streaming from a memtable), writes at full speed.
+            SequentialWriterOption options = getIOOptions().writerOptions;
+            OperationType operation = lifecycleNewTracker.opType();
+            boolean offline = lifecycleNewTracker instanceof LifecycleTransaction && ((LifecycleTransaction) lifecycleNewTracker).isOffline();
+            if (operation == OperationType.FLUSH)
+                writerOptions = isFlushThrottled() ? options.withFlushLimiter(CompactionManager.instance.getRateLimiter()) : options;
+            else if (operation != null && operation.limitsWrites() && !offline)
+                writerOptions = options.withLimiter(CompactionManager.instance.getRateLimiter());
+            else
+                writerOptions = options;
             return buildInternal(lifecycleNewTracker, owner);
+        }
+
+        /**
+         * Whether a memtable flush charges the compaction limiter.  The flushes of commit log replay at startup, and of
+         * a drain or a shutdown, do not.
+         */
+        private static boolean isFlushThrottled()
+        {
+            return DatabaseDescriptor.isDaemonInitialized()
+                   && DatabaseDescriptor.isMemtableFlushThrottleEnabled()
+                   && !CommitLog.instance.isReplaying()
+                   && !StorageService.instance.isShutdown();
+        }
+
+        /**
+         * Returns the writer options for the component files.  When the operation type limits writes, the options
+         * charge the compaction rate limiter.  Before {@link #build}, returns the configured options without the limiter.
+         */
+        public SequentialWriterOption getWriterOptions()
+        {
+            return writerOptions != null ? writerOptions : getIOOptions().writerOptions;
         }
 
         protected abstract W buildInternal(LifecycleNewTracker lifecycleNewTracker, Owner owner);
