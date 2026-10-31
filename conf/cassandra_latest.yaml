@@ -1259,7 +1259,18 @@ concurrent_materialized_view_builders: 1
 # Setting this to 0 disables throttling. Note that this accounts for all types
 # of compaction, including validation compaction (building Merkle trees
 # for repairs).
+# The limit covers the bytes compaction reads from disk and the bytes it
+# writes, together.  Compaction charges the limit at each disk read and
+# write, so it does not burst above the limit.
 compaction_throughput: 64MiB/s
+
+# When true, memtable flush writes count against compaction_throughput,
+# together with compaction reads and writes.  Flush has priority within that
+# limit.  Flush then writes to disk at no more than compaction_throughput, so a
+# write rate above it fills the memtables and blocks writes.  The flushes of
+# commit log replay at startup, of a drain and of a shutdown are not limited,
+# and during bootstrap neither flush nor compaction is limited.
+memtable_flush_throttle_enabled: false
 
 # When compacting, the replacement sstable(s) can be opened before they
 # are completely written, and used in place of the prior sstables for

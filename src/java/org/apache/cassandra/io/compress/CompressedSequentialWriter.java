@@ -82,13 +82,14 @@ public class CompressedSequentialWriter extends SequentialWriter
 
     private static SequentialWriterOption buildOption(SequentialWriterOption option, CompressionParams parameters)
     {
-        return SequentialWriterOption.newBuilder()
-                                     .bufferSize(parameters.chunkLength())
-                                     .bufferType(parameters.getSstableCompressor().preferredBufferType())
-                                     .trickleFsync(option.trickleFsync())
-                                     .trickleFsyncByteInterval(option.trickleFsyncByteInterval())
-                                     .finishOnClose(option.finishOnClose())
-                                     .build();
+        SequentialWriterOption built = SequentialWriterOption.newBuilder()
+                                                             .bufferSize(parameters.chunkLength())
+                                                             .bufferType(parameters.getSstableCompressor().preferredBufferType())
+                                                             .trickleFsync(option.trickleFsync())
+                                                             .trickleFsyncByteInterval(option.trickleFsyncByteInterval())
+                                                             .finishOnClose(option.finishOnClose())
+                                                             .build();
+        return option.paced() ? built.withFlushLimiter(option.limiter()) : built.withLimiter(option.limiter());
     }
 
     public CompressedSequentialWriter(File file,
@@ -262,9 +263,11 @@ public class CompressedSequentialWriter extends SequentialWriter
     {
         try
         {
+            int length = toWrite.remaining();
             channel.write(toWrite);
             toWrite.rewind();
             crcMetadata.appendDirect(toWrite, true);
+            chargeLimiter(length + Integer.BYTES);
         }
         catch (IOException e)
         {

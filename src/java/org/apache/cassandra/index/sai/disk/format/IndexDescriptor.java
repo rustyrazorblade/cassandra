@@ -54,6 +54,7 @@ import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileHandle;
+import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Throwables;
 
@@ -77,18 +78,31 @@ public class IndexDescriptor
     public final Descriptor sstableDescriptor;
     public final ClusteringComparator clusteringComparator;
     public final PrimaryKey.Factory primaryKeyFactory;
+    private final IndexFileUtils fileUtils;
 
     private IndexDescriptor(Version version, Descriptor sstableDescriptor, IPartitioner partitioner, ClusteringComparator clusteringComparator)
+    {
+        this(version, sstableDescriptor, partitioner, clusteringComparator, IndexFileUtils.instance);
+    }
+
+    private IndexDescriptor(Version version, Descriptor sstableDescriptor, IPartitioner partitioner, ClusteringComparator clusteringComparator, IndexFileUtils fileUtils)
     {
         this.version = version;
         this.sstableDescriptor = sstableDescriptor;
         this.clusteringComparator = clusteringComparator;
         this.primaryKeyFactory = new PrimaryKey.Factory(partitioner, clusteringComparator);
+        this.fileUtils = fileUtils;
     }
 
     public static IndexDescriptor create(Descriptor descriptor, IPartitioner partitioner, ClusteringComparator clusteringComparator)
     {
         return new IndexDescriptor(Version.LATEST, descriptor, partitioner, clusteringComparator);
+    }
+
+    /** Creates a descriptor whose index files charge the limiter of the sstable's {@code writerOptions}, if any. */
+    public static IndexDescriptor create(Descriptor descriptor, IPartitioner partitioner, ClusteringComparator clusteringComparator, SequentialWriterOption writerOptions)
+    {
+        return new IndexDescriptor(Version.LATEST, descriptor, partitioner, clusteringComparator, IndexFileUtils.instance.withLimiterOf(writerOptions));
     }
 
     public static IndexDescriptor create(SSTableReader sstable)
@@ -231,7 +245,7 @@ public class IndexDescriptor
                          component,
                          file);
 
-        IndexOutputWriter writer = IndexFileUtils.instance.openOutput(file);
+        IndexOutputWriter writer = fileUtils.openOutput(file);
 
         if (append)
         {
@@ -253,7 +267,7 @@ public class IndexDescriptor
         if (logger.isTraceEnabled())
             logger.trace(logMessage("Creating sstable attached index output for component {} on file {}..."), component, file);
 
-        IndexOutputWriter writer = IndexFileUtils.instance.openOutput(file);
+        IndexOutputWriter writer = fileUtils.openOutput(file);
 
         if (append)
         {

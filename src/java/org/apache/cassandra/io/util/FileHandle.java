@@ -22,7 +22,6 @@ import java.util.function.DoubleSupplier;
 import java.util.function.Function;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.util.concurrent.RateLimiter;
 
 import org.apache.cassandra.cache.ChunkCache;
 import org.apache.cassandra.io.compress.BufferType;
@@ -198,22 +197,22 @@ public class FileHandle extends SharedCloseableImpl
 
     /**
      * Create {@link RandomAccessReader} with configured method of reading content of the file.
-     * Reading from file will be rate limited by given {@link RateLimiter}.
+     * The reader charges {@code limiter} with the bytes it reads from disk.
      *
-     * @param limiter RateLimiter to use for rate limiting read
+     * @param limiter the limiter to charge, or null for none
      * @return RandomAccessReader for the file
      */
-    public RandomAccessReader createReader(RateLimiter limiter)
+    public RandomAccessReader createReader(ThroughputLimiter limiter)
     {
         return createReader(limiter, false);
     }
 
-    public RandomAccessReader createReader(RateLimiter limiter, boolean isScan)
+    public RandomAccessReader createReader(ThroughputLimiter limiter, boolean isScan)
     {
         return createReader(limiter, isScan, OnReaderClose.RETAIN_FILE_OPEN);
     }
 
-    public RandomAccessReader createReader(RateLimiter limiter, boolean isScan, OnReaderClose onReaderClose)
+    public RandomAccessReader createReader(ThroughputLimiter limiter, boolean isScan, OnReaderClose onReaderClose)
     {
         if (onReaderClose == OnReaderClose.CLOSE_FILE)
         {
@@ -269,18 +268,14 @@ public class FileHandle extends SharedCloseableImpl
         NativeLibrary.trySkipCache(channel.getFileDescriptor(), 0, position, file().absolutePath());
     }
 
-    public Rebufferer instantiateRebufferer(RateLimiter limiter)
+    public Rebufferer instantiateRebufferer(ThroughputLimiter limiter)
     {
         return instantiateRebufferer(limiter, false);
     }
 
-    public Rebufferer instantiateRebufferer(RateLimiter limiter, boolean isScan)
+    public Rebufferer instantiateRebufferer(ThroughputLimiter limiter, boolean isScan)
     {
-        Rebufferer rebufferer = rebuffererFactory.instantiateRebufferer(isScan);
-
-        if (limiter != null)
-            rebufferer = new LimitingRebufferer(rebufferer, limiter, DiskOptimizationStrategy.MAX_BUFFER_SIZE);
-        return rebufferer;
+        return rebuffererFactory.instantiateRebufferer(isScan, limiter);
     }
 
     /**

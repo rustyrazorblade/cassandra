@@ -1457,6 +1457,18 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                     value, oldValue);
     }
 
+    public boolean isMemtableFlushThrottleEnabled()
+    {
+        return DatabaseDescriptor.isMemtableFlushThrottleEnabled();
+    }
+
+    public void setMemtableFlushThrottleEnabled(boolean enabled)
+    {
+        boolean oldValue = DatabaseDescriptor.isMemtableFlushThrottleEnabled();
+        DatabaseDescriptor.setMemtableFlushThrottleEnabled(enabled);
+        logger.info("memtable_flush_throttle_enabled set to {} (was {})", enabled, oldValue);
+    }
+
     /**
      * Get the Current Compaction Throughput
      * key is 1/5/15minute time dimension for statistics
@@ -3863,6 +3875,8 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
         assert !isShutdown;
         isShutdown = true;
+        // Lifts compaction_throughput, so a flush or compaction waiting on it does not hold up the drain.
+        CompactionManager.instance.getRateLimiter();
 
         runPreShutdownHooks();
 

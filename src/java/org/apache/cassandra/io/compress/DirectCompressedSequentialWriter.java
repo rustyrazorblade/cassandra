@@ -272,6 +272,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         writeBuffer.limit(flushLimit);
         while (writeBuffer.hasRemaining())
             fchannel.write(writeBuffer);
+        chargeLimiter(flushLimit);
     }
 
     private void flushCompleteBlocks()

@@ -17,6 +17,10 @@
  */
 package org.apache.cassandra.db.compaction;
 
+import java.util.Set;
+
+import com.google.common.collect.Sets;
+
 import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 public enum OperationType
@@ -74,6 +78,21 @@ public enum OperationType
         this.fileName = toLowerCaseLocalized(type).replace(" ", "");
         this.writesData = writesData;
         this.priority = priority;
+    }
+
+    /**
+     * compaction_throughput limits the sstable writes of these operations.  The code that opens a scanner or
+     * data reader limits reads, so this set leaves out repair validation and verify, which only read.
+     */
+    private static final Set<OperationType> LIMITED_WRITES = Sets.immutableEnumSet(CLEANUP, SCRUB, UPGRADE_SSTABLES,
+                                                                                  MAJOR_COMPACTION, RELOCATE,
+                                                                                  GARBAGE_COLLECT, ANTICOMPACTION,
+                                                                                  COMPACTION, TOMBSTONE_COMPACTION);
+
+    /** Whether compaction_throughput limits the sstable writes of this operation. */
+    public boolean limitsWrites()
+    {
+        return LIMITED_WRITES.contains(this);
     }
 
     public static OperationType fromFileName(String fileName)

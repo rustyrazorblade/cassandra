@@ -263,7 +263,7 @@ public abstract class AbstractCompactionStrategy
         try
         {
             for (SSTableReader sstable : sstables)
-                scanners.add(sstable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode()));
+                scanners.add(sstable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode(), CompactionManager.instance.getRateLimiter()));
         }
         catch (Throwable t)
         {

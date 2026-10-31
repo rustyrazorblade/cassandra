@@ -64,6 +64,7 @@ import org.apache.cassandra.io.sstable.ReducingKeyIterator;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableFlushObserver;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -926,6 +927,19 @@ public interface Index
         {
             return true;
         }
+    }
+
+    /**
+     * A {@link Group} whose flush observer writes files of its own.  The sstable writer passes it its options, so
+     * that those files charge the same limiter as the sstable's.
+     */
+    interface GroupWithWriterOptions extends Group
+    {
+        /**
+         * As {@link Group#getFlushObserver(Descriptor, ILifecycleTransaction, TableMetadata)}, with the options of the
+         * sstable's own writers.
+         */
+        SSTableFlushObserver getFlushObserver(Descriptor descriptor, ILifecycleTransaction txn, TableMetadata tableMetadata, SequentialWriterOption writerOptions);
     }
 
     /**

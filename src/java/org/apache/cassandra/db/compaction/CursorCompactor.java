@@ -71,6 +71,7 @@ import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -513,7 +514,8 @@ public class CursorCompactor extends CompactionInfo.Holder
          * {@link CompactionIterator#CompactionIterator(OperationType, List, AbstractCompactionController, long, TimeUUID, ActiveCompactionsTracker)}
          */
 
-        this.sstableCursors = convertScannersToCursors(scanners, sstables, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+        this.sstableCursors = convertScannersToCursors(scanners, sstables, DatabaseDescriptor.getCompactionReadDiskAccessMode(),
+                                                       CompactionManager.instance.getRateLimiter());
         this.sstableCursorsEqualsNext = new boolean[sstables.size()];
         this.enforceStrictLiveness = controller.cfs.metadata.get().enforceStrictLiveness();
         this.probeCursorOrder = enforceStrictLiveness ? new StatefulCursor[sstableCursors.length] : null;
@@ -2317,7 +2319,7 @@ public class CursorCompactor extends CompactionInfo.Holder
      * full-range one, and each of its sstables gets a whole-file cursor.
      */
     private static StatefulCursor[] convertScannersToCursors(List<ISSTableScanner> scanners, ImmutableSet<SSTableReader> sstables,
-                                                             DiskAccessMode diskAccessMode)
+                                                             DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
     {
         for (ISSTableScanner scanner : scanners)
             scanner.close();
@@ -2331,12 +2333,12 @@ public class CursorCompactor extends CompactionInfo.Holder
                 if (scanner instanceof SSTableSimpleScanner)
                 {
                     SSTableReader reader = Iterables.getOnlyElement(scanner.getBackingSSTables());
-                    cursors[i++] = new StatefulCursor(reader, ((SSTableSimpleScanner) scanner).positionBounds(), diskAccessMode);
+                    cursors[i++] = new StatefulCursor(reader, ((SSTableSimpleScanner) scanner).positionBounds(), diskAccessMode, limiter);
                 }
                 else
                 {
                     for (SSTableReader reader : scanner.getBackingSSTables())
-                        cursors[i++] = new StatefulCursor(reader, diskAccessMode);
+                        cursors[i++] = new StatefulCursor(reader, null, diskAccessMode, limiter);
                 }
             }
             assert i == cursors.length : "cursor count " + i + " differs from sstable count " + cursors.length;

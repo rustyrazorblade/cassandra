@@ -89,6 +89,7 @@ public class CommitLog implements CommitLogMBean
 
     volatile Configuration configuration;
     private boolean started = false;
+    private volatile boolean replaying = false;
 
     private static CommitLog construct()
     {
@@ -226,9 +227,23 @@ public class CommitLog implements CommitLogMBean
      */
     public int recoverFiles(File... clogs) throws IOException
     {
-        CommitLogReplayer replayer = CommitLogReplayer.construct(this, getLocalHostId());
-        replayer.replayFiles(clogs);
-        return replayer.blockForWrites();
+        replaying = true;
+        try
+        {
+            CommitLogReplayer replayer = CommitLogReplayer.construct(this, getLocalHostId());
+            replayer.replayFiles(clogs);
+            return replayer.blockForWrites();
+        }
+        finally
+        {
+            replaying = false;
+        }
+    }
+
+    /** Whether {@link #recoverFiles} is replaying, and flushing what it replayed. */
+    public boolean isReplaying()
+    {
+        return replaying;
     }
 
     public void recoverPath(String path) throws IOException

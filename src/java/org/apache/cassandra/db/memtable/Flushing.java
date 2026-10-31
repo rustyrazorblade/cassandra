@@ -38,12 +38,14 @@ import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.SerializationHeader;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.commitlog.IntervalSet;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.Clock;
@@ -158,6 +160,8 @@ public class Flushing
             long startTimeNs = Clock.Global.nanoTime();
             long startCpuTime = ThreadStats.getCurrentThreadCpuTimeNano();
             long startAllocatedBytes = ThreadStats.getCurrentThreadAllocatedBytes();
+            ThroughputLimiter limiter = CompactionManager.instance.getRateLimiter();
+            long startThrottledNanos = limiter.threadPriorityWaitNanos();
 
             // (we can't clear out the map as-we-go to free up memory,
             //  since the memtable is being used for queries in the "pending flush" category)
@@ -199,7 +203,7 @@ public class Flushing
                             "bytes flushed: {} / (rate: {}), " +
                             "partitions flushed: {} / (rate: {}/s), " +
                             "rows: {} / (rate: {}/s), " +
-                            "cpu time: {} ms, heap allocated: {}",
+                            "cpu time: {} ms, heap allocated: {}, throttled: {} ms",
                             writer.getFilename(),
                             FBUtilities.prettyPrintMemory(bytesFlushed),
                             toFlush.memtable().getFinalCommitLogUpperBound(),
@@ -208,7 +212,8 @@ public class Flushing
                             toFlush.partitionCount(), partitionsPerSec,
                             writer.getTotalRows(), rowsPerSec,
                             startCpuTime < 0 ? "n/a": TimeUnit.NANOSECONDS.toMillis(endCpuTime - startCpuTime),
-                            endAllocatedBytes < 0 ? "n/a" : FBUtilities.prettyPrintMemory(endAllocatedBytes - startAllocatedBytes)
+                            endAllocatedBytes < 0 ? "n/a" : FBUtilities.prettyPrintMemory(endAllocatedBytes - startAllocatedBytes),
+                            TimeUnit.NANOSECONDS.toMillis(limiter.threadPriorityWaitNanos() - startThrottledNanos)
                 );
                 // Update the metrics
                 metrics.bytesFlushed.inc(bytesFlushed);

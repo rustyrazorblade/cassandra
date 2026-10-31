@@ -41,6 +41,9 @@ import static org.apache.cassandra.utils.Throwables.merge;
  */
 public class SequentialWriter extends BufferedDataOutputStreamPlus implements Transactional
 {
+    /** The bytes a paced writer writes between two syncs. */
+    public static final int PACED_SYNC_BYTES = 1 << 20;
+
     // absolute path to the given file
     private final String filePath;
     private final File file;
@@ -63,6 +66,8 @@ public class SequentialWriter extends BufferedDataOutputStreamPlus implements Tr
     // latency spikes
     protected final SequentialWriterOption option;
     private long bytesSinceTrickleFsync = 0;
+    /** The bytes a paced writer has written since it last charged the limiter. */
+    private long pendingCharge = 0;
 
     protected long lastFlushOffset;
 
@@ -221,6 +226,11 @@ public class SequentialWriter extends BufferedDataOutputStreamPlus implements Tr
         {
             throw new FSWriteError(e, getPath());
         }
+        if (pendingCharge > 0)
+        {
+            option.limiter().acquirePriority(pendingCharge);
+            pendingCharge = 0;
+        }
     }
 
     /*
@@ -270,6 +280,7 @@ public class SequentialWriter extends BufferedDataOutputStreamPlus implements Tr
             buffer.flip();
             channel.write(buffer);
             lastFlushOffset += buffer.position();
+            chargeLimiter(buffer.position());
         }
         catch (IOException e)
         {
@@ -277,6 +288,26 @@ public class SequentialWriter extends BufferedDataOutputStreamPlus implements Tr
         }
         if (runPostFlush != null)
             runPostFlush.accept(getLastFlushOffset());
+    }
+
+    /**
+     * Charges the limiter in the writer options, if any, with {@code bytes} written to disk.  A paced writer charges
+     * after each sync instead, once per {@link #PACED_SYNC_BYTES}, so the disk receives its writes at the limited rate,
+     * not in one burst at the final sync.
+     */
+    protected void chargeLimiter(long bytes)
+    {
+        ThroughputLimiter limiter = option.limiter();
+        if (limiter == null)
+            return;
+        if (!option.paced())
+        {
+            limiter.acquire(bytes);
+            return;
+        }
+        pendingCharge += bytes;
+        if (pendingCharge >= PACED_SYNC_BYTES)
+            syncDataOnlyInternal();
     }
 
     @Override
