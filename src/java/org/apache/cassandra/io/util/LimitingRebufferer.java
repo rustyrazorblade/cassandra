@@ -20,6 +20,8 @@
  */
 package org.apache.cassandra.io.util;
 
+import java.util.function.BooleanSupplier;
+import java.util.function.IntConsumer;
 import javax.annotation.concurrent.NotThreadSafe;
 
 import com.google.common.primitives.Ints;
@@ -36,13 +38,27 @@ import com.google.common.util.concurrent.RateLimiter;
 @NotThreadSafe
 public class LimitingRebufferer extends WrappingRebufferer
 {
-    final private RateLimiter limiter;
+    final private Object limiter;
+    final private IntConsumer acquire;
+    final private BooleanSupplier isLimited;
     final private int limitQuant;
 
     public LimitingRebufferer(Rebufferer wrapped, RateLimiter limiter, int limitQuant)
     {
+        this(wrapped, limiter, limiter::acquire, () -> true, limitQuant);
+    }
+
+    public LimitingRebufferer(Rebufferer wrapped, ThroughputLimiter limiter, int limitQuant)
+    {
+        this(wrapped, limiter, limiter::acquire, limiter::isLimited, limitQuant);
+    }
+
+    private LimitingRebufferer(Rebufferer wrapped, Object limiter, IntConsumer acquire, BooleanSupplier isLimited, int limitQuant)
+    {
         super(wrapped);
         this.limiter = limiter;
+        this.acquire = acquire;
+        this.isLimited = isLimited;
         this.limitQuant = limitQuant;
     }
 
@@ -55,12 +71,13 @@ public class LimitingRebufferer extends WrappingRebufferer
         if (remaining == 0)
             return this;
 
-        if (remaining > limitQuant)
+        // Smaller buffers spread the charges, which only matters while a limit is set.
+        if (remaining > limitQuant && isLimited.getAsBoolean())
         {
             buffer.limit(posInBuffer + limitQuant); // certainly below current limit
             remaining = limitQuant;
         }
-        limiter.acquire(remaining);
+        acquire.accept(remaining);
         return this;
     }
 

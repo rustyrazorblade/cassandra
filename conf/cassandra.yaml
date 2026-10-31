@@ -1288,6 +1288,20 @@ concurrent_materialized_view_builders: 1
 # for repairs).
 compaction_throughput: 64MiB/s
 
+# When true, background_io_throughput limits background disk I/O in place of
+# compaction_throughput.  Compaction, cleanup, scrub, verify and repair
+# validation charge the limit at each disk read and write, so they do not burst
+# above it.  Memtable flush writes count against the same limit, and flush has
+# priority within it.  Flush then writes to disk at no more than
+# background_io_throughput, so a write rate above it fills the memtables and
+# blocks writes.  The flushes of commit log replay at startup, of a drain and of
+# a shutdown are not limited, and during bootstrap nothing is limited.
+background_io_limiter_enabled: false
+
+# The disk throughput, reads and writes together, of all background I/O when
+# background_io_limiter_enabled is true.  Setting this to 0 disables throttling.
+# background_io_throughput: 128MiB/s
+
 # When compacting, the replacement sstable(s) can be opened before they
 # are completely written, and used in place of the prior sstables for
 # any range that has been written. This helps to smoothly transfer reads

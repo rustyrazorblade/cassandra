@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.io.util;
 
+import javax.annotation.Nullable;
+
 /**
  * Interface for the classes that can be used to instantiate rebufferers over a given file.
  *
@@ -29,4 +31,15 @@ package org.apache.cassandra.io.util;
 public interface RebuffererFactory extends ReaderFileProxy
 {
     Rebufferer instantiateRebufferer(boolean isScan);
+
+    /**
+     * Instantiates a rebufferer that charges {@code limiter} with the bytes it reads from disk.
+     *
+     * @param limiter the limiter to charge, or null for none
+     */
+    default Rebufferer instantiateRebufferer(boolean isScan, @Nullable ThroughputLimiter limiter)
+    {
+        Rebufferer rebufferer = instantiateRebufferer(isScan);
+        return limiter == null ? rebufferer : new LimitingRebufferer(rebufferer, limiter, DiskOptimizationStrategy.MAX_BUFFER_SIZE);
+    }
 }

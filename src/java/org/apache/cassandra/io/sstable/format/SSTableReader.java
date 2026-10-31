@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiFunction;
 
 import javax.annotation.Nullable;
 
@@ -97,6 +98,7 @@ import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.FileUtils.DuplicateHardlinkException;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.metrics.RestorableMeter;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadataRef;
@@ -1087,16 +1089,19 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner()
     {
-        return getScanner(dfile.diskAccessMode());
+        return getScanner(dfile.diskAccessMode(), null);
     }
 
-    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
+    /**
+     * @param limiter the limiter to charge with the bytes read from disk, or null for none
+     */
+    public ISSTableScanner getScanner(DiskAccessMode diskAccessMode, @Nullable ThroughputLimiter limiter)
     {
         PartitionPositionBounds fullRange = getPositionsForFullRange();
         if (fullRange != null)
-            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), diskAccessMode);
+            return new SSTableSimpleScanner(this, Collections.singletonList(fullRange), diskAccessMode, limiter);
         else
-            return new SSTableSimpleScanner(this, Collections.emptyList(), diskAccessMode);
+            return new SSTableSimpleScanner(this, Collections.emptyList(), diskAccessMode, limiter);
     }
 
     /**
@@ -1107,15 +1112,18 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public ISSTableScanner getScanner(Collection<Range<Token>> ranges)
     {
-        return getScanner(ranges, dfile.diskAccessMode());
+        return getScanner(ranges, dfile.diskAccessMode(), null);
     }
 
-    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
+    /**
+     * @param limiter the limiter to charge with the bytes read from disk, or null for none
+     */
+    public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode, @Nullable ThroughputLimiter limiter)
     {
         if (ranges != null)
-            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), diskAccessMode);
+            return new SSTableSimpleScanner(this, getPositionsForRanges(ranges), diskAccessMode, limiter);
         else
-            return getScanner(diskAccessMode);
+            return getScanner(diskAccessMode, limiter);
     }
 
     /**
@@ -1435,6 +1443,12 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public RandomAccessReader openDataReader(RateLimiter limiter)
     {
         assert limiter != null;
+        return openDataReaderInternal(null, (handle, onClose) -> handle.createReader(limiter, false, onClose));
+    }
+
+    public RandomAccessReader openDataReader(ThroughputLimiter limiter)
+    {
+        assert limiter != null;
         return openDataReaderInternal(null, limiter, false);
     }
 
@@ -1453,25 +1467,39 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         return openDataReaderInternal(diskAccessMode, null, true);
     }
 
-    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, RateLimiter limiter)
+    /**
+     * @param limiter the limiter to charge with the bytes read from disk, or null for none
+     */
+    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, @Nullable ThroughputLimiter limiter)
     {
-        assert limiter != null;
         return openDataReaderInternal(diskAccessMode, limiter, true);
     }
 
+    public RandomAccessReader openDataReaderForScan(DiskAccessMode diskAccessMode, RateLimiter limiter)
+    {
+        assert limiter != null;
+        return openDataReaderInternal(diskAccessMode, (handle, onClose) -> handle.createReader(limiter, true, onClose));
+    }
+
     private RandomAccessReader openDataReaderInternal(@Nullable DiskAccessMode diskAccessMode,
-                                                      @Nullable RateLimiter limiter,
+                                                      @Nullable ThroughputLimiter limiter,
                                                       boolean isScan)
     {
+        return openDataReaderInternal(diskAccessMode, (handle, onClose) -> handle.createReader(limiter, isScan, onClose));
+    }
+
+    private RandomAccessReader openDataReaderInternal(@Nullable DiskAccessMode diskAccessMode,
+                                                      BiFunction<FileHandle, OnReaderClose, RandomAccessReader> createReader)
+    {
         if (canReuseDfile(diskAccessMode))
-            return dfile.createReader(limiter, isScan, OnReaderClose.RETAIN_FILE_OPEN);
+            return createReader.apply(dfile, OnReaderClose.RETAIN_FILE_OPEN);
 
         FileHandle handle = dfile.toBuilder()
                                  .withDiskAccessMode(diskAccessMode)
                                  .complete();
         try
         {
-            return handle.createReader(limiter, isScan, OnReaderClose.CLOSE_FILE);
+            return createReader.apply(handle, OnReaderClose.CLOSE_FILE);
         }
         catch (Throwable t)
         {

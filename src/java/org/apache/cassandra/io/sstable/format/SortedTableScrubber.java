@@ -153,7 +153,7 @@ public abstract class SortedTableScrubber<R extends SSTableReaderWithFilter> imp
         // partition "ahead" of the data file.)
         this.dataFile = transaction.isOffline()
                         ? sstable.openDataReaderForScan(DatabaseDescriptor.getCompactionReadDiskAccessMode())
-                        : sstable.openDataReaderForScan(DatabaseDescriptor.getCompactionReadDiskAccessMode(), CompactionManager.instance.getRateLimiter());
+                        : CompactionManager.instance.openDataReaderForScan(sstable);
 
         this.scrubInfo = new ScrubInfo(dataFile, sstable, fileAccessLock.readLock());
 

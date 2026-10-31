@@ -1457,6 +1457,19 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                     value, oldValue);
     }
 
+    public int getBackgroundIoThroughputMebibytesPerSec()
+    {
+        return DatabaseDescriptor.getBackgroundIoThroughputMebibytesPerSecAsInt();
+    }
+
+    public void setBackgroundIoThroughputMebibytesPerSec(int value)
+    {
+        double oldValue = DatabaseDescriptor.getBackgroundIoThroughputMebibytesPerSec();
+        DatabaseDescriptor.setBackgroundIoThroughputMebibytesPerSec(value);
+        CompactionManager.instance.getBackgroundIoLimiter();
+        logger.info("background_io_throughput set to {} MiB/s (was {} MiB/s)", value, oldValue);
+    }
+
     /**
      * Get the Current Compaction Throughput
      * key is 1/5/15minute time dimension for statistics
@@ -3863,6 +3876,8 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
         assert !isShutdown;
         isShutdown = true;
+        // Lifts background_io_throughput, so a flush or compaction waiting on it does not hold up the drain.
+        CompactionManager.instance.getBackgroundIoLimiter();
 
         runPreShutdownHooks();
 

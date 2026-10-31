@@ -71,6 +71,7 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.ForwardingSSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.ChannelProxy;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.repair.RepairParallelism;
 import org.apache.cassandra.repair.messages.RepairOption;
@@ -302,12 +303,12 @@ public class FailingRepairTest extends TestBaseImpl implements Serializable
             return new FailingISSTableScanner();
         }
 
-        public ISSTableScanner getScanner(DiskAccessMode diskAccessMode)
+        public ISSTableScanner getScanner(DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
         {
             return new FailingISSTableScanner();
         }
 
-        public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode)
+        public ISSTableScanner getScanner(Collection<Range<Token>> ranges, DiskAccessMode diskAccessMode, ThroughputLimiter limiter)
         {
             return new FailingISSTableScanner();
         }

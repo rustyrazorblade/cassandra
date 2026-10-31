@@ -768,6 +768,13 @@ since server [re]start.
 |PendingTasksByTableName |Gauge<Map<String, Map<String, Integer>>>
 |Estimated number of compactions remaining to perform, grouped by
 keyspace and then table name. This info is also kept in `Table Metrics`.
+
+|FlushBytesCharged |Gauge<Long> |Bytes that memtable flushes charged to
+`background_io_throughput` since server [re]start, with
+`background_io_limiter_enabled`.
+
+|FlushThrottledNanos |Gauge<Long> |Time that memtable flushes waited for
+`background_io_throughput` since server [re]start, in nanoseconds.
 |===
 
 == CommitLog Metrics

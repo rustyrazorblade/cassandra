@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import javax.annotation.Nullable;
 import java.util.stream.Collectors;
 
 import javax.management.openmbean.OpenDataException;
@@ -68,6 +69,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.cache.AutoSavingCache;
 import org.apache.cassandra.concurrent.ExecutorFactory;
 import org.apache.cassandra.concurrent.WrappedExecutorPlus;
+import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
@@ -105,6 +107,8 @@ import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.MetaStrategy;
 import org.apache.cassandra.locator.RangesAtEndpoint;
@@ -180,7 +184,9 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     // own pool to prevent either scenario.
     private final SecondaryIndexExecutor secondaryIndexExecutor = new SecondaryIndexExecutor();
 
-    private final CompactionMetrics metrics = new CompactionMetrics(executor, validationExecutor, viewBuildExecutor, secondaryIndexExecutor);
+    private final ThroughputLimiter backgroundIoLimiter = new ThroughputLimiter(Double.MAX_VALUE);
+
+    private final CompactionMetrics metrics = new CompactionMetrics(backgroundIoLimiter, executor, validationExecutor, viewBuildExecutor, secondaryIndexExecutor);
 
     @VisibleForTesting
     final Multiset<ColumnFamilyStore> compactingCF = ConcurrentHashMultiset.create();
@@ -234,6 +240,39 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             throughput = Double.MAX_VALUE;
         if (compactionRateLimiter.getRate() != throughput)
             compactionRateLimiter.setRate(throughput);
+    }
+
+    /**
+     * Gets the limiter that background I/O charges at each disk read and write, with its rate set from
+     * background_io_throughput.  When background_io_throughput is 0, or the node is bootstrapping or shutting down,
+     * the limiter has no limit.
+     *
+     * @return the limiter, or null when background_io_limiter_enabled is false
+     */
+    @Nullable
+    public ThroughputLimiter getBackgroundIoLimiter()
+    {
+        if (!DatabaseDescriptor.isBackgroundIoLimiterEnabled())
+            return null;
+
+        double throughput = DatabaseDescriptor.getBackgroundIoThroughputBytesPerSec();
+        if (throughput == 0 || StorageService.instance.isBootstrapMode() || StorageService.instance.isShutdown())
+            throughput = Double.MAX_VALUE;
+        if (backgroundIoLimiter.getRate() != throughput)
+            backgroundIoLimiter.setRate(throughput);
+        return backgroundIoLimiter;
+    }
+
+    /**
+     * Opens a data reader for scrub or verify.  The reader charges the background I/O limiter when it is enabled, and
+     * the compaction_throughput limiter when it is not.
+     */
+    public RandomAccessReader openDataReaderForScan(SSTableReader sstable)
+    {
+        ThroughputLimiter limiter = getBackgroundIoLimiter();
+        DiskAccessMode diskAccessMode = DatabaseDescriptor.getCompactionReadDiskAccessMode();
+        return limiter != null ? sstable.openDataReaderForScan(diskAccessMode, limiter)
+                               : sstable.openDataReaderForScan(diskAccessMode, getRateLimiter());
     }
 
     public Meter getCompactionThroughput()
@@ -1700,6 +1739,9 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
     {
         long lengthRead = (long) ((bytesScanned - lastBytesScanned) * compressionRatio) + 1;
         metrics.bytesCompactedThroughput.mark(lengthRead);
+        // The background I/O limiter charges each read and write instead.
+        if (DatabaseDescriptor.isBackgroundIoLimiterEnabled())
+            return;
         while (lengthRead >= Integer.MAX_VALUE)
         {
             limiter.acquire(Integer.MAX_VALUE);
@@ -1771,7 +1813,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
                 {
                     rangesToScan = Collections2.filter(ranges, range -> !transientRanges.contains(range));
                 }
-                return sstable.getScanner(rangesToScan, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+                return sstable.getScanner(rangesToScan, DatabaseDescriptor.getCompactionReadDiskAccessMode(), instance.getBackgroundIoLimiter());
             }
 
             @Override
@@ -1794,7 +1836,7 @@ public class CompactionManager implements CompactionManagerMBean, ICompactionMan
             @Override
             public ISSTableScanner getScanner(SSTableReader sstable)
             {
-                return sstable.getScanner(DatabaseDescriptor.getCompactionReadDiskAccessMode());
+                return sstable.getScanner(DatabaseDescriptor.getCompactionReadDiskAccessMode(), instance.getBackgroundIoLimiter());
             }
 
             @Override

@@ -198,30 +198,44 @@ public class FileHandle extends SharedCloseableImpl
 
     /**
      * Create {@link RandomAccessReader} with configured method of reading content of the file.
-     * Reading from file will be rate limited by given {@link RateLimiter}.
+     * The reader charges {@code limiter} with the bytes it reads from disk.
      *
-     * @param limiter RateLimiter to use for rate limiting read
+     * @param limiter the limiter to charge, or null for none
      * @return RandomAccessReader for the file
      */
-    public RandomAccessReader createReader(RateLimiter limiter)
+    public RandomAccessReader createReader(ThroughputLimiter limiter)
     {
         return createReader(limiter, false);
     }
 
-    public RandomAccessReader createReader(RateLimiter limiter, boolean isScan)
+    public RandomAccessReader createReader(ThroughputLimiter limiter, boolean isScan)
     {
         return createReader(limiter, isScan, OnReaderClose.RETAIN_FILE_OPEN);
     }
 
+    public RandomAccessReader createReader(ThroughputLimiter limiter, boolean isScan, OnReaderClose onReaderClose)
+    {
+        return createReader(instantiateRebufferer(limiter, isScan), onReaderClose);
+    }
+
+    /**
+     * The reader acquires {@code limiter} for the bytes of each buffer it reads, after the read.
+     */
     public RandomAccessReader createReader(RateLimiter limiter, boolean isScan, OnReaderClose onReaderClose)
+    {
+        Rebufferer rebufferer = new LimitingRebufferer(rebuffererFactory.instantiateRebufferer(isScan), limiter, DiskOptimizationStrategy.MAX_BUFFER_SIZE);
+        return createReader(rebufferer, onReaderClose);
+    }
+
+    private RandomAccessReader createReader(Rebufferer rebufferer, OnReaderClose onReaderClose)
     {
         if (onReaderClose == OnReaderClose.CLOSE_FILE)
         {
-            return new RandomAccessReader.RandomAccessReaderWithOwnFile(instantiateRebufferer(limiter, isScan), this);
+            return new RandomAccessReader.RandomAccessReaderWithOwnFile(rebufferer, this);
         }
         else if (onReaderClose == OnReaderClose.RETAIN_FILE_OPEN)
         {
-            return new RandomAccessReader(instantiateRebufferer(limiter, isScan));
+            return new RandomAccessReader(rebufferer);
         }
         throw new IllegalArgumentException("Unknown close policy: " + onReaderClose);
     }
@@ -269,18 +283,14 @@ public class FileHandle extends SharedCloseableImpl
         NativeLibrary.trySkipCache(channel.getFileDescriptor(), 0, position, file().absolutePath());
     }
 
-    public Rebufferer instantiateRebufferer(RateLimiter limiter)
+    public Rebufferer instantiateRebufferer(ThroughputLimiter limiter)
     {
         return instantiateRebufferer(limiter, false);
     }
 
-    public Rebufferer instantiateRebufferer(RateLimiter limiter, boolean isScan)
+    public Rebufferer instantiateRebufferer(ThroughputLimiter limiter, boolean isScan)
     {
-        Rebufferer rebufferer = rebuffererFactory.instantiateRebufferer(isScan);
-
-        if (limiter != null)
-            rebufferer = new LimitingRebufferer(rebufferer, limiter, DiskOptimizationStrategy.MAX_BUFFER_SIZE);
-        return rebufferer;
+        return rebuffererFactory.instantiateRebufferer(isScan, limiter);
     }
 
     /**

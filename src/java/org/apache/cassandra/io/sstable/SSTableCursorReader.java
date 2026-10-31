@@ -21,6 +21,7 @@ package org.apache.cassandra.io.sstable;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collection;
+import javax.annotation.Nullable;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -49,6 +50,7 @@ import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.ResizableByteBuffer;
+import org.apache.cassandra.io.util.ThroughputLimiter;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableMetadataRef;
@@ -564,17 +566,17 @@ public class SSTableCursorReader implements AutoCloseable
     {
         TableMetadata metadata = Util.metadataFromSSTable(desc);
         SSTableReader reader = SSTableReader.openNoValidation(null, desc, TableMetadataRef.forOfflineTools(metadata));
-        return new SSTableCursorReader(reader, metadata, reader.ref(), null, null);
+        return new SSTableCursorReader(reader, metadata, reader.ref(), null, null, null);
     }
 
     public SSTableCursorReader(SSTableReader reader)
     {
-        this(reader, reader.metadata(), null, null, null);
+        this(reader, reader.metadata(), null, null, null, null);
     }
 
     public SSTableCursorReader(SSTableReader reader, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, null, diskAccessMode);
+        this(reader, reader.metadata(), null, null, diskAccessMode, null);
     }
 
     /**
@@ -586,12 +588,28 @@ public class SSTableCursorReader implements AutoCloseable
      */
     public SSTableCursorReader(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
     {
-        this(reader, reader.metadata(), null, bounds, diskAccessMode);
+        this(reader, bounds, diskAccessMode, null);
     }
 
-    /** @param bounds the segments to read, or null for the whole file */
+    /**
+     * Same as {@link #SSTableCursorReader(SSTableReader, Collection, DiskAccessMode)}, and charges {@code limiter}
+     * with the bytes read from disk.
+     *
+     * @param limiter the limiter to charge, or null for none
+     */
+    public SSTableCursorReader(SSTableReader reader, Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode,
+                               @Nullable ThroughputLimiter limiter)
+    {
+        this(reader, reader.metadata(), null, bounds, diskAccessMode, limiter);
+    }
+
+    /**
+     * @param bounds the segments to read, or null for the whole file
+     * @param limiter the limiter to charge with the bytes read from disk, or null for none
+     */
     private SSTableCursorReader(SSTableReader reader, TableMetadata metadata, Ref<SSTableReader> readerRef,
-                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode)
+                                Collection<PartitionPositionBounds> bounds, DiskAccessMode diskAccessMode,
+                                @Nullable ThroughputLimiter limiter)
     {
         ssTableReader = reader;
         ssTableReaderRef = readerRef;
@@ -608,7 +626,7 @@ public class SSTableCursorReader implements AutoCloseable
         serializationHeader = reader.header;
         sstableHasDroppedColumns = anyDroppedColumn(deserializationHelper, serializationHeader);
 
-        dataReader = reader.openDataReaderForScan(diskAccessMode);
+        dataReader = reader.openDataReaderForScan(diskAccessMode, limiter);
         // the HEADER decides whether this sstable can contain static rows: after
         // ALTER TABLE ... DROP of the last static column, current metadata has no static
         // columns but older sstables legitimately still carry static rows

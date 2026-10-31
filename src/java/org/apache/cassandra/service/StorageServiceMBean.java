@@ -872,6 +872,10 @@ public interface StorageServiceMBean extends NotificationEmitter
     public void setCompactionThroughputMbPerSec(int value);
     Map<String, String> getCurrentCompactionThroughputMebibytesPerSec();
 
+    public int getBackgroundIoThroughputMebibytesPerSec();
+    /** Sets background_io_throughput, which applies when background_io_limiter_enabled is true.  0 removes the limit. */
+    public void setBackgroundIoThroughputMebibytesPerSec(int value);
+
     public int getCompressedReadAheadBufferInKB();
     public void setCompressedReadAheadBufferInKB(int sizeInKb);
 

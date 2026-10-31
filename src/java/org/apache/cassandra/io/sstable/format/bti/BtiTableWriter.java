@@ -172,9 +172,9 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
         IndexWriter(Builder b, SequentialWriter dataWriter)
         {
             super(b);
-            rowIndexWriter = new SequentialWriter(descriptor.fileFor(Components.ROW_INDEX), b.getIOOptions().writerOptions);
+            rowIndexWriter = new SequentialWriter(descriptor.fileFor(Components.ROW_INDEX), b.getWriterOptions());
             rowIndexFHBuilder = IndexComponent.fileBuilder(Components.ROW_INDEX, b).withMmappedRegionsCache(b.getMmappedRegionsCache());
-            partitionIndexWriter = new SequentialWriter(descriptor.fileFor(Components.PARTITION_INDEX), b.getIOOptions().writerOptions);
+            partitionIndexWriter = new SequentialWriter(descriptor.fileFor(Components.PARTITION_INDEX), b.getWriterOptions());
             partitionIndexFHBuilder = IndexComponent.fileBuilder(Components.PARTITION_INDEX, b).withMmappedRegionsCache(b.getMmappedRegionsCache());
             partitionIndex = new PartitionIndexBuilder(partitionIndexWriter, partitionIndexFHBuilder);
             // register listeners to be alerted when the data files are flushed
@@ -332,7 +332,7 @@ public class BtiTableWriter extends SortedTableWriter<BtiFormatPartitionWriter, 
 
             SequentialWriter sequentialWriter = DataComponent.buildWriter(descriptor,
                                                                           getCompressionParams(),
-                                                                          getIOOptions().writerOptions,
+                                                                          getWriterOptions(),
                                                                           getMetadataCollector(),
                                                                           ensuringInBuildInternalContext(operationType),
                                                                           getIOOptions().flushCompression,

@@ -58,6 +58,12 @@ public class IndexFileUtils
         this.writerOption = writerOption;
     }
 
+    /** Returns file utilities whose writers charge the limiter of {@code options}, if any. */
+    public IndexFileUtils withLimiterOf(SequentialWriterOption options)
+    {
+        return options.limiter() == null ? this : new IndexFileUtils(writerOption.withLimiterOf(options));
+    }
+
     public IndexOutputWriter openOutput(File file)
     {
         assert writerOption.finishOnClose() : "IndexOutputWriter relies on close() to sync with disk.";

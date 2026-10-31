@@ -1313,6 +1313,11 @@ public class DatabaseDescriptor
         {
             throw new ConfigurationException("Invalid value of compaction_throughput: " + conf.compaction_throughput.toString(), false);
         }
+
+        if (conf.background_io_throughput.toMebibytesPerSecond() >= Integer.MAX_VALUE)
+        {
+            throw new ConfigurationException("Invalid value of background_io_throughput: " + conf.background_io_throughput.toString(), false);
+        }
     }
 
     @VisibleForTesting
@@ -3062,6 +3067,48 @@ public class DatabaseDescriptor
                                                Integer.MAX_VALUE + " in MiB/s");
 
         conf.compaction_throughput = new DataRateSpec.LongBytesPerSecondBound(value, MEBIBYTES_PER_SECOND);
+    }
+
+    public static boolean isBackgroundIoLimiterEnabled()
+    {
+        return conf.background_io_limiter_enabled;
+    }
+
+    @VisibleForTesting
+    public static void setBackgroundIoLimiterEnabled(boolean enabled)
+    {
+        conf.background_io_limiter_enabled = enabled;
+    }
+
+    public static double getBackgroundIoThroughputBytesPerSec()
+    {
+        return conf.background_io_throughput.toBytesPerSecond();
+    }
+
+    public static double getBackgroundIoThroughputMebibytesPerSec()
+    {
+        return conf.background_io_throughput.toMebibytesPerSecond();
+    }
+
+    public static int getBackgroundIoThroughputMebibytesPerSecAsInt()
+    {
+        return conf.background_io_throughput.toMebibytesPerSecondAsInt();
+    }
+
+    @VisibleForTesting
+    public static void setBackgroundIoThroughputBytesPerSec(int value)
+    {
+        conf.background_io_throughput = new DataRateSpec.LongBytesPerSecondBound(value);
+    }
+
+    public static void setBackgroundIoThroughputMebibytesPerSec(int value)
+    {
+        if (value == Integer.MAX_VALUE)
+            throw new IllegalArgumentException("background_io_throughput: " + value +
+                                               " is too large; it should be less than " +
+                                               Integer.MAX_VALUE + " in MiB/s");
+
+        conf.background_io_throughput = new DataRateSpec.LongBytesPerSecondBound(value, MEBIBYTES_PER_SECOND);
     }
 
     public static int getConcurrentValidations()
