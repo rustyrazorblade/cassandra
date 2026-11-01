@@ -94,6 +94,55 @@ public class DataComponent
         return m;
     }
 
+    /**
+     * Which operations write their Data file through the async compaction writer. Only the compaction
+     * family does: their outputs are large, so a writer thread per open output pays for itself.
+     */
+    private static final EnumMap<OperationType, Boolean> ASYNC_WRITER_SUPPORT = buildAsyncWriterSupport();
+
+    private static EnumMap<OperationType, Boolean> buildAsyncWriterSupport()
+    {
+        EnumMap<OperationType, Boolean> m = new EnumMap<>(OperationType.class);
+
+        m.put(OperationType.COMPACTION, true);
+        m.put(OperationType.MAJOR_COMPACTION, true);
+        m.put(OperationType.ANTICOMPACTION, true);
+        m.put(OperationType.CLEANUP, true);
+        m.put(OperationType.UPGRADE_SSTABLES, true);
+        m.put(OperationType.GARBAGE_COLLECT, true);
+        m.put(OperationType.TOMBSTONE_COMPACTION, true);
+        // relocateSSTables rewrites sstables through a compaction task.
+        m.put(OperationType.RELOCATE, true);
+
+        // tryAppend() calls mark() once per partition, and mark() waits for every chunk in flight.
+        m.put(OperationType.SCRUB, false);
+        // Many small sstables, often smaller than a chunk; a thread per file costs more than it saves.
+        m.put(OperationType.FLUSH, false);
+        // Writes run on the streaming or repair thread, outside the compaction family.
+        m.put(OperationType.STREAM, false);
+        // Offline and bulk writers (SSTableTxnWriter, CQLSSTableWriter).
+        m.put(OperationType.WRITE, false);
+        // The offline sstablesplit tool.
+        m.put(OperationType.UNKNOWN, false);
+
+        // These never build a Data file writer. Classified only to keep the map total.
+        m.put(OperationType.P0, false);
+        m.put(OperationType.VERIFY, false);
+        m.put(OperationType.VALIDATION, false);
+        m.put(OperationType.INDEX_BUILD, false);
+        m.put(OperationType.VIEW_BUILD, false);
+        m.put(OperationType.INDEX_SUMMARY, false);
+        m.put(OperationType.KEY_CACHE_SAVE, false);
+        m.put(OperationType.ROW_CACHE_SAVE, false);
+        m.put(OperationType.COUNTER_CACHE_SAVE, false);
+
+        // Total over the enum, so a new OperationType fails at class load instead of in buildWriter().
+        for (OperationType op : OperationType.values())
+            if (!m.containsKey(op))
+                throw new AssertionError("Missing async writer classification for " + op);
+        return m;
+    }
+
     public static SequentialWriter buildWriter(Descriptor descriptor,
                                                CompressionParams compression,
                                                SequentialWriterOption options,
@@ -109,7 +158,7 @@ public class DataComponent
             // Independent of each other: direct IO decides how the bytes reach the disk, the async
             // budget decides which thread compresses and checksums them. Compression is the same CPU
             // cost either way, so both paths take the pipeline.
-            int asyncBufferBytes = DatabaseDescriptor.asyncCompactionWriterEnabled()
+            int asyncBufferBytes = DatabaseDescriptor.asyncCompactionWriterEnabled() && isAsyncWriterSupported(operationType)
                                    ? DatabaseDescriptor.getAsyncCompactionWriterBufferInBytes()
                                    : 0;
 
@@ -196,4 +245,12 @@ public class DataComponent
         return support.isSupported();
     }
 
+    @VisibleForTesting
+    static boolean isAsyncWriterSupported(OperationType operationType)
+    {
+        Boolean supported = ASYNC_WRITER_SUPPORT.get(operationType);
+        if (supported == null)
+            throw new IllegalStateException("OperationType " + operationType + " has no async writer classification");
+        return supported;
+    }
 }

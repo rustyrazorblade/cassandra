@@ -720,8 +720,9 @@ public class Config
     public boolean cursor_compaction_enabled = CURSOR_COMPACTION_ENABLED.getBoolean();
 
     /**
-     * Hands each filled chunk buffer to a pool of reusable slots so the compressed write path can be
-     * decoupled from the thread producing the data. Experimental; off by default.
+     * Moves compression, checksums and the Data file write of a compressed SSTable onto a writer
+     * thread of its own, for compaction-family operations only (see DataComponent). Experimental;
+     * off by default.
      */
     public boolean async_compaction_writer_enabled = false;
 

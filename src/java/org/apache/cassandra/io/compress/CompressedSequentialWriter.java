@@ -27,6 +27,8 @@ import java.util.zip.CRC32;
 
 import javax.annotation.Nullable;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.cassandra.db.compression.CompressionDictionary;
 import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.io.FSReadError;
@@ -234,6 +236,12 @@ public class CompressedSequentialWriter extends SequentialWriter
         // chunkOffset is a plain long advanced on the pipeline's thread when one is running, so ask the
         // pipeline instead. bufferOffset is the uncompressed bytes handed to it so far.
         return pipeline == null ? chunkOffset : pipeline.estimatedOnDiskBytesWritten(bufferOffset);
+    }
+
+    @VisibleForTesting
+    public boolean usesAsyncPipeline()
+    {
+        return pipeline != null;
     }
 
     /** The raw offset, for the pipeline to publish after it writes a chunk. */

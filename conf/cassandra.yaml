@@ -691,7 +691,11 @@ commitlog_disk_access_mode: legacy
 # Experimental.  New garbage free compaction path.  Does not yet support collections, counters, BTI.
 cursor_compaction_enabled: false
 
-# Experimental.  Move compression and the SSTable write off the compaction thread.
+# Experimental.  Move compression, checksums and the Data file write of compressed SSTables
+# off the compaction thread, onto one writer thread per open output.  Applies to compaction,
+# major compaction, anticompaction, cleanup, upgradesstables, garbagecollect, tombstone
+# compaction and relocatesstables.  Flush, scrub, streaming and offline writers always write
+# on their own thread.
 async_compaction_writer_enabled: false
 
 # In-flight memory per open compressed writer.  Off heap with direct buffers.
