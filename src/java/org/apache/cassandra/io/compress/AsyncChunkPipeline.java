@@ -56,7 +56,7 @@ import static org.apache.cassandra.utils.Throwables.merge;
  * writer takes the filled slots in order and does everything order-dependent: compression, the
  * offsets table, chunkOffset, the full-file checksum and the write itself.
  *
- * The writer it serves supplies five things, all of which it already had:
+ * The writer it serves supplies five methods:
  * {@link CompressedSequentialWriter#flushData(java.nio.ByteBuffer)},
  * {@code lastFlushOffsetSnapshot}, {@code chunkOffsetSnapshot}, {@code trickleFsync} and
  * {@code getPath}.
@@ -125,9 +125,8 @@ class AsyncChunkPipeline
     private boolean started = false;
 
     /**
-     * Producer-only: set when the execution environment cannot start a background thread, so the
-     * writer's work runs inline on the producer thread instead. The deterministic simulator forbids
-     * threads; there the pipeline still produces identical output, only synchronously.
+     * Producer-only: set when the executor factory refuses to start a thread, so the writer's work
+     * runs inline on the producer thread instead. The output is the same, only synchronous.
      */
     private boolean inline = false;
 
@@ -174,8 +173,8 @@ class AsyncChunkPipeline
         this.owner = owner;
         this.chunkLength = parameters.chunkLength();
         this.bufferType = parameters.getSstableCompressor().preferredBufferType();
-        // Derive the slot count from a byte budget: the runway that matters is bytes in flight, and
-        // a fixed count would scale it with the table's chunk length.
+        // Derive the slot count from a byte budget: what matters is the bytes in flight, and a fixed
+        // count would scale them with the table's chunk length.
         this.slotCount = Math.max(2, bufferBytes / chunkLength);
         this.free = new SpscArrayQueue<>(slotCount);
         // +1 so the queue can never reject: the producer holds one slot while offering another.
@@ -194,7 +193,7 @@ class AsyncChunkPipeline
      *
      * The pipeline is built by CompressedSequentialWriter's constructor, which runs before a
      * subclass has initialised its own fields; DirectCompressedSequentialWriter's aligned write
-     * buffer is still null at that point, and the writer thread calls back through emitChunk into
+     * buffer is still null at that point, and the writer thread calls back through flushData into
      * exactly that code. No flush can happen before construction finishes, so first use is safe.
      */
     private void ensureStarted()
@@ -203,16 +202,14 @@ class AsyncChunkPipeline
         {
             try
             {
-                // Publish the thread handle before marking started. The cleanup path keys off writer,
-                // so the handle must be set first: assigning it before started closes the window where
-                // a reader saw started true with writer still null.
+                // The cleanup path keys off writer, not started, so a null writer always means no thread.
                 writer = executorFactory().startThread(threadName, this::writerLoop);
             }
             catch (UnsupportedOperationException e)
             {
-                // The environment forbids background threads (the deterministic simulator). Do the
-                // writer's work inline on the producer thread instead. writer stays null, so the
-                // cleanup path sees no thread to join or free buffers underneath.
+                // The executor factory refuses threads. Do the writer's work inline on the producer
+                // thread instead. writer stays null, so the cleanup path sees no thread to join or
+                // free buffers underneath.
                 inline = true;
             }
             started = true;
@@ -225,7 +222,7 @@ class AsyncChunkPipeline
      * The writer's superclass fires the post-flush listener from whichever thread flushed. That
      * would be the writer thread here, and the BIG-path consumer,
      * {@code IndexSummaryBuilder.markDataSynced}, walks maps the producer mutates concurrently in
-     * {@code maybeAddEntry}. Keep the callback on the producer and feed it the durable offset.
+     * {@code maybeAddEntry}. Keep the callback on the producer and feed it the written offset.
      */
     void setPostFlushListener(LongConsumer runPostFlush)
     {
@@ -382,7 +379,7 @@ class AsyncChunkPipeline
      *
      * The type is preserved. FSError is an Error, so an FSWriteError from the channel arrives as one
      * and the disk failure policy still sees it with its path. A RuntimeException -- what
-     * {@code compressChunk} raises for a compressor fault -- stays a RuntimeException, so a
+     * {@code flushData} raises for a compressor fault -- stays a RuntimeException, so a
      * compressor bug aborts the compaction rather than stopping transports or killing the JVM.
      */
     void rethrowFailure()

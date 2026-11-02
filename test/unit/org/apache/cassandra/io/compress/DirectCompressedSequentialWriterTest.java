@@ -446,9 +446,8 @@ public class DirectCompressedSequentialWriterTest
      * buffers this way: it quiesces first and, when the thread will not stop, frees nothing and only
      * closes the channel. This test holds the writer inside the first compress, aborts, and asserts
      * the abort does not fault, the pipeline is still running, the channel is closed, and writeBuffer
-     * was left alone. It then releases the writer and lets it settle. Against the pre-fix code, which
-     * freed writeBuffer before quiescing, the post-abort writeBuffer would be null (and the writer,
-     * once released, would touch freed memory).
+     * was left alone. It then releases the writer and lets it settle. A cleanup that freed writeBuffer
+     * before the quiesce would leave it null here, and the released writer would touch freed memory.
      */
     @Test
     public void abortWithStuckWriterFreesNoBuffersAndClosesChannel() throws Exception
@@ -493,7 +492,7 @@ public class DirectCompressedSequentialWriterTest
                        writer.pipeline.stillRunning());
             assertNotNull("writeBuffer must NOT be freed while the writer thread may still touch it",
                           writer.writeBuffer());
-            assertFalse("abort must close the channel to unblock a stuck write", writer.isOpen());
+            assertFalse("abort must close the channel so the stuck writer's next write fails", writer.isOpen());
             // The writer adds the chunk offset when it resumes, so the offsets must still be allocated.
             assertNotEquals("the chunk offsets must not be freed while the writer may still add one",
                             Transactional.AbstractTransactional.State.ABORTED, writer.metadataWriter.state());

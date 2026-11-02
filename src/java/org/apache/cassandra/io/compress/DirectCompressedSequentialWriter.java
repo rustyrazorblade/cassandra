@@ -82,15 +82,15 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     private boolean dataFinalized = false;
 
     // Chunks staged in writeBuffer but not yet on disk, as flat {compressedEnd, uncompressedEnd} pairs in
-    // write order: offer 2 when a chunk is staged, poll 2 when it becomes durable, nothing else, or pairing
-    // breaks. Only the writer thread touches this queue. Offsets are never negative, so -1 is a safe empty
-    // sentinel.
+    // write order: offer 2 when a chunk is staged, poll 2 when it is written, nothing else, or pairing
+    // breaks. Only the thread that writes chunks touches this queue: the writer thread while a pipeline
+    // runs, the producer otherwise. Offsets are never negative, so -1 is a safe empty sentinel.
     private final LongArrayQueue stagedChunkBoundaries = new LongArrayQueue(-1L);
 
-    // Uncompressed offset of the last chunk whose compressed bytes are fully on disk. The writer thread
-    // updates it after each channel write; the post-flush listener on the producer thread only reads it.
-    // A stale read is safe: the value is never above the true durable offset, so a reader never short-reads.
-    private volatile long durableUncompressedOffset = 0;
+    // Uncompressed offset of the last chunk whose compressed bytes are fully written to the channel. The
+    // thread that writes chunks updates it after each channel write; the post-flush listener only reads it.
+    // A stale read is safe: the value is never above the true written offset, so a reader never short-reads.
+    private volatile long writtenUncompressedOffset = 0;
 
     private final int blockSize;
 
@@ -175,8 +175,8 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     }
 
     // Parent reads fchannel.position(), which lags by the bytes staged in writeBuffer.
-    // getEstimatedOnDiskBytesWritten is intentionally NOT overridden: parent returns chunkOffset,
-    // which already reflects the eventual on-disk size.
+    // getEstimatedOnDiskBytesWritten is not overridden: the parent's estimate counts chunkOffset, which
+    // includes the bytes staged in writeBuffer.
     @Override
     public long getOnDiskFilePointer()
     {
@@ -227,17 +227,17 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     // The parent feeds the post-flush listener getLastFlushOffset() (== uncompressedSize), which counts bytes
     // staged in writeBuffer that O_DIRECT has not yet written. Report instead the uncompressed offset of the
     // last chunk whose compressed bytes are fully on disk, so a preemptive reader never short-reads past EOF.
-    // The writer thread keeps durableUncompressedOffset current; the listener only reads that volatile.
+    // The thread that writes chunks keeps writtenUncompressedOffset current; the listener only reads it.
     @Override
     public void setPostFlushListener(LongConsumer postFlush)
     {
-        super.setPostFlushListener(stagedOffset -> postFlush.accept(durableUncompressedOffset));
+        super.setPostFlushListener(stagedOffset -> postFlush.accept(writtenUncompressedOffset));
     }
 
-    // Runs on the writer thread after a channel write. fchannel.position() counts only whole blocks written,
-    // so chunks ending at or below it are durable. Chunks flush in order, so draining from the head suffices
-    // and the published offset is monotonic.
-    private void advanceDurableOffset()
+    // Runs after a channel write. fchannel.position() counts only whole blocks written, so chunks ending at
+    // or below it are written. Chunks flush in order, so draining from the head suffices and the published
+    // offset is monotonic.
+    private void advanceWrittenOffset()
     {
         long onDisk;
         try
@@ -249,7 +249,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
             throw new FSReadError(e, getPath());
         }
 
-        long offset = durableUncompressedOffset;
+        long offset = writtenUncompressedOffset;
         long compressedEnd;
         while ((compressedEnd = stagedChunkBoundaries.peekLong()) != stagedChunkBoundaries.nullValue()
                && compressedEnd <= onDisk)
@@ -257,7 +257,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
             stagedChunkBoundaries.pollLong();
             offset = stagedChunkBoundaries.pollLong();
         }
-        durableUncompressedOffset = offset;
+        writtenUncompressedOffset = offset;
     }
 
     @Override
@@ -342,7 +342,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
                 writeBuffer.clear();
             }
 
-            advanceDurableOffset();
+            advanceWrittenOffset();
         }
         catch (IOException e)
         {
@@ -368,7 +368,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
             // O_DIRECT required padding; truncate back to actual data size.
             fchannel.truncate(actualDataSize);
 
-            advanceDurableOffset();
+            advanceWrittenOffset();
         }
         catch (IOException e)
         {

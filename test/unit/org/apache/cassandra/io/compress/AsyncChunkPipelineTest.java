@@ -326,8 +326,8 @@ public class AsyncChunkPipelineTest
     }
 
     /**
-     * Where background threads cannot be started (the deterministic simulator), the pipeline does the
-     * writer thread's work inline. The files must match, and cleanup must see no thread.
+     * Where the executor factory refuses to start a thread, the pipeline does the writer thread's work
+     * inline. The files must match, and cleanup must see no thread.
      */
     @Test
     public void inlineFallbackMatchesSynchronousWriter() throws IOException
