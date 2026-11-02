@@ -698,6 +698,20 @@ commitlog_disk_access_mode: auto
 # Experimental.  New garbage free compaction path.  Does not yet support collections, counters, BTI.
 cursor_compaction_enabled: true
 
+# Experimental.  Move compression, checksums and the Data file write of compressed SSTables
+# off the compaction thread, onto one writer thread per open output.  Applies to compaction,
+# major compaction, anticompaction, cleanup, upgradesstables, garbagecollect, tombstone
+# compaction and relocatesstables.  Flush, scrub, streaming and offline writers always write
+# on their own thread.
+async_compaction_writer_enabled: true
+
+# Bytes the async compaction writer may hold in flight per open output, before the
+# compaction thread waits for the writer thread.  Off heap, except with
+# DeflateCompressor, which uses heap buffers.  A writer always holds at least two
+# chunks, so a buffer smaller than two chunks of the table's chunk_length_in_kb
+# holds two chunks.  Must be between 1MiB and 256MiB.
+# async_compaction_writer_buffer: 4MiB
+
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
@@ -981,6 +995,11 @@ trickle_fsync: true
 # start the writeback instead, which is the burst this setting exists to avoid.
 # The interval is counted in uncompressed bytes, so for compressed SSTables
 # (the default) an fsync fires after fewer bytes than this reach the disk.
+# With async_compaction_writer_enabled, the writer thread runs the same fsync for
+# compaction writes.  With async_compaction_writer_enabled and
+# background_write_disk_access_mode: direct, trickle_fsync has no effect on
+# compaction writes: O_DIRECT bypasses the page cache, and the data is synced once
+# when the SSTable is finished.
 # Min unit: KiB
 trickle_fsync_interval: 10240KiB
 
