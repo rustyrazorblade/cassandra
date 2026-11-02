@@ -167,8 +167,9 @@ New features
       tombstone compaction and relocatesstables; flush, scrub, streaming and offline writers are unchanged.
       async_compaction_writer_buffer (default 4MiB, 1MiB to 256MiB) bounds the bytes in flight per output.
       With the option on, trickle_fsync runs on the writer thread every trickle_fsync_interval of uncompressed
-      bytes, as before. With background_write_disk_access_mode: direct, trickle_fsync has no effect on these
-      writes; the data is synced once when the SSTable is finished. See CASSANDRA-21655.
+      bytes, as before. When async_compaction_writer_enabled is true and background_write_disk_access_mode is
+      direct, compaction writes skip the trickle_fsync per-interval sync; the final sync still runs.
+      See CASSANDRA-21655.
 Upgrading
 ---------
     - memtable_offheap_space: 0 is now rejected at startup when memtable_allocation_type is

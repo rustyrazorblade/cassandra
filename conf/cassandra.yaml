@@ -1013,11 +1013,10 @@ trickle_fsync: true
 # start the writeback instead, which is the burst this setting exists to avoid.
 # The interval is counted in uncompressed bytes, so for compressed SSTables
 # (the default) an fsync fires after fewer bytes than this reach the disk.
-# With async_compaction_writer_enabled, the writer thread runs the same fsync for
-# compaction writes.  With async_compaction_writer_enabled and
-# background_write_disk_access_mode: direct, trickle_fsync has no effect on
-# compaction writes: O_DIRECT bypasses the page cache, and the data is synced once
-# when the SSTable is finished.
+# When async_compaction_writer_enabled is true, the writer thread runs the same
+# fsync for compaction writes.  When async_compaction_writer_enabled is true and
+# background_write_disk_access_mode is direct, compaction writes skip the
+# trickle_fsync per-interval sync; the final sync still runs.
 # Min unit: KiB
 trickle_fsync_interval: 10240KiB
 
