@@ -26,6 +26,7 @@ import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 
 import org.apache.cassandra.schema.CompressionParams;
@@ -62,12 +63,20 @@ public class DeflateCompressor implements ICompressor
 
     private DeflateCompressor()
     {
+        // onRemoval runs when a FastThreadLocalThread exits, so the native zlib stream of a
+        // short-lived thread is freed then rather than left to the GC.
         deflater = new FastThreadLocal<Deflater>()
         {
             @Override
             protected Deflater initialValue()
             {
                 return new Deflater();
+            }
+
+            @Override
+            protected void onRemoval(Deflater value)
+            {
+                value.end();
             }
         };
         inflater = new FastThreadLocal<Inflater>()
@@ -77,8 +86,26 @@ public class DeflateCompressor implements ICompressor
             {
                 return new Inflater();
             }
+
+            @Override
+            protected void onRemoval(Inflater value)
+            {
+                value.end();
+            }
         };
         recommendedUses = ImmutableSet.of(Uses.GENERAL);
+    }
+
+    @VisibleForTesting
+    Deflater threadDeflater()
+    {
+        return deflater.get();
+    }
+
+    @VisibleForTesting
+    Inflater threadInflater()
+    {
+        return inflater.get();
     }
 
     public Set<String> supportedOptions()
