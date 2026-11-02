@@ -645,6 +645,8 @@ public enum CassandraRelevantProperties
     TCM_USE_ATOMIC_LONG_PROCESSOR("cassandra.test.use_atomic_long_processor", "false"),
     TCM_USE_TEST_NO_OP_REPLICATOR("cassandra.test.use_no_op_replicator", "false"),
     TEST_ACCORD_STORE_THREAD_CHECKS_ENABLED("cassandra.test.accord.store.thread_checks_enabled", "true"),
+    /** Rows written by AsyncCompactionWriterBurnTest. */
+    TEST_ASYNC_COMPACTION_WRITER_BURN_ROWS("cassandra.test.async_compaction_writer.burn_rows", "100000"),
     TEST_BBFAILHELPER_ENABLED("test.bbfailhelper.enabled"),
     TEST_BLOB_SHARED_SEED("cassandra.test.blob.shared.seed", "42"),
     TEST_BYTEMAN_TRANSFORMATIONS_DEBUG("cassandra.test.byteman.transformations.debug"),
