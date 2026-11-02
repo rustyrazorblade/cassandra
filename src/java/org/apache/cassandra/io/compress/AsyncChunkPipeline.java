@@ -138,11 +138,11 @@ class AsyncChunkPipeline
     private volatile boolean writerParked = false;
 
     /**
-     * Uncompressed offset actually put on the channel. The post-flush listener is fed this rather
-     * than the staged offset: reporting less than is durable only delays an early-open reader,
-     * whereas reporting more makes it short-read.
+     * Uncompressed offset actually written to the channel. The post-flush listener is fed this
+     * rather than the staged offset: reporting less than is written only delays an early-open
+     * reader, whereas reporting more makes it short-read.
      */
-    private volatile long durableOffset = 0;
+    private volatile long writtenOffset = 0;
 
     /** Published copy of chunkOffset, so the producer's size estimate is not a data race. */
     private volatile long estimatedOnDisk = 0;
@@ -278,12 +278,22 @@ class AsyncChunkPipeline
             LockSupport.unpark(writer);
     }
 
-    /** Fires the early-open callback with what the writer has actually made durable. */
+    /** Fires the early-open callback with what the writer has actually written. */
     void firePostFlush()
     {
         LongConsumer listener = postFlush;
         if (listener != null)
-            listener.accept(durableOffset);
+            listener.accept(writtenOffset);
+    }
+
+    LongConsumer postFlushListener()
+    {
+        return postFlush;
+    }
+
+    long writtenOffset()
+    {
+        return writtenOffset;
     }
 
     /**
@@ -319,7 +329,7 @@ class AsyncChunkPipeline
             awaitProgress();
         }
 
-        long writtenBytes = durableOffset;
+        long writtenBytes = writtenOffset;
         long onDisk = estimatedOnDisk;
         long pendingBytes = submittedBytes - writtenBytes;
         if (pendingBytes <= 0)
@@ -330,10 +340,10 @@ class AsyncChunkPipeline
     }
 
     /** Republishes after a truncate rewound the writer's offsets. */
-    void republishOffsets(long estimated, long durable)
+    void republishOffsets(long estimated, long written)
     {
         this.estimatedOnDisk = estimated;
-        this.durableOffset = durable;
+        this.writtenOffset = written;
         // Rewind the hint high-water mark too, so hinting resumes at the new offset rather than
         // staying idle until the rewritten region climbs back past the old mark.
         this.hintedOffset = estimated;
@@ -436,7 +446,7 @@ class AsyncChunkPipeline
             if (failure.get() == null)
             {
                 owner.flushData(slot);
-                durableOffset = owner.getLastFlushOffset();
+                writtenOffset = owner.lastFlushOffsetSnapshot();
                 long onDisk = owner.chunkOffsetSnapshot();
                 estimatedOnDisk = onDisk;
                 maybeHintWriteback(onDisk);

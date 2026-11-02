@@ -256,6 +256,10 @@ public class SSTableRewriter extends Transactional.AbstractTransactional impleme
         if (eagerWriterMetaRelease && writer != null)
             writer.releaseMetadataOverhead();
 
+        // The old writer stays in the transaction until it commits, but nothing more is appended to it.
+        if (writer != null)
+            writer.stopAsyncWriterThread();
+
         if (writer == null || writer.getFilePointer() == 0)
         {
             if (writer != null)

@@ -140,6 +140,7 @@ public class ShardedMultiWriter implements SSTableMultiWriter
                          FBUtilities.prettyPrintMemory(currentUncompressedSize),
                          cfs.getKeyspaceName(), cfs.getTableName());
 
+            writers[currentWriter].stopAsyncWriterThread();
             writers[++currentWriter] = createWriter();
         }
 

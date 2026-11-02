@@ -222,6 +222,67 @@ public class AsyncChunkPipelineTest
     }
 
     /**
+     * A writer that is switched out keeps no writer thread and no slots. After stopAsyncWriterThread the
+     * remaining chunks are written inline, and the files must still match the synchronous writer's.
+     */
+    @Test
+    public void stopAsyncWriterThreadWritesTheRestInline() throws IOException
+    {
+        for (boolean direct : new boolean[]{ false, true })
+        {
+            CompressionParams params = CompressionParams.lz4();
+            byte[] head = payload(params.chunkLength() * (SLOTS * 2) + 77, false);
+            byte[] tail = payload(params.chunkLength() * 3 + 5, true);
+            String name = direct ? "stop_direct" : "stop";
+
+            File syncData = FileUtils.createTempFile(name + "_sync", ".db");
+            File asyncData = FileUtils.createTempFile(name + "_async", ".db");
+            CompressedSequentialWriter sync = open(direct, params, syncData, 0);
+            CompressedSequentialWriter async = open(direct, params, asyncData, asyncBytes(params));
+
+            for (CompressedSequentialWriter w : new CompressedSequentialWriter[]{ sync, async })
+            {
+                try (CompressedSequentialWriter writer = w)
+                {
+                    writer.write(head);
+                    AsyncChunkPipeline pipeline = writer.pipeline;
+                    writer.stopAsyncWriterThread();
+                    if (writer == async)
+                    {
+                        assertFalse(name + ": writer thread outlived stopAsyncWriterThread", pipeline.stillRunning());
+                        assertEquals(name + ": slots kept after stopAsyncWriterThread", 0, pipeline.freeSlotCount());
+                        assertFalse(name + ": writer still uses the pipeline", writer.usesAsyncPipeline());
+                    }
+                    writer.write(tail);
+                    writer.finish();
+                }
+            }
+
+            assertSameFiles(name, syncData, asyncData);
+        }
+    }
+
+    private CompressedSequentialWriter open(boolean direct, CompressionParams params, File data, int asyncBytes)
+    {
+        File meta = new File(data.absolutePath() + ".metadata");
+        File digest = new File(data.absolutePath() + ".digest");
+        return direct
+               ? new DirectCompressedSequentialWriter(data, meta, digest, SequentialWriterOption.DEFAULT, params, collector(), null, asyncBytes)
+               : new CompressedSequentialWriter(data, meta, digest, SequentialWriterOption.DEFAULT, params, collector(), null, asyncBytes);
+    }
+
+    private static void assertSameFiles(String name, File syncData, File asyncData) throws IOException
+    {
+        assertArrayEquals(name + ": data file differs", readAll(syncData), readAll(asyncData));
+        assertArrayEquals(name + ": compression metadata differs",
+                          readAll(new File(syncData.absolutePath() + ".metadata")),
+                          readAll(new File(asyncData.absolutePath() + ".metadata")));
+        assertArrayEquals(name + ": digest differs",
+                          readAll(new File(syncData.absolutePath() + ".digest")),
+                          readAll(new File(asyncData.absolutePath() + ".digest")));
+    }
+
+    /**
      * The post-flush listener drives early open: a reader binds to whatever offset it reports. So the
      * reported offset must never run ahead of the bytes actually on disk, or the reader short-reads
      * live compaction output. This writes many chunks through the async writer with a small pool and,

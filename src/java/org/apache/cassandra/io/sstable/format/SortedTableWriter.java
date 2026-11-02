@@ -323,6 +323,13 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
     }
 
     @Override
+    public void stopAsyncWriterThread()
+    {
+        if (dataWriter instanceof CompressedSequentialWriter)
+            ((CompressedSequentialWriter) dataWriter).stopAsyncWriterThread();
+    }
+
+    @Override
     public void mark()
     {
         dataMark = dataWriter.mark();

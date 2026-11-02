@@ -85,10 +85,12 @@ public class CompressedSequentialWriter extends SequentialWriter
     private final ByteBuffer[] chunkAndTrailer = new ByteBuffer[2];
 
     /**
-     * Non-null when the write path runs off this thread. Both this class and the O_DIRECT subclass
-     * get it from here, so neither carries a copy of the machinery.
+     * Non-null while the write path runs off this thread. Both this class and the O_DIRECT subclass
+     * get it from here, so neither carries a copy of the machinery. Set to null by
+     * {@link #stopAsyncWriterThread}, after which every write runs on the calling thread. Only the
+     * producer reads or sets it.
      */
-    protected final AsyncChunkPipeline pipeline;
+    protected AsyncChunkPipeline pipeline;
 
     private final int maxCompressedLength;
     private final boolean isDictionaryEnabled;
@@ -197,9 +199,11 @@ public class CompressedSequentialWriter extends SequentialWriter
 
         this.sstableMetadataCollector = sstableMetadataCollector;
         crcMetadata = createChecksumWriter();
+        File parent = file.parent();
         this.pipeline = asyncBufferBytes > 0
                         ? new AsyncChunkPipeline(this, parameters, option.trickleFsync(),
-                                                 option.trickleFsyncByteInterval(), asyncBufferBytes, file.name())
+                                                 option.trickleFsyncByteInterval(), asyncBufferBytes,
+                                                 parent == null ? file.name() : parent.name() + '/' + file.name())
                         : null;
     }
 
@@ -242,6 +246,48 @@ public class CompressedSequentialWriter extends SequentialWriter
     public boolean usesAsyncPipeline()
     {
         return pipeline != null;
+    }
+
+    /**
+     * Stops the writer thread and frees its slots, so a writer that is switched out holds no thread
+     * for the rest of its transaction. Later flushes, syncs and the prepare run on the calling
+     * thread. The chunk being filled is not flushed here, because only the last chunk of a file may
+     * be short.
+     */
+    public void stopAsyncWriterThread()
+    {
+        if (pipeline == null)
+            return;
+
+        pipeline.drain();
+        pipeline.quiesce();
+        // A thread that did not stop may still touch the slots, so free nothing and keep the pipeline
+        // for doPreCleanup. The pipeline is shut down, so the compaction cannot go on.
+        if (pipeline.stillRunning())
+            throw new IllegalStateException("Async compaction writer thread for " + getPath() + " did not stop");
+
+        Throwable failed = pipeline.releaseBuffers(null);
+        LongConsumer listener = pipeline.postFlushListener();
+        pipeline = null;
+        if (listener != null)
+            super.setPostFlushListener(listener);
+        maybeFail(failed);
+    }
+
+    /**
+     * With a pipeline, the uncompressed offset the writer thread has written to the channel. The
+     * field itself is advanced on that thread and is not safe to read here.
+     */
+    @Override
+    public long getLastFlushOffset()
+    {
+        return pipeline == null ? lastFlushOffset : pipeline.writtenOffset();
+    }
+
+    /** The raw uncompressed offset, for the pipeline to publish after it writes a chunk. */
+    long lastFlushOffsetSnapshot()
+    {
+        return lastFlushOffset;
     }
 
     /** The raw offset, for the pipeline to publish after it writes a chunk. */
@@ -540,7 +586,7 @@ public class CompressedSequentialWriter extends SequentialWriter
         // The truncate rewound chunkOffset and lastFlushOffset; republish both so neither the size
         // estimate nor the early-open offset reports past the truncation point.
         if (pipeline != null)
-            pipeline.republishOffsets(chunkOffset, getLastFlushOffset());
+            pipeline.republishOffsets(chunkOffset, lastFlushOffset);
     }
 
     private void truncate(long toFileSize, long toBufferOffset)
@@ -591,6 +637,8 @@ public class CompressedSequentialWriter extends SequentialWriter
     @Override
     public void padToPageBoundary()
     {
+        // The padding moves lastFlushOffset, which the writer thread owns while a pipeline runs.
+        assert pipeline == null : "padToPageBoundary is not supported with the async compaction writer";
         if (buffer.position() == 0)
             return;
 

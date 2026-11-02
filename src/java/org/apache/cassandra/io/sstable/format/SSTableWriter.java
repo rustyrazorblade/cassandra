@@ -365,6 +365,15 @@ public abstract class SSTableWriter extends SSTable implements Transactional
     }
 
     /**
+     * Called once nothing more will be appended, while the transaction stays open. Stops any async
+     * compaction writer thread of the Data file, so a writer that is switched out holds no thread
+     * and no write buffers until the transaction ends.
+     */
+    public void stopAsyncWriterThread()
+    {
+    }
+
+    /**
      * Parameters for calculating the expected size of an SSTable. Exposed on memtable flush sets (i.e. collected
      * subsets of a memtable that will be written to sstables).
      */
