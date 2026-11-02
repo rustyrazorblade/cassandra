@@ -31,8 +31,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import com.google.common.util.concurrent.Uninterruptibles;
 import com.github.luben.zstd.ZstdDictTrainer;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -42,8 +42,8 @@ import org.apache.cassandra.concurrent.ForwardingExecutorFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.compression.CompressionDictionary.DictId;
-import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.db.compression.CompressionDictionary.Kind;
+import org.apache.cassandra.db.compression.CompressionDictionaryManager;
 import org.apache.cassandra.db.compression.ZstdCompressionDictionary;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
