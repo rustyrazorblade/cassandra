@@ -295,11 +295,9 @@ public class AsyncCompactionWriterBurnTest extends CQLTester
      * <li>split it the same way or nearly: the output counts differ by at most one;</li>
      * <li>each have outputs with ordered, non-overlapping key ranges that hold every input partition
      *     exactly once;</li>
-     * <li>each have outputs that pass extended verification and stay within {@code maxBytes} plus the
-     *     bytes the async writer may hold in flight.</li>
+     * <li>each have outputs that pass extended verification and stay within {@code maxBytes} plus one
+     *     partition and two chunks, the same bound for both runs.</li>
      * </ul>
-     * The size bound is a ceiling only; AsyncCompactionWriterSSTableSizeTest holds the writer thread
-     * and checks that the estimate counts the chunks in flight.
      */
     private void assertSameContentSplitDifferently(boolean cursor, WriterFactory factory, long maxBytes) throws Throwable
     {
@@ -327,10 +325,14 @@ public class AsyncCompactionWriterBurnTest extends CQLTester
                 {
                     verify(cfs, output);
                     // The switch is checked once per partition, so an output may pass the cap by one
-                    // partition, the chunk still being filled, and what the async writer holds in flight.
+                    // partition and the chunk still being filled; one more chunk covers the error of the
+                    // estimate for chunks in flight. An estimate that left those chunks out would pass
+                    // the cap by as much as is in flight, and fails here when the writer thread falls
+                    // behind. AsyncCompactionWriterSSTableSizeTest holds the writer thread to make that
+                    // certain.
                     long bound = maxBytes == Long.MAX_VALUE
                                  ? Long.MAX_VALUE
-                                 : maxBytes + PARTITION_BYTES + CHUNK_KB * 1024L + DatabaseDescriptor.getAsyncCompactionWriterBufferInBytes();
+                                 : maxBytes + PARTITION_BYTES + 2 * CHUNK_KB * 1024L;
                     assertTrue("output of " + output.onDiskLength() + " bytes is over the " + bound + " byte bound",
                                output.onDiskLength() <= bound);
                 }
