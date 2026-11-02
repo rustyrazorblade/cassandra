@@ -200,10 +200,10 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         syncDataOnlyInternal();
     }
 
-    // O_DIRECT bypasses the page cache, so there are no dirty pages for a writeback hint to start.
-    // Skip the syscall the parent would otherwise make once per interval.
+    // O_DIRECT bypasses the page cache, so there are no dirty pages for a trickle sync to write out.
+    // The sync at prepare still runs.
     @Override
-    void hintWriteback(long offset, long nbytes)
+    void trickleFsync()
     {
     }
 

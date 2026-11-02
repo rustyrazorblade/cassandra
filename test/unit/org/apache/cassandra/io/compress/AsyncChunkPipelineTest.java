@@ -23,6 +23,8 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -116,109 +118,95 @@ public class AsyncChunkPipelineTest
     }
 
     /**
-     * With trickle_fsync on, the writer thread starts kernel writeback of each interval's worth of
-     * on-disk bytes. Those hints must tile the file: begin at zero, stay contiguous and monotonic,
-     * and each cover at least the interval. A gap, an overlap, or a hint against the uncompressed
-     * offset would mean the range accounting in maybeHintWriteback drifted from the bytes on disk.
-     *
-     * sync_file_range is a no-op off Linux, so this asserts the offsets the pipeline computes rather
-     * than the syscall, and it runs the same on every platform.
+     * With trickle_fsync on, the writer thread runs an fdatasync every interval of uncompressed
+     * bytes, as the synchronous writer does. The data compresses well, so a count of compressed bytes
+     * would sync far less often.
      */
     @Test
-    public void writebackHintsTileTheFileContiguously() throws IOException
+    public void trickleFsyncRunsPerUncompressedInterval() throws IOException
     {
         CompressionParams params = CompressionParams.lz4();
-        long interval = 2L * params.chunkLength();
+        int interval = 2 * params.chunkLength();
+        int chunks = 20;
         SequentialWriterOption option = SequentialWriterOption.newBuilder()
                                                               .trickleFsync(true)
                                                               .trickleFsyncByteInterval(interval)
                                                               .build();
+        byte[] payload = new byte[params.chunkLength() * chunks];
 
-        List<long[]> hints = new ArrayList<>();
-        File data = FileUtils.createTempFile("writeback", ".db");
-        File meta = new File(data.absolutePath() + ".metadata");
+        SyncCountingWriter sync = syncCounting(params, option, 0);
+        SyncCountingWriter async = syncCounting(params, option, asyncBytes(params));
+        write(sync, payload);
+        write(async, payload);
 
-        // Incompressible, so the on-disk size tracks the payload and several intervals are crossed.
-        byte[] payload = payload(params.chunkLength() * 20, true);
-
-        CompressedSequentialWriter writer =
-            new CompressedSequentialWriter(data, meta, null, option, params, collector(), null, asyncBytes(params))
-            {
-                @Override
-                void hintWriteback(long offset, long nbytes)
-                {
-                    hints.add(new long[]{ offset, nbytes });
-                }
-            };
-        write(writer, payload);
-
-        assertFalse("expected at least one writeback hint", hints.isEmpty());
-
-        long expectedOffset = 0;
-        for (long[] hint : hints)
-        {
-            assertEquals("hints must be contiguous with no gap or overlap", expectedOffset, hint[0]);
-            assertTrue("each hint must cover at least the interval", hint[1] >= interval);
-            expectedOffset += hint[1];
-        }
-        assertTrue("hints must not run past the data on disk", expectedOffset <= readAll(data).length);
+        // One sync per interval, plus the one at prepare.
+        int expected = chunks * params.chunkLength() / interval + 1;
+        assertEquals("synchronous writer", expected, sync.syncs);
+        assertEquals("async writer must sync as often as the synchronous writer", expected, async.syncs);
+        assertTrue("trickle syncs must run on the writer thread", async.syncThreads.stream().anyMatch(n -> n.startsWith("CompactionWriter-")));
     }
 
-    /**
-     * The hint has to stay off when the operator has not asked for it. Two ways turn it off: the
-     * shipped default leaves trickle_fsync false, and a zero byte interval collapses writebackInterval
-     * to 0. Both must issue no hints even across a payload that crosses several intervals; a regression
-     * that hinted regardless of config would slip past every byte-identical test.
-     */
     @Test
-    public void noHintsWhenHintingIsDisabled() throws IOException
+    public void noTrickleFsyncWhenDisabled() throws IOException
     {
         CompressionParams params = CompressionParams.lz4();
-        byte[] payload = payload(params.chunkLength() * 20, true);
-
-        assertNoHints(params, SequentialWriterOption.newBuilder().trickleFsync(false).build(), payload);
-        assertNoHints(params, SequentialWriterOption.newBuilder()
-                                                    .trickleFsync(true)
-                                                    .trickleFsyncByteInterval(0)
-                                                    .build(), payload);
+        SequentialWriterOption option = SequentialWriterOption.newBuilder()
+                                                              .trickleFsync(false)
+                                                              .trickleFsyncByteInterval(params.chunkLength())
+                                                              .build();
+        SyncCountingWriter async = syncCounting(params, option, asyncBytes(params));
+        write(async, new byte[params.chunkLength() * 20]);
+        assertEquals("only the sync at prepare", 1, async.syncs);
     }
 
-    private void assertNoHints(CompressionParams params, SequentialWriterOption option, byte[] payload)
-    throws IOException
+    /** O_DIRECT bypasses the page cache, so the async path syncs only at prepare. */
+    @Test
+    public void noTrickleFsyncUnderDirectIo() throws IOException
     {
-        List<long[]> hints = new ArrayList<>();
-        File data = FileUtils.createTempFile("nohint", ".db");
-        File meta = new File(data.absolutePath() + ".metadata");
-
-        CompressedSequentialWriter writer =
-            new CompressedSequentialWriter(data, meta, null, option, params, collector(), null, asyncBytes(params))
+        CompressionParams params = CompressionParams.lz4();
+        SequentialWriterOption option = SequentialWriterOption.newBuilder()
+                                                              .trickleFsync(true)
+                                                              .trickleFsyncByteInterval(params.chunkLength())
+                                                              .build();
+        File data = FileUtils.createTempFile("trickle_direct", ".db");
+        int[] syncs = { 0 };
+        DirectCompressedSequentialWriter writer =
+            new DirectCompressedSequentialWriter(data, new File(data.absolutePath() + ".metadata"), null, option, params,
+                                                 collector(), null, asyncBytes(params))
             {
                 @Override
-                void hintWriteback(long offset, long nbytes)
+                protected void syncDataOnlyInternal()
                 {
-                    hints.add(new long[]{ offset, nbytes });
+                    syncs[0]++;
+                    super.syncDataOnlyInternal();
                 }
             };
-        write(writer, payload);
-
-        assertTrue("no writeback hints when hinting is disabled", hints.isEmpty());
+        write(writer, new byte[params.chunkLength() * 20]);
+        assertEquals("only the sync at prepare", 1, syncs[0]);
     }
 
-    /**
-     * O_DIRECT bypasses the page cache, so DirectCompressedSequentialWriter overrides hintWriteback to
-     * a no-op. The pipeline still asks for a hint every interval, so the suppression lives only in that
-     * override. Removing it would fall back to the parent, which resolves the fd and calls
-     * sync_file_range once per interval for nothing. No byte-identical or offset test catches that,
-     * and off Linux the syscall is a no-op anyway, so guard the override's presence directly.
-     */
-    @Test
-    public void directWriterSuppressesWritebackHint() throws NoSuchMethodException
+    private static final class SyncCountingWriter extends CompressedSequentialWriter
     {
-        assertEquals("O_DIRECT must override hintWriteback to a no-op",
-                     DirectCompressedSequentialWriter.class,
-                     DirectCompressedSequentialWriter.class
-                         .getDeclaredMethod("hintWriteback", long.class, long.class)
-                         .getDeclaringClass());
+        volatile int syncs;
+        final Set<String> syncThreads = ConcurrentHashMap.newKeySet();
+
+        SyncCountingWriter(File data, SequentialWriterOption option, CompressionParams params, int asyncBytes)
+        {
+            super(data, new File(data.absolutePath() + ".metadata"), null, option, params, collector(), null, asyncBytes);
+        }
+
+        @Override
+        protected void syncDataOnlyInternal()
+        {
+            syncs++;
+            syncThreads.add(Thread.currentThread().getName());
+            super.syncDataOnlyInternal();
+        }
+    }
+
+    private static SyncCountingWriter syncCounting(CompressionParams params, SequentialWriterOption option, int asyncBytes)
+    {
+        return new SyncCountingWriter(FileUtils.createTempFile("trickle", ".db"), option, params, asyncBytes);
     }
 
     /**

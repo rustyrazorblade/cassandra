@@ -55,8 +55,8 @@ import static org.apache.cassandra.utils.Throwables.merge;
  *
  * The writer it serves supplies five things, all of which it already had:
  * {@link CompressedSequentialWriter#flushData(java.nio.ByteBuffer)},
- * {@link CompressedSequentialWriter#getLastFlushOffset}, {@code chunkOffsetSnapshot},
- * {@code hintWriteback} and {@code getPath}.
+ * {@code lastFlushOffsetSnapshot}, {@code chunkOffsetSnapshot}, {@code trickleFsync} and
+ * {@code getPath}.
  */
 class AsyncChunkPipeline
 {
@@ -125,11 +125,11 @@ class AsyncChunkPipeline
      */
     private boolean inline = false;
 
-    /** Bytes between writeback hints; 0 turns hinting off. See the constructor for the rationale. */
-    private final long writebackInterval;
+    /** Uncompressed bytes between trickle_fsync syncs; 0 when trickle_fsync is off. */
+    private final long trickleFsyncInterval;
 
-    /** Writer-only: on-disk offset already handed to a writeback hint. */
-    private long hintedOffset = 0;
+    /** Writer-only: uncompressed bytes written since the last trickle_fsync sync. */
+    private long bytesSinceTrickleFsync = 0;
 
     /**
      * Set while the writer is parked, so the producer pays for an unpark only when it is felt. The
@@ -178,10 +178,7 @@ class AsyncChunkPipeline
         // the first swap returns it here, so it counts against the budget.
         this.allocated = 1;
 
-        // A range writeback hint starts writeback of only the newly-written bytes and never waits,
-        // so it costs almost nothing and keeps the final fsync cheap. The trickle_fsync interval
-        // drives it; 0 turns it off.
-        this.writebackInterval = trickleFsync ? trickleFsyncByteInterval : 0;
+        this.trickleFsyncInterval = trickleFsync ? trickleFsyncByteInterval : 0;
 
         this.threadName = "CompactionWriter-" + name;
     }
@@ -344,9 +341,6 @@ class AsyncChunkPipeline
     {
         this.estimatedOnDisk = estimated;
         this.writtenOffset = written;
-        // Rewind the hint high-water mark too, so hinting resumes at the new offset rather than
-        // staying idle until the rewritten region climbs back past the old mark.
-        this.hintedOffset = estimated;
     }
 
     /**
@@ -445,11 +439,12 @@ class AsyncChunkPipeline
             // slots and counting them so drain() still completes rather than hangs.
             if (failure.get() == null)
             {
+                long before = owner.lastFlushOffsetSnapshot();
                 owner.flushData(slot);
-                writtenOffset = owner.lastFlushOffsetSnapshot();
-                long onDisk = owner.chunkOffsetSnapshot();
-                estimatedOnDisk = onDisk;
-                maybeHintWriteback(onDisk);
+                long after = owner.lastFlushOffsetSnapshot();
+                writtenOffset = after;
+                estimatedOnDisk = owner.chunkOffsetSnapshot();
+                maybeTrickleFsync(after - before);
             }
         }
         catch (Throwable t)
@@ -485,25 +480,20 @@ class AsyncChunkPipeline
     }
 
     /**
-     * Starts kernel writeback of the on-disk range written since the last hint, once a byte
-     * interval's worth has built up. It runs on the writer thread, right after the channel write it
-     * follows, so it never contends with those writes and never touches the channel from elsewhere.
-     *
-     * The offset is a file offset: chunkOffset counts compressed bytes on disk, which is what the
-     * writeback hint acts on, not the uncompressed getLastFlushOffset. See
-     * {@link CompressedSequentialWriter#hintWriteback} for what the hint does and does not promise.
+     * Runs the trickle_fsync sync once an interval of uncompressed bytes has been written, as the
+     * synchronous path does. It runs here, after the write it follows, so it never races a write.
      */
-    private void maybeHintWriteback(long onDisk)
+    private void maybeTrickleFsync(long uncompressedBytes)
     {
-        if (writebackInterval == 0)
+        if (trickleFsyncInterval == 0)
             return;
 
-        long pending = onDisk - hintedOffset;
-        if (pending < writebackInterval)
+        bytesSinceTrickleFsync += uncompressedBytes;
+        if (bytesSinceTrickleFsync < trickleFsyncInterval)
             return;
 
-        owner.hintWriteback(hintedOffset, pending);
-        hintedOffset = onDisk;
+        owner.trickleFsync();
+        bytesSinceTrickleFsync = 0;
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -519,7 +509,7 @@ class AsyncChunkPipeline
 
     void quiesce()
     {
-        // Everything that touches the channel -- the writes and the writeback hints -- runs on the
+        // Everything that touches the channel -- the writes and the trickle syncs -- runs on the
         // writer thread, so setting shutdown and joining the thread is all that closing the channel
         // in doPreCleanup needs to be safe.
         shutdown = true;

@@ -43,7 +43,6 @@ import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.NativeLibrary;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import static org.apache.cassandra.utils.Throwables.maybeFail;
@@ -94,11 +93,6 @@ public class CompressedSequentialWriter extends SequentialWriter
 
     private final int maxCompressedLength;
     private final boolean isDictionaryEnabled;
-
-    // The data channel's file descriptor, for writeback hints. fchannel never changes, so resolve it
-    // once on the first hint. UNSET keeps it distinct from getfd's -1 "unavailable", which we cache too.
-    private static final int FD_UNSET = Integer.MIN_VALUE;
-    private int dataFd = FD_UNSET;
 
     private static ByteBuffer allocateBuffer(CompressionParams parameters)
     {
@@ -297,18 +291,12 @@ public class CompressedSequentialWriter extends SequentialWriter
     }
 
     /**
-     * Starts kernel writeback of an on-disk data range for the pipeline, which cannot reach the
-     * channel's file descriptor itself. This is a hint, not a force: it queues writeback of the
-     * range and returns without waiting, and makes no durability guarantee. Its only purpose is to
-     * keep the dirty-page backlog bounded so the durability fsync in doPrepare stays cheap.
-     *
-     * This acts on the page cache, so it is a no-op under O_DIRECT; the subclass overrides it there.
+     * The trickle_fsync sync for the pipeline, which runs it on the writer thread every interval of
+     * uncompressed bytes, as {@link SequentialWriter#doFlush} does on the synchronous path.
      */
-    void hintWriteback(long offset, long nbytes)
+    void trickleFsync()
     {
-        if (dataFd == FD_UNSET)
-            dataFd = NativeLibrary.getfd(fchannel);
-        NativeLibrary.trySyncFileRange(dataFd, offset, nbytes);
+        syncDataOnlyInternal();
     }
 
     /**
