@@ -18,7 +18,6 @@
 package org.apache.cassandra.io.compress;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,12 +32,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import com.google.common.util.concurrent.Uninterruptibles;
+import com.github.luben.zstd.ZstdDictTrainer;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.apache.cassandra.concurrent.ExecutorFactory;
+import org.apache.cassandra.concurrent.ForwardingExecutorFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringComparator;
+import org.apache.cassandra.db.compression.CompressionDictionary.DictId;
+import org.apache.cassandra.db.compression.CompressionDictionaryManager;
+import org.apache.cassandra.db.compression.CompressionDictionary.Kind;
+import org.apache.cassandra.db.compression.ZstdCompressionDictionary;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.DataPosition;
@@ -52,8 +58,11 @@ import static org.apache.cassandra.schema.CompressionParams.DEFAULT_CHUNK_LENGTH
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * The async writer swaps a fresh slot in on every flush instead of clearing one in place. Nothing
@@ -252,22 +261,29 @@ public class AsyncChunkPipelineTest
 
     private CompressedSequentialWriter open(boolean direct, CompressionParams params, File data, int asyncBytes)
     {
-        File meta = new File(data.absolutePath() + ".metadata");
-        File digest = new File(data.absolutePath() + ".digest");
+        File meta = metaFor(data);
+        File digest = digestFor(data);
         return direct
                ? new DirectCompressedSequentialWriter(data, meta, digest, SequentialWriterOption.DEFAULT, params, collector(), null, asyncBytes)
                : new CompressedSequentialWriter(data, meta, digest, SequentialWriterOption.DEFAULT, params, collector(), null, asyncBytes);
     }
 
+    private static File metaFor(File data)
+    {
+        return new File(data.absolutePath() + ".metadata");
+    }
+
+    private static File digestFor(File data)
+    {
+        return new File(data.absolutePath() + ".digest");
+    }
+
     private static void assertSameFiles(String name, File syncData, File asyncData) throws IOException
     {
         assertArrayEquals(name + ": data file differs", readAll(syncData), readAll(asyncData));
-        assertArrayEquals(name + ": compression metadata differs",
-                          readAll(new File(syncData.absolutePath() + ".metadata")),
-                          readAll(new File(asyncData.absolutePath() + ".metadata")));
-        assertArrayEquals(name + ": digest differs",
-                          readAll(new File(syncData.absolutePath() + ".digest")),
-                          readAll(new File(asyncData.absolutePath() + ".digest")));
+        assertArrayEquals(name + ": compression metadata differs", readAll(metaFor(syncData)), readAll(metaFor(asyncData)));
+        assertTrue(name + ": no digest written", digestFor(syncData).exists());
+        assertArrayEquals(name + ": digest differs", readAll(digestFor(syncData)), readAll(digestFor(asyncData)));
     }
 
     /**
@@ -279,12 +295,12 @@ public class AsyncChunkPipelineTest
      * uncompressed offset the listener reports, which keeps the length comparison meaningful.
      */
     @Test
-    public void postFlushOffsetNeverExceedsDurableBytes() throws IOException
+    public void postFlushOffsetNeverExceedsWrittenBytes() throws IOException
     {
         CompressionParams params = CompressionParams.lz4();
         byte[] payload = payload(params.chunkLength() * (SLOTS * 5) + 123, true);
 
-        File data = FileUtils.createTempFile("durableInvariant", ".db");
+        File data = FileUtils.createTempFile("writtenInvariant", ".db");
         File meta = new File(data.absolutePath() + ".metadata");
 
         CompressedSequentialWriter writer = newWriter(params, data, meta, asyncBytes(params));
@@ -304,44 +320,100 @@ public class AsyncChunkPipelineTest
         // write() finishes and closes the writer, so the pipeline is fully drained on return.
         write(writer, payload);
 
-        assertTrue("post-flush durable-offset invariant violated: " + violations, violations.isEmpty());
-        assertEquals("final durable offset must equal the uncompressed size after finish",
+        assertTrue("post-flush written-offset invariant violated: " + violations, violations.isEmpty());
+        assertEquals("final written offset must equal the uncompressed size after finish",
                      payload.length, writer.getLastFlushOffset());
     }
 
     /**
-     * The writer thread is started on the first flush, so there is a window where the pipeline is
-     * marked started but the thread handle is not assigned yet. The Accord simulator drove an abort
-     * through that window: doPreCleanup ran quiesce() then stillRunning() on the half-started
-     * pipeline. Before the fix stillRunning did started && writer.isAlive() and threw a
-     * NullPointerException on the null handle, which broke every memtable flush that aborted. Both
-     * calls must treat a null handle as "no thread is running".
-     *
-     * The window is a scheduling accident that a byte-identical test never reaches, so pin the exact
-     * state directly: mark the pipeline started with no thread, then run the two cleanup calls.
+     * Where background threads cannot be started (the deterministic simulator), the pipeline does the
+     * writer thread's work inline. The files must match, and cleanup must see no thread.
      */
     @Test
-    public void cleanupToleratesStartedWithoutWriterThread() throws Exception
+    public void inlineFallbackMatchesSynchronousWriter() throws IOException
     {
-        CompressionParams params = CompressionParams.lz4();
-        File data = FileUtils.createTempFile("halfStarted", ".db");
-        File meta = new File(data.absolutePath() + ".metadata");
-
-        CompressedSequentialWriter writer = newWriter(params, data, meta, asyncBytes(params));
+        ExecutorFactory saved = ExecutorFactory.Global.executorFactory();
+        ExecutorFactory.Global.unsafeSet(new ForwardingExecutorFactory(saved)
+        {
+            @Override
+            public Thread startThread(String name, Runnable runnable)
+            {
+                throw new UnsupportedOperationException();
+            }
+        });
         try
         {
-            AsyncChunkPipeline pipeline = pipelineOf(writer);
-            setStarted(pipeline, true);
+            CompressionParams params = CompressionParams.lz4();
+            compare(params, "inline", DEFAULT_CHUNK_LENGTH * (SLOTS * 3) + 101, false);
 
-            // The abort path calls both of these; neither may dereference the null handle.
-            pipeline.quiesce();
-            assertFalse("a pipeline with no writer thread must not report itself running",
-                        pipeline.stillRunning());
+            File data = FileUtils.createTempFile("inline_abort", ".db");
+            CompressedSequentialWriter writer = newWriter(params, data, new File(data.absolutePath() + ".metadata"), asyncBytes(params));
+            writer.write(payload(DEFAULT_CHUNK_LENGTH * 2, false));
+            assertFalse("no writer thread may exist in inline mode", writer.pipeline.stillRunning());
+            assertNull("abort in inline mode failed", writer.abort(null));
         }
         finally
         {
-            writer.abort(null);
+            ExecutorFactory.Global.unsafeSet(saved);
         }
+    }
+
+    /** The dictionary compressor shares one native dictionary across threads; the writer thread is one more. */
+    @Test
+    public void zstdDictionaryMatchesSynchronousWriter() throws IOException
+    {
+        ZstdDictTrainer trainer = new ZstdDictTrainer(100 * 1024, 6 * 1024, 3);
+        Random random = new Random(7);
+        for (int i = 0; i < 1000; i++)
+        {
+            byte[] sample = new byte[100];
+            for (int b = 0; b < sample.length; b++)
+                sample[b] = (byte) ((b % 8) + random.nextInt(4));
+            trainer.addSample(sample);
+        }
+        ZstdCompressionDictionary dictionary = new ZstdCompressionDictionary(new DictId(Kind.ZSTD, 1), trainer.trainSamples());
+        try
+        {
+            // The writer asks the manager only for the current dictionary.
+            CompressionDictionaryManager manager = mock(CompressionDictionaryManager.class);
+            when(manager.getCurrent()).thenReturn(dictionary);
+            CompressionParams params = CompressionParams.zstd(DEFAULT_CHUNK_LENGTH, true);
+            compare(params, "zstd_dictionary", DEFAULT_CHUNK_LENGTH * (SLOTS * 3) + 101, false,
+                    (data, meta, asyncBytes) -> new CompressedSequentialWriter(data, meta, digestFor(data),
+                                                                               SequentialWriterOption.DEFAULT,
+                                                                               params, collector(), manager, asyncBytes));
+        }
+        finally
+        {
+            dictionary.close();
+        }
+    }
+
+    /** A chunk length other than the default changes the slot size and the slot count. */
+    @Test
+    public void nonDefaultChunkLengthMatchesSynchronousWriter() throws IOException
+    {
+        CompressionParams params = CompressionParams.lz4(4096);
+        compare(params, "chunk4k", 4096 * (SLOTS * 3) + 101, false);
+        compareDirect(params, "chunk4k_direct", 4096 * (SLOTS * 3) + 101);
+    }
+
+    /** A budget smaller than two chunks still gives two slots, so the producer and writer can overlap. */
+    @Test
+    public void budgetBelowTwoChunksUsesTwoSlots() throws IOException
+    {
+        CompressionParams params = CompressionParams.lz4();
+        byte[] payload = payload(DEFAULT_CHUNK_LENGTH * 10 + 3, false);
+
+        File syncData = FileUtils.createTempFile("twoslots_sync", ".db");
+        File asyncData = FileUtils.createTempFile("twoslots_async", ".db");
+        write(newWriter(params, syncData, metaFor(syncData), 0), payload);
+        CompressedSequentialWriter async = newWriter(params, asyncData, metaFor(asyncData), 1);
+        AsyncChunkPipeline pipeline = async.pipeline;
+        write(async, payload);
+
+        assertEquals("slots allocated for a 1-byte budget", 2, pipeline.allocatedSlots());
+        assertSameFiles("twoslots", syncData, asyncData);
     }
 
     /**
@@ -521,20 +593,6 @@ public class AsyncChunkPipelineTest
         }
     }
 
-    private static AsyncChunkPipeline pipelineOf(CompressedSequentialWriter writer) throws Exception
-    {
-        Field f = CompressedSequentialWriter.class.getDeclaredField("pipeline");
-        f.setAccessible(true);
-        return (AsyncChunkPipeline) f.get(writer);
-    }
-
-    private static void setStarted(AsyncChunkPipeline pipeline, boolean value) throws Exception
-    {
-        Field f = AsyncChunkPipeline.class.getDeclaredField("started");
-        f.setAccessible(true);
-        f.setBoolean(pipeline, value);
-    }
-
     private void compareAcrossSizes(CompressionParams params, String name) throws IOException
     {
         compare(params, name + "_tiny", 25, false);
@@ -584,8 +642,7 @@ public class AsyncChunkPipelineTest
         long asyncPosition = writeWithReset(newWriter(params, asyncData, asyncMeta, asyncBytes(params)), head, discarded, tail);
 
         assertEquals(name + ": reported position differs", syncPosition, asyncPosition);
-        assertArrayEquals(name + ": data file differs", readAll(syncData), readAll(asyncData));
-        assertArrayEquals(name + ": compression metadata differs", readAll(syncMeta), readAll(asyncMeta));
+        assertSameFiles(name, syncData, asyncData);
     }
 
     private static long writeWithReset(CompressedSequentialWriter writer, byte[] head, byte[] discarded, byte[] tail)
@@ -606,14 +663,14 @@ public class AsyncChunkPipelineTest
 
     private CompressedSequentialWriter newWriter(CompressionParams params, File data, File meta, int asyncBytes)
     {
-        return new CompressedSequentialWriter(data, meta, null, SequentialWriterOption.DEFAULT,
+        return new CompressedSequentialWriter(data, meta, digestFor(data), SequentialWriterOption.DEFAULT,
                                               params, collector(), null, asyncBytes);
     }
 
     private void compareDirect(CompressionParams params, String name, int bytes) throws IOException
     {
         compare(params, name, bytes, false,
-                (data, meta, asyncBytes) -> new DirectCompressedSequentialWriter(data, meta, null,
+                (data, meta, asyncBytes) -> new DirectCompressedSequentialWriter(data, meta, digestFor(data),
                                                                                  SequentialWriterOption.DEFAULT,
                                                                                  params, collector(), null, asyncBytes));
     }
@@ -622,7 +679,7 @@ public class AsyncChunkPipelineTest
     throws IOException
     {
         compare(params, name, bytes, incompressible,
-                (data, meta, asyncBytes) -> new CompressedSequentialWriter(data, meta, null,
+                (data, meta, asyncBytes) -> new CompressedSequentialWriter(data, meta, digestFor(data),
                                                                            SequentialWriterOption.DEFAULT,
                                                                            params, collector(), null, asyncBytes));
     }
@@ -645,8 +702,7 @@ public class AsyncChunkPipelineTest
         long asyncPosition = write(factory.open(asyncData, asyncMeta, asyncBytes(params)), payload);
 
         assertEquals(name + ": reported position differs", syncPosition, asyncPosition);
-        assertArrayEquals(name + ": data file differs", readAll(syncData), readAll(asyncData));
-        assertArrayEquals(name + ": compression metadata differs", readAll(syncMeta), readAll(asyncMeta));
+        assertSameFiles(name, syncData, asyncData);
     }
 
     private interface WriterFactory

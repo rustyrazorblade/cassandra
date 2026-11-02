@@ -1515,14 +1515,39 @@ public class DirectCompressedSequentialWriterTest
                 byte[] payload = new byte[rs.nextInt(1, 64 * 1024 + 1)];
                 rs.nextBytes(payload);
                 int failOnWrite = rs.nextInt(1, 9);
-                runWriteFaultExample(blockSize, params, payload, failOnWrite, anyFaultFired);
+                runWriteFaultExample(blockSize, params, payload, failOnWrite, 0, anyFaultFired);
+            }));
+        assertTrue("no example fired its injected write fault; the sweep degraded to all-success",
+                   anyFaultFired.get());
+    }
+
+    /**
+     * The same faults with the async pipeline: the channel write then fails on the writer thread.
+     * The error must still reach the producer with its cause, and the abort must stop the thread and
+     * balance the direct buffer gauge.
+     */
+    @Test
+    public void testWriteFailureOnTheAsyncWriterThreadAbortsCleanly() throws Exception
+    {
+        AtomicBoolean anyFaultFired = new AtomicBoolean();
+        withDirectWriteBufferSize(1, () ->
+            qt().withSeed(seed).withExamples(40).forAll(Gens.random()).check(rs -> {
+                int blockSize = rs.pickInt(8, 16, 64, 512);
+                CompressionParams params = paramsForKind(rs.pick(CompressorKind.values()), rs.pickInt(1024, 2048, 4096));
+                byte[] payload = new byte[rs.nextInt(1, 64 * 1024 + 1)];
+                rs.nextBytes(payload);
+                int failOnWrite = rs.nextInt(1, 9);
+                long gaugeBefore = StorageMetrics.directWriteBufferBytes.getCount();
+                runWriteFaultExample(blockSize, params, payload, failOnWrite, 4 * params.chunkLength(), anyFaultFired);
+                assertEquals("direct buffer gauge did not balance after the abort",
+                             gaugeBefore, StorageMetrics.directWriteBufferBytes.getCount());
             }));
         assertTrue("no example fired its injected write fault; the sweep degraded to all-success",
                    anyFaultFired.get());
     }
 
     private void runWriteFaultExample(int blockSize, CompressionParams params, byte[] payload,
-                                      int failOnWrite, AtomicBoolean anyFaultFired) throws Exception
+                                      int failOnWrite, int asyncBytes, AtomicBoolean anyFaultFired) throws Exception
     {
         byte[] standardBytes = standardWriterBytes(payload, params);
 
@@ -1541,9 +1566,11 @@ public class DirectCompressedSequentialWriterTest
                 SequentialWriterOption abortOnCloseOption = SequentialWriterOption.newBuilder()
                                                                                   .finishOnClose(false)
                                                                                   .build();
+                DirectCompressedSequentialWriter opened;
                 try (DirectCompressedSequentialWriter writer = new DirectCompressedSequentialWriter(
-                     dataFile, metaFile, null, abortOnCloseOption, params, collector, null))
+                     dataFile, metaFile, null, abortOnCloseOption, params, collector, null, asyncBytes))
                 {
+                    opened = writer;
                     channel = installFaultChannel(writer, dataFile).failOnWriteIndex(failOnWrite);
                     try
                     {
@@ -1555,6 +1582,9 @@ public class DirectCompressedSequentialWriterTest
                         observed = e;
                     }
                 }
+
+                if (opened.pipeline != null)
+                    assertFalse("writer thread outlived the writer", opened.pipeline.stillRunning());
 
                 if (channel.faultFired)
                 {
