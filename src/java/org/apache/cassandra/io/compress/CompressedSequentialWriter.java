@@ -690,15 +690,17 @@ public class CompressedSequentialWriter extends SequentialWriter
                     pipeline.quiesce();
                 }
                 catch (Throwable t) { accumulate = merge(accumulate, t); }
+                accumulate = pipeline.inspectUnreportedFailure(accumulate);
 
                 if (pipeline.stillRunning())
                 {
                     // Free nothing. The thread may be inside compressor.compress writing into a
                     // buffer, and MemoryUtil.clean under native code faults the JVM rather than
                     // throwing. That includes the superclass's cleanup, which frees buffer, so it is
-                    // not called either. Close the channel, which unblocks a stuck write and lets
-                    // the abort finish; the buffers carry Cleaners and the collector reclaims them
-                    // once the thread finally exits.
+                    // not called either. Close the channel so the thread's next write fails. Closing
+                    // does not end a write already blocked in the kernel: the close waits for it,
+                    // as it would on the synchronous path. The buffers carry Cleaners and the
+                    // collector reclaims them once the thread exits.
                     try { channel.close(); }
                     catch (Throwable t) { accumulate = merge(accumulate, t); }
                     return accumulate;

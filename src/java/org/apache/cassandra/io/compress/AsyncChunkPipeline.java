@@ -18,6 +18,7 @@
 package org.apache.cassandra.io.compress;
 
 import java.io.IOException;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,6 +29,7 @@ import java.util.function.LongConsumer;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 import org.jctools.queues.SpscArrayQueue;
 import org.slf4j.Logger;
@@ -35,6 +37,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
@@ -112,6 +115,9 @@ class AsyncChunkPipeline
      * abort.
      */
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
+
+    /** Set once {@link #rethrowFailure} has thrown the recorded failure to the producer. */
+    private volatile boolean failureRethrown = false;
 
     private volatile boolean shutdown = false;
 
@@ -271,6 +277,9 @@ class AsyncChunkPipeline
 
         if (!filled.offer(outgoing))
             throw new IllegalStateException("async writer queue full; slot accounting is wrong");
+        // The offer is a release store only. Without a full fence the writerParked read below may
+        // run before it, see false, and skip the unpark while the writer parks on an empty queue.
+        VarHandle.fullFence();
         if (writerParked)
             LockSupport.unpark(writer);
     }
@@ -355,7 +364,7 @@ class AsyncChunkPipeline
     {
         Thread w = writer;
         if (w != null && !w.isAlive() && failure.get() == null)
-            failure.compareAndSet(null, new IOException("Async writer thread for " + owner.getPath() + " exited unexpectedly"));
+            failure.compareAndSet(null, new IllegalStateException("Async writer thread for " + owner.getPath() + " exited unexpectedly"));
 
         LockSupport.parkNanos(PRODUCER_PARK_NANOS);
 
@@ -382,6 +391,7 @@ class AsyncChunkPipeline
         if (t == null)
             return;
 
+        failureRethrown = true;
         Throwables.throwIfUnchecked(t);
         throw new FSWriteError(t instanceof IOException ? (IOException) t : new IOException(t), owner.getPath());
     }
@@ -402,16 +412,15 @@ class AsyncChunkPipeline
             while (true)
             {
                 ByteBuffer slot = filled.poll();
+                // quiesce() runs on the producer, which has stopped submitting. A chunk offered just
+                // before shutdown was set may have been missed by the poll above, so poll once more.
+                if (slot == null && shutdown && (slot = filled.poll()) == null)
+                    return;
+
                 if (slot != null)
                 {
                     idle = 0;
                     processChunk(slot);
-                }
-                else if (shutdown)
-                {
-                    // quiesce() runs on the producer, which has stopped submitting, so an empty queue
-                    // here means every submitted chunk has been written.
-                    return;
                 }
 
                 if (slot == null)
@@ -519,21 +528,36 @@ class AsyncChunkPipeline
             return;   // nothing was ever flushed, or the thread never started; there is nothing to wait for
 
         // The writer exits once it finds the queue empty, so nothing already dispatched is dropped.
+        // An interrupt must not cut the wait short, or cleanup frees what the thread still uses.
         LockSupport.unpark(w);
-        try
-        {
-            w.join(quiesceMillis);
-        }
-        catch (InterruptedException e)
-        {
-            Thread.currentThread().interrupt();
-        }
+        Uninterruptibles.joinUninterruptibly(w, quiesceMillis, TimeUnit.MILLISECONDS);
 
         if (w.isAlive())
             logger.error("Async compaction writer thread for {} did not stop within {}ms " +
                          "({} of {} chunks written, recorded failure: {}); its buffers are left to the " +
                          "garbage collector rather than freed underneath it",
                          owner.getPath(), quiesceMillis, completed, submitted, failure.get());
+    }
+
+    /**
+     * Runs a failure from the writer thread that the producer never saw through the disk failure
+     * policy. That happens when the producer aborts first for another reason; the failure the
+     * producer did see reaches the policy through the compaction that it ends.
+     */
+    Throwable inspectUnreportedFailure(Throwable accumulate)
+    {
+        Throwable t = failure.get();
+        if (t == null || failureRethrown)
+            return accumulate;
+        try
+        {
+            JVMStabilityInspector.inspectThrowable(t);
+        }
+        catch (Throwable inspected)
+        {
+            accumulate = merge(accumulate, inspected);
+        }
+        return accumulate;
     }
 
     /**
@@ -577,6 +601,12 @@ class AsyncChunkPipeline
             catch (Throwable t) { accumulate = merge(accumulate, t); }
         }
         return accumulate;
+    }
+
+    @VisibleForTesting
+    Throwable recordedFailure()
+    {
+        return failure.get();
     }
 
     @VisibleForTesting

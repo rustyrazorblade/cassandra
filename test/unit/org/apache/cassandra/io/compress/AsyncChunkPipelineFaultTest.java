@@ -18,7 +18,12 @@
 package org.apache.cassandra.io.compress;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.collect.ImmutableMap;
 
@@ -28,20 +33,26 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.Util;
+import org.apache.cassandra.concurrent.ExecutorFactory;
+import org.apache.cassandra.concurrent.ForwardingExecutorFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.io.FSError;
+import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.CompressionParams;
+import org.apache.cassandra.service.DiskErrorsHandler;
+import org.apache.cassandra.service.DiskErrorsHandlerService;
 
 import static org.apache.cassandra.utils.Throwables.anyCauseMatches;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -49,8 +60,8 @@ import static org.junit.Assert.fail;
  * A failure raised on the writer thread has to unwind the producer's stack. The try-with-resources
  * in CompactionTask is the only thing that aborts the transaction, so a swallowed failure would
  * commit an SSTable whose data file is short. These tests inject a compression failure at a chosen
- * chunk and assert four things: the producer throws, the throw is an FSError so the disk failure
- * policy still recognises it, no slot is leaked, and no writer thread is left behind.
+ * chunk and assert four things: the producer throws, the throw keeps its type (a compressor fault is
+ * not an FSError, a write fault is), no slot is leaked, and no writer thread is left behind.
  *
  * The chunk indices are chosen around the pool boundary. A slot lost on an exception path does not
  * show up until the pool drains, which is exactly at the boundary.
@@ -171,7 +182,7 @@ public class AsyncChunkPipelineFaultTest
     }
 
     /**
-     * The other arm of the same rule: a genuine write failure must arrive as an FSError with its
+     * The other case of the same rule: a genuine write failure must arrive as an FSError with its
      * path, because JVMStabilityInspector tests for the type and DefaultDiskErrorsHandler reads the
      * path to mark a directory unwritable.
      */
@@ -255,6 +266,239 @@ public class AsyncChunkPipelineFaultTest
         Util.spinUntilTrue(() -> writer.pipeline.freeSlotCount() >= expected, 10, TimeUnit.SECONDS);
 
         assertEquals("a slot leaked on the failure path", expected, writer.pipeline.freeSlotCount());
+    }
+
+    /**
+     * An interrupted producer must still wait for the writer thread before cleanup frees anything,
+     * and must keep its interrupt.
+     */
+    @Test
+    public void interruptedAbortStillWaitsForTheWriterThread() throws Exception
+    {
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch arrived = new CountDownLatch(1);
+        FaultyCompressor.blockAt(1, release, arrived);
+
+        File data = FileUtils.createTempFile("asyncFaultInterrupt", ".db");
+        CompressedSequentialWriter writer = newWriter(data, new File(data.absolutePath() + ".metadata"));
+        writeChunks(writer, 2);
+        assertTrue("writer thread never reached the blocking compress", arrived.await(10, TimeUnit.SECONDS));
+        AsyncChunkPipeline pipeline = writer.pipeline;
+
+        Thread producer = Thread.currentThread();
+        Thread releaser = new Thread(() -> {
+            // Release the writer only once the producer waits for it in the join.
+            Util.spinUntilTrue(() -> producer.getState() == Thread.State.TIMED_WAITING, 10, TimeUnit.SECONDS);
+            release.countDown();
+        });
+        releaser.start();
+
+        producer.interrupt();
+        Throwable result;
+        try
+        {
+            result = writer.abort(null);
+        }
+        finally
+        {
+            assertTrue("the producer lost its interrupt", Thread.interrupted());
+            release.countDown();
+            releaser.join();
+        }
+
+        assertNull("abort failed: " + result, result);
+        assertFalse("cleanup ran before the writer thread stopped", pipeline.stillRunning());
+        assertEquals("cleanup left slots behind", 0, pipeline.freeSlotCount());
+    }
+
+    /** An interrupt while the producer waits for a free slot aborts the write, but is not a disk fault. */
+    @Test
+    public void interruptWhileWaitingForASlotIsNotADiskFault() throws Exception
+    {
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch arrived = new CountDownLatch(1);
+        FaultyCompressor.blockAt(1, release, arrived);
+
+        File data = FileUtils.createTempFile("asyncFaultWaitInterrupt", ".db");
+        CompressedSequentialWriter writer = newWriter(data, new File(data.absolutePath() + ".metadata"));
+        AtomicReference<Throwable> thrown = new AtomicReference<>();
+        AtomicBoolean interruptKept = new AtomicBoolean();
+        Thread producer = new Thread(() -> {
+            try
+            {
+                // More chunks than slots, so the producer waits once the writer thread is held.
+                writeChunks(writer, SLOTS * 3);
+            }
+            catch (Throwable t)
+            {
+                thrown.set(t);
+                interruptKept.set(Thread.currentThread().isInterrupted());
+            }
+        });
+        try
+        {
+            producer.start();
+            assertTrue("writer thread never reached the blocking compress", arrived.await(10, TimeUnit.SECONDS));
+            Util.spinUntilTrue(() -> producer.getState() == Thread.State.TIMED_WAITING, 10, TimeUnit.SECONDS);
+            producer.interrupt();
+            producer.join(TimeUnit.SECONDS.toMillis(10));
+            assertFalse("producer did not stop on interrupt", producer.isAlive());
+        }
+        finally
+        {
+            release.countDown();
+        }
+
+        assertNotNull("the interrupt did not stop the producer", thrown.get());
+        assertFalse("an interrupt surfaced as a disk fault: " + thrown.get(), anyCauseMatches(thrown.get(), FSError.class::isInstance));
+        assertTrue("the producer lost its interrupt", interruptKept.get());
+        writer.abort(null);
+        settle(writer);
+    }
+
+    /**
+     * A disk fault on the writer thread that the producer never saw, because it aborted first, must
+     * still reach the disk failure policy.
+     */
+    @Test
+    public void unreportedWriteFailureReachesTheDiskFailurePolicy() throws Exception
+    {
+        List<Throwable> inspected = installRecordingDiskErrorsHandler();
+        try
+        {
+            File data = FileUtils.createTempFile("asyncFaultUnreported", ".db");
+            FailingWriteWriter writer = new FailingWriteWriter(data, new File(data.absolutePath() + ".metadata"), faultyParams(), 1);
+            // One full chunk and one byte: the chunk goes to the writer thread, and no later flush
+            // gives the producer a chance to see the failure.
+            writeChunks(writer, 1);
+            writer.write(0);
+            AsyncChunkPipeline pipeline = writer.pipeline;
+            Util.spinUntilTrue(() -> pipeline.recordedFailure() != null, 10, TimeUnit.SECONDS);
+
+            writer.abort(null);
+
+            assertEquals("the unreported failure must reach the disk failure policy once", 1, countFSErrors(inspected));
+        }
+        finally
+        {
+            DiskErrorsHandlerService.set(DiskErrorsHandler.NoOpDiskErrorHandler.NO_OP);
+        }
+    }
+
+    /** A failure the producer already rethrew reaches the policy through the compaction; cleanup must not repeat it. */
+    @Test
+    public void reportedWriteFailureIsNotInspectedAgainOnCleanup() throws Exception
+    {
+        List<Throwable> inspected = installRecordingDiskErrorsHandler();
+        try
+        {
+            File data = FileUtils.createTempFile("asyncFaultReported", ".db");
+            FailingWriteWriter writer = new FailingWriteWriter(data, new File(data.absolutePath() + ".metadata"), faultyParams(), 1);
+            try
+            {
+                writeChunks(writer, SLOTS * 3);
+                writer.finish();
+                fail("injected write failure did not reach the producer");
+            }
+            catch (FSError expected)
+            {
+                // expected
+            }
+            writer.abort(null);
+
+            assertEquals("cleanup inspected a failure the producer already rethrew", 0, countFSErrors(inspected));
+        }
+        finally
+        {
+            DiskErrorsHandlerService.set(DiskErrorsHandler.NoOpDiskErrorHandler.NO_OP);
+        }
+    }
+
+    /**
+     * A writer thread that dies is a bug, not a disk fault, so the producer gets an
+     * IllegalStateException and the disk failure policy stays out of it.
+     */
+    @Test
+    public void deadWriterThreadIsNotADiskFault() throws Exception
+    {
+        ExecutorFactory saved = ExecutorFactory.Global.executorFactory();
+        ExecutorFactory.Global.unsafeSet(new ForwardingExecutorFactory(saved)
+        {
+            @Override
+            public Thread startThread(String name, Runnable runnable)
+            {
+                // A writer thread that exits at once, without taking any chunk.
+                return super.startThread(name, () -> {});
+            }
+        });
+        Throwable thrown = null;
+        CompressedSequentialWriter writer;
+        try
+        {
+            File data = FileUtils.createTempFile("asyncFaultDeadWriter", ".db");
+            writer = newWriter(data, new File(data.absolutePath() + ".metadata"));
+            try
+            {
+                writeChunks(writer, SLOTS * 3);
+                writer.finish();
+            }
+            catch (Throwable t)
+            {
+                thrown = t;
+            }
+        }
+        finally
+        {
+            ExecutorFactory.Global.unsafeSet(saved);
+        }
+
+        assertNotNull("a dead writer thread never reached the producer", thrown);
+        assertTrue("expected IllegalStateException, got " + thrown, thrown instanceof IllegalStateException);
+        assertFalse("a dead writer thread surfaced as a disk fault", anyCauseMatches(thrown, FSError.class::isInstance));
+        writer.abort(null);
+    }
+
+    private static List<Throwable> installRecordingDiskErrorsHandler()
+    {
+        List<Throwable> inspected = new CopyOnWriteArrayList<>();
+        DiskErrorsHandlerService.set(new ForwardingDiskErrorsHandler(DiskErrorsHandler.NoOpDiskErrorHandler.NO_OP)
+        {
+            @Override
+            public void inspectDiskError(Throwable t)
+            {
+                inspected.add(t);
+            }
+        });
+        return inspected;
+    }
+
+    private static int countFSErrors(List<Throwable> inspected)
+    {
+        int count = 0;
+        for (Throwable t : inspected)
+            if (t instanceof FSError)
+                count++;
+        return count;
+    }
+
+    /** Passes every call to a delegate, so a test overrides only what it records. */
+    private static class ForwardingDiskErrorsHandler implements DiskErrorsHandler
+    {
+        private final DiskErrorsHandler delegate;
+
+        ForwardingDiskErrorsHandler(DiskErrorsHandler delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        @Override public void init() { delegate.init(); }
+        @Override public void handleCorruptSSTable(CorruptSSTableException e) { delegate.handleCorruptSSTable(e); }
+        @Override public void handleFSError(FSError e) { delegate.handleFSError(e); }
+        @Override public boolean handleCommitError(String message, Throwable t) { return delegate.handleCommitError(message, t); }
+        @Override public void handleStartupFSError(Throwable t) { delegate.handleStartupFSError(t); }
+        @Override public void inspectDiskError(Throwable t) { delegate.inspectDiskError(t); }
+        @Override public void inspectCommitLogError(Throwable t) { delegate.inspectCommitLogError(t); }
+        @Override public void close() throws Exception { delegate.close(); }
     }
 
     private static void settle(CompressedSequentialWriter writer)
