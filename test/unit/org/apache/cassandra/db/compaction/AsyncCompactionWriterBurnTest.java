@@ -56,6 +56,7 @@ import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigFormat;
+import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.OutputHandler;
 
@@ -171,6 +172,7 @@ public class AsyncCompactionWriterBurnTest extends CQLTester
         Set<Descriptor> inputs = descriptors(cfs.getLiveSSTables());
         Set<String> filesBefore = dataDirectoryFiles(cfs);
         long directBefore = directMemoryUsed();
+        long directWriteBuffersBefore = StorageMetrics.directWriteBufferBytes.getCount();
 
         DatabaseDescriptor.setCursorCompactionEnabled(false);
         DatabaseDescriptor.setAsyncCompactionWriterEnabled(true);
@@ -219,9 +221,12 @@ public class AsyncCompactionWriterBurnTest extends CQLTester
         assertEquals("writer threads left after the stopped compaction", 0, writerThreads());
         assertEquals("the inputs must still be live", inputs, descriptors(cfs.getLiveSSTables()));
         assertEquals("output files left after the stopped compaction", filesBefore, dataDirectoryFiles(cfs));
-        // Off-heap slots are freed directly, so direct memory returns to its level before the compaction.
-        assertTrue("direct memory grew by " + (directMemoryUsed() - directBefore) + " bytes",
-                   directMemoryUsed() <= directBefore);
+        // The O_DIRECT write buffers have an exact gauge. The JVM direct pool also counts unrelated
+        // allocations, so allow less than one chunk there; a leaked slot is a whole chunk.
+        assertEquals("O_DIRECT write buffers left after the stopped compaction",
+                     directWriteBuffersBefore, StorageMetrics.directWriteBufferBytes.getCount());
+        long grown = directMemoryUsed() - directBefore;
+        assertTrue("direct memory grew by " + grown + " bytes", grown < CHUNK_KB * 1024);
         assertAllRows();
     }
 

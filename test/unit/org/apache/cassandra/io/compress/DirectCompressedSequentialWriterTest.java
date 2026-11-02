@@ -1505,19 +1505,7 @@ public class DirectCompressedSequentialWriterTest
     @Test
     public void testWriteFailureMidStreamThrowsFSWriteErrorAndAbortsCleanly() throws Exception
     {
-        AtomicBoolean anyFaultFired = new AtomicBoolean();
-        // Floor-sized buffer maximizes mid-stream channel writes, so most fault points land.
-        withDirectWriteBufferSize(1, () ->
-            qt().withSeed(seed).withExamples(60).forAll(Gens.random()).check(rs -> {
-                int blockSize = rs.pickInt(8, 16, 64, 512);
-                CompressionParams params = paramsForKind(rs.pick(CompressorKind.values()), rs.pickInt(1024, 2048, 4096));
-                byte[] payload = new byte[rs.nextInt(1, 64 * 1024 + 1)];
-                rs.nextBytes(payload);
-                int failOnWrite = rs.nextInt(1, 9);
-                runWriteFaultExample(blockSize, params, payload, failOnWrite, 0, anyFaultFired);
-            }));
-        assertTrue("no example fired its injected write fault; the sweep degraded to all-success",
-                   anyFaultFired.get());
+        writeFaultSweep(60, false);
     }
 
     /**
@@ -1528,16 +1516,22 @@ public class DirectCompressedSequentialWriterTest
     @Test
     public void testWriteFailureOnTheAsyncWriterThreadAbortsCleanly() throws Exception
     {
+        writeFaultSweep(40, true);
+    }
+
+    private void writeFaultSweep(int examples, boolean async) throws Exception
+    {
         AtomicBoolean anyFaultFired = new AtomicBoolean();
+        // Floor-sized buffer maximizes mid-stream channel writes, so most fault points land.
         withDirectWriteBufferSize(1, () ->
-            qt().withSeed(seed).withExamples(40).forAll(Gens.random()).check(rs -> {
+            qt().withSeed(seed).withExamples(examples).forAll(Gens.random()).check(rs -> {
                 int blockSize = rs.pickInt(8, 16, 64, 512);
                 CompressionParams params = paramsForKind(rs.pick(CompressorKind.values()), rs.pickInt(1024, 2048, 4096));
                 byte[] payload = new byte[rs.nextInt(1, 64 * 1024 + 1)];
                 rs.nextBytes(payload);
                 int failOnWrite = rs.nextInt(1, 9);
                 long gaugeBefore = StorageMetrics.directWriteBufferBytes.getCount();
-                runWriteFaultExample(blockSize, params, payload, failOnWrite, 4 * params.chunkLength(), anyFaultFired);
+                runWriteFaultExample(blockSize, params, payload, failOnWrite, async ? 4 * params.chunkLength() : 0, anyFaultFired);
                 assertEquals("direct buffer gauge did not balance after the abort",
                              gaugeBefore, StorageMetrics.directWriteBufferBytes.getCount());
             }));
