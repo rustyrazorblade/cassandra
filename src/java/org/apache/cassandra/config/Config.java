@@ -727,9 +727,10 @@ public class Config
     public boolean async_compaction_writer_enabled = false;
 
     /**
-     * Bytes the async compressed writer may keep in flight per open data file, before the producer
-     * stalls for the write thread to catch up. The number of chunk slots is derived from this and the
-     * table's chunk_length_in_kb, so the byte budget stays fixed regardless of the chunk size.
+     * Bytes the async compaction writer may keep in flight per open Data file, before the compaction
+     * thread waits for the writer thread. The number of chunk slots is derived from this and the
+     * table's chunk_length_in_kb, with a minimum of two, so the byte budget stays fixed regardless of
+     * the chunk size. Validated to 1MiB-256MiB when the option is on.
      */
     public DataStorageSpec.IntMebibytesBound async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound("4MiB");
 

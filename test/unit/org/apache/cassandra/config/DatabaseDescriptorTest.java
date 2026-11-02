@@ -1176,6 +1176,48 @@ public class DatabaseDescriptorTest
     }
 
     @Test
+    public void testAsyncCompactionWriterBufferValidation()
+    {
+        Config conf = DatabaseDescriptor.getRawConfig();
+        boolean savedEnabled = conf.async_compaction_writer_enabled;
+        DataStorageSpec.IntMebibytesBound savedBuffer = conf.async_compaction_writer_buffer;
+        try
+        {
+            conf.async_compaction_writer_enabled = true;
+            for (String rejected : new String[]{ "0MiB", "257MiB" })
+            {
+                conf.async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound(rejected);
+                try
+                {
+                    DatabaseDescriptor.validateAsyncCompactionWriter();
+                    fail("expected ConfigurationException for async_compaction_writer_buffer " + rejected);
+                }
+                catch (ConfigurationException expected)
+                {
+                    Assert.assertTrue("expected message to mention async_compaction_writer_buffer, got: " + expected.getMessage(),
+                                      expected.getMessage().contains("async_compaction_writer_buffer"));
+                }
+            }
+
+            for (String accepted : new String[]{ "1MiB", "256MiB" })
+            {
+                conf.async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound(accepted);
+                DatabaseDescriptor.validateAsyncCompactionWriter();
+            }
+
+            // The buffer is not used with the option off, so it is not checked either.
+            conf.async_compaction_writer_enabled = false;
+            conf.async_compaction_writer_buffer = new DataStorageSpec.IntMebibytesBound("0MiB");
+            DatabaseDescriptor.validateAsyncCompactionWriter();
+        }
+        finally
+        {
+            conf.async_compaction_writer_enabled = savedEnabled;
+            conf.async_compaction_writer_buffer = savedBuffer;
+        }
+    }
+
+    @Test
     public void testInitializeBackgroundWriteDiskAccessModeRejectsUnsupportedModes()
     {
         // Everything outside standard/direct must be rejected, including 'auto': it has no

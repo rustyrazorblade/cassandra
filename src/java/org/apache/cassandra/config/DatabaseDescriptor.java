@@ -911,6 +911,7 @@ public class DatabaseDescriptor
             throw new ConfigurationException("saved_caches_directory must not be the same as the hints_directory", false);
 
         initializeBackgroundWriteDiskAccessMode();
+        validateAsyncCompactionWriter();
 
         if (conf.memtable_flush_writers == 0)
         {
@@ -4981,6 +4982,23 @@ public class DatabaseDescriptor
     public static void setAsyncCompactionWriterEnabled(boolean async_compaction_writer_enabled)
     {
         conf.async_compaction_writer_enabled = async_compaction_writer_enabled;
+    }
+
+    /** Upper bound for async_compaction_writer_buffer. Each open compaction output may hold this much. */
+    private static final int MAX_ASYNC_COMPACTION_WRITER_BUFFER_MIB = 256;
+
+    @VisibleForTesting
+    static void validateAsyncCompactionWriter()
+    {
+        if (!conf.async_compaction_writer_enabled)
+            return;
+
+        int mib = conf.async_compaction_writer_buffer.toMebibytes();
+        if (mib <= 0 || mib > MAX_ASYNC_COMPACTION_WRITER_BUFFER_MIB)
+            throw new ConfigurationException("async_compaction_writer_buffer must be between 1MiB and " +
+                                             MAX_ASYNC_COMPACTION_WRITER_BUFFER_MIB + "MiB when " +
+                                             "async_compaction_writer_enabled is true. Got: " +
+                                             conf.async_compaction_writer_buffer, false);
     }
 
     public static int getAsyncCompactionWriterBufferInBytes()

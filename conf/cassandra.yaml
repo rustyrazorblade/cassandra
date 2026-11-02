@@ -698,7 +698,11 @@ cursor_compaction_enabled: false
 # on their own thread.
 async_compaction_writer_enabled: false
 
-# In-flight memory per open compressed writer.  Off heap with direct buffers.
+# Bytes the async compaction writer may hold in flight per open output, before the
+# compaction thread waits for the writer thread.  Off heap, except with
+# DeflateCompressor, which uses heap buffers.  A writer always holds at least two
+# chunks, so a buffer smaller than two chunks of the table's chunk_length_in_kb
+# holds two chunks.  Must be between 1MiB and 256MiB.
 # async_compaction_writer_buffer: 4MiB
 
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
