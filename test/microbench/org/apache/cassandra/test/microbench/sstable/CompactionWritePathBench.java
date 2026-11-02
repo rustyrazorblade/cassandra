@@ -36,7 +36,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 
-import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
@@ -49,8 +48,8 @@ import org.apache.cassandra.test.microbench.CompactionBench;
 /**
  * Compaction benchmark sized for the write path rather than the merge path.
  *
- * Each row carries a blob payload, so a run moves gigabytes through
- * {@code CompressedSequentialWriter} instead of the few megabytes the bigint-only
+ * Each row carries a blob payload, so a run moves about 100MB with the defaults through
+ * {@code CompressedSequentialWriter}, instead of the few megabytes the bigint-only
  * {@link CompactionBench} produces. The payload is deliberately half repeated bytes and half
  * random, which lands LZ4 near a 2:1 ratio: fully random data makes the compressor bail out
  * early and understates compression cost, while uniform data compresses away to nothing and
@@ -88,6 +87,13 @@ public class CompactionWritePathBench extends CompactionBench
     @Param("16")
     int chunkKb = 16;
 
+    /**
+     * Parent directory for cached datasets, reused across runs; empty generates the dataset in every
+     * trial. Each set of dataset parameters gets its own subdirectory.
+     */
+    @Param("")
+    String datasetCache = "";
+
     protected void createSStables()
     {
         keyspace = createKeyspace("CREATE KEYSPACE %s with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 } and durable_writes = false");
@@ -108,15 +114,14 @@ public class CompactionWritePathBench extends CompactionBench
         DatabaseDescriptor.setAsyncCompactionWriterBuffer(writerBuffer);
 
         // Generating the dataset costs about two minutes, so it is done per trial by default.
-        // Set cassandra.bench.dataset to reuse one set of SSTables across runs instead.
-        String cachePath = CassandraRelevantProperties.BENCH_DATASET.getString();
-        if (cachePath == null)
+        // Set datasetCache to reuse one set of SSTables across runs instead.
+        if (datasetCache.isEmpty())
         {
             generateRows();
             return;
         }
 
-        File cache = new File(cachePath);
+        File cache = new File(datasetCache, datasetKey());
         cache.tryCreateDirectories();
         if (dataFilesIn(cache).isEmpty())
         {
@@ -127,6 +132,13 @@ public class CompactionWritePathBench extends CompactionBench
         {
             restoreFrom(cache);
         }
+    }
+
+    /** Every parameter that changes the generated SSTables, so a cached dataset is reused only for the same input. */
+    private String datasetKey()
+    {
+        return String.join("-", "sstables" + sstableCount, "rows" + rowCount, overlap, "payload" + payloadSize,
+                           "repeat" + repeatPercent, "chunk" + chunkKb);
     }
 
     private void generateRows()
