@@ -300,10 +300,14 @@ public class AsyncCompactionWriterBurnTest extends CQLTester
         }
     }
 
-    /** Extended verification reads every partition and checks the Digest against the Data file. */
+    /**
+     * Extended verification reads every partition and checks the Digest against the Data file. Its
+     * output is dropped: it logs a line per index entry, which at large row counts blocks the test
+     * log appender. A failure still throws.
+     */
     private static void verify(ColumnFamilyStore cfs, SSTableReader sstable)
     {
-        try (IVerifier verifier = sstable.getVerifier(cfs, new OutputHandler.LogOutput(), false,
+        try (IVerifier verifier = sstable.getVerifier(cfs, new OutputHandler.NullOutput(), false,
                                                       IVerifier.options().invokeDiskFailurePolicy(true)
                                                                          .extendedVerification(true).build()))
         {
@@ -397,7 +401,8 @@ public class AsyncCompactionWriterBurnTest extends CQLTester
                 execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", i / ROWS_PER_PARTITION, i % ROWS_PER_PARTITION, value(i));
             flush();
         }
-        assertEquals(INPUT_SSTABLES, cfs.getLiveSSTables().size());
+        // A large row count can fill a memtable before the explicit flush, which adds input sstables.
+        assertTrue("expected at least " + INPUT_SSTABLES + " input sstables", cfs.getLiveSSTables().size() >= INPUT_SSTABLES);
         return cfs;
     }
 
