@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorRangeReads;
 import org.apache.cassandra.db.CursorReads;
@@ -472,7 +473,7 @@ public class RangeReadMaterializationBoundTest extends RangeReadOracle
     private static List<String> page(ColumnFamilyStore cfs, PartitionRangeQueryPager pager)
     {
         try (ReadExecutionController controller = pager.executionController();
-             UnfilteredPartitionIterator partitions = pager.fetchPageUnfiltered(cfs.metadata(), PAGE_SIZE, controller))
+             UnfilteredPartitionIterator partitions = pager.fetchPageUnfiltered(cfs.metadata(), PageSize.inRows(PAGE_SIZE), controller))
         {
             return canonicalRecords(partitions);
         }

@@ -51,6 +51,7 @@ import org.openjdk.jmh.infra.Blackhole;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.SelectStatement;
@@ -501,7 +502,7 @@ public class RangeReadBench extends CQLTester
         List<ByteBuffer> bound = new ArrayList<>(values.length);
         for (Object value : values)
             bound.add(LongType.instance.decompose((Long) value));
-        QueryOptions options = QueryOptions.create(ConsistencyLevel.ONE, bound, false, -1, null, ConsistencyLevel.SERIAL,
+        QueryOptions options = QueryOptions.create(ConsistencyLevel.ONE, bound, false, PageSize.NONE, null, ConsistencyLevel.SERIAL,
                                                    ProtocolVersion.V5, KEYSPACE, Long.MIN_VALUE, nowInSec);
         return (PartitionRangeReadCommand) select.getQuery(options, nowInSec);
     }
@@ -515,7 +516,7 @@ public class RangeReadBench extends CQLTester
     private List<PartitionRangeReadCommand> pages(PartitionRangeReadCommand base, int pageSize)
     {
         List<PartitionRangeReadCommand> pages = new ArrayList<>();
-        PartitionRangeReadCommand page = base.withUpdatedLimit(base.limits().forPaging(pageSize));
+        PartitionRangeReadCommand page = base.withUpdatedLimit(base.limits().forPaging(PageSize.inRows(pageSize)));
         TableMetadata metadata = cfs.metadata();
         while (true)
         {
@@ -549,7 +550,7 @@ public class RangeReadBench extends CQLTester
                 return pages;
             AbstractBounds<PartitionPosition> bounds = new Bounds<>(lastKey, base.dataRange().keyRange().right);
             DataRange range = base.dataRange().forPaging(bounds, metadata.comparator, lastClustering, false);
-            DataLimits limits = base.limits().forPaging(pageSize, lastKey.getKey(), Integer.MAX_VALUE - rowsInLastPartition);
+            DataLimits limits = base.limits().forPaging(PageSize.inRows(pageSize), lastKey.getKey(), Integer.MAX_VALUE - rowsInLastPartition);
             page = base.withUpdatedLimitsAndDataRange(limits, range);
         }
     }

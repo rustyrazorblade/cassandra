@@ -40,6 +40,7 @@ import org.apache.cassandra.cache.ChunkCache;
 import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLStatement;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.SelectStatement;
@@ -314,6 +315,12 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
      */
     protected void assertPagedMatches(ReadCase c, ColumnFamilyStore cfs, LongFunction<PartitionRangeReadCommand> command, int pageSize)
     {
+        assertPagedMatches(c, cfs, command, PageSize.inRows(pageSize));
+    }
+
+    /** {@link #assertPagedMatches(ReadCase, ColumnFamilyStore, LongFunction, int)} with pages in rows or in bytes. */
+    protected void assertPagedMatches(ReadCase c, ColumnFamilyStore cfs, LongFunction<PartitionRangeReadCommand> command, PageSize pageSize)
+    {
         compare(c.named(c.label + " / paged " + pageSize), cfs, EnumSet.of(Surface.S1), into -> {
             PartitionRangeQueryPager pager = (PartitionRangeQueryPager) command.apply(c.nowInSec).getPager(null, ProtocolVersion.V5);
             Set<String> positions = new HashSet<>();
@@ -345,6 +352,12 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
      */
     protected void assertCqlMatches(ReadCase c, ColumnFamilyStore cfs, String query, int pageSize)
     {
+        assertCqlMatches(c, cfs, query, rowPages(pageSize));
+    }
+
+    /** {@link #assertCqlMatches(ReadCase, ColumnFamilyStore, String, int)} with pages in rows or in bytes. */
+    protected void assertCqlMatches(ReadCase c, ColumnFamilyStore cfs, String query, PageSize pageSize)
+    {
         CQLStatement statement = QueryProcessor.getStatement(formatQuery(query), ClientState.forInternalCalls());
         compare(c.named(c.label + " / " + query + " pageSize=" + pageSize), cfs, EnumSet.of(Surface.S3),
                 into -> cqlPages(statement, pageSize, c.nowInSec, into));
@@ -355,6 +368,12 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
      * ({@code ReadCommand.createResponseLocally}), the response a remote replica sends.
      */
     protected void assertCqlReplicaResponsesMatch(ReadCase c, ColumnFamilyStore cfs, String query, int pageSize)
+    {
+        assertCqlReplicaResponsesMatch(c, cfs, query, rowPages(pageSize));
+    }
+
+    /** {@link #assertCqlReplicaResponsesMatch(ReadCase, ColumnFamilyStore, String, int)} with pages in rows or in bytes. */
+    protected void assertCqlReplicaResponsesMatch(ReadCase c, ColumnFamilyStore cfs, String query, PageSize pageSize)
     {
         CQLStatement statement = QueryProcessor.getStatement(formatQuery(query), ClientState.forInternalCalls());
         compare(c.named(c.label + " / " + query + " pageSize=" + pageSize + " as replica responses"), cfs, EnumSet.of(Surface.S3),
@@ -409,7 +428,7 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
         List<ByteBuffer> bound = new ArrayList<>(values.length);
         for (Object value : values)
             bound.add(LongType.instance.decompose(((Number) value).longValue()));
-        QueryOptions options = QueryOptions.create(ConsistencyLevel.ONE, bound, false, -1, null, ConsistencyLevel.SERIAL,
+        QueryOptions options = QueryOptions.create(ConsistencyLevel.ONE, bound, false, PageSize.NONE, null, ConsistencyLevel.SERIAL,
                                                    ProtocolVersion.V5, KEYSPACE, Long.MIN_VALUE, nowInSec);
         return (PartitionRangeReadCommand) select.getQuery(options, nowInSec);
     }
@@ -465,7 +484,13 @@ public abstract class RangeReadOracle extends CursorReadDifferentialTester
             throw new AssertionError("page " + page + " ended where an earlier page ended, " + position + ": the paging would not end");
     }
 
-    private static void cqlPages(CQLStatement statement, int pageSize, long nowInSec, Observation into)
+    /** A page size in rows; 0 or less for no paging. */
+    private static PageSize rowPages(int pageSize)
+    {
+        return pageSize <= 0 ? PageSize.NONE : PageSize.inRows(pageSize);
+    }
+
+    private static void cqlPages(CQLStatement statement, PageSize pageSize, long nowInSec, Observation into)
     {
         PagingState state = null;
         Set<String> positions = new HashSet<>();

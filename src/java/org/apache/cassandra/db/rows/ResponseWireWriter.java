@@ -493,7 +493,13 @@ public final class ResponseWireWriter implements ResponseSink.Output
     private AbstractType<?> lastValueType;
     private int lastValueWritten;
 
-    /** The value size, {@code Cell.valueSize()}, of the cell {@link #addCellFromWire} last wrote; 0 when it wrote no value. */
+    @Override
+    public boolean knowsValueSize()
+    {
+        return true;
+    }
+
+    @Override
     public int lastValueSize()
     {
         return lastValueWritten == 0 ? 0 : valueSize(lastValueType, lastValueWritten);

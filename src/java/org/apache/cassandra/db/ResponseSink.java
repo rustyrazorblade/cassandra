@@ -144,6 +144,21 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         void addCellFromWire(ColumnMetadata column, long timestamp, int ttl, long localDeletionTime,
                              CellPath path, boolean hasValue, CellValueSource source) throws IOException;
 
+        /**
+         * The value size, {@code Cell.valueSize()}, of the cell {@link #addCellFromWire} last wrote,
+         * 0 when it wrote no value; -1 when this output does not know it.
+         */
+        default int lastValueSize()
+        {
+            return -1;
+        }
+
+        /** Whether {@link #lastValueSize} knows the size. */
+        default boolean knowsValueSize()
+        {
+            return false;
+        }
+
         /** The open row's liveness, as given to {@link #startRow}. */
         LivenessInfo rowLiveness();
 
@@ -880,8 +895,10 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         if (scanGuard != null)
             scanGuard.cell(timestamp, ttl, localDeletionTime);
         boolean hasValue = !converted && source.hasValue();
+        boolean staged = false;
         if (filter != null && filter.filtersColumn(column))
         {
+            staged = true;
             // the value is needed twice: once to evaluate, once to write
             if (filterValue == null)
                 filterValue = new CursorReadMerger.CellValueScratch();
@@ -894,11 +911,24 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         // the row has failed the filter: the merge discards the value the sink does not read
         if (!writesRowContent())
             return;
+        if (countBytes && live && !staged && hasValue && !writer.knowsValueSize())
+        {
+            // the output cannot tell the value's size: stage the value to learn it
+            if (filterValue == null)
+                filterValue = new CursorReadMerger.CellValueScratch();
+            filterValue.clear();
+            source.streamValue(filterValue);
+            source = stagedValueSource;
+            staged = true;
+        }
         writer.addCellFromWire(column, timestamp, ttl, localDeletionTime, path, hasValue, source);
         if (countBytes && live)
+        {
+            int valueSize = !hasValue ? 0 : staged ? filterValue.length() : writer.lastValueSize();
             // AbstractCell.dataSize: timestamp, ttl, local deletion time, value and path
             // a simple column's cell has no path; the merge may pass a stale one, which the writer ignores too
-            addCellLiveBytes(column, true, timestamp, CELL_TIMES_SIZE + writer.lastValueSize() + (column.isComplex() ? path.dataSize() : 0));
+            addCellLiveBytes(column, true, timestamp, CELL_TIMES_SIZE + valueSize + (column.isComplex() ? path.dataSize() : 0));
+        }
     }
 
     /** The timestamp, ttl and local deletion time part of {@code AbstractCell.dataSize}. */

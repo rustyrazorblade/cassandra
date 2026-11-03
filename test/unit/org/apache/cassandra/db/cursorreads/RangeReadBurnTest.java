@@ -35,6 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorRangeReads;
@@ -202,7 +203,7 @@ public class RangeReadBurnTest extends RangeReadOracle
      */
     private void compareRead(ColumnFamilyStore cfs, String label, PartitionRangeReadCommand base, int pageSize, long readSeed)
     {
-        PartitionRangeReadCommand page = pageSize > 0 ? base.withUpdatedLimit(base.limits().forPaging(pageSize)) : base;
+        PartitionRangeReadCommand page = pageSize > 0 ? base.withUpdatedLimit(base.limits().forPaging(PageSize.inRows(pageSize))) : base;
         TableMetadata metadata = cfs.metadata();
         for (int n = 0; ; n++)
         {
@@ -239,7 +240,7 @@ public class RangeReadBurnTest extends RangeReadOracle
                 return;
             AbstractBounds<PartitionPosition> bounds = new Bounds<>(lastKey, base.dataRange().keyRange().right);
             DataRange range = base.dataRange().forPaging(bounds, metadata.comparator, lastClustering, false);
-            DataLimits limits = base.limits().forPaging(pageSize, lastKey.getKey(), Integer.MAX_VALUE - rowsInLastPartition);
+            DataLimits limits = base.limits().forPaging(PageSize.inRows(pageSize), lastKey.getKey(), Integer.MAX_VALUE - rowsInLastPartition);
             page = base.withUpdatedLimitsAndDataRange(limits, range);
         }
     }
