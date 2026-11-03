@@ -238,7 +238,7 @@ public class BigFormat extends AbstractSSTableFormat<BigTableReader, BigTableWri
     @Override
     public CursorIndexWriter.Factory cursorIndexWriterFactory()
     {
-        return (writer, header) -> ((BigTableWriter) writer).createCursorIndexWriter();
+        return (writer, header) -> CursorIndexWriter.checkWriterType(NAME, writer, BigTableWriter.class).createCursorIndexWriter();
     }
 
     @Override
