@@ -38,6 +38,7 @@ import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLStatement;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -319,6 +320,12 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
      */
     protected void assertCqlMatches(ReadCase c, ColumnFamilyStore cfs, String query, int pageSize)
     {
+        assertCqlMatches(c, cfs, query, rowPages(pageSize));
+    }
+
+    /** {@link #assertCqlMatches(ReadCase, ColumnFamilyStore, String, int)} with pages in rows or in bytes. */
+    protected void assertCqlMatches(ReadCase c, ColumnFamilyStore cfs, String query, PageSize pageSize)
+    {
         CQLStatement statement = QueryProcessor.getStatement(formatQuery(query), ClientState.forInternalCalls());
         compare(c.named(c.label + " / " + query + " pageSize=" + pageSize), cfs, null, EnumSet.of(Surface.S3),
                 into -> cqlPages(statement, pageSize, c.nowInSec, into));
@@ -330,6 +337,12 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
      * cursor run that is the transcode path, unless it declines the read.
      */
     protected void assertCqlReplicaResponsesMatch(ReadCase c, ColumnFamilyStore cfs, String query, int pageSize)
+    {
+        assertCqlReplicaResponsesMatch(c, cfs, query, rowPages(pageSize));
+    }
+
+    /** {@link #assertCqlReplicaResponsesMatch(ReadCase, ColumnFamilyStore, String, int)} with pages in rows or in bytes. */
+    protected void assertCqlReplicaResponsesMatch(ReadCase c, ColumnFamilyStore cfs, String query, PageSize pageSize)
     {
         CQLStatement statement = QueryProcessor.getStatement(formatQuery(query), ClientState.forInternalCalls());
         compare(c.named(c.label + " / " + query + " pageSize=" + pageSize + " as replica responses"), cfs, null, EnumSet.of(Surface.S3),
@@ -386,6 +399,12 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
      * every page and the paging state after it.
      */
     protected void assertPagedMatches(ReadCase c, ColumnFamilyStore cfs, LongFunction<SinglePartitionReadCommand> command, int pageSize)
+    {
+        assertPagedMatches(c, cfs, command, PageSize.inRows(pageSize));
+    }
+
+    /** {@link #assertPagedMatches(ReadCase, ColumnFamilyStore, LongFunction, int)} with pages in rows or in bytes. */
+    protected void assertPagedMatches(ReadCase c, ColumnFamilyStore cfs, LongFunction<SinglePartitionReadCommand> command, PageSize pageSize)
     {
         compare(c.named(c.label + " / paged " + pageSize), cfs, command, EnumSet.of(Surface.S1), into -> {
             SinglePartitionPager pager = (SinglePartitionPager) command.apply(c.nowInSec).getPager(null, ProtocolVersion.V5);
@@ -481,7 +500,13 @@ public abstract class CursorReadOracle extends CursorReadDifferentialTester
         }
     }
 
-    private static void cqlPages(CQLStatement statement, int pageSize, long nowInSec, Observation into)
+    /** A page size in rows; 0 or less for no paging. */
+    private static PageSize rowPages(int pageSize)
+    {
+        return pageSize <= 0 ? PageSize.NONE : PageSize.inRows(pageSize);
+    }
+
+    private static void cqlPages(CQLStatement statement, PageSize pageSize, long nowInSec, Observation into)
     {
         PagingState state = null;
         int page = 0;

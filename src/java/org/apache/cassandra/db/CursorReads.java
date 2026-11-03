@@ -385,6 +385,12 @@ public final class CursorReads
     @VisibleForTesting
     public static volatile boolean TEST_CORRUPT_CELL_TIMESTAMPS = false;
 
+    /** Test only: adds one byte to the live data size the transcode path counts for each streamed
+     *  row against a byte limit, so the byte paging tests can prove they catch a wrong count.
+     *  Never set outside tests. */
+    @VisibleForTesting
+    public static volatile boolean TEST_SKEW_ROW_LIVE_DATA_SIZE = false;
+
     /** Test only: inverts the cell reconciliation verdict inside the cursor-level merge, so the
      *  differential harness can prove it detects a wrong merge decision.  Never set outside tests. */
     @VisibleForTesting

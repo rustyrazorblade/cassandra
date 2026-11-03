@@ -27,6 +27,7 @@ import org.junit.Test;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.AbstractReadCommandBuilder;
 import org.apache.cassandra.db.ColumnFamilyStore;
@@ -339,7 +340,7 @@ public class LateMaterializationAllocationBaselineTest extends SSTableFormatPara
         {
             assertTrue("paging did not terminate", guard++ < 1000);
             try (ReadExecutionController controller = pager.executionController();
-                 UnfilteredPartitionIterator page = pager.fetchPageUnfiltered(cfs.metadata(), pageSize, controller))
+                 UnfilteredPartitionIterator page = pager.fetchPageUnfiltered(cfs.metadata(), PageSize.inRows(pageSize), controller))
             {
                 while (page.hasNext())
                 {

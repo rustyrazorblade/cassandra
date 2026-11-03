@@ -31,8 +31,10 @@ import org.junit.Before;
 import org.junit.Test;
 
 import org.apache.cassandra.Util;
+import org.apache.cassandra.config.DataStorageSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
 import org.apache.cassandra.db.ReadExecutionController;
@@ -73,7 +75,8 @@ public class CursorReadOracleSelfTest extends CursorReadOracle
         Map.entry("TEST_SKEW_DROPPED_ROW_ACCOUNTING", Surface.S4),
         Map.entry("TEST_TRANSCODE_SKEW_TIMESTAMP", Surface.S2),
         Map.entry("TEST_TRANSCODE_WRONG_FLAGS", Surface.S2),
-        Map.entry("TEST_CORRUPT_STREAMED_CELL_VALUE", Surface.S2));
+        Map.entry("TEST_CORRUPT_STREAMED_CELL_VALUE", Surface.S2),
+        Map.entry("TEST_SKEW_ROW_LIVE_DATA_SIZE", Surface.S3));
 
     private static final EnumSet<Surface> tripped = EnumSet.noneOf(Surface.class);
     private static final TreeSet<String> flagsTripped = new TreeSet<>();
@@ -234,6 +237,41 @@ public class CursorReadOracleSelfTest extends CursorReadOracle
         for (String flag : new String[]{ "TEST_TRANSCODE_SKEW_TIMESTAMP", "TEST_TRANSCODE_WRONG_FLAGS", "TEST_CORRUPT_STREAMED_CELL_VALUE" })
             expectFlagTrips(flag, Surface.S2,
                             () -> assertReplicaResponsesMatch(ReadCase.of(flag, 9), cfs, fullRead(cfs, 1L)));
+    }
+
+    /** Paging by bytes: a row size one byte too large ends a page on another row. */
+    @Test
+    public void rowLiveDataSizeTripsS3() throws Exception
+    {
+        createTable("CREATE TABLE %s (pk bigint, ck bigint, v text, PRIMARY KEY (pk, ck))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+        for (long ck = 0; ck < 10; ck++)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ck, "value-" + ck);
+        flush();
+        // a second sstable, so the rows go through the merge rather than being copied as stored
+        for (long ck = 0; ck < 10; ck += 2)
+            execute("INSERT INTO %s (pk, ck, v) VALUES (?, ?, ?)", 1L, ck, "other-" + ck);
+        flush();
+        // each row is 8 (liveness) + 13 (row deletion) + 8 (clustering) + 27 (cell) = 56 bytes;
+        // a page stops once it reaches its size: 113 bytes stop after three rows (168), or after
+        // two (114) when each counts 57
+        // the transcode path declines a read that tracks the local read size thresholds
+        DataStorageSpec.LongBytesBound warn = DatabaseDescriptor.getLocalReadSizeWarnThreshold();
+        DataStorageSpec.LongBytesBound fail = DatabaseDescriptor.getLocalReadSizeFailThreshold();
+        DatabaseDescriptor.setLocalReadSizeWarnThreshold(null);
+        DatabaseDescriptor.setLocalReadSizeFailThreshold(null);
+        try
+        {
+            expectFlagTrips("TEST_SKEW_ROW_LIVE_DATA_SIZE", Surface.S3,
+                            () -> assertCqlReplicaResponsesMatch(ReadCase.of("row live data size", 15).expectTranscode(true), cfs,
+                                                                 "SELECT * FROM %s WHERE pk = 1", PageSize.inBytes(113)));
+        }
+        finally
+        {
+            DatabaseDescriptor.setLocalReadSizeWarnThreshold(warn);
+            DatabaseDescriptor.setLocalReadSizeFailThreshold(fail);
+        }
     }
 
     // ---------------------------------------------------------------- surfaces with no production flag

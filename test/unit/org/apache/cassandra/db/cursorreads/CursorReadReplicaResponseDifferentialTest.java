@@ -35,6 +35,7 @@ import org.junit.Test;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.AbstractReadCommandBuilder;
 import org.apache.cassandra.db.Clustering;
@@ -415,36 +416,37 @@ public class CursorReadReplicaResponseDifferentialTest extends CursorReadOracle
             case "limit 5 per partition 3":
                 return limited(base, DataLimits.cqlLimits(5, 3));
             case "page 3":
-                return limited(base, DataLimits.NONE.forPaging(3));
+                return limited(base, DataLimits.NONE.forPaging(PageSize.inRows(3)));
             case "page 3 resume after 20":
                 return base.forPaging(Clustering.make(ByteBufferUtil.bytes(20L)),
-                                      DataLimits.NONE.forPaging(3, base.partitionKey().getKey(), 7));
+                                      DataLimits.NONE.forPaging(PageSize.inRows(3), base.partitionKey().getKey(), 7));
             case "page 2 resume after 27":
                 return base.forPaging(Clustering.make(ByteBufferUtil.bytes(27L)),
-                                      DataLimits.cqlLimits(10).forPaging(2, base.partitionKey().getKey(), 10));
+                                      DataLimits.cqlLimits(10).forPaging(PageSize.inRows(2), base.partitionKey().getKey(), 10));
             case "group by ck 3 groups":
-                return limited(base, DataLimits.groupByLimits(3, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, groupBy(base, 1)));
+                return limited(base, DataLimits.groupByLimits(3, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, groupBy(base, 1)));
             case "group by ck page 4 rows":
-                return limited(base, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 4, groupBy(base, 1))
+                return limited(base, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 4, groupBy(base, 1))
                                                .forGroupByInternalPaging(GroupingState.EMPTY_STATE));
             case "group by ck 2 groups page 5 rows":
-                return limited(base, DataLimits.groupByLimits(2, DataLimits.NO_LIMIT, 5, groupBy(base, 1)));
+                return limited(base, DataLimits.groupByLimits(2, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 5, groupBy(base, 1)));
             case "group by ck page 4 rows resume after 20":
             {
                 Clustering<?> last = Clustering.make(ByteBufferUtil.bytes(20L));
-                return base.forPaging(last, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 4, groupBy(base, 1))
+                return base.forPaging(last, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 4, groupBy(base, 1))
                                                       .forGroupByInternalPaging(new GroupingState(base.partitionKey().getKey(), last)));
             }
             case "group by ck page 3 rows resume in other partition":
-                return limited(base, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 3, groupBy(base, 1))
+                return limited(base, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 3, groupBy(base, 1))
                                                .forGroupByInternalPaging(new GroupingState(ByteBufferUtil.bytes(999L),
                                                                                            Clustering.make(ByteBufferUtil.bytes(5L)))));
             case LIMIT_REACHED_AT_PARTITION_START:
-                return limited(base, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 1, groupBy(base, 1))
+                // one group: the group open in the other partition reaches it when this partition starts
+                return limited(base, DataLimits.groupByLimits(1, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 1, groupBy(base, 1))
                                                .forGroupByInternalPaging(new GroupingState(ByteBufferUtil.bytes(999L),
                                                                                            Clustering.make(ByteBufferUtil.bytes(5L)))));
             case "group by pk page 6 rows":
-                return limited(base, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 6, groupBy(base, 0))
+                return limited(base, DataLimits.groupByLimits(DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, DataLimits.NO_LIMIT, 6, groupBy(base, 0))
                                                .forGroupByInternalPaging(GroupingState.EMPTY_STATE));
             default:
                 throw new AssertionError(limit);

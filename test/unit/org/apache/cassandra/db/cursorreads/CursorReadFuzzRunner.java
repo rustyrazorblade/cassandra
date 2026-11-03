@@ -42,6 +42,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.ClusteringComparator;
@@ -954,7 +955,7 @@ public abstract class CursorReadFuzzRunner extends CursorReadOracle
                 Clustering<?> last = cfs.metadata().comparator.make(clusteringValues(s, q.resumeAfter));
                 LongFunction<SinglePartitionReadCommand> resumed = now -> {
                     SinglePartitionReadCommand base = command.apply(now);
-                    return base.forPaging(last, base.limits().forPaging(q.resumeLimit));
+                    return base.forPaging(last, base.limits().forPaging(PageSize.inRows(q.resumeLimit)));
                 };
                 assertAllReadSurfacesMatch(c.named(c.label + " resumed after " + Arrays.toString(q.resumeAfter)), cfs, resumed);
             }

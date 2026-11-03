@@ -36,6 +36,7 @@ import org.junit.After;
 import org.apache.cassandra.cache.KeyCacheKey;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
@@ -103,6 +104,7 @@ public abstract class CursorReadDifferentialTester extends CQLTester
     {
         DatabaseDescriptor.setCursorReadsEnabled(false);
         CursorReads.TEST_CORRUPT_CELL_TIMESTAMPS = false;
+        CursorReads.TEST_SKEW_ROW_LIVE_DATA_SIZE = false;
         CursorReads.TEST_CORRUPT_MERGE_DECISIONS = false;
         CursorReads.TEST_SKEW_MEMTABLE_LEG_TIMESTAMPS = false;
         CursorReads.TEST_FORCE_MEMTABLE_ROW_REUSE = false;
@@ -506,7 +508,7 @@ public abstract class CursorReadDifferentialTester extends CQLTester
             {
                 assertTrue("paging sequence did not terminate", guard++ < 10_000);
                 try (ReadExecutionController controller = pager.executionController();
-                     UnfilteredPartitionIterator page = pager.fetchPageUnfiltered(cfs.metadata(), pageSize, controller))
+                     UnfilteredPartitionIterator page = pager.fetchPageUnfiltered(cfs.metadata(), PageSize.inRows(pageSize), controller))
                 {
                     run.pageRecords.add(canonicalRecords(page));
                 }

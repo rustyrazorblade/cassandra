@@ -30,6 +30,7 @@ import org.junit.Test;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLStatement;
 import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.db.Clustering;
@@ -524,7 +525,7 @@ public class EmptyComplexColumnDifferentialTest extends CursorReadOracle
         try
         {
             CQLStatement statement = QueryProcessor.getStatement(formatQuery(query), ClientState.forInternalCalls());
-            QueryOptions options = QueryOptions.create(ConsistencyLevel.ONE, Collections.emptyList(), false, -1, null,
+            QueryOptions options = QueryOptions.create(ConsistencyLevel.ONE, Collections.emptyList(), false, PageSize.NONE, null,
                                                        ConsistencyLevel.SERIAL, ProtocolVersion.V5, KEYSPACE, Long.MIN_VALUE, nowInSec);
             ResultMessage.Rows rows = (ResultMessage.Rows) statement.execute(QueryState.forInternalCalls(), options,
                                                                              Dispatcher.RequestTime.forImmediateExecution());

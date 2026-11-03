@@ -58,6 +58,7 @@ import org.openjdk.jmh.infra.Blackhole;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLTester;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.CursorReads;
@@ -355,7 +356,7 @@ public class CursorWideSchemaReadBench extends CQLTester
     {
         TableMetadata metadata = cfs.metadata();
         DecoratedKey key = metadata.partitioner.decorateKey(LongType.instance.decompose(PK));
-        DataLimits limits = DataLimits.cqlLimits(Integer.MAX_VALUE).forPaging(pageSize);
+        DataLimits limits = DataLimits.cqlLimits(Integer.MAX_VALUE).forPaging(PageSize.inRows(pageSize));
         SinglePartitionReadCommand first = SinglePartitionReadCommand.create(metadata, nowInSec, columnFilter(metadata), RowFilter.none(),
                                                                              limits, key, new ClusteringIndexSliceFilter(Slices.ALL, false));
         List<SinglePartitionReadCommand> commands = new ArrayList<>();

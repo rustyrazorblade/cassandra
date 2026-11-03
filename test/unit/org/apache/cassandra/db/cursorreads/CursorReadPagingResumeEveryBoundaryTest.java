@@ -30,6 +30,7 @@ import org.junit.Test;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DataStorageSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.PageSize;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
@@ -166,7 +167,7 @@ public class CursorReadPagingResumeEveryBoundaryTest extends CursorReadOracle
                     LongFunction<SinglePartitionReadCommand> resumed = nowInSec -> {
                         SinglePartitionReadCommand base = full.apply(nowInSec);
                         Clustering<?> last = Clustering.make(ByteBufferUtil.bytes(resumeAt));
-                        return base.forPaging(last, base.limits().forPaging(limit));
+                        return base.forPaging(last, base.limits().forPaging(PageSize.inRows(limit)));
                     };
                     assertAllReadSurfacesMatch(ReadCase.of(profile + (reversed ? " reversed" : "") + " resume after " + resumeAt
                                                            + " limit " + limit, seed++).at(now), cfs, resumed);

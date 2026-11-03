@@ -32,6 +32,7 @@ import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.vint.VIntCoding;
 
 import static org.apache.cassandra.db.SerializationHeader.MessagingHeaderSerializer.MESSAGING;
 
@@ -407,8 +408,42 @@ public final class ResponseWireWriter
             header.writeTTL(ttl, body);
         if (column.isComplex())
             column.cellPathSerializer().serialize(path, body);
+        lastValueType = header.getType(column);
+        lastValueWritten = 0;
         if (hasValue)
+        {
+            int start = bodyLength();
             source.streamValue(body);
+            lastValueWritten = bodyLength() - start;
+        }
+    }
+
+    /** The type and the written bytes of the value {@link #addCellFromWire} last wrote, length included. */
+    private AbstractType<?> lastValueType;
+    private int lastValueWritten;
+
+    /** The value size, {@code Cell.valueSize()}, of the cell {@link #addCellFromWire} last wrote; 0 when it wrote no value. */
+    public int lastValueSize()
+    {
+        return lastValueWritten == 0 ? 0 : valueSize(lastValueType, lastValueWritten);
+    }
+
+    private int bodyLength()
+    {
+        return inPlace != null ? inPlace.getLength() : rowBody.getLength();
+    }
+
+    /** The value size in {@code written} bytes of a value {@code AbstractType.writeValue} wrote: a variable-length value has its length first, as a vint. */
+    private static int valueSize(AbstractType<?> type, int written)
+    {
+        if (type.valueLengthIfFixed() >= 0)
+            return written;
+        for (int lengthSize = 1; lengthSize <= written; lengthSize++)
+        {
+            if (VIntCoding.computeUnsignedVIntSize(written - lengthSize) == lengthSize)
+                return written - lengthSize;
+        }
+        throw new IllegalStateException("no vint length fits a written value of " + written + " bytes");
     }
 
     private void openComplexColumn(ColumnMetadata column, DeletionTime deletion) throws IOException

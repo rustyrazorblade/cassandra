@@ -30,6 +30,7 @@ import java.util.Comparator;
 import java.util.List;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.primitives.Ints;
 
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.context.CounterContext;
@@ -37,6 +38,7 @@ import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.CompositeType;
@@ -65,6 +67,7 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.memory.MemoryUtil;
+import org.apache.cassandra.utils.vint.VIntCoding;
 
 import io.netty.util.concurrent.FastThreadLocal;
 
@@ -149,6 +152,18 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
      *  or expired liveness. */
     private boolean rowHasDeletion;
 
+    // ---- the open row's live data size, Row.liveDataSize, kept only when the limit counts bytes ----
+    /** Whether the counter has a byte limit; only then is the size below kept. */
+    private final boolean countBytes;
+    /** The liveness, deletion and simple cell part of the open row's live data size. */
+    private long rowLiveBytes;
+    /** The complex column the open row's cells are in; null when none. */
+    private ColumnMetadata liveBytesColumn;
+    /** The complex deletion of {@link #liveBytesColumn}, after the purge. */
+    private DeletionTime liveBytesColumnDeletion = DeletionTime.LIVE;
+    /** The live cell bytes of {@link #liveBytesColumn} so far. */
+    private long liveBytesColumnCells;
+
     // ---- partition state ----
     private boolean dropEverything;  // a partition-level filter failed: count the first element only
     private boolean stopped;          // the limit stopped the read, or the first element was counted
@@ -212,6 +227,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
                       && localDeletionTime < gcBefore;
         this.scanGuard = scanGuard;
         this.counter = counter;
+        this.countBytes = counter != null && counter.countsBytes();
         this.countByClustering = countByClustering;
         this.filter = filter;
         this.command = command;
@@ -494,6 +510,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         rowLive = liveness.isLive(nowInSec);
         rowHasColumnWithNoCells = false;
         rowHasDeletion = !deletion.isLive() || (liveness.isExpiring() && nowInSec >= liveness.localExpirationTime());
+        if (countBytes)
+            startRowLiveBytes(liveness);
         if (scanGuard != null)
             scanGuard.startRow(null, liveness, deletion);
         if (filter != null)
@@ -600,6 +618,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             // ComplexColumnData.purge keeps that column, so the row keeps it too
             rowHasContent = true;
             rowHasColumnWithNoCells = true;
+            if (countBytes)
+                openLiveBytesColumn(column, DeletionTime.LIVE);
             if (scanGuard != null)
                 scanGuard.columnWithNoCells();
             if (filter != null)
@@ -614,6 +634,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             return;
         rowHasContent = true;
         rowHasDeletion = true;
+        if (countBytes)
+            openLiveBytesColumn(column, deletion);
         if (scanGuard != null)
             scanGuard.complexDeletion();
         if (filter != null)
@@ -658,6 +680,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         {
             throw new RuntimeException("response write failed", e);
         }
+        if (countBytes)
+            addCellLiveBytes(purged.column(), live, purged.timestamp(), purged.dataSize());
     }
 
     @Override
@@ -740,6 +764,114 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             source = stagedValueSource;
         }
         writer.addCellFromWire(column, timestamp, ttl, localDeletionTime, path, hasValue, source);
+        if (countBytes && live)
+            // AbstractCell.dataSize: timestamp, ttl, local deletion time, value and path
+            // a simple column's cell has no path; the merge may pass a stale one, which the writer ignores too
+            addCellLiveBytes(column, true, timestamp, CELL_TIMES_SIZE + writer.lastValueSize() + (column.isComplex() ? path.dataSize() : 0));
+    }
+
+    /** The timestamp, ttl and local deletion time part of {@code AbstractCell.dataSize}. */
+    private static final int CELL_TIMES_SIZE = TypeSizes.LONG_SIZE + TypeSizes.INT_SIZE + TypeSizes.LONG_SIZE;
+
+    /** {@code Row.Deletion.dataSize}: a deletion time and the shadowable flag, live or not. */
+    private static final int ROW_DELETION_SIZE = DeletionTime.LIVE.dataSize() + 1;
+
+    /**
+     * Starts the open row's {@code BTreeRow.liveDataSize}: the row deletion, and the liveness, which
+     * counts as {@code LivenessInfo.EMPTY} when it is not live.  The clustering is added at the
+     * row's end, and only when the row is counted.
+     */
+    private void startRowLiveBytes(LivenessInfo liveness)
+    {
+        boolean expiring = liveness.isLive(nowInSec) && liveness.isExpiring();
+        int livenessSize = expiring ? TypeSizes.LONG_SIZE + TypeSizes.INT_SIZE + TypeSizes.LONG_SIZE : TypeSizes.LONG_SIZE;
+        rowLiveBytes = livenessSize + ROW_DELETION_SIZE;
+        liveBytesColumn = null;
+        liveBytesColumnDeletion = DeletionTime.LIVE;
+        liveBytesColumnCells = 0;
+    }
+
+    /** A complex column of the open row starts, with its complex deletion after the purge. */
+    private void openLiveBytesColumn(ColumnMetadata column, DeletionTime deletion)
+    {
+        closeLiveBytesColumn();
+        liveBytesColumn = column;
+        liveBytesColumnDeletion = deletion;
+    }
+
+    /** {@code ComplexColumnData.liveDataSize}: the complex deletion counts only when a live cell does. */
+    private void closeLiveBytesColumn()
+    {
+        if (liveBytesColumnCells > 0)
+            rowLiveBytes += liveBytesColumnDeletion.dataSize() + liveBytesColumnCells;
+        liveBytesColumn = null;
+        liveBytesColumnDeletion = DeletionTime.LIVE;
+        liveBytesColumnCells = 0;
+    }
+
+    /** {@code Cell.liveDataSize} of one written cell, added to its row or to its complex column. */
+    private void addCellLiveBytes(ColumnMetadata column, boolean live, long timestamp, int dataSize)
+    {
+        if (!column.isComplex())
+        {
+            closeLiveBytesColumn();
+            if (live)
+                rowLiveBytes += dataSize;
+            return;
+        }
+        if (!ColumnMetadata.sameName(liveBytesColumn, column))
+            openLiveBytesColumn(column, DeletionTime.LIVE);
+        if (live && !liveBytesColumnDeletion.deletes(timestamp))
+            liveBytesColumnCells += dataSize;
+    }
+
+    /** The open row's {@code Row.liveDataSize}, with its clustering; 0 when the counter does not count bytes. */
+    private int rowLiveDataSize()
+    {
+        if (!countBytes)
+            return 0;
+        closeLiveBytesColumn();
+        int clusteringSize = rowClusteringObject != null
+                             ? rowClusteringObject.dataSize()
+                             : clusteringDataSize(rowClusteringBytes, rowClusteringLength, writer.clusteringTypes());
+        int size = Ints.checkedCast(rowLiveBytes + clusteringSize);
+        return CursorReads.TEST_SKEW_ROW_LIVE_DATA_SIZE ? size + 1 : size;
+    }
+
+    /**
+     * {@code ClusteringPrefix.dataSize} of a clustering in the form
+     * {@code ClusteringPrefix.Serializer.serializeValuesWithoutSize} writes: a header of two bits a
+     * value, null or empty, every 32 values, then each value that is neither, with its length first
+     * when its type has no fixed length.
+     */
+    @VisibleForTesting
+    static int clusteringDataSize(byte[] bytes, int length, AbstractType<?>[] types)
+    {
+        int size = 0;
+        int position = 0;
+        int offset = 0;
+        while (offset < types.length)
+        {
+            long header = VIntCoding.getUnsignedVInt(bytes, ByteArrayAccessor.instance, position, length);
+            position += VIntCoding.computeUnsignedVIntSize(header);
+            int limit = Math.min(types.length, offset + 32);
+            for (; offset < limit; offset++)
+            {
+                // isNull is the high bit of the pair, isEmpty the low bit
+                if ((header & (3L << (offset * 2))) != 0)
+                    continue;
+                int valueLength = types[offset].valueLengthIfFixed();
+                if (valueLength < 0)
+                {
+                    long vint = VIntCoding.getUnsignedVInt(bytes, ByteArrayAccessor.instance, position, length);
+                    position += VIntCoding.computeUnsignedVIntSize(vint);
+                    valueLength = Ints.checkedCast(vint);
+                }
+                position += valueLength;
+                size += valueLength;
+            }
+        }
+        return size;
     }
 
     @Override
@@ -771,7 +903,7 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
             return;
         }
         anyFilterSurvivor = true;
-        if (counter != null && !counter.countRow(countByClustering ? rowClustering() : null, rowLive))
+        if (counter != null && !counter.countRow(countByClustering ? rowClustering() : null, rowLive, rowLiveDataSize()))
         {
             writer.abandonRow();
             stopIfCounted();
@@ -912,7 +1044,8 @@ public final class ResponseSink implements CursorReadMerger.MergeSink
         if (filter != null && !filter.rowObjectMatches(purged))
             return;
         anyFilterSurvivor = true;
-        if (counter != null && !counter.countRow(purged.clustering(), purged.hasLiveData(nowInSec, enforceStrictLiveness)))
+        if (counter != null && !counter.countRow(purged.clustering(), purged.hasLiveData(nowInSec, enforceStrictLiveness),
+                                                 countBytes ? purged.liveDataSize(nowInSec) : 0))
         {
             stopIfCounted();
             return;
