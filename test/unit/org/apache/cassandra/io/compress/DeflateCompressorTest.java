@@ -25,6 +25,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.fail;
 
@@ -48,23 +49,30 @@ public class DeflateCompressorTest
 
         assertNotNull(deflater.get());
         assertNotNull(inflater.get());
+        assertEnded("Deflater", () -> deflater.get().getBytesRead());
+        assertEnded("Inflater", () -> inflater.get().getBytesRead());
+    }
+
+    /**
+     * Checks that the stream was ended. Every JDK fails a call on an ended stream with the
+     * message "Deflater has been closed" (or "Inflater ..."). JDK 25 changed the exception from
+     * NullPointerException to IllegalStateException when Deflater and Inflater became AutoCloseable.
+     */
+    private static void assertEnded(String name, Runnable call)
+    {
+        Class<? extends RuntimeException> expected = Runtime.version().feature() >= 25
+                                                     ? IllegalStateException.class
+                                                     : NullPointerException.class;
         try
         {
-            deflater.get().getTotalIn();
-            fail("the thread's Deflater was not ended when the thread exited");
+            call.run();
         }
-        catch (NullPointerException expected)
+        catch (RuntimeException e)
         {
-            // Deflater.ensureOpen throws this once end() has run.
+            assertEquals(expected, e.getClass());
+            assertEquals(name + " has been closed", e.getMessage());
+            return;
         }
-        try
-        {
-            inflater.get().getTotalIn();
-            fail("the thread's Inflater was not ended when the thread exited");
-        }
-        catch (NullPointerException expected)
-        {
-            // Inflater.ensureOpen throws this once end() has run.
-        }
+        fail("the thread's " + name + " was not ended when the thread exited");
     }
 }
